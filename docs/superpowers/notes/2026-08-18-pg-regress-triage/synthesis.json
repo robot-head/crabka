@@ -1,0 +1,2077 @@
+{
+ "ledger_summary": "Total 110,197 changed lines in 175 failing files (56 exact). By kind (whole-block, +-30%): cost-planner-only ~23,000 (census 15,971 visible inside QUERY PLAN blocks + ~2,050 join cross-join row order + ~3,500 hidden behind cascade producers [join_hash 700, select_parallel 900, memoize 240, explain 165, partitioning 1,182, indexes 433] + stats_ext estimated-selectivity rows 762 + misc); deterministic plan-shape/EXPLAIN renderer needing a plan tree + typed deparse but no cost model ~6,600 (structural transforms 1,835, partition Append/prune 2,430, VERBOSE Output ~1,100, InitPlan/SubPlan/CTE/WindowAgg/ProjectSet/Merge/Conflict nodes, JSON/YAML/XML field sets, EXPLAIN EXECUTE/CTAS dispatch); reorder fixable by a join-side heuristic ~1,340 (geometry 1,334, interval 4); sort tie order (pg_qsort + window ordering) ~1,200 (window 1,196); everything else ~78,000 (parser, executor, catalog, DDL, types, functions, and absent subsystems: text search ~2,850, rules ~1,450, FDW ~1,550, pubsub ~1,550, large objects ~880, cumulative stats ~1,300, jsonpath ~2,600, xml ~1,200, datetime typmod ~1,980, arrays-of-any-type ~1,850, scalar types ~2,600, PL/pgSQL ~2,000, inheritance/constraint catalog ~2,000, expression partition keys ~3,400 incl. gated, ...). Per-cluster cost-planner-only: planner_join 10,900 (+1,835 structural), partitioning 5,817 (+2,430 shape), agg_window 1,577, indexes_storage 1,809 (+433 hidden), datetime_geometry_ranges 297 (+1,338 heuristic), scalar_types 286, security_roles 337 (rowsecurity: 365 planner + 463 shape + 228 shape-after-INHERIT), txn_session 360, views_rules 614, statistics ~870, dml ~307, ddl_objects ~117, constraints_triggers_plpgsql ~59, json_xml 48, textsearch 80, catalog_psql 0. Files exact WITHOUT any cost-based planner: 93 of 175 (select_into, tidrangescan [rule-based Tid Range Scan], partition_info, hash_part, create_aggregate, polymorphism, functional_deps, tsrf, psql, psql_pipeline, type_sanity, opr_sanity, misc_sanity, oidjoins, largeobject, constraints, without_overlaps, triggers, replica_identity, date, timestamp, timestamptz, horology, multirangetypes, alter_generic, alter_operator, create_operator, create_cast, create_procedure, create_type, typed_table, create_table_like, drop_if_exists, object_address, dependency, event_trigger, insert, copy, copy2, copydml, copyencoding, truncate, hash_func, amutils, reloptions, tablespace, indirect_toast, compression, random, json, jsonpath, jsonpath_encoding, jsonb_jsonpath, sqljson, sqljson_queryfuncs, xml, xmlmap, name, text, float8, uuid, enum, strings, numerology, encoding, conversion, errors, collate, collate.utf8, create_role, password, guc, database, namespace, sysviews, misc, stats_import, tsdicts, tstypes, foreign_data, publication, subscription, transactions, combocid, lock, advisory_lock, prepared_xacts, temp, vacuum, prepare, sequence, identity, rules[5 marginal]); geometry joins them with the join-side heuristic; 82 files need the planner programme for part of their lines (25 of them for <100 lines). Cascades (producer -> victims): SRF-in-select-list (routine.rs:2112/2609) -> select_parallel 1,012, explain 509, memoize 242, incremental_sort 119 + explain_* wrappers in merge/partition_prune/misc_functions/stats_ext; UPDATE pg_class -> join_hash 744; blocking memory budget -> portals 725, transactions 61, tuplesort 438, type_sanity 122, opr_sanity 100, psql 48; create_view interpt_pp -> select_views 901; DROP TABLE cascade of inheritance children -> inherit ~330; expression partition keys -> partition_prune 589, partition_join 561, inherit 220, partition_aggregate 99, insert 354, update 250, copy 12, and create_table's atomic DROP failure leaks parted/list_parted2/range_parted2/part1..4 into alter_table ~150, triggers 51, merge 17, inherit 16; whole-file: publication, subscription (grammar), largeobject (lo_create), oidjoins (pg_get_catalog_foreign_keys), tsdicts 594 (ispell template), prepared_xacts (max_prepared_transactions GUC), combocid (cmin), typed_table, alter_operator, create_am, object_address, plpgsql 570 (bpchar NEW/OLD), foreign_key ~900 (partitioned FK), index_including(_gist)/brin*/gin (CREATE INDEX refusals), compression_1 230, uuid 165, encoding/conversion 172/430, collate.utf8 168, database, namespace. Cross-file poison: select_into's `INSERT INTO int4_tbl SELECT 1 INTO f` (~450 lines in join/subselect/union/join_hash/aggregates/with/polymorphism); constraints leaks atacc1 into alter_table; stats leaks test_io_local into tablespace; list_parted/range_parted leak into inherit. Full markdown: scratchpad/analysis/synthesis.md.",
+ "workstreams": [
+  {
+   "id": "N00",
+   "title": "exec.rs carve-out (mechanical module split, optional enabler)",
+   "roots": [
+    "(none) \u2014 moves DDL families out of exec.rs into ddl_index.rs/ddl_partition.rs/ddl_inherit.rs/ddl_alter.rs/catalog_rows.rs with no behaviour change"
+   ],
+   "estimated_lines": 0,
+   "file_set": [
+    "crates/pgexec/src/exec.rs (whole file, moves only)",
+    "crates/pgexec/src/lib.rs (mod decls)"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": "Certify alone. Removes the exec.rs bottleneck for every later batch; if skipped, batches carry the per-batch exec.rs region overlaps listed in the batches."
+  },
+  {
+   "id": "N01",
+   "title": "SELECT ... INTO rejected in nested contexts (int4_tbl poison producer)",
+   "roots": [
+    "planner_join-select-into-nested-contexts",
+    "agg_window R25 int4_tbl contamination"
+   ],
+   "estimated_lines": 450,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [opt_select_into 12427, finish_query_statement 12406, query_statement]"
+   ],
+   "size": "S",
+   "depends_on": [],
+   "notes": "select_into 12 + poison in join ~80, subselect ~37, union 13, join_hash 6, aggregates 14, with 10, polymorphism. Messages: 'SELECT ... INTO is not allowed here' with LINE/caret; 'views must not contain SELECT INTO'; 'COPY (SELECT INTO) is not supported'."
+  },
+  {
+   "id": "N02",
+   "title": "Blocking-query memory policy: route constant users through the knob, statement-level cap, per-conjunct WHERE pushdown",
+   "roots": [
+    "planner_join-blocking-memory-budget",
+    "txn-x-blocking-memory-budget",
+    "agg_window R24 memory budget",
+    "catalog_psql memory budget (type_sanity/opr_sanity/psql)"
+   ],
+   "estimated_lines": 2000,
+   "file_set": [
+    "crates/pgexec/src/scanner.rs [BLOCKING_QUERY_MEMORY 939, datum_row_bytes 1116, collect_cursor_bounded 951, memory_budget_exceeded 1136]",
+    "crates/pgexec/src/exec.rs [key_source_rows 24225, ensure_blocking_rows_fit 24423, 18505, append_from_item 13574 per-conjunct WHERE->ON, lateral_join 13595 filter, 19243 wants_system_column gate]",
+    "crates/pgexec/src/join.rs [JoinPolicy::default 57, push_bounded_join_row 1085, count_join_rows 139]",
+    "crates/pgexec/src/agg.rs:2872",
+    "crates/pgexec/src/grouping.rs:496",
+    "crates/pgexec/src/cte.rs:492",
+    "crates/pgexec/src/setops.rs:353",
+    "crates/pgexec/src/srf.rs:2321 [MemoryBudget only]",
+    "crates/gres/src/lib.rs:857",
+    "scripts/gres-pg-regress.sh:267"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": "Certify alone (soak harness observes the policy). tuplesort 438, join ~190, limit ~70, memoize 54, tidscan 18, subselect ~20, portals 696, transactions 61, type_sanity 122, opr_sanity 100, psql 48, agg 64, brin*/partition_join ~80. Nine compile-time users of the 16 MiB constant ignore --pgexec-blocking-query-memory. Real spill is a later executor feature (P0a/P4)."
+  },
+  {
+   "id": "N03",
+   "title": "User SETOF functions in the select list, built-in SRF with GROUP BY, ARE regex escapes",
+   "roots": [
+    "planner_join-srf-user-functions-in-select-list",
+    "part-srf-in-select-list",
+    "planner_join-regex-are-word-boundaries",
+    "agg_window R6 (SRF+GROUP BY part)",
+    "dml SRF in SELECT list 136",
+    "rangefuncs H 100"
+   ],
+   "estimated_lines": 300,
+   "file_set": [
+    "crates/pgexec/src/routine.rs [validate_plpgsql_scalar 2112, inline_scalar_call 2589-2612, eval_plpgsql_table_function 3052 reuse]",
+    "crates/pgexec/src/srf.rs [classify 300, is_set_returning 356, expr_contains_srf 1453, rewrite_expr 1578, plan 456, project_rows_ordered 1696, reject_in_aggregate 1464]",
+    "crates/pgexec/src/regexp_fn.rs [compile_pattern 472]"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": "Direct ~300 lines; gates ~2,900 planner/EXPLAIN lines in select_parallel/explain/memoize/incremental_sort/merge/partition_prune/misc_functions/stats_ext. Built-in SRF as a grouping key -> ProjectSet BELOW the Agg (oracle: HashAggregate -> ProjectSet -> Seq Scan)."
+  },
+  {
+   "id": "N04",
+   "title": "GUC surface: every planner GUC, track_io_timing/compute_query_id, debug_parallel_query bool spellings, max_prepared_transactions=0, role in SET, HINT texts",
+   "roots": [
+    "planner_join-guc-gaps",
+    "sec-guc-registry-and-session-state",
+    "sec-guc-runtime-scope",
+    "txn-prepared-transactions-guc",
+    "namespace search_path in CREATE FUNCTION SET"
+   ],
+   "estimated_lines": 500,
+   "file_set": [
+    "crates/pgexec/src/session.rs [GUC table ~976-1360, guc_enum 999]"
+   ],
+   "size": "S",
+   "depends_on": [],
+   "notes": "prepared_xacts 286 becomes byte-exact against the _1 variant with max_prepared_transactions=0; guc 149; namespace 27; explain 4; select_parallel ~20; work_mem/hash_mem_multiplier/parallel_* GUCs used by 51 files."
+  },
+  {
+   "id": "N05",
+   "title": "Writable pg_class (reltuples/relpages) + relpages storage",
+   "roots": [
+    "planner_join-writable-pg-class",
+    "stats pg-class-relpages-defaults",
+    "reloptions UPDATE pg_class",
+    "privileges 'permission denied for table pg_class'"
+   ],
+   "estimated_lines": 100,
+   "file_set": [
+    "crates/pgexec/src/exec.rs [execute_write_body Statement::Update arm 6453 virtual-relation dispatch; pg_class_rows ~20380; PgClassRow::build ~20826]",
+    "crates/pgexec/src/relstats.rs [set_reltuples_op, new relpages/relallvisible keyspace]"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": "Unblocks join_hash 744 lines which then need P4/P7 (Hash Join, Parallel Hash, hash_join_batches JSON)."
+  },
+  {
+   "id": "N06",
+   "title": "Harness: connect to database 'regression'",
+   "roots": [
+    "catalog_psql harness dbname",
+    "txn harness dbname",
+    "views R34 harness-dbname"
+   ],
+   "estimated_lines": 144,
+   "file_set": [
+    "scripts/gres-pg-regress.sh [GRES_DB]"
+   ],
+   "size": "S",
+   "depends_on": [],
+   "notes": "psql 132, sequence 4, rules 8."
+  },
+  {
+   "id": "P0h",
+   "title": "Plan IR header commit: freeze Plan/PlanState/PlannedStmt/RangeTblEntry/RestrictInfo/Executor trait",
+   "roots": [
+    "executor_architecture proposal"
+   ],
+   "estimated_lines": 0,
+   "file_set": [
+    "crates/pgexec/src/plan/mod.rs (new)",
+    "crates/pgexec/src/plan/query.rs (new)"
+   ],
+   "size": "S",
+   "depends_on": [],
+   "notes": "Lands first in batch 2 so P0a/P0b/P2/P3 can build against stable types."
+  },
+  {
+   "id": "P0a",
+   "title": "Planner Phase 1a: Query IR + bind + node-tree (Volcano) executor with per-node instrumentation; delete the AST-walking read path and the describe walk",
+   "roots": [
+    "executor_architecture proposal",
+    "planner_join-lateral-binder-gaps (absorbed via bind.rs scope chain)",
+    "planner_join-subqueries-outside-select-context",
+    "rowsecurity describe-path errors",
+    "rangefuncs B schema/describe path"
+   ],
+   "estimated_lines": 500,
+   "file_set": [
+    "crates/pgexec/src/plan/{mod,query,bind,rewrite(skeleton),createplan}.rs (new)",
+    "crates/pgexec/src/plan/exec/* (new)",
+    "crates/pgexec/src/exec.rs [READ PATH ONLY: execute_read 23750, execute_read_locking 23808, select_to_relation_with_ctes 19170, region 13300-19330 and 24100-24900 deleted at the end; build_from_schema_*/describe walk deleted]",
+    "crates/pgexec/src/query.rs",
+    "crates/pgexec/src/session.rs [run_select_traced 7902, explain 5176 call site]",
+    "crates/pgexec/src/subquery.rs (folding -> InitPlan/SubPlan drivers)",
+    "join.rs/agg.rs/grouping.rs/window.rs/setops.rs/values.rs/srf.rs/cte.rs CALLED as node bodies (not moved/renamed)"
+   ],
+   "size": "XXL",
+   "depends_on": [
+    "P0h",
+    "N02",
+    "N03"
+   ],
+   "notes": "Certify alone at each milestone. Invariants: RawScan single exit + UnrestrictedTable proofs on the Path, ReadPermit before any read, statement-level snapshot/read_ts/GC pin, check_query_canceled at node boundaries, RangeScanner leaves for sharded relations, scalar-function request channel available in node bodies. Absorbs N11."
+  },
+  {
+   "id": "P0b",
+   "title": "Planner Phase 1b: EXPLAIN renderer over Plan/PlanState + typed deparser + full ExplainOptions/formats + utility dispatch",
+   "roots": [
+    "planner_join-explain-renderer-gaps",
+    "planner_join-explain-typed-deparse",
+    "planner_join-explain-utility-formats-options",
+    "agg_window R23 (deterministic part)",
+    "sec-explain-syntactic-shape (pure shape 463 + RLS qual deparse order)",
+    "dml EXPLAIN MERGE/ON CONFLICT renderer",
+    "dgr-explain-verbose-output-and-range-support",
+    "dgr-explain-const-typing-and-folding",
+    "txn fast_default renderer",
+    "jx-sqljson-deparse (EXPLAIN VERBOSE Output/Table Function Call)",
+    "indexes explain-typed-deparse-and-nodes",
+    "views R43 explain-create-matview"
+   ],
+   "estimated_lines": 3000,
+   "file_set": [
+    "crates/pgexec/src/explain.rs -> crates/pgexec/src/plan/explain.rs + plan/deparse.rs (keep deparse_with/plan_sort_key/parenthesisation)",
+    "crates/pgparser/src/ast.rs [ExplainOptions 1805]",
+    "crates/pgparser/src/parser.rs [explain 6059-6095: buffers/wal/timing/summary/settings/generic_plan/memory/serialize]",
+    "crates/pgexec/src/session.rs [explain 5176-5231 option handling; EXECUTE/DECLARE/CTAS/SELECT INTO/CREATE MATERIALIZED VIEW dispatch; prepared-statement lookup]",
+    "crates/pgexec/src/eval.rs [infer_type 4154 reuse]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "P0h",
+    "P0a"
+   ],
+   "notes": "VERBOSE Output ~1,100 (join 418, subselect 174, with 76, returning 49, rangetypes 97, sqljson 161, tsrf 67, fast_default 52), renderer nodes ~700 (join type names, ON quals, SubPlan/InitPlan/CTE/WindowAgg/ProjectSet/LockRows/Unique/Merge on/Conflict lines), formats/options ~500, per-node ANALYZE actuals + (never executed), EXPLAIN over EXECUTE/DECLARE/CTAS, ordinals resolved, '42'::bigint / '(0,1)'::tid / 'ATAAAA'::name."
+  },
+  {
+   "id": "P1",
+   "title": "Planner Phase 2a: rule-based transforms (pull-up, qual distribution, join removal, SJE, sublink->semi/anti, NullTest/const reduction, IN->=ANY, alias numbering, One-Time Filter, join-type suffixes)",
+   "roots": [
+    "planner_join-plan-structural-transforms",
+    "predicate NullTest reduction",
+    "union UNION ALL qual pushdown",
+    "window deterministic transforms (shared with P5)",
+    "rowsecurity shape-after-INHERIT 228 (with N32)",
+    "subselect volatile const-qual gating (tattle NOTICE count)"
+   ],
+   "estimated_lines": 2500,
+   "file_set": [
+    "crates/pgexec/src/plan/rewrite.rs (new)",
+    "crates/pgexec/src/plan/bind.rs (nullability, RTE identity)",
+    "crates/pgexec/src/plan/deparse.rs (qualify iff >1 RTE, flat AND lists)",
+    "crates/pgexec/src/plan/exec/result.rs (one-time qual gating)"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "P0a",
+    "P0b"
+   ],
+   "notes": "Exit: predicate.out exact; every join.out EXPLAIN whose expected plan has no Hash/Merge/Index/Bitmap/Materialize/Memoize node matches."
+  },
+  {
+   "id": "P2",
+   "title": "Statistics subsystem: ANALYZE compute_scalar_stats, pg_statistic/pg_stats/pg_statistic_ext, extended statistics, import functions, relpages emulation, selfuncs",
+   "roots": [
+    "stats-ext-ddl-catalog",
+    "stats-ext-analyze-data",
+    "PLANNER-row-estimate (stats_ext 762)",
+    "stats-import-relation",
+    "stats-import-attribute",
+    "analyze-pg-statistic",
+    "cat-pg-statistic",
+    "planner_join-xc pg_stats",
+    "json/jsonb/polymorphism pg_stats refs",
+    "alter-column-set-statistics",
+    "create_index CREATE STATISTICS mcv"
+   ],
+   "estimated_lines": 2000,
+   "file_set": [
+    "crates/pgexec/src/plan/stats.rs (new: compute_scalar_stats, estimate_rel_size, heap-page simulator)",
+    "crates/pgexec/src/plan/selfuncs.rs (new)",
+    "crates/pgexec/src/relstats.rs",
+    "crates/pgexec/src/catalog_rel.rs [pg_statistic, pg_stats, pg_statistic_ext, pg_statistic_ext_data, pg_stats_ext]",
+    "crates/pgexec/src/stats_fn.rs (new: pg_restore_relation_stats/pg_restore_attribute_stats/pg_clear_* with EvalCtx notice sink)",
+    "crates/pgexec/src/clock.rs [EvalCtx notice sender + catalog-write seam]",
+    "crates/pgexec/src/session.rs [run_maintenance ANALYZE ~5299]",
+    "crates/pgexec/src/exec.rs [CREATE STATISTICS DDL arm; ALTER COLUMN SET STATISTICS]",
+    "crates/pgparser/src/parser.rs [CREATE STATISTICS qualified names]"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "P0h",
+    "N05"
+   ],
+   "notes": "Prerequisite for P4 cost fidelity (join order/method on tenk1/onek). stats_ext 1,215, stats_import 645, pg_stats refs ~60, extended-stats refusals 143 sites. Exit: stats_ext 'estimated' column exact; stats_import exact."
+  },
+  {
+   "id": "P3",
+   "title": "Index storage: memcomparable secondary keys, per-key direction/nulls/opclass/collation, partial, INCLUDE, expression and unique-expression entries, hash entries, NULLS NOT DISTINCT, opclass params, ordered index cursor",
+   "roots": [
+    "idx-include-columns",
+    "idx-partial-index",
+    "part-partial-index",
+    "part-include-index",
+    "DESC/NULLS FIRST keys",
+    "unique expression index",
+    "idx-nulls-not-distinct",
+    "idx-opclass-params-syntax",
+    "planner_join-xc-index-ddl",
+    "idx-gin-generic-opclasses",
+    "indexes-storage index_read_path findings"
+   ],
+   "estimated_lines": 700,
+   "file_set": [
+    "crates/pgkv/src/key.rs [232-257 secondary_index_entry_key]",
+    "crates/pgkv/src/keyenc.rs (memcomparable encoding)",
+    "crates/pgkv/src/rowenc.rs",
+    "crates/pgcatalog/src/lib.rs [Index/NewIndex 397 + serde.rs]",
+    "crates/pgexec/src/exec.rs [index_entries 11240, local_index_backfill_ops 10060, CREATE INDEX validation 1419-2686 (1426 INCLUDE, 2514 partial, 2523 DESC, 2564 unique-expr, 2686 name_ops, 2778 GIN)]",
+    "crates/pgexec/src/scanner.rs (ordered index cursor, local only)",
+    "crates/pgexec/src/catalog_rel.rs [pg_index indkey/indoption/indexprs/indpred/indnkeyatts]",
+    "crates/pgexec/src/catalog_fn.rs [IndexDef 128 INCLUDE/WHERE text]"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "P0h"
+   ],
+   "notes": "Certify alone (index key format rebuild via backfill; greenfield, no migration). Prerequisite for every Index/Index Only/Bitmap node in P4 and for Merge Join / ORDER BY via index. Exit: zero 'not supported' CREATE INDEX errors in the schedule."
+  },
+  {
+   "id": "P4",
+   "title": "Planner Phase 3: cost model, paths, join search, index/bitmap/tid paths, Hash/Merge/NestLoop/Materialize/Memoize operators, semi/anti joins, PG hash iteration order, join-side heuristic",
+   "roots": [
+    "planner_join-cost-planner-explain",
+    "part-planner-cost-based-plans (non-partition part)",
+    "indexes-storage-planner-index-scans (btree part)",
+    "dgr-planner-only",
+    "agg_window PLANNER",
+    "planner_join-tid-scan-access-path",
+    "planner_join-hash-iteration-order",
+    "scalar/security/txn/views/ddl/dml/ctp/jx/tsfr planner-only lines",
+    "stats PLANNER-plan-shape"
+   ],
+   "estimated_lines": 11700,
+   "file_set": [
+    "crates/pgexec/src/plan/{cost,paths,indexpath,joinpath,pathkeys,equivclass}.rs (new)",
+    "crates/pgexec/src/plan/exec/{hashjoin,mergejoin,nestloop,material,memoize,indexscan,indexonlyscan,bitmap,tidscan,sort}.rs (new)",
+    "crates/pgexec/src/join.rs (JoinIndex as Hash node body; LIFO bucket order)",
+    "crates/pgexec/src/scanner.rs (index cursor consumers)",
+    "crates/pgexec/src/plan/dist.rs (from plan_dist.rs; sharded paths always preferred until costed)",
+    "crates/pgexec/src/exec.rs [try_scan_with_local_index 18151-18245 removed]",
+    "crates/pgexec/src/agg.rs (HashAggregate simplehash iteration order + PG hash functions)"
+   ],
+   "size": "XXL",
+   "depends_on": [
+    "P0a",
+    "P0b",
+    "P1",
+    "P2",
+    "P3",
+    "N05"
+   ],
+   "notes": "Certify alone. join ~4,600 EXPLAIN + ~2,050 row order, subselect ~1,000, aggregates planagg ~500, create_index btree ~800, btree_index 243, union ~500, equivclass ~300, select 130, limit 60, tidscan/tidrangescan ~130, memoize 48+, join_hash 93+, updatable_views 405, select_views 113, rowsecurity 365, txn ~250, views 614, geometry 1,334 (heuristic), misc. Exit: EXPLAIN (COSTS OFF) of every join.sql/subselect.sql/equivclass.sql/select.sql/limit.sql/tidscan.sql/tidrangescan.sql statement matches upstream node choice on tenk1/onek data under the schedule's enable_* GUCs; join/geometry cross-join row order matches."
+  },
+  {
+   "id": "P5",
+   "title": "Planner Phase 4: upper relations + sort fidelity (pg_qsort port, window ordering, Run Condition, Incremental Sort, Hash/Group/Mixed/Partial/Finalize agg, Unique vs HashAggregate, SetOp/HashSetOp, LockRows, top-N)",
+   "roots": [
+    "agg_window R8 sort-tie-order",
+    "agg_window R9 grouped output order",
+    "agg_window R23 (cost part)",
+    "groupingsets PLANNER",
+    "incremental_sort",
+    "tuplesort planner",
+    "select_distinct/select_distinct_on planner",
+    "aggregates agg strategy"
+   ],
+   "estimated_lines": 3200,
+   "file_set": [
+    "crates/pgexec/src/plan/grouping.rs (new)",
+    "crates/pgexec/src/plan/exec/{agg,windowagg,incsort,unique,setop,sort}.rs",
+    "crates/pgexec/src/window.rs [execute 513-555, evaluate_call 1038-1052, partitions 1248]",
+    "crates/pgexec/src/agg.rs [1842 sorted_input, 1864, 2947/2956]",
+    "crates/pgexec/src/exec.rs [24179-24216 sort sites until deleted]",
+    "crates/pgexec/src/scanner.rs [2087 top-K]"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "P4"
+   ],
+   "notes": "Certify alone (replaces stable sorts everywhere; DISTINCT ON tie choice changes). window.rs emit-in-window-sort-order can be pulled forward as an S item into Phase 0. Exit: window.out exact except frame/moving-aggregate/caret roots; groupingsets/incremental_sort EXPLAIN blocks match."
+  },
+  {
+   "id": "P6",
+   "title": "Planner Phase 5: partition-aware planning (Append in bound order with _n aliases, partprune static+runtime, Subplans Removed, Merge Append, partitionwise join/agg, EXPLAIN EXECUTE generic plans, constraint exclusion, Update/Delete child lines)",
+   "roots": [
+    "part-explain-append-prune",
+    "part-planner-cost-based-plans (partition part)",
+    "part-partition-scan-order",
+    "inherit Append/Merge Append blocks",
+    "alter_table constraint-exclusion Append 68",
+    "rowsecurity Append over inheritance"
+   ],
+   "estimated_lines": 8200,
+   "file_set": [
+    "crates/pgexec/src/plan/partition.rs (new)",
+    "crates/pgexec/src/plan/exec/append.rs (new)",
+    "crates/pgexec/src/partition.rs [partitions_of 479, descendants 504, leaves_of 537 bound order; pruning beside contains 798/compare_range_tuple 845/route 873]",
+    "crates/pgexec/src/inheritance.rs [children_of 95 OID order]",
+    "crates/pgexec/src/exec.rs [partitioned_scan 17100, inherited_scan 17133 re-homed]",
+    "crates/pgexec/src/session.rs [prepared statement lookup for EXPLAIN EXECUTE; plan_cache_mode]"
+   ],
+   "size": "XXL",
+   "depends_on": [
+    "P4",
+    "N31a",
+    "N32",
+    "N33a"
+   ],
+   "notes": "partition_prune ~3,400, partition_join ~3,600, partition_aggregate ~1,100, inherit ~750. Exit: partition_prune.out and partition_join.out exact; partition_aggregate exact except parallel blocks."
+  },
+  {
+   "id": "P7",
+   "title": "Planner Phase 6: parallel plan shapes (Gather/Gather Merge/Parallel */Partial+Finalize/Workers) \u2014 plan parallel, execute serially, account as parallel",
+   "roots": [
+    "select_parallel planner",
+    "write_parallel",
+    "join_hash Parallel Hash",
+    "part-srf-in-select-list unblocked parallel EXPLAIN ANALYZE 365",
+    "aggregates/incremental_sort/select_distinct/memoize/partition_aggregate parallel lines"
+   ],
+   "estimated_lines": 2200,
+   "file_set": [
+    "crates/pgexec/src/plan/parallel.rs (new)",
+    "crates/pgexec/src/plan/exec/gather.rs (new)",
+    "crates/pgexec/src/plan/cost.rs (parallel costs)",
+    "crates/pgexec/src/exec.rs [ALTER TABLE SET (parallel_workers) reloption stored \u2014 shared region with N33b]"
+   ],
+   "size": "M",
+   "depends_on": [
+    "P4",
+    "P5",
+    "N04",
+    "N05"
+   ],
+   "notes": "Certify alone. DECISION: M with accounting fiction (nloops = outer x (workers+1), Launched = Planned) vs XL for real workers. Exit: select_parallel.out and write_parallel.out exact; join_hash exact except hash_join_batches JSON needing ExecChooseHashTableSize batches."
+  },
+  {
+   "id": "P8",
+   "title": "Planner Phase 7 (optional): GiST/SP-GiST/BRIN/hash/GIN-generic index AMs with real scans, KNN Order By, brin_summarize_* / gin_* functions",
+   "roots": [
+    "indexes idx-brin-am",
+    "fn-brin-summarize",
+    "idx-gin-generic-opclasses",
+    "create_index_spgist PLANNER",
+    "gist/spgist PLANNER",
+    "box/polygon PLANNER",
+    "tsearch PLANNER 80",
+    "point-in-polygon geometry bug"
+   ],
+   "estimated_lines": 1400,
+   "file_set": [
+    "crates/pgexec/src/index_am/{gist,spgist,brin,gin}.rs (new)",
+    "crates/pgexec/src/exec.rs [index_entries 11240 AM arms]",
+    "crates/pgexec/src/builtin_opclasses.rs",
+    "crates/pgexec/src/builtin_opfamilies.rs",
+    "crates/pgexec/src/plan/indexpath.rs",
+    "crates/pgtypes/src/geometry.rs [point_inside]"
+   ],
+   "size": "XXL",
+   "depends_on": [
+    "P4",
+    "P3"
+   ],
+   "notes": "create_index_spgist 620, gist 137, brin* 165 + brin functions 169, gin 84, hash_index 8, polygon 157, box 116, tsearch 80, spgist 12, rangetypes 16."
+  },
+  {
+   "id": "N07",
+   "title": "Parser lane 1: expression, FROM and select-list grammar gaps",
+   "roots": [
+    "planner_join-parser-from-clause-and-star-gaps",
+    "agg_window R39 parser misc",
+    "agg_window R22 BEGIN WORK",
+    "jx row-star",
+    "dml whole-row x.*",
+    "part-parenthesized-setop",
+    "part-insert-as-alias (grammar half)",
+    "CTAS/SELECT INTO AS EXECUTE (select_into, write_parallel, prepare)",
+    "WHERE CURRENT OF grammar",
+    "DROP INDEX list",
+    "$1.f1 / name-mode-type routine params",
+    "ctp-whole-row-star-reference"
+   ],
+   "estimated_lines": 1000,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [join_onto ~12990-13030, table_factor 13105, parse_from 12960, expression primary Star ~1233/~11330/14993, select target list ~11897, set-op operands 12514-12660, create_table_as 7001, UPDATE/DELETE WHERE, DROP INDEX, routine_arg ~14375, begin 6628, expect_col_id 510 callers]",
+    "crates/pgparser/src/ast.rs (Star-in-expression, CTAS EXECUTE)",
+    "crates/pgexec/src/exec.rs [join alias binding; CTAS AS EXECUTE arm]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": "Executor halves of CURRENT OF (N36a) and INSERT AS alias (N39b) are separate."
+  },
+  {
+   "id": "N09",
+   "title": "Lexer + syntax-error parity + error positions/DETAIL/HINT plumbing (LINE n: / caret)",
+   "roots": [
+    "planner_join-error-cursor-position",
+    "agg_window R26 error positions",
+    "dgr-datetime-error-caret",
+    "scalar syntax-parity",
+    "scalar error-position",
+    "jx cursor",
+    "part error DETAIL split",
+    "obj-msg-quoting",
+    "'at or near' wording",
+    "column-resolution HINTs"
+   ],
+   "estimated_lines": 800,
+   "file_set": [
+    "crates/pgparser/src/lexer.rs [at_or_near 699, string continuation]",
+    "crates/pgparser/src/error.rs [ParseError::new 34, reporting_position 141]",
+    "crates/pgparser/src/parser.rs [syntax_error_at_token 13684 adoption]",
+    "crates/pgexec/src/error.rs [ExecError -> PgError position/detail/hint]",
+    "crates/pgexec/src/session.rs [error emission: LINE/caret from statement offsets]",
+    "crates/pgexec/src/scope.rs [column resolution messages/HINTs]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": "Cross-cluster; many blocks that other workstreams fix still differ only by the caret until this lands."
+  },
+  {
+   "id": "N10",
+   "title": "Result column naming (FigureColname): LATERAL alias pin, missing arms, function-scan naming",
+   "roots": [
+    "agg_window R7 result-column-naming",
+    "planner_join-column-name-inference",
+    "arrays naming",
+    "case naming",
+    "collate naming",
+    "dgr-array-expr-column-name"
+   ],
+   "estimated_lines": 1100,
+   "file_set": [
+    "crates/pgexec/src/exec.rs [named_expr_inner 24919, BindPass::set_expr ~14785 (pin alias before substitution), derived_name 24850]",
+    "crates/pgexec/src/routine.rs [table_function_columns 2951 composite attribute names]",
+    "crates/pgexec/src/viewdef.rs:661 (follows)"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": "830 of the lines are the LATERAL outer-ref substitution turning Column into Const before naming; if P0a lands first the pin lives in plan/bind.rs."
+  },
+  {
+   "id": "N11",
+   "title": "LATERAL / correlated outer-reference binding (scope chain) \u2014 standalone only if P0a is deferred",
+   "roots": [
+    "planner_join-lateral-binder-gaps",
+    "rangefuncs LATERAL scope 207",
+    "planner_join-subqueries-outside-select-context",
+    "part-update-set-row-subselect"
+   ],
+   "estimated_lines": 670,
+   "file_set": [
+    "crates/pgexec/src/exec.rs [LateralBinder/BindPass/Shadow 13981-14320, lateral_join 13745, is_lateral_item 13713]",
+    "crates/pgexec/src/scope.rs",
+    "crates/pgexec/src/subquery.rs [resolve_in_select]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": "Absorbed by P0a's bind.rs; listed so the plan can choose."
+  },
+  {
+   "id": "N12a",
+   "title": "Arrays of any element type + domain over composite (open ElemType)",
+   "roots": [
+    "jx-array-elem-types",
+    "agg_window R14 arrays-of-any-type",
+    "ctp-user-type-arrays-and-domain-over-composite",
+    "scalar arrays-any-elem",
+    "union arrays of varbit",
+    "part-hash-array-partitioning",
+    "with arrays of record"
+   ],
+   "estimated_lines": 1850,
+   "file_set": [
+    "crates/pgtypes/src/datum.rs [ElemType 261, from_column_type 355-446, array_of 1118, code/write_code/read_code 563-663]",
+    "crates/pgtypes/src/cast.rs",
+    "crates/pgcatalog/src/serde.rs [SCHEMA_VERSION bump]",
+    "crates/pgexec/src/usertype.rs [create_domain 98-106]",
+    "crates/pgparser/src/parser.rs:776 [array-type allow-list]",
+    "crates/pgexec/src/partition/hash.rs [hash_array_extended]"
+   ],
+   "size": "XL",
+   "depends_on": [],
+   "notes": "Certify alone (array storage format). json 368, jsonb 354, agg 346, arrays 185, ctp 364, with 90, enum 36, polymorphism 35, rangefuncs 27, queryfuncs 19, varbit 19. Prerequisite for N18 SEARCH/CYCLE."
+  },
+  {
+   "id": "N12b",
+   "title": "Relation rowtypes as first-class types + whole-row references + $1.f access",
+   "roots": [
+    "agg_window R15 table-rowtypes",
+    "sec-sql-function-composite-notation (misc 218)",
+    "views R18 relation-rowtypes-as-types",
+    "planner_join-xc mki8/int8_tbl return type",
+    "part-table-rowtype-casts",
+    "rangefuncs whole-row params",
+    "generated table row type"
+   ],
+   "estimated_lines": 1000,
+   "file_set": [
+    "crates/pgexec/src/usertype.rs (register relation composite types on CREATE/ALTER/DROP TABLE|VIEW; pg_type typrelid)",
+    "crates/pgexec/src/routine.rs [resolve_type 468, substitute 2377]",
+    "crates/pgexec/src/scope.rs:1299",
+    "crates/pgexec/src/eval.rs [4199, whole_row_reference 55]",
+    "crates/pgexec/src/exec.rs:14892",
+    "crates/pgexec/src/rowexpr.rs (row-type coercion)",
+    "crates/pgparser/src/parser.rs [$1.f1, alias.* args \u2014 shared with N07]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N07"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N12c",
+   "title": "Row comparison semantics + row-valued subqueries",
+   "roots": [
+    "planner_join-row-subquery-comparisons",
+    "agg_window R16 row comparison",
+    "collate row-in-subquery"
+   ],
+   "estimated_lines": 260,
+   "file_set": [
+    "crates/pgexec/src/subquery.rs [run_scalar 640, run_single_column 660, resolve_in_select]",
+    "crates/pgexec/src/eval.rs [InSubquery/Quantified with Row lhs; apply_binary on records]",
+    "crates/pgexec/src/rowexpr.rs",
+    "crates/pgtypes/src/ops.rs:1039"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N13",
+   "title": "SQL-language function executor (value-bound execution, DML/CTAS final statements, OR REPLACE checks, inlining CONTEXT/QUERY, polymorphic resolution, CALL args, pg_get_functiondef)",
+   "roots": [
+    "agg_window R19 sql-function-executor",
+    "ddl-sql-routine-executor",
+    "ddl-pg-get-functiondef",
+    "planner_join-sql-function-final-ctas",
+    "views R17 sql-function-inline-capture",
+    "dml SQL-function body deparse",
+    "views R48 merge-sql-body-parse-deparse",
+    "rules H23 $1 binding",
+    "polymorphism implicitly_coercible"
+   ],
+   "estimated_lines": 1100,
+   "file_set": [
+    "crates/pgexec/src/routine.rs [inline_scalar 1825, final_query 2211, callable 2272, bound_args 2347, substitute 2377, check_replaceable 875, build_routine 677, implicitly_coercible 1535, resolve_type 468, 2628/2841 final-statement check]",
+    "crates/pgexec/src/session.rs [drive_scalar_worker 8027 dispatch for a SQL-body executor]",
+    "crates/pgexec/src/plpgsql.rs [execute_scalar_function seam]",
+    "crates/pgwire/src/error.rs [DiagnosticFields internal_query/internal_position]",
+    "crates/pgexec/src/catalog_fn.rs [pg_get_functiondef]"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "N03"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N14",
+   "title": "User-defined function scans / FunctionScan relation builder (ORDINALITY, coldeflist, ROWS FROM, composite/OUT naming, schema path, scalar builtins in FROM)",
+   "roots": [
+    "agg_window R18 user-function-scans",
+    "part-pg-get-indexdef-lateral",
+    "ddl-object-address FROM-position forms",
+    "statistics-import LATERAL scalar functions",
+    "plpgsql FOR implicit lateral"
+   ],
+   "estimated_lines": 1050,
+   "file_set": [
+    "crates/pgexec/src/exec.rs [build_table_expr Function arms 17745-17794, build_table_expr_schema_with_ctes 19576-19605, lateral_schema_item 19326, from_column_names 14634 \u2014 or plan/bind RTE after P0a]",
+    "crates/pgexec/src/routine.rs [expands_as_table 2911, table_function_expansion 2924, table_function_columns 2941, plpgsql_table_function_schema 3020, eval_plpgsql_table_function 3052, expand_table_function 2817]",
+    "crates/pgexec/src/srf.rs [from_item 1185, plan 456, user_function_relation 1357, undefined_function 2295 -> one-row scalar-function scan fallback]",
+    "crates/pgexec/src/plpgsql.rs [execute_table_function 402-421, Return arm 1756]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N13"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N15",
+   "title": "Named / default / VARIADIC call arguments (parser AST + one resolution point + builtin proargnames/defaults fixture)",
+   "roots": [
+    "jx-named-args-builtins",
+    "agg_window R20 named/default/VARIADIC",
+    "polymorphism named+variadic",
+    "dgr-variadic-call-args",
+    "part-variadic-call-args",
+    "text variadic-call",
+    "json/jsonb variadic",
+    "fast_default random named args",
+    "stats_import named args"
+   ],
+   "estimated_lines": 1500,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [func_call 1901-1950, positional_from_named 3012, peek_named_argument_label 2991]",
+    "crates/pgparser/src/ast.rs [FuncArgs labels + VARIADIC]",
+    "crates/pgexec/src/routine.rs [resolve_call/bound_args, RoutineArgMode::Variadic ~826]",
+    "crates/pgexec/src/builtin_procs_*.tsv.zst (regenerate from post-initdb pg_proc: proargnames, pronargdefaults, proargdefaults)",
+    "crates/pgexec/src/routine.rs:3544 decoder",
+    "one resolution point before eval.rs 369-426 guard chain (json_fn.rs 874-899, srf.rs 321/755, format_fn.rs make_interval)",
+    "crates/pgexec/src/viewdef.rs [FuncCall deparse name => value]"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N16",
+   "title": "Aggregate completeness: ordered-set/hypothetical, builtin support functions callable, useragg fidelity, moving aggregates, overloads, outer-level aggregates, functional dependency, grouping-sets semantics",
+   "roots": [
+    "agg_window R1",
+    "agg_window R2",
+    "agg_window R3",
+    "agg_window R3b",
+    "agg_window R4",
+    "agg_window R5",
+    "agg_window R10",
+    "agg_window R11",
+    "planner_join-xc-ordered-set-aggregates",
+    "planner_join-volatile-group-key-double-eval",
+    "polymorphism polymorphic aggregates",
+    "create_aggregate",
+    "alter_generic CREATE AGGREGATE int4pl"
+   ],
+   "estimated_lines": 1300,
+   "file_set": [
+    "crates/pgexec/src/agg.rs [AggFunc enum, validate_grouped 1161, func_in_scalar_context_error]",
+    "crates/pgexec/src/useragg.rs [lookup via routines_named -> builtin table, build/accepts, msfunc/minvfunc]",
+    "crates/pgexec/src/grouping.rs",
+    "crates/pgexec/src/func.rs [int4pl, int8inc, float8_accum, numeric_avg_accum, ordered_set_transition ...]",
+    "crates/pgexec/src/exec.rs [comment_ops COMMENT ON AGGREGATE]",
+    "crates/pgparser/src/parser.rs [WITHIN GROUP suffix in func_call 14976] + ast.rs"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N15"
+   ],
+   "notes": "WITHIN GROUP shares the func_call production with N15 -> sequence after N15."
+  },
+  {
+   "id": "N17",
+   "title": "Window frames and specs (infinite-interval RANGE, timetz in_range, unbounded precedence, named WINDOW over GROUP BY, moving-aggregate execution)",
+   "roots": [
+    "agg_window R12 window-frame",
+    "agg_window R3b moving aggregates"
+   ],
+   "estimated_lines": 470,
+   "file_set": [
+    "crates/pgexec/src/window.rs [resolved_frame 1354, execute internals]",
+    "crates/pgparser/src/parser.rs [frame_bound 2138]",
+    "crates/pgexec/src/useragg.rs [mstype hooks]"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": "P0a calls window.rs::execute unchanged; P5 later restructures ordering."
+  },
+  {
+   "id": "N18",
+   "title": "Recursive CTE shape, SEARCH/CYCLE, DML CTE forward references, CREATE RECURSIVE VIEW, lazy LIMIT over infinite CTEs",
+   "roots": [
+    "agg_window R13 recursive-cte-shape-search-cycle",
+    "agg_window R32a DML-CTE forward refs",
+    "planner_join-recursive-cte-parenthesised-form"
+   ],
+   "estimated_lines": 1100,
+   "file_set": [
+    "crates/pgexec/src/cte.rs [split_recursive_terms 294-315, check_recursive_term 533-541, 329-340 refusals, 380 MAX_RECURSION_ITERATIONS + lazy LIMIT, evaluation_order/cte_references 164-169]",
+    "crates/pgexec/src/exec.rs [execute_write_parts ~4362 DML forward references]",
+    "crates/pgparser/src/parser.rs [create_view 9259 RECURSIVE arm, parse_with_clause ~12735 WITH-prefixed DML bodies]",
+    "crates/pgexec/src/viewdef.rs [194-230 SEARCH/CYCLE printing]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N12a"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N19",
+   "title": "SRF ProjectSet semantics (nested SRF args, SRF in GROUP BY/PARTITION BY, DISTINCT ON, error contexts, split_pathtarget_at_srfs placement)",
+   "roots": [
+    "agg_window R6 srf-projectset (remainder after N03)"
+   ],
+   "estimated_lines": 510,
+   "file_set": [
+    "crates/pgexec/src/srf.rs [1467/1587/1709 refusals, project_rows_ordered 1696, rows]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N03"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N20",
+   "title": "Datetime typmod precision (timestamp(p)/time(p)/interval(p) field masks) end to end",
+   "roots": [
+    "dgr-datetime-typmod-precision"
+   ],
+   "estimated_lines": 1983,
+   "file_set": [
+    "crates/pgtypes/src/datum.rs [ColumnType Time/Timetz/Timestamp/Timestamptz/Interval payload; typmod 1391]",
+    "crates/pgtypes/src/cast.rs [cast_in 512, cast_assign_in 423]",
+    "crates/pgtypes/src/datetime.rs [rounding half away from zero + AdjustIntervalForTypmod helpers near IntervalField 1977 / parse_interval_ranged 2086]",
+    "crates/pgparser/src/parser.rs [parse_type_name 651-663, interval_literal 1852-1880]",
+    "crates/pgexec/src/exec.rs [coerce 12800-12813, catalog_typmod 21529]",
+    "crates/pgcatalog/src/serde.rs [355-376, 500-524, SCHEMA_VERSION 50]",
+    "crates/pgexec/src/func.rs [builtin_format_type 2745 interval typmod spelling]",
+    "crates/pgexec/src/viewdef.rs [cast deparse]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": "Certify alone (SCHEMA_VERSION bump). timestamp 726, timestamptz 870, interval 91, horology 296."
+  },
+  {
+   "id": "N21",
+   "title": "Datetime / geometry / range function fidelity (missing functions, OVERLAPS, multirange literals, to_char/to_timestamp, generate_series ts, tz abbrevs, box_in, epoch, BETWEEN SYMMETRIC, date_bin, 'now' at txn start)",
+   "roots": [
+    "dgr-missing-datetime-functions",
+    "dgr-overlaps-predicate",
+    "dgr-multirange-literal-parser",
+    "dgr-format-fn-fidelity",
+    "dgr-generate-series-timestamp",
+    "dgr-tz-abbrev-zone-lookup",
+    "dgr-box-input-adjacent-points",
+    "dgr-unknown-literal-args",
+    "dgr-cross-type-datetime-compare",
+    "dgr-epoch-literal-utc",
+    "dgr-range-type-ddl-fidelity",
+    "dgr-between-symmetric",
+    "dgr-date-bin-overflow",
+    "dgr-interval-fidelity",
+    "dgr-decode-strictness-julian-T",
+    "dgr-multirange-adjacent-op",
+    "dgr-drop-cascade-notice-hint"
+   ],
+   "estimated_lines": 880,
+   "file_set": [
+    "crates/pgtypes/src/datetime.rs [clock_now 972, to_char/to_timestamp engine, generate_series]",
+    "crates/pgtypes/src/geometry.rs [box_in]",
+    "crates/pgtypes range/multirange parsers",
+    "crates/pgexec/src/{func.rs, format_fn.rs, datetime_fn.rs, srf.rs generate_series lazy}",
+    "crates/pgparser/src/parser.rs [OVERLAPS, BETWEEN SYMMETRIC]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N20"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N21x",
+   "title": "Datetime calendar range: PG 4713 BC..294276 AD / 5874897 instead of jiff +-9999 (DECISION)",
+   "roots": [
+    "dgr-datetime-range-representation"
+   ],
+   "estimated_lines": 247,
+   "file_set": [
+    "crates/pgtypes/src/datetime.rs (julian-day arithmetic replacing jiff civil range 38-44, 1071)"
+   ],
+   "size": "XXL",
+   "depends_on": [
+    "N20"
+   ],
+   "notes": "date 8, timestamp 44, timestamptz 91, horology 98, rangetypes 6, jsonb_jsonpath 2."
+  },
+  {
+   "id": "N22",
+   "title": "jsonpath grammar/printer round-trip, numeric literals, escapes, datetime methods with templates/precision/tz, evaluator misc",
+   "roots": [
+    "jx-jsonpath-grammar-printer",
+    "jx-jsonpath-datetime",
+    "jx-jsonpath-eval-misc",
+    "jsonpath_encoding (target UTF8 expected file)"
+   ],
+   "estimated_lines": 2600,
+   "file_set": [
+    "crates/pgexec/src/jsonpath.rs [lex 401, lex_number 522 -> numeric::parse_finite, lex_quoted 555, Parser 610, Method 174/1007-1035, datetime_method 1995-2040, compare 1784-1807, printer 2118-2246 escaping]",
+    "crates/pgtypes/src/datetime.rs [template engine std mode: parse_by_template 5481, Scanner 5049, Assembly 5490, tokenize_template 4613; new error texts + field mask]",
+    "crates/pgexec/src/json_fn.rs [path_args/eval_path_func 874-945, jsonb_path_query_rows 1714 use_tz + ctx.time_zone]",
+    "crates/pgexec/src/jsontable.rs [346/385/532]",
+    "crates/pgexec/src/clock.rs [EvalCtx warning sink for 'TIME(10) precision reduced']"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": "jsonpath 909, jsonpath_encoding 124, jsonb_jsonpath 1,280+117+107+66. pgtypes/datetime.rs region disjoint from N20."
+  },
+  {
+   "id": "N23",
+   "title": "JSON/JSONB function fidelity (SQL/JSON constructors+aggregates, JSON_TABLE deparse/cursor, queryfuncs returning coercion/analysis, jsonb scalar casts, subscripting, populate_record_valid, #-, diagnostics)",
+   "roots": [
+    "jx-sqljson constructors/aggregates/JSON_ARRAY(subquery)",
+    "jx-queryfuncs returning-coercion/analysis-checks/constraint-deparse/index-immutability",
+    "jx-jsontable deparse/cursor/user-type-oid",
+    "jx jsonb scalar casts/subscript polish/populate_record_valid/#-/pg_column_size/set_lax/diagnostics/json_object shape/populate coercion/array_to_json multidim/stack HINT",
+    "jx srf-record-in-targetlist"
+   ],
+   "estimated_lines": 1900,
+   "file_set": [
+    "crates/pgexec/src/json_fn.rs",
+    "crates/pgexec/src/jsontable.rs",
+    "crates/pgexec/src/sqljson*.rs",
+    "crates/pgtypes/src/jsonb.rs",
+    "crates/pgexec/src/viewdef.rs [JSON_* deparse]",
+    "crates/pgparser/src/parser.rs [JSON_* clauses]",
+    "crates/pgparser/src/lexer.rs [#- token]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N15"
+   ],
+   "notes": "EXPLAIN VERBOSE Output/Table Function Call lines are P0b."
+  },
+  {
+   "id": "N24",
+   "title": "XML: xpath, xmltable, xmlelement family, SET XML OPTION, xmlmap functions (variant DECISION)",
+   "roots": [
+    "jx-xml xpath",
+    "jx-xml xmltable",
+    "jx-xml xmlelement family",
+    "jx-xml SET XML OPTION",
+    "jx-xmlmap functions",
+    "jx refcursor/oid[]/cursor"
+   ],
+   "estimated_lines": 1200,
+   "file_set": [
+    "crates/pgtypes/src/xml.rs (quick-xml)",
+    "crates/pgexec/src/xml_fn.rs",
+    "crates/pgparser/src/parser.rs [XMLTABLE/PASSING/COLUMNS]",
+    "xmlmap functions (table_to_xml family)",
+    "crates/pgexec/src/session.rs [SET XML OPTION]"
+   ],
+   "size": "XL",
+   "depends_on": [],
+   "notes": "Target xml.out (libxml parity) vs xml_1.out (no-libxml variant, 1,327 lines today); xmlmap -> xmlmap_1."
+  },
+  {
+   "id": "N25",
+   "title": "Text search subsystem (default parser, dictionaries ispell/hunspell/synonym/thesaurus, config mappings, headline, rank, ts_debug/ts_stat/ts_rewrite, tsvector/tsquery I/O, tsvector args typing)",
+   "roots": [
+    "tsfr-ts-default-parser",
+    "tsfr-ts-headline",
+    "tsfr-unknown-literal-tsargs",
+    "tsfr-ts-aux-functions",
+    "tsfr-ts-match-exec",
+    "tsfr-websearch",
+    "tsfr-rank",
+    "tsfr-gist-opclass-options",
+    "tsfr-ts-dictionaries",
+    "tsfr-ts-config-mapping-ddl",
+    "tsfr-tsvector-tsquery-io",
+    "json/jsonb tsvector 217+229"
+   ],
+   "estimated_lines": 2850,
+   "file_set": [
+    "crates/pgtypes/src/text_search.rs (rewrite)",
+    "crates/pgexec/src/text_search_fn.rs",
+    "crates/pgexec/src/text_search_catalog.rs [Create/Dictionary 118-126, DictionaryTemplate 236, 133-136 storage]",
+    "crates/pgparser/src/parser.rs [create_text_search 6534, alter_text_search 6579, def_arg_name 439]",
+    "crates/pgexec/src/exec.rs [text_search_catalog_rows 21710]",
+    "dictionary files from src/backend/tsearch (ispell_sample, hunspell_sample*, synonym_sample, thesaurus_sample)"
+   ],
+   "size": "XXL",
+   "depends_on": [],
+   "notes": "tsearch 1,308 non-planner, tsdicts 599, tstypes 489, json/jsonb tsvector 446. GiST/GIN scans in tsearch (80) are P8."
+  },
+  {
+   "id": "N26",
+   "title": "FDW DDL grammar + catalogs + object semantics (foreign_data)",
+   "roots": [
+    "tsfr-fdw-ddl-grammar",
+    "tsfr-fdw-catalogs-psql",
+    "tsfr-fdw-object-semantics",
+    "tsfr-foreign-table-relkind",
+    "tsfr set-statistics/storage",
+    "tsfr check-deparse",
+    "tsfr reassign/drop owned",
+    "tsfr alter-sequence"
+   ],
+   "estimated_lines": 1550,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [ALTER dispatch 3696-3789 Foreign arm, parse_options 13843, parse_user_mapping_user 13865, create_fdw 13887, create_server 13916, alter_server 13934, create_user_mapping 13960, alter_user_mapping 13977, drop_user_mapping 13995, create_foreign_table 14014, drop_foreign_table 14057, import_foreign_schema 14073, grant/revoke 4568/4615 ON FOREIGN, comment_on 8592]",
+    "crates/pgparser/src/ast.rs [955-1032]",
+    "crates/pgcatalog/src/lib.rs [610-633 FDW/Server/UserMapping records; 268 ForeignTableMeta per-column options; 6279/6355/6321/6538 ops]",
+    "crates/pgcatalog/src/serde.rs [1973/2313/2342; SCHEMA_VERSION bump for column options]",
+    "crates/pgexec/src/catalog_rel.rs [pg_foreign_data_wrapper, pg_foreign_server, pg_user_mapping[s], pg_foreign_table, information_schema.foreign_*/user_mapping*/usage_privileges/role_usage_grants]",
+    "crates/pgexec/src/catalog_fn.rs [has_server_privilege etc.]",
+    "crates/pgexec/src/srf.rs [pg_options_to_table]",
+    "crates/pgexec/src/exec.rs [1826-1952 arms, comment_ops 31868]"
+   ],
+   "size": "XL",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N27",
+   "title": "Logical replication DDL + catalogs + psql listings (publication/subscription; no replication)",
+   "roots": [
+    "tsfr-publication-ddl",
+    "tsfr-subscription-ddl",
+    "tsfr-predefined-roles",
+    "publication DML-time replica identity checks"
+   ],
+   "estimated_lines": 1550,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [create_statement 5488 / ALTER dispatch publication|subscription productions; bounded_non_goal_refusal 15954]",
+    "crates/pgparser/src/ast.rs [NON_GOAL_REFUSALS 2224/2245/2268; test parser.rs:23197; session.rs:21046]",
+    "crates/pgexec/src/publication.rs (new: row-filter/column-list validation beside policy_ddl.rs)",
+    "crates/pgcatalog/src/lib.rs [Publication/Subscription records]",
+    "crates/pgexec/src/catalog_rel.rs [pg_publication (pubgencols) 1406-1416, pg_publication_rel (prattrs int2vector, prqual), pg_publication_namespace, pg_publication_tables + pg_get_publication_tables(), pg_subscription, pg_subscription_rel, pg_stat_subscription_stats]",
+    "crates/pgexec/src/catalog_fn.rs [pg_relation_is_publishable 732]",
+    "crates/pgexec/src/exec.rs [comment_ops, DropColumn dependency 28370, execute_write_parts replica-identity check 4361]",
+    "crates/pgexec/src/session.rs [dispatch 6921/6973]",
+    "docs/PG_COMPAT_MATRIX.md rows 145/201/251"
+   ],
+   "size": "XL",
+   "depends_on": [],
+   "notes": "Sequenced after N26 (same parser.rs/ast.rs/catalog_rel.rs/exec.rs dispatch regions)."
+  },
+  {
+   "id": "N28",
+   "title": "Rule system (CREATE/DROP/ALTER RULE, DO INSTEAD/ALSO rewrite, ON SELECT rules, pg_rules, pg_get_ruledef, ENABLE/DISABLE RULE)",
+   "roots": [
+    "views R1 rule-system",
+    "dml RULEs (copydml, returning)",
+    "agg_window R30 RULES",
+    "generated_* rules",
+    "errors drop-rule",
+    "foreign_key rule r1"
+   ],
+   "estimated_lines": 1450,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [CREATE [OR REPLACE] RULE, DROP RULE, ALTER RULE, COMMENT ON RULE, ALTER TABLE ENABLE|DISABLE [REPLICA|ALWAYS] RULE ~4008]",
+    "crates/pgparser/src/ast.rs [NonGoalCommand::{AlterRule 2082,CreateRule 2092,DropRule 2104} removed from refusals] + command.rs rows 36/89/139",
+    "crates/pgcatalog/src/lib.rs [Rule record, pg_rewrite rows]",
+    "crates/pgexec/src/rewrite_rules.rs (new query rewriter)",
+    "crates/pgexec/src/exec.rs [execute_write_parts hooks]",
+    "crates/pgexec/src/catalog_rel.rs [pg_rules]",
+    "crates/pgexec/src/catalog_fn.rs [pg_get_ruledef]",
+    "docs/PG_COMPAT_MATRIX.md rows 148/203/254"
+   ],
+   "size": "XXL",
+   "depends_on": [
+    "P0a",
+    "N30b"
+   ],
+   "notes": "DECISION: full rewriter or scoped to rules.sql/updatable_views.sql shapes. rules 805, updatable_views 183, copydml 52, returning 147, with ~200, generated 40, errors 10, foreign_key 8."
+  },
+  {
+   "id": "N29a",
+   "title": "Cumulative statistics system (pg_stat_* / pg_statio_* views, counters, snapshots, pg_stat_force_next_flush/reset/have_stats)",
+   "roots": [
+    "stats-relation-counters",
+    "stats-pg-stat-io",
+    "stats-cluster-wide-views",
+    "stats-function-counters",
+    "stats-snapshot-have-stats",
+    "stats-pg-stat-database",
+    "stats-cumulative-gucs",
+    "vacuum pg_stat_*_tables",
+    "select_parallel pg_stat_database/pg_stat_force_next_flush"
+   ],
+   "estimated_lines": 1300,
+   "file_set": [
+    "crates/pgexec/src/pgstat.rs (new)",
+    "crates/pgexec/src/catalog_rel.rs [pg_stat_*/pg_statio_* views]",
+    "crates/pgexec/src/plan/exec/* scan leaf + execute_write counter hooks (after P0a)",
+    "crates/pgexec/src/session.rs [track_functions/track_counts/track_io_timing/stats_fetch_consistency GUCs]"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "P0a",
+    "N04"
+   ],
+   "notes": "DECISION: in scope?"
+  },
+  {
+   "id": "N29b",
+   "title": "pg_locks / pg_prepared_statements / pg_prepared_xacts / pg_database rows",
+   "roots": [
+    "txn-pg-locks-view",
+    "stats_import pg-locks-relation-rows",
+    "prepare pg_prepared_statements catalog",
+    "prepare pg_database rows",
+    "psql pg_prepared_statements text",
+    "lock privileges"
+   ],
+   "estimated_lines": 320,
+   "file_set": [
+    "crates/pgexec/src/catalog_rel.rs [rows() arms pg_locks/pg_prepared_xacts]",
+    "crates/pgexec/src/lockmgr.rs (renderers incl. advisory + tuple/relation locks)",
+    "crates/pgexec/src/session.rs [prepared-statement catalog]",
+    "crates/pgexec/src/exec.rs [pg_database rows]"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": "pg_cursors moved to N36a."
+  },
+  {
+   "id": "N29c",
+   "title": "System catalog view definitions dump (pg_views rows for 80 pg_catalog views) \u2014 DECISION",
+   "roots": [
+    "views R4 system-catalog-view-definitions"
+   ],
+   "estimated_lines": 1437,
+   "file_set": [
+    "crates/pgexec/src/catalog_rel.rs [pg_views_rows 2902, RELATION_NAMES/system_view_oid]",
+    "crates/pgexec/src/exec.rs [virtual_table registries 19853/22320/22681/20573 retired]",
+    "bootstrap of view definitions from system_views.sql"
+   ],
+   "size": "XXL",
+   "depends_on": [
+    "N29a",
+    "N29b",
+    "N28"
+   ],
+   "notes": "Honest route needs dozens of SRFs (pg_stat_get_*, pg_show_all_settings, pg_cursor, pg_prepared_xact, ...)."
+  },
+  {
+   "id": "N30a",
+   "title": "create_view: regression-C adapter for interpt_pp (unblocks select_views)",
+   "roots": [
+    "views R40 create-view-no-eval"
+   ],
+   "estimated_lines": 902,
+   "file_set": [
+    "crates/pgexec/src/routine.rs [RegressionCAdapter 1694-1746, eval 2041-2063, has_exact_regression_c_signature 1699 result-type parameter]",
+    "crates/pgtypes/src/geometry.rs [Lseg::intersection_point 213]"
+   ],
+   "size": "S",
+   "depends_on": [],
+   "notes": "create_view 1 + select_views 901."
+  },
+  {
+   "id": "N30b",
+   "title": "View storage, pg_get_viewdef fidelity, updatable-view semantics, view privileges/defaults/reloptions, security-barrier ordering, matview refresh, PREPARE DML on views",
+   "roots": [
+    "views R2 view-bound-storage",
+    "views R3 viewdef-deparse-fidelity",
+    "agg_window R31 viewdef",
+    "planner_join-limit-with-ties-viewdef",
+    "jx N viewdef unnest",
+    "planner_join \\sv unnamed_subquery",
+    "views R6 view-column-defaults",
+    "views R8 view-write-rewrite-gaps",
+    "views R7 view-privileges",
+    "views R16 security-barrier-qual-ordering",
+    "views R11 matview-refresh-semantics",
+    "views R12 view-reloptions-catalog",
+    "views R13 temp-view-notice",
+    "views R9 merge-into-views",
+    "views R10 row-locking-through-views",
+    "part-prepare-dml-on-view",
+    "views R44 alter-view-rename-column",
+    "views R14/R15/R24/R25/R27"
+   ],
+   "estimated_lines": 1670,
+   "file_set": [
+    "crates/pgexec/src/viewdef.rs [write_query 141/270-292, write_select 430-445, expression_text 243, 1093]",
+    "crates/pgexec/src/viewwrite.rs",
+    "crates/pgexec/src/exec.rs [CreateView arm 1095/2152, build_base_table view expansion 17612-17660]",
+    "crates/pgcatalog/src/lib.rs [View record: store analysed query] + serde.rs",
+    "crates/pgexec/src/session.rs [PREPARE/describe of DML on views 25126]",
+    "crates/pgexec/src/rls.rs [security barrier ordering]"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "P0a"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N31a",
+   "title": "Expression partition keys + partition DDL/catalog misc (custom hash opclass, hash arrays, attach column check, key-constraint DETAIL, bound-order enumeration, pg_partition_tree/root, satisfies_hash_partition, pg_get_partition_constraintdef, MINVALUE ordering)",
+   "roots": [
+    "part-expression-partition-keys",
+    "dml-partition-expression-keys",
+    "create_table partition-expression-keys cascade + leaks into alter_table/triggers/merge/inherit",
+    "part-hash-opclass-support-function",
+    "part-hash-array-partitioning",
+    "part-attach-column-mismatch",
+    "part-partition-key-constraint-check",
+    "part-partition-scan-order",
+    "part-pg-partition-tree-root",
+    "cat-pg-partition-tree-and-partition-fns",
+    "fk pg_partition_tree 107",
+    "cluster pg_partition_tree 32",
+    "part-satisfies-hash-partition",
+    "dml pg_get_partition_constraintdef 112"
+   ],
+   "estimated_lines": 1700,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [opt_partition_by 7436-7488]",
+    "crates/pgparser/src/ast.rs [PartitionKeyElem 2394 keep Expr/collation/opclass]",
+    "crates/pgexec/src/partition.rs [SCHEME_VERSION 55 -> 3, Scheme 128, serialize 258/268, key_ordinals 691, key_values 708, key_description 769, route 873, satisfies 895, key_columns 1114, expression_key_error 1156, key_column_type 1166, partitions_of 479 / leaves_of 537 / descendants 504]",
+    "crates/pgexec/src/partition/hash.rs [opclass support fn 2, hash_array_extended]",
+    "crates/pgexec/src/exec.rs [partition_scheme_from_ast 25588, reject_incomplete_partitioned_key 25617, resolve_partition_bound 25660, route_row_to_leaf 17478, 5067, pg_partitioned_table_rows 20315, reject_partition_key_column ~29912, RENAME COLUMN scheme rewrite ~30178, attach_partition_ops 29002 column-set check]",
+    "crates/pgexec/src/eval.rs [infer_type 4154 reuse]",
+    "crates/pgexec/src/catalog_fn.rs [part_key_def 2019 via viewdef.rs expression_text 243; pg_partition_root; pg_get_partition_constraintdef]",
+    "crates/pgexec/src/srf.rs [pg_partition_tree]",
+    "crates/pgexec/src/func.rs [satisfies_hash_partition]",
+    "crates/pgexec/src/useroperator.rs [opclass lookup]",
+    "crates/pgexec/src/inheritance.rs [children_of OID order \u2014 coordinate with N32]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N15"
+   ],
+   "notes": "~1,700 direct; a further ~1,700 behind it are Append/planner lines for P6. Removing the create_table DROP failure also clears leaks into alter_table ~150, triggers 51, merge 17, inherit 16."
+  },
+  {
+   "id": "N31b",
+   "title": "Partitioned foreign keys + FK misc (clones on partitions, conparentid, root-table violation text, FK to partitioned PK, self-referential FK, TRUNCATE on partitioned FK, drop-set fix)",
+   "roots": [
+    "ctp-partitioned-foreign-keys",
+    "ctp-fk-referencing-partitioned-pk",
+    "truncate FK on partitioned tables",
+    "ctp NOT ENFORCED",
+    "foreign_key drop cascade notice for partitions",
+    "agg_window R34 self-referential FK",
+    "ctp-fk-misc-semantics",
+    "temp ON COMMIT FK"
+   ],
+   "estimated_lines": 1050,
+   "file_set": [
+    "crates/pgexec/src/exec.rs [718-723 CREATE TABLE refusal, add_foreign_key_constraint 29302-29308, drop_table_and_dependents_ops call 943 (removed vs dropping), drop_foreign_key_constraint 29390, alter_constraint ~29150, ValidateConstraint 28822, partition_definition 25300 FK clones, attach_partition_ops 29002 FK half]",
+    "crates/pgexec/src/fk.rs [resolve_foreign_key 239, run_child_check 1815, run_parent_check 1889, find_referencing_rows 2000, violation 735, types_are_comparable 557, FkParts::resolve rows in partitions]",
+    "crates/pgcatalog/src/lib.rs [ForeignKey 529 parent link] + serde.rs 1626/1663 FOREIGN_KEY_VERSION",
+    "crates/pgexec/src/catalog_rel.rs [constraint_row 2669 conparentid/conenforced]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N31a"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N31c",
+   "title": "Cross-partition UPDATE row movement, MERGE into partitioned tables, partitioned DML (column-order refusal, generated/identity on partitions, ON CONFLICT on partitioned)",
+   "roots": [
+    "dml update row-movement 241",
+    "dml partitioned UPDATE column-order refusal 67",
+    "part-cross-partition-update",
+    "dml MERGE into partitioned tables 240",
+    "txn generated_stored/virtual partition rules",
+    "identity partitions/inheritance",
+    "ON CONFLICT partitioned (tsfr/generated)",
+    "ctp-partition-trigger-clone-rules"
+   ],
+   "estimated_lines": 950,
+   "file_set": [
+    "crates/pgexec/src/exec.rs [execute_timestamp_update 12085, check_partition_constraint 5047, MERGE executor, INSERT ... SELECT routing 17486, apply_locked_row_update 10878]",
+    "crates/pgexec/src/partition.rs [route]",
+    "crates/pgexec/src/timestamp_txn.rs (rowid contract)",
+    "crates/pgexec/src/trigger.rs [clone_partition_triggers 2050, drop 598, set_table_trigger_mode 2150]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N31a"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N32",
+   "title": "Inheritance + NOT NULL / CHECK constraint catalog (drop cascade children, INHERITS column merge, constraint objects with inheritance counters, ALTER TABLE INHERIT/NO INHERIT, merge notices, rename recursion, Failing row DETAIL)",
+   "roots": [
+    "part-drop-cascade-inheritance-children",
+    "part-inherits-column-merge",
+    "part-notnull-constraint-catalog",
+    "ctp-notnull-constraint-catalog",
+    "part-check-constraint-inheritance",
+    "part-alter-table-inherit",
+    "ctp-alter-table-inherit",
+    "rowsecurity ALTER TABLE INHERIT cascade 397",
+    "generated inheritance DDL 165",
+    "part-merge-notice-count",
+    "part-rename-inherited-column",
+    "part-regclass-oid-union-types",
+    "rules H42 inherits(id)",
+    "views R31 inherit-merge-column",
+    "ctp-detail-failing-row",
+    "ctp-comment-on-subobjects (constraints)",
+    "tsfr notnull-constraint-name"
+   ],
+   "estimated_lines": 2000,
+   "file_set": [
+    "crates/pgcatalog/src/lib.rs [Column.not_null 170 -> NotNullConstraint record; CheckConstraint 254 + no_inherit/enforced/conislocal/coninhcount/normalised expr] + serde.rs",
+    "crates/pgexec/src/exec.rs [inherited_table_definition 25217-25290, drop_table_and_dependents_ops 9304 + cascade notices 9526-9600, apply_table_not_null_constraints, ALTER TABLE SET/DROP/ADD NOT NULL + ALTER CONSTRAINT ~29092-29233, add_check_constraint 29489, DROP CONSTRAINT, ALTER TYPE inherited-column check, RenameColumn, ALTER TABLE INHERIT/NO INHERIT executor near 29002]",
+    "crates/pgexec/src/inheritance.rs [descendants/children_of 95 OID order, rename_ops, attach_ops/drop_metadata_ops]",
+    "crates/pgexec/src/catalog_rel.rs [pg_constraint rows contype n/c; check_constraint_rows 2547-2604; pg_get_expr]",
+    "crates/pgexec/src/session.rs [inheritance_notices ~9488]",
+    "crates/pgparser/src/parser.rs [alter_table_action 3997-4190 INHERIT/NO INHERIT, NOT NULL NO INHERIT, ALTER CONSTRAINT INHERIT ~4190]",
+    "crates/pgexec/src/viewdeps.rs (RENAME COLUMN spurious refusal)",
+    "crates/pgexec/src/error.rs [check-violation DETAIL 'Failing row contains']"
+   ],
+   "size": "XL",
+   "depends_on": [],
+   "notes": "Prerequisite for P6 (inherit Append blocks) and rowsecurity shape-after-INHERIT."
+  },
+  {
+   "id": "N33a",
+   "title": "Partitioned index tree + index DDL/catalog fidelity (pg_inherits for indexes, ALTER INDEX ATTACH, ON ONLY, INVALID, auto-attach, DROP INDEX rules, pg_attribute rows for indexes, REINDEX, CIC, USING INDEX, index naming/deparse, dropped-column placeholders)",
+   "roots": [
+    "part-partitioned-index-tree",
+    "cat-index-pg-attribute-rows",
+    "part-dropped-column-placeholders (DECISION)",
+    "part-index-autoname-and-deparse",
+    "part-unique-index-per-partition-enforcement",
+    "part-pk-on-partition-column",
+    "part-drop-index-concurrently",
+    "part-replica-identity-using-index",
+    "idx-reindex-effects",
+    "idx-concurrently-txn-block-and-invalid",
+    "ddl-alter-table-add-constraint-using-index",
+    "idx-partitioned-index-cascade",
+    "ddl-alter-index-alter-column",
+    "ddl-drop-index-multi-and-concurrently",
+    "index comment",
+    "psql partitioned-index pg_inherits",
+    "partition_info index ancestors"
+   ],
+   "estimated_lines": 1150,
+   "file_set": [
+    "crates/pgcatalog/src/lib.rs [Index parent link, indisvalid, indisreplident; put_index_ops]",
+    "crates/pgexec/src/exec.rs [cloned_partition_index 25438, partition_index_clones 25474, attached_partition_index_ops 25507, clone_indexes_onto_partitions 25529, attach_partition_ops 29002 index half, pg_inherits_rows 20277, pg_attribute_rows 20874 rows for indexes, Statement::DropIndex, REINDEX relfilenode, CIC failure state, index name chooser 9474/9675]",
+    "crates/pgparser/src/parser.rs [alter_index 3960 ATTACH PARTITION / ALTER COLUMN SET STATISTICS, drop_index 11081 CONCURRENTLY + list, ADD ... USING INDEX]",
+    "crates/pgexec/src/catalog_fn.rs [IndexDef 128 ON ONLY + expression parenthesisation]",
+    "crates/pgexec/src/catalog_rel.rs [pg_index/pg_constraint partition rows]"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "P3",
+    "N32"
+   ],
+   "notes": "Sequenced after N31a/N31b on attach_partition_ops."
+  },
+  {
+   "id": "N33b",
+   "title": "Storage misc: reloptions, tablespace semantics, toast/column compression, page-faithful TABLESAMPLE, PG PRNG random(), hash functions, index property functions, make_tuple_indirect",
+   "roots": [
+    "cat-reloptions-storage",
+    "ddl-tablespace-semantics",
+    "guc-toast-compression-and-column-compression",
+    "ddl-toast-relations-and-pg-toast",
+    "exec-tablesample-pg-faithful",
+    "fn-random-pg-prng",
+    "fn-hash-functions",
+    "fn-index-property-functions",
+    "fn-make-tuple-indirect",
+    "pg_relation_size"
+   ],
+   "estimated_lines": 1300,
+   "file_set": [
+    "crates/pgexec/src/exec.rs [ALTER TABLE SET (...) reloptions + pg_class.reloptions region]",
+    "crates/pgexec/src/tablespace.rs",
+    "crates/pgexec/src/func.rs [hash*, random (xoroshiro port), pg_indexam_has_property/pg_index_column_has_property/pg_index_has_property, make_tuple_indirect]",
+    "tablesample sampler (page-based SYSTEM/BERNOULLI over rowid blocks)",
+    "crates/pgparser/src/parser.rs [COMPRESSION]",
+    "crates/pgcatalog Column compression + pg_column_compression + \\d+ Compression"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": "compression_1 variant = no-lz4 build (cheaper target)."
+  },
+  {
+   "id": "N34a",
+   "title": "Operators: shell operators, ALTER OPERATOR / OPERATOR FAMILY / OPERATOR CLASS options, user-operator resolution in =/IN, PG operator-token lexing",
+   "roots": [
+    "ddl-operator-shell-and-alter",
+    "create_operator lex/privileges",
+    "planner_join-xc-user-operator-resolution",
+    "agg_window R17 generic-operator lexing",
+    "lex-pattern-and-startswith-ops",
+    "stats_ext user-operator-symbol-lexing",
+    "part-user-operator-lexing",
+    "expressions shell-operators",
+    "equivclass ALTER OPERATOR",
+    "rowsecurity/privileges <<< >>>"
+   ],
+   "estimated_lines": 850,
+   "file_set": [
+    "crates/pgparser/src/lexer.rs [lex 42 operator-token rule; fixed punctuation table]",
+    "crates/pgparser/src/parser.rs [ALTER OPERATOR, ALTER OPERATOR FAMILY, CREATE OPERATOR CLASS options]",
+    "crates/pgexec/src/useroperator.rs [373 shell operators, families, opclass functions]",
+    "crates/pgexec/src/eval.rs [apply_binary user-operator resolution]",
+    "crates/pgtypes/src/ops.rs:1039"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N09"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N34b",
+   "title": "Object addressing, dependency graph, role-owned objects, DROP/IF EXISTS notices, pg_depend/pg_shdepend, event trigger rows",
+   "roots": [
+    "ddl-object-address-functions",
+    "dependency (role-owned objects)",
+    "event_trigger fidelity",
+    "ddl-if-exists-notices",
+    "drop-cascade NOTICE/DETAIL family (part/dgr/agg R28/indexes/stats_ext/stats_import/views R20/R21/foreign_key)",
+    "cat-pg-describe-object-and-depend",
+    "views R41 pg-depend-catalog",
+    "misc_sanity pg_shdepend",
+    "DROP OWNED / REASSIGN OWNED / CREATE GROUP",
+    "temp-view NOTICE"
+   ],
+   "estimated_lines": 1450,
+   "file_set": [
+    "crates/pgexec/src/catalog_fn.rs [CatalogFunc 68 / catalog_func 118: pg_describe_object, pg_identify_object, pg_get_object_address record form]",
+    "crates/pgexec/src/srf.rs [classify 300 FROM-position forms]",
+    "crates/pgexec/src/catalog_rel.rs [pg_depend_rows 1017 all classes; pg_shdepend]",
+    "crates/pgexec/src/reg_fn.rs",
+    "crates/pgexec/src/exec.rs [drop notice builders 9526-9600, DROP ... IF EXISTS notices, event trigger ddl_command_end rows]",
+    "crates/pgcatalog dependency edges (owner, ACL, function<-operator/cast/aggregate)",
+    "crates/pgparser/src/parser.rs [DROP OWNED, REASSIGN OWNED, CREATE GROUP]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N32"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N34c",
+   "title": "Type / cast / access method / typed table / LIKE DDL (shell types, base-type attributes, CREATE CAST WITH FUNCTION, CREATE ACCESS METHOD, CREATE TABLE OF, LIKE INCLUDING, domain comments/validation, unknown pseudo-type)",
+   "roots": [
+    "ddl-shell-type-autocreate",
+    "ddl-create-type-base-attributes",
+    "ddl-create-cast-with-function",
+    "ddl-create-access-method",
+    "psql CREATE ACCESS METHOD 120 / pg_am fidelity 59",
+    "ddl-typed-tables",
+    "ddl-create-table-like",
+    "create_table misc",
+    "domain comment/validation (ctp-comment-on-subobjects, ctp-domain-integration-gaps)",
+    "views R25 unknown-pseudo-type"
+   ],
+   "estimated_lines": 1300,
+   "file_set": [
+    "crates/pgexec/src/usertype.rs [shell types, typinput/typoutput attributes, domain checks 1357]",
+    "crates/pgexec/src/exec.rs [CREATE CAST / CREATE ACCESS METHOD / CREATE TABLE OF / LIKE expansion regions ~1000-2400; comment_ops 31880]",
+    "crates/pgparser/src/parser.rs [CREATE TYPE attribute list, CREATE TABLE OF, LIKE options, CREATE ACCESS METHOD, comment_on 8592 subobjects]",
+    "crates/pgexec/src/catalog_rel.rs [pg_am, pg_type rows]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N34d",
+   "title": "ALTER TABLE subcommand completeness + alter_generic object families",
+   "roots": [
+    "alter_table ~35 roots (minus leaks/planner/N31/N32 shares)",
+    "alter_generic",
+    "views R30 alter-set-schema",
+    "identity SET LOGGED",
+    "tsfr set-statistics/storage"
+   ],
+   "estimated_lines": 1500,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [alter_table_action 3997-4190 remaining subcommands: SET SCHEMA, SET LOGGED/UNLOGGED, ALTER COLUMN SET STATISTICS/STORAGE/(n_distinct)/COMPRESSION, SET ACCESS METHOD, OF/NOT OF, CLUSTER ON, VALIDATE, ALTER CONSTRAINT ...; ALTER AGGREGATE/COLLATION/CONVERSION/FUNCTION/LANGUAGE/OPERATOR CLASS|FAMILY/STATISTICS/TEXT SEARCH RENAME/OWNER/SET SCHEMA]",
+    "crates/pgexec/src/exec.rs [ALTER TABLE executor 28900-30300, Action::Unsupported 28981]"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "N32",
+    "N33a",
+    "N31b"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N35a",
+   "title": "Sequence DDL + column DEFAULT stored as expressions + DROP TABLE drops owned sequences",
+   "roots": [
+    "txn-seq-full-ddl",
+    "txn drop-table-leaves-owned-sequence",
+    "txn column DEFAULT expressions (fast_default 100)",
+    "ctp-column-default-expression (constraints DEFAULTEXPR 128)",
+    "part-column-default-persistence",
+    "sequence privileges",
+    "views R19 sequence-as-relation",
+    "identity seq DDL",
+    "psql sequence describe (with N42)"
+   ],
+   "estimated_lines": 860,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [create_sequence (CreateIndex on SEQUENCE_RELATION today), alter_sequence]",
+    "crates/pgcatalog/src/lib.rs [Sequence data type/owner/owned-by; ColumnDefault expression not Value] + serde.rs (SCHEMA_VERSION bump)",
+    "crates/pgexec/src/exec.rs [column_from_ast 2355, ensure_default_can_be_persisted 2794, drop_table_ops/drop_table_and_dependents_ops emit drop_sequence_ops, INSERT default evaluation]",
+    "crates/pgexec/src/func.rs [lastval, nextval/currval/setval regclass forms]",
+    "crates/pgexec/src/catalog_rel.rs [pg_sequences, pg_sequence]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N35b",
+   "title": "Identity + generated columns completeness",
+   "roots": [
+    "identity ALTER forms/OVERRIDING/ALWAYS enforcement/info_schema/create validation/drop-owned-seq/typed tables",
+    "generated_stored/virtual remainder (diagnostics, virtual-only rules, qualified names, info_schema, triggers, tableoid, sublink name, alter view, deparse, copy where, fn privileges)"
+   ],
+   "estimated_lines": 900,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [ALTER COLUMN ADD/SET/DROP IDENTITY, OVERRIDING SYSTEM|USER VALUE]",
+    "crates/pgexec/src/exec.rs [identity/generated column DDL + INSERT/UPDATE enforcement (ALTER TABLE region shared with N34d)]",
+    "crates/pgexec/src/catalog_rel.rs [information_schema.columns is_generated/is_identity]",
+    "crates/pgexec/src/viewdef.rs [generated deparse]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N34d",
+    "N35a"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N36a",
+   "title": "Cursors and portals: lazy execution, errors at FETCH, SCROLL/NO SCROLL/WITH HOLD, WHERE CURRENT OF, pg_cursors, locking reads over joins/views/temp/search_path relations",
+   "roots": [
+    "portals WHERE CURRENT OF 284",
+    "portals pg_cursors 88",
+    "portals cursor-lazy/no-scroll/toast GUC",
+    "tidscan CURRENT OF 79",
+    "generated_virtual CURRENT OF 24",
+    "txn locking-path resolution",
+    "planner_join-for-update-restrictions",
+    "views R10 row-locking-through-views",
+    "txn cursor-lazy 28"
+   ],
+   "estimated_lines": 650,
+   "file_set": [
+    "crates/pgexec/src/session.rs [declare_cursor 4589-4635, FETCH, cursor state]",
+    "crates/pgexec/src/cursor.rs",
+    "crates/pgexec/src/exec.rs [execute_read_locking 23808/23886 -> LockRows after P0a; UPDATE/DELETE CURRENT OF executor]",
+    "crates/pgexec/src/catalog_rel.rs [pg_cursors]",
+    "crates/pgparser/src/parser.rs [WHERE CURRENT OF \u2014 with N07]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "P0a",
+    "N07"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N36b",
+   "title": "Transaction characteristics + implicit transaction blocks + pipeline + temp ON COMMIT + misc txn diagnostics",
+   "roots": [
+    "txn-transaction-characteristics",
+    "txn implicit-block (simple query + psql_pipeline 142)",
+    "temp CTAS ON COMMIT / PREPARE TRANSACTION refusal / ON COMMIT DROP inheritance",
+    "txn xmin/cmdid/plpgsql RETURN/carets/snapshot/warning/routine SET clause",
+    "txn-commit-of-failed-block-keeps-ddl",
+    "temp pg_temp namespace objects"
+   ],
+   "estimated_lines": 450,
+   "file_set": [
+    "crates/pgexec/src/session.rs [simple_query implicit block, sync(), set_transaction_tail, TxnCtx deferrable/read-only]",
+    "crates/pgparser/src/parser.rs [SET TRANSACTION / SET SESSION CHARACTERISTICS / CTAS ON COMMIT]"
+   ],
+   "size": "M",
+   "depends_on": [
+    "N04"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N36c",
+   "title": "MVCC system columns (xmin/xmax/cmin/cmax, command-id visibility) + heap physical order after UPDATE \u2014 DECISION",
+   "roots": [
+    "txn-mvcc-system-columns (combocid)",
+    "part-heap-order-after-update",
+    "ctp-row-order-heap-append",
+    "views R22 storage-order-after-update",
+    "returning row order",
+    "with y-state heap order",
+    "psql/cluster update heap order"
+   ],
+   "estimated_lines": 150,
+   "file_set": [
+    "crates/pgexec/src/scope.rs [SYSTEM_COLUMNS]",
+    "crates/pgexec/src/exec.rs [execute_timestamp_update 12085, apply_locked_row_update 10878-10943]",
+    "crates/pgexec/src/timestamp_txn.rs",
+    "crates/pgmvcc"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": "Certify alone. Contradicts the timestamp-domain rowid contract; ~40-80 lines across many files."
+  },
+  {
+   "id": "N37a",
+   "title": "Privilege model: column/default/non-relation object ACLs, role membership options, role lifecycle, view/function/sequence/type privileges, SET ROLE for non-bootstrap superuser, predefined roles",
+   "roots": [
+    "sec-column-privileges",
+    "sec-default-privileges",
+    "sec-role-membership-model",
+    "sec-nonrelation-object-privileges",
+    "sec-role-attributes-lifecycle",
+    "password",
+    "views R7 view-privileges",
+    "zeropriv ACL",
+    "role grant options",
+    "dgr-type-privileges",
+    "generated fn privileges",
+    "sequence privileges",
+    "tsfr set-role",
+    "tsfr predefined-roles",
+    "GRANT ON DATABASE/TABLESPACE"
+   ],
+   "estimated_lines": 1150,
+   "file_set": [
+    "crates/pgexec/src/privilege.rs [ReadPermit 542, column grants 42/1127]",
+    "crates/pgcatalog/src/lib.rs [roles/ACL records, role_can_set]",
+    "crates/pgparser/src/parser.rs [GRANT/REVOKE options, ALTER DEFAULT PRIVILEGES, CREATE ROLE options]",
+    "crates/pgexec/src/exec.rs [grant arms, role DDL]",
+    "crates/pgexec/src/catalog_fn.rs [has_*_privilege family]",
+    "crates/pgexec/src/catalog_rel.rs [pg_default_acl, pg_auth_members columns]",
+    "crates/pgexec/src/session.rs [SET ROLE]"
+   ],
+   "size": "XL",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N37b",
+   "title": "Large objects (lo_* functions, pg_largeobject[_metadata], ownership/ACL, lo_compat_privileges)",
+   "roots": [
+    "catalog_psql large objects (largeobject 457)",
+    "sec-large-objects (privileges 427)"
+   ],
+   "estimated_lines": 880,
+   "file_set": [
+    "crates/pgexec/src/largeobject.rs (new)",
+    "crates/pgexec/src/catalog_rel.rs [pg_largeobject, pg_largeobject_metadata]",
+    "crates/pgexec/src/func.rs [dispatch]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": "DECISION: in scope?"
+  },
+  {
+   "id": "N37c",
+   "title": "Misc admin functions, sysviews, pg_temp function schema, schema-qualified routine names",
+   "roots": [
+    "sec-misc-admin-functions",
+    "sec-sysviews-catalog-views",
+    "pg_temp functions (agg R35, explain, planner_join-xc)",
+    "routine namespaces (parser routine_name)",
+    "misc_functions \\gset wal_segment_size"
+   ],
+   "estimated_lines": 600,
+   "file_set": [
+    "crates/pgexec/src/func.rs",
+    "crates/pgexec/src/catalog_rel.rs [sysviews]",
+    "crates/pgparser/src/parser.rs [routine_name qualifier]",
+    "crates/pgexec/src/routine.rs [schema field]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N38",
+   "title": "PL/pgSQL fidelity (record field types on NEW/OLD, expression SQL tail, CONTEXT with line numbers, %ROWTYPE, RETURN tail, composite field assignment, SETOF composite in FROM, diagnostics)",
+   "roots": [
+    "ctp-plpgsql-record-field-types",
+    "ctp-plpgsql-expression-sql-tail",
+    "ctp-plpgsql-error-context",
+    "rangefuncs %ROWTYPE / plpgsql F 104",
+    "plancache plpgsql RETURN tail",
+    "agg_window R21",
+    "ctp-sql-function-invocation-from-plpgsql",
+    "psql plpgsql CONTEXT"
+   ],
+   "estimated_lines": 2000,
+   "file_set": [
+    "crates/pgexec/src/plpgsql.rs [rewrite_record_field 3045, 288/385/425 context, 1392, execute_table_function 402-421, Return arm 1756]",
+    "crates/pgparser/src/plpgsql.rs [parse_expr_range 1245 -> parser.rs parse_expression 15878, %ROWTYPE, statement line numbers]",
+    "crates/pgexec/src/eval.rs [bpchar_to_text_value 115]",
+    "crates/pgexec/src/routine.rs [plpgsql_scalar_result_type 1936]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N39a",
+   "title": "COPY: FROM fires plpgsql triggers, ON_ERROR, client_encoding, precheck ordering, TRUNCATE notices",
+   "roots": [
+    "ctp-copy-fires-triggers",
+    "dml COPY ON_ERROR 106",
+    "copyencoding",
+    "dml precheck_copy_from ordering",
+    "truncate NOTICE",
+    "copy WHERE"
+   ],
+   "estimated_lines": 450,
+   "file_set": [
+    "crates/pgexec/src/session.rs [run_copy_in 10527 with_scalar_runtime(request_tx), precheck_copy_from, client_encoding]",
+    "crates/pgexec/src/trigger.rs [invoke 132]"
+   ],
+   "size": "M",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N39b",
+   "title": "DML grammar and semantics: RETURNING OLD/NEW, ON CONFLICT targets/arbiters, INSERT indirection/subscripts, multi-column SET, MERGE grammar/scope/joined USING, INSERT AS alias, EXCLUDED typing",
+   "roots": [
+    "dml RETURNING OLD/NEW 195",
+    "views R35 returning-old-new-wholerow",
+    "dml ON CONFLICT target grammar",
+    "dml INSERT target indirection",
+    "arrays insert-target-subscripts",
+    "dml multi-column SET",
+    "part-update-set-row-subselect (half)",
+    "dml MERGE grammar / clause scope",
+    "part-merge-using-join-parse",
+    "views R9 merge-into-views",
+    "part-insert-as-alias (executor half)",
+    "agg_window R32b upsert/merge",
+    "dml correlated subqueries",
+    "views R23"
+   ],
+   "estimated_lines": 1150,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [insert target/alias/indirection, ON CONFLICT conflict_target, merge 6863 source table_ref, RETURNING OLD/NEW]",
+    "crates/pgexec/src/exec.rs [execute_write INSERT/UPDATE/MERGE arms 3308-8300, ON CONFLICT DO UPDATE binding, RETURNING old/new evaluation]",
+    "crates/pgexec/src/viewwrite.rs"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N07"
+   ],
+   "notes": "Coordinate with N31c on MERGE: N31c owns partitioned routing, N39b owns grammar/RETURNING/ON CONFLICT."
+  },
+  {
+   "id": "N39c",
+   "title": "Constraint / trigger fidelity: temporal PERIOD FKs, format_type ranges, exclusion constraints, replica identity, regress C trigger adapter, DROP COLUMN dependency tracking, trigger deparse, Failing row DETAIL",
+   "roots": [
+    "ctp-period-temporal-fk",
+    "ctp-format-type-range",
+    "ctp-exclusion-constraints-full",
+    "ctp-replica-identity",
+    "publication replica-identity 33",
+    "ctp-c-regress-trigger-adapter",
+    "ctp-column-dependency-tracking",
+    "ctp-trigger-deparse-and-info-schema",
+    "ctp-detail-failing-row (shared N32)",
+    "ctp-domain-integration-gaps",
+    "triggers create_table leak (N31a)"
+   ],
+   "estimated_lines": 1000,
+   "file_set": [
+    "crates/pgexec/src/exec.rs [reject_temporal_foreign_key 26489, enforce_exclusion_constraint 10249, enforce_not_null 3240 / enforce_check_constraints 26688 DETAIL, DROP COLUMN dependency check, REPLICA IDENTITY action 28981, pg_class relreplident 20148]",
+    "crates/pgexec/src/fk.rs [PERIOD FKs]",
+    "crates/pgexec/src/func.rs [builtin_format_type 2674 ranges]",
+    "crates/pgexec/src/routine.rs [STATIC_REGRESS_ENTRYPOINTS / call_regression_c_adapter 4782]",
+    "crates/pgexec/src/trigger.rs [invoke, when_matches 1408, drop 598, set_table_trigger_mode 2150]",
+    "crates/pgexec/src/catalog_fn.rs [600-705 pg_get_triggerdef]",
+    "crates/pgparser/src/parser.rs [7825 EXCLUDE, alter_table_action REPLICA IDENTITY]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N31b",
+    "N40d"
+   ],
+   "notes": "fk.rs after N31b; routine.rs adapter table after N40d/N30a."
+  },
+  {
+   "id": "N40a",
+   "title": "Regex engine: PostgreSQL ARE port (or translation layer) \u2014 DECISION",
+   "roots": [
+    "scalar regex-engine 381",
+    "strings regex-engine/similar-explain-fold/similar-substring",
+    "regexp-arg-msgs",
+    "arrays like-any (part)"
+   ],
+   "estimated_lines": 500,
+   "file_set": [
+    "crates/pgexec/src/regexp_fn.rs [compile_pattern 472]",
+    "crates/pgexec/src/pattern.rs [similar_to_regex 117]",
+    "crates/pgtypes/src/regex/ (new port of src/backend/regex)"
+   ],
+   "size": "XL",
+   "depends_on": [
+    "N03"
+   ],
+   "notes": "Back-references (\\1) and PG error texts are not expressible with the regex crate."
+  },
+  {
+   "id": "N40b",
+   "title": "Scalar type fidelity: name type, float8 send/recv+math, numeric typmod/overflow/width_bucket, uuid assignment cast + uuidv7, enum (pg_enum, functions, unknown-literal adoption), strings (scs, bytea msgs, to_bin/oct, int-bytea, unistr), unknown-literal typing, sql-value-fn precision, case const-folding, array function family, UDF overload with column args (fipshash)",
+   "roots": [
+    "scalar name-type",
+    "scalar float8 send-recv/float8-math/erf-gamma",
+    "scalar numeric typmod-overflow/overflow-detect/width_bucket/to_char/arith/gen-series/lcm",
+    "scalar uuid assignment-cast-io-to-string/uuidv7",
+    "scalar enum pg_enum/enum-funcs/unknown-literal-adopts-type/anyenum/unsafe-new-value/alter-msgs",
+    "scalar strings scs/bytea-input-msgs/to_bin_oct/int-bytea/unistr/toast",
+    "dgr-unknown-literal-args",
+    "tsfr unknown-literal-tsargs (mechanism)",
+    "expressions sql-value-fn-precision/current_catalog/typmod-casts-views",
+    "case const-folding/operator-on-domain",
+    "text undefined-object-msg/datestyle-concat/format-star",
+    "arrays array-fn-family/point-subscript/concat-op/anyall-msgs/array-literal-detail/pg_input-type-brackets/assign-validation/width_bucket/fipshash-resolution",
+    "int->text assignment cast (planner_join-xc, stats_ext, views R36)",
+    "rowsecurity fipshash arg-type inference cascade 440"
+   ],
+   "estimated_lines": 2600,
+   "file_set": [
+    "crates/pgtypes/src/datum.rs:1002 [name -> distinct type]",
+    "crates/pgtypes/src/cast.rs:314 [assignment_cast_allowed]",
+    "crates/pgtypes/src/numeric.rs:48 [Typmod]",
+    "crates/pgtypes float8 I/O",
+    "crates/pgexec/src/func.rs:3128 [power]",
+    "crates/pgexec/src/eval.rs [1370 Pow, 1473 coerce_untyped_literal_operands]",
+    "crates/pgexec/src/math_fn.rs:792 [width_bucket]",
+    "crates/pgexec/src/string_fn.rs:1119 [format_sql]",
+    "crates/pgexec/src/usertype.rs [505-535/1281 enum]",
+    "crates/pgexec/src/routine.rs [resolve_call overload with column args]",
+    "crates/pgexec/src/catalog_rel.rs [pg_enum]"
+   ],
+   "size": "XL",
+   "depends_on": [],
+   "notes": "fipshash overload resolution also gates rowsecurity (440) and brin_multi."
+  },
+  {
+   "id": "N40c",
+   "title": "Collations: CREATE COLLATION (incl. builtin provider), collation derivation/mismatch errors, collation_for, index/sort-key collation",
+   "roots": [
+    "scalar collation-derivation",
+    "scalar create-collation",
+    "collate.utf8 builtin provider",
+    "publication create-collation",
+    "scalar collation-for",
+    "scalar index-collation",
+    "scalar explain-sortkey-collation",
+    "scalar domain-func-resolution",
+    "scalar literal-collate-fold"
+   ],
+   "estimated_lines": 450,
+   "file_set": [
+    "crates/pgparser/src/parser.rs [expect_collation_name 1346, CREATE COLLATION]",
+    "crates/pgparser/src/ast.rs [Expr::Collate 3753]",
+    "crates/pgtypes collation module (icu/builtin providers, deterministic)",
+    "crates/pgexec/src/eval.rs [collation derivation]",
+    "crates/pgexec/src/catalog_rel.rs [pg_collation]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": "Ordered-index text keys under non-C collations need collation sort keys (P3 dependency)."
+  },
+  {
+   "id": "N40d",
+   "title": "Encoding conversions + regress C encoding functions + CREATE/DROP CONVERSION",
+   "roots": [
+    "scalar regress-c-encoding-functions",
+    "scalar multi-encoding-library+regress-c (conversion)",
+    "scalar convert_to",
+    "scalar conversion-ddl",
+    "copyencoding LATIN1"
+   ],
+   "estimated_lines": 620,
+   "file_set": [
+    "crates/pgexec/src/routine.rs [regression-C adapter table]",
+    "crates/pgtypes/src/encoding/ (new conversion tables)",
+    "crates/pgparser/src/parser.rs + ast.rs:2156 [CREATE/DROP CONVERSION]",
+    "crates/pgexec/src/catalog_rel.rs [pg_conversion]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N30a"
+   ],
+   "notes": ""
+  },
+  {
+   "id": "N41",
+   "title": "Catalog self-description: pg_type full columns/fixture, pg_range, pg_am, pg_shdepend, catalog PK/index/toast self-description, pg_get_catalog_foreign_keys, oid typing of catalog columns, regprocedure quoting",
+   "roots": [
+    "catalog_psql pg_type columns/fixture",
+    "catalog_psql pg_range",
+    "catalog_psql self-fixture (opr_sanity/misc_sanity)",
+    "catalog_psql column naming (regtype header)",
+    "catalog_psql oidvector/amvalidate/pg_am/user opclass family",
+    "oidjoins pg_get_catalog_foreign_keys",
+    "psql missing catalogs",
+    "part-regclass-oid-union-types",
+    "catalog oid columns typed integer"
+   ],
+   "estimated_lines": 1000,
+   "file_set": [
+    "crates/pgexec/src/catalog_rel.rs [pg_type 32 columns, pg_range, pg_am, pg_shdepend, catalog self-description, oid typing 1218]",
+    "crates/pgexec/src/exec.rs [pg_type_rows, pg_class_rows for catalogs (relkind, reltoastrelid, catalog indexes)]",
+    "crates/pgexec/src/catalog_fn.rs + srf.rs [pg_get_catalog_foreign_keys]",
+    "crates/pgexec/src/reg_fn.rs [regprocedure quoting]",
+    "crates/pgexec/src/setops.rs [regclass/oid unification]"
+   ],
+   "size": "L",
+   "depends_on": [],
+   "notes": ""
+  },
+  {
+   "id": "N42",
+   "title": "psql describe support: builtin pg_get_function_*, format_type, sequence describe, \\gdesc, bind-count FATAL, BEGIN ATOMIC \\df+, builtin SQL-bodied functions, tableoid, AUTOCOMMIT-off batch",
+   "roots": [
+    "catalog_psql builtin pg_get_function_*",
+    "catalog_psql sequence type+Owned by",
+    "catalog_psql format_type",
+    "catalog_psql describe utility",
+    "catalog_psql bind-count FATAL",
+    "catalog_psql BEGIN ATOMIC",
+    "catalog_psql builtin SQL-bodied functions",
+    "catalog_psql tableoid",
+    "catalog_psql autocommit batch (needs live repro)",
+    "catalog_psql param inference in func args"
+   ],
+   "estimated_lines": 550,
+   "file_set": [
+    "crates/pgexec/src/catalog_fn.rs [pg_get_function_arguments/identity_arguments/result over builtin_procs]",
+    "crates/pgexec/src/func.rs [builtin_format_type]",
+    "crates/pgexec/src/session.rs [\\gdesc utility describe, bind-count FATAL, simple_query batch]",
+    "crates/pgexec/src/catalog_rel.rs [pg_sequences (with N35a)]"
+   ],
+   "size": "L",
+   "depends_on": [
+    "N35a"
+   ],
+   "notes": ""
+  }
+ ],
+ "batches": [
+  {
+   "batch": 0,
+   "workstreams": [
+    "N00"
+   ],
+   "rationale": "Optional enabler: mechanical exec.rs module split, certified alone before anyone builds on it. Removes the 39k-line bottleneck; if the user declines, all later batches stand with the listed region overlaps.",
+   "file_overlap_check": "Only workstream in the batch."
+  },
+  {
+   "batch": 1,
+   "workstreams": [
+    "N01",
+    "N02",
+    "N03",
+    "N04",
+    "N05",
+    "N06",
+    "N20",
+    "N22",
+    "N24",
+    "N25",
+    "N30a",
+    "N41"
+   ],
+   "rationale": "Cheapest large recovery first (~13,000 lines directly: memory policy 2,000, datetime typmod 1,983, jsonpath 2,600, text search 2,850, interpt adapter 902, catalog self-description 1,000, select_into poison 450, GUCs 500, harness 144, XML 1,200) and the Phase-0 planner prerequisites (N01-N06) that un-cascade explain/memoize/select_parallel/join_hash/incremental_sort/portals/tuplesort so the planner is measurable. Certify alone: N02 (soak-observable), N20 (SCHEMA_VERSION bump).",
+   "file_overlap_check": "No two workstreams claim the same function. Accepted region overlaps: parser.rs (N01 opt_select_into | N20 parse_type_name/interval_literal | N25 create/alter_text_search | N24 XMLTABLE); exec.rs (N02 key_source_rows/ensure_blocking_rows_fit/append_from_item/lateral_join/19243 | N05 Update arm + PgClassRow | N20 coerce/catalog_typmod | N25 text_search_catalog_rows | N41 pg_type/pg_am/catalog rows); srf.rs (N02 MemoryBudget const | N03 classify/plan/rewrite); routine.rs (N03 validate_plpgsql_scalar/inline_scalar_call | N30a RegressionCAdapter); pgtypes/datetime.rs (N20 rounding helpers | N22 template std-mode); session.rs (N04 GUC table only)."
+  },
+  {
+   "batch": 2,
+   "workstreams": [
+    "P0h",
+    "P0a",
+    "P0b",
+    "P2",
+    "P3",
+    "N12a",
+    "N15",
+    "N17",
+    "N19",
+    "N26",
+    "N34c",
+    "N37b",
+    "N38"
+   ],
+   "rationale": "Planner Phase 1 (IR + node executor + renderer) starts after the P0h header commit, with the statistics subsystem and index storage running in parallel on disjoint files (stats before cost model; index storage before Index Scan nodes). Independent subsystems that do not touch the read path fill the remaining lanes (arrays-of-any-type 1,850, named args 1,500, FDW 1,550, type/cast/AM DDL 1,300, large objects 880, PL/pgSQL 2,000, window frames 470, ProjectSet 510). Certify alone: P0a (each milestone), P3 (index key rebuild), N12a (array storage).",
+   "file_overlap_check": "P0a owns exec.rs read path (13300-19330, 24100-24900, execute_read*) and session.rs run_select_traced; P0b owns explain.rs->plan/explain+deparse, session.rs explain, parser explain options; P2 owns exec.rs CREATE STATISTICS arm, session.rs run_maintenance, catalog_rel pg_statistic*; P3 owns exec.rs index_entries/backfill/CREATE INDEX validation, scanner.rs ordered cursor, pgkv, pgcatalog Index; N26 owns exec.rs 1826-1952 FDW arms + catalog_rel pg_foreign_*; N34c owns exec.rs CREATE CAST/AM/TABLE OF/LIKE arms + catalog_rel pg_am/pg_type. Accepted overlaps: exec.rs (regions above, all disjoint), session.rs (P0a | P0b | P2), scanner.rs (P0a Seq Scan leaf wrapper | P3 index cursor), parser.rs (P0b explain | P2 CREATE STATISTICS | N15 func_call/positional_from_named | N26 FDW productions | N34c CREATE TYPE/CAST/AM/OF/LIKE), ast.rs (P0b ExplainOptions | N15 FuncArgs | N26 FDW variants), catalog_rel.rs (P2 | N26 | N34c), srf.rs (N15 arg mapping | N19 ProjectSet internals; P0a calls srf.rs unchanged), window.rs (N17 frames; P0a calls execute unchanged), routine.rs (N15 bound_args | N38 plpgsql_scalar_result_type), pgtypes datum.rs (N12a ElemType only; N40b waits)."
+  },
+  {
+   "batch": 3,
+   "workstreams": [
+    "P1",
+    "N07",
+    "N09",
+    "N10",
+    "N12b",
+    "N12c",
+    "N13",
+    "N14",
+    "N16",
+    "N18",
+    "N23",
+    "N27",
+    "N31a",
+    "N32",
+    "N40b",
+    "N40c",
+    "N40d"
+   ],
+   "rationale": "After P0a is certified: rule-based planner transforms (Phase 2a) plus the language/DDL families that must precede partition planning (expression partition keys, inheritance/constraint catalog) and the parser/lexer/error lanes; SQL-function executor and function scans; JSON functions; pubsub (sequenced after FDW); scalar types/collations/encodings. ~17,000 lines.",
+   "file_overlap_check": "Accepted overlaps: parser.rs (N07 FROM/select/expr | N09 error positions | N16 WITHIN GROUP after N15 | N27 publication/subscription | N31a opt_partition_by | N32 alter_table_action INHERIT/ALTER CONSTRAINT | N40c CREATE COLLATION | N40d CREATE CONVERSION); exec.rs (P1 none (plan/ only) | N10 named_expr_inner/BindPass | N14 build_table_expr Function arms + schema path or plan/bind RTE | N31a partition regions 25588-25720/17478/20315/~29912-30178/attach_partition_ops column check | N32 inherited_table_definition 25217 / drop_table_and_dependents 9304-9600 / ALTER TABLE NOT NULL, CHECK, INHERIT ~29092-29489 | N27 dispatch + execute_write_parts hook 4361 + DropColumn 28370 | N18 execute_write_parts DML CTE order \u2014 N18 and N27 both touch execute_write_parts: N27 adds a replica-identity check call, N18 reorders CTE evaluation; coordinate); routine.rs (N12b resolve_type | N13 executor | N14 table_function_* | N40d adapter table); scope.rs (N09 messages | N12b 1299); eval.rs (N12c row compare | N40b coerce_untyped_literal_operands | N40c collation derivation); catalog_rel.rs (N27 pg_publication* | N32 pg_constraint | N40b pg_enum | N40c pg_collation); pgcatalog lib.rs/serde.rs (N32 constraints | N27 publication records); inheritance.rs (N32 owns; N31a defers children_of ordering to N32); pgtypes datum.rs (N40b name/numeric only)."
+  },
+  {
+   "batch": 4,
+   "workstreams": [
+    "P4",
+    "N21",
+    "N29a",
+    "N29b",
+    "N31b",
+    "N31c",
+    "N33a",
+    "N34a",
+    "N34b",
+    "N35a",
+    "N36a",
+    "N36b",
+    "N39a",
+    "N39b",
+    "N42"
+   ],
+   "rationale": "Planner Phase 3 (cost model + operators + index paths; the single largest recovery, ~11,700) certified alone, alongside DDL/DML families sequenced behind their prerequisites: partitioned FKs and cross-partition DML after N31a, partitioned index tree after P3/N32 (and after N31a/N31b on attach_partition_ops), cursors after P0a+N07, cumulative stats after P0a, sequences/defaults, object addressing after N32, operators after N09.",
+   "file_overlap_check": "Accepted overlaps: exec.rs (P4 removes try_scan_with_local_index only | N31b FK regions 718/29302/29390/943 + partition_definition FK clones | N31c execute_timestamp_update/MERGE/INSERT routing | N33a partition-index regions 25438-25529 / pg_inherits_rows / pg_attribute_rows / attach_partition_ops index half / DropIndex / REINDEX | N34b drop notices 9526-9600 (N32 done) | N35a column_from_ast / drop_table_ops sequences | N39b execute_write INSERT/UPDATE/MERGE arms \u2014 N31c owns partitioned routing, N39b owns grammar/RETURNING/ON CONFLICT | N29b pg_database rows); session.rs (N36a cursors | N36b simple_query/txn | N39a run_copy_in | N42 describe/\\gdesc | N29b prepared statements); parser.rs (N33a alter_index/drop_index | N34a ALTER OPERATOR | N34b DROP OWNED/REASSIGN | N35a sequences | N36b SET TRANSACTION | N39b DML productions); lexer.rs (N34a only); fk.rs (N31b only); catalog_rel.rs (N29a pg_stat_* | N29b pg_locks | N33a pg_index/pg_inherits | N34b pg_depend | N35a pg_sequences); catalog_fn.rs (N33a IndexDef | N34b object address | N42 pg_get_function_*); srf.rs (N34b FROM forms only); trigger.rs (N39a invoke only)."
+  },
+  {
+   "batch": 5,
+   "workstreams": [
+    "P5",
+    "P6",
+    "N28",
+    "N30b",
+    "N33b",
+    "N34d",
+    "N37a",
+    "N37c",
+    "N39c"
+   ],
+   "rationale": "Planner Phases 4 and 5 (upper rels + sort fidelity, certified alone; partition planning after N31a/N32/N33a and P4 \u2014 ~11,400 lines) with the remaining subsystems: rule system (after P0a and view storage), view storage/deparse, ALTER TABLE completeness (after N32/N33a/N31b so its region is free), privileges, misc admin functions, constraint/trigger fidelity (fk.rs after N31b, routine.rs adapter table after N40d), storage misc.",
+   "file_overlap_check": "Accepted overlaps: exec.rs (P6 partitioned_scan/inherited_scan re-home | N28 execute_write_parts rule hooks | N30b CreateView 1095/2152 + build_base_table view expansion | N34d ALTER TABLE region 28900-30300 | N37a grant arms | N39c enforce_*/reject_temporal/DROP COLUMN dependency | N33b reloptions region); session.rs (N30b PREPARE on views | N37a SET ROLE | N28 dispatch); parser.rs (N28 RULE grammar | N34d alter_table_action rest + alter_generic | N37a GRANT/ROLE | N39c EXCLUDE/REPLICA IDENTITY | N33b COMPRESSION); fk.rs (N39c only); viewdef.rs (N30b owns; N28 adds pg_get_ruledef in catalog_fn.rs); routine.rs (N39c adapter table only); rls.rs (N30b only); window.rs/agg.rs (P5 only)."
+  },
+  {
+   "batch": 6,
+   "workstreams": [
+    "P7",
+    "N35b",
+    "N11",
+    "N36c",
+    "N21x",
+    "N29c",
+    "N40a"
+   ],
+   "rationale": "Planner Phase 6 (parallel accounting, certified alone) plus identity/generated after ALTER TABLE, and the decision-gated items if approved (heap order/MVCC syscols, datetime calendar range, system view dump, regex engine port); N11 only if P0a slipped.",
+   "file_overlap_check": "P7 plan/parallel.rs + cost.rs + exec.rs reloptions (N33b done); N35b exec.rs ALTER TABLE region (N34d done); N36c exec.rs execute_timestamp_update (N31c done) + timestamp_txn.rs; N21x pgtypes datetime.rs (N20/N21/N22 done); N29c catalog_rel.rs pg_views_rows + exec.rs virtual_table registries; N40a regexp_fn.rs/pattern.rs + new pgtypes regex module. No shared functions."
+  },
+  {
+   "batch": 7,
+   "workstreams": [
+    "P8"
+   ],
+   "rationale": "Planner Phase 7 (optional): GiST/SP-GiST/BRIN/hash/GIN-generic access methods with real scans; last because it is XXL for ~1,400 lines and depends on P3+P4.",
+   "file_overlap_check": "Only workstream in the batch."
+  }
+ ],
+ "planner_program": "Phase 0 \u2014 prerequisites (batch 1: N01 SELECT INTO rejection, N02 memory policy, N03 SRF-in-select-list + SRF/GROUP BY + ARE regex, N04 GUC surface, N05 writable pg_class + relpages, N06 harness dbname; window.rs emit-in-window-sort-order may be pulled forward from P5 as an S item). Files: parser.rs opt_select_into; scanner.rs/exec.rs/join.rs/agg.rs/grouping.rs/cte.rs/setops.rs/srf.rs memory sites + gres lib.rs + scripts; routine.rs/srf.rs/regexp_fn.rs; session.rs GUC table; exec.rs Update arm + relstats.rs. Moves ~13,000 lines directly (with N20/N22/N24/N25/N30a/N41 in the same batch) and un-cascades explain 693 / memoize 308 / select_parallel 1,148 / join_hash 843 / incremental_sort 119 / portals 725 / tuplesort 438 / limit 134. Exit: zero 'set-returning function ... only supported in FROM position' errors in the schedule; every planner GUC the schedule sets is accepted; int4_tbl has 5 rows in join.out; `SELECT * FROM tenk1 ORDER BY unique2` and the abbrev_abort_uuids sorts succeed; join_hash reaches `rollback` without 'current transaction is aborted'.\n\nPhase 1 \u2014 Query IR + node-tree executor + EXPLAIN renderer (batch 2: P0h header, P0a, P0b). Builds: bind AST -> Query (RangeTbl entries, TargetEntry, Var{rti,attno,ty}, RestrictInfo{security_level, leakproof, required_relids}); a real plan tree for single relations and FROM-order nested loops (Seq Scan -> Filter -> Agg|Sort|Unique|Limit|ProjectSet|WindowAgg|Result; Values/Function/Subquery/CTE/Named Tuplestore/Table Function scans; ModifyTable on top for writes; LockRows for FOR UPDATE); per-node ntuples/nloops/rows_removed instrumentation; VERBOSE Output with schema qualification; complete JSON/YAML/XML key sets with zero costs; SUMMARY/BUFFERS/MEMORY/SERIALIZE/SETTINGS/GENERIC_PLAN options; EXPLAIN over EXECUTE/DECLARE/CTAS/SELECT INTO/CREATE MATERIALIZED VIEW; InitPlan/SubPlan numbering; typed deparse from BoundExpr ('42'::bigint, '(0,1)'::tid, 'ATAAAA'::name, ordinals resolved, flat AND lists); RLS quals deparsed in PG order; describe walk and old read path deleted (~8-10k lines of exec.rs). Invariants kept by construction: RawScan single exit + UnrestrictedTable proof on the Path, ReadPermit before any read (inherited for tree children), statement-level snapshot/read_ts/GC pin, check_query_canceled at node boundaries, RangeScanner leaves for sharded relations (plan_dist paths always preferred), scalar-function request channel reachable from node bodies. Files: crates/pgexec/src/plan/{mod,query,bind,rewrite,createplan,explain,deparse}.rs, plan/exec/*, exec.rs read path, query.rs, session.rs run_select_traced/explain, pgparser ExplainOptions/parser explain. Expected to move ~3,500 lines (VERBOSE Output ~1,100 across join/subselect/with/returning/rangetypes/sqljson/tsrf/fast_default; renderer nodes ~700 \u2014 join type names, ON quals, SubPlan/InitPlan/CTE/WindowAgg/ProjectSet/LockRows/Unique/'Merge on'/Conflict lines; formats/options ~500; ANALYZE actuals; EXPLAIN utility dispatch; describe-path errors ~500) and hold every currently-exact file exact. Exit: no regression on the 56 exact files or Phase-0 gains; explain.out format/option blocks match except the parallel JSON block; select_into, tsrf, rangetypes, fast_default EXPLAIN blocks match; EXPLAIN ANALYZE prints per-node actual rows/loops and '(never executed)'; the read path is served only by plan/exec.\n\nPhase 2a \u2014 rule-based transforms (batch 3: P1): pull_up_subqueries, quals distributed to scans vs joins ('Filter:' vs 'Join Filter:'), AND/OR flattening, IN -> = ANY ('{..}'::type[]), X = X -> IS NOT NULL, NullTest reduction on NOT NULL columns, constant-false -> Result / One-Time Filter: false (and Join Filter: false), remove_useless_joins, self-join elimination, sublink -> semi/anti join, single-row VALUES -> Result, non-materialized CTE inlining, immutable-call folding, alias numbering (_1.._n, \"*VALUES*_1\", unnamed_subquery), Var qualification iff >1 RTE, join-type suffixes with ON quals; the executor gates one-time quals once (subselect tattle NOTICE counts). Files: plan/rewrite.rs, plan/bind.rs, plan/deparse.rs, plan/exec/result.rs. Moves ~2,500 (predicate 238 exact, equivclass structural, join ~1,200 structural, union pushdown, window/rowsecurity shape). Exit: predicate.out exact; every join.out EXPLAIN whose expected plan contains no Hash/Merge/Index/Bitmap/Materialize/Memoize node matches; subselect NOTICE counts match.\n\nPhase 2b \u2014 statistics (batch 2: P2, parallel with Phase 1): ANALYZE computes compute_scalar_stats (nullfrac, width, ndistinct, MCV, histogram, correlation; deterministic below 30k rows), pg_statistic + pg_stats + pg_statistic_ext[_data] + pg_stats_ext, extended statistics (ndistinct/dependencies/mcv), pg_restore_*/pg_clear_* with WARNINGs through an EvalCtx notice sink, relpages/relallvisible emulation (estimate_rel_size + heap-page simulator per table), selfuncs port (eqsel/scalarltsel/eqjoinsel/nulltestsel/estimate_num_groups, DEFAULT_* constants). Files: plan/stats.rs, plan/selfuncs.rs, relstats.rs, catalog_rel.rs, stats_fn.rs, clock.rs EvalCtx, session.rs run_maintenance, exec.rs CREATE STATISTICS, parser.rs. Moves ~2,000 (stats_ext 1,215, stats_import 645, pg_stats refs, extended-stats refusals). Exit: stats_ext 'estimated' column exact for every MCV/ndistinct/dependencies query; stats_import exact; pg_class.reltuples/relpages for tenk1/onek after test_setup's VACUUM ANALYZE equal PG.\n\nPhase 2c \u2014 index storage (batch 2: P3, parallel): memcomparable secondary-index keys in crates/pgkv keyenc.rs (NULLS FIRST/LAST, DESC by inversion; C/POSIX and default collation first), index catalog with per-key direction/nulls/opclass/collation, predicate (partial), INCLUDE columns, expression entries, unique expression indexes, hash-method entries, NULLS NOT DISTINCT, opclass parameters, rebuild via local_index_backfill_ops (greenfield, no migration), ordered index cursor in scanner.rs (local only). Files: pgkv key/keyenc/rowenc, pgcatalog Index + serde, exec.rs index_entries/backfill/CREATE INDEX validation, scanner.rs, catalog_rel pg_index, catalog_fn IndexDef. Moves ~700 directly (index_including 256+83, partial/DESC/unique-expression refusals, insert_conflict expression indexes). Exit: zero 'not supported' CREATE INDEX errors in the schedule; pg_index / pg_get_indexdef / \\\\d index output match for indexing/index_including/create_index DDL blocks; a unit test serves ORDER BY over an indexed column from the index cursor.\n\nPhase 3 \u2014 cost-based planner core (batch 4: P4, certify alone): cost.rs (all cost_* + PG 18 disabled_nodes + enable_*/work_mem/random_page_cost/... GUCs), paths.rs (RelOptInfo, add_path dominance, pathkeys, equivalence classes incl. constant contradiction and redundant sort keys), indexpath.rs (clause matching via builtin_opclasses/opfamilies, Index Cond vs Filter, bitmap AND/OR, index-only eligibility with a visibility-map analogue -> Heap Fetches), joinpath.rs (join_search_one_level, nestloop/hash/merge, parameterised inner paths, Materialize/Memoize placement, semi/anti/unique, ExecChooseHashTableSize batches), Tid/Tid Range paths, hash join with LIFO bucket order, HashAggregate simplehash iteration order + PG hash functions (hashint4/hashtext/hash_array), join-side choice reproducing geometry, planagg MIN/MAX -> InitPlan + Index Only Scan Backward, plan/dist.rs for sharded relations. Files: plan/{cost,paths,indexpath,joinpath,pathkeys,equivclass}.rs, plan/exec/{hashjoin,mergejoin,nestloop,material,memoize,indexscan,indexonlyscan,bitmap,tidscan}.rs, join.rs bodies, scanner.rs index cursor consumers, exec.rs try_scan_with_local_index removed. Moves ~11,700 (join ~4,600 EXPLAIN + ~2,050 row order, subselect ~1,000, aggregates planagg ~500, create_index btree ~800, btree_index 243, union ~500, equivclass ~300, select 130, limit 60, tidscan/tidrangescan ~130, memoize 48+, join_hash 93+, updatable_views 405, select_views 113, rowsecurity 365, txn ~250, views 614, geometry 1,334, misc). Exit: EXPLAIN (COSTS OFF) of every statement in join.sql, subselect.sql, equivclass.sql, select.sql, limit.sql, tidscan.sql, tidrangescan.sql, aggregates.sql planagg section and create_index.sql btree section matches upstream node choice on the tenk1/onek/int4_tbl/int8_tbl data under the schedule's enable_* GUCs; unsorted result order of join.sql and geometry.sql cross joins matches; union.sql / select_distinct.sql hashed output order matches.\n\nPhase 4 \u2014 upper relations and sort fidelity (batch 5: P5, certify alone): pg_qsort (sort_template.h) port at every sort site incl. top-N bounded heapsort, one global sort per window with select_active_windows ordering and optimize_window_clauses, Run Condition, Incremental Sort with Presorted Key and group counts, Hash/Group/Mixed aggregate strategy + Partial/Finalize, GroupAggregate sorted output, DISTINCT Unique-vs-HashAggregate, SetOp/HashSetOp, LockRows, ordered-set placement. Files: plan/grouping.rs, plan/exec/{agg,windowagg,incsort,unique,setop,sort}.rs, window.rs, agg.rs sort sites, scanner.rs top-K. Moves ~3,200 (window 1,196 tie + 197 cost + shape, groupingsets 685, incremental_sort 499, tuplesort 90, select_distinct(_on) 220, aggregates ~300). Exit: window.out exact except frames/moving-aggregate/caret roots; groupingsets and incremental_sort EXPLAIN blocks match; DISTINCT ON without ORDER BY keeps PG's tie choice.\n\nPhase 5 \u2014 partition-aware planning (batch 5: P6; needs N31a, N32, N33a): Append/Merge Append over leaves in PartitionDesc order with _n aliases counting surviving children only, partprune.c port (static + run-time + InitPlan params, Subplans Removed, (never executed)), constraint_exclusion for inheritance CHECKs, partitionwise join/aggregate under enable_partitionwise_*, EXPLAIN EXECUTE generic plans with $n under plan_cache_mode = force_generic_plan, Update/Delete child lines, VERBOSE public.part_p1 p_1. Files: plan/partition.rs, partition.rs ordering, inheritance.rs, plan/exec/append.rs, session.rs prepared statements. Moves ~8,200 (partition_prune ~3,400, partition_join ~3,600, partition_aggregate ~1,100, inherit ~750). Exit: partition_prune.out and partition_join.out exact; partition_aggregate exact except parallel blocks; inherit Append/Merge Append blocks match.\n\nPhase 6 \u2014 parallel plan shapes (batch 6: P7): plan parallel, execute serially, account ntuples/nloops as if parallel (nloops = outer x (workers+1); EXPLAIN prints averages so text is identical), Workers Planned = Launched from max_parallel_workers_per_gather / parallel_workers reloption / min_parallel_*_scan_size / parallel_setup_cost=0, Gather / Gather Merge / Parallel Seq|Index|Bitmap Scan / Parallel Append / Parallel Hash / Partial+Finalize Aggregate, 'Worker N: Sort Method' strings; document the fiction in PG_COMPAT_MATRIX; DECISION whether real workers are required later (the planner survives the swap). Files: plan/parallel.rs, plan/exec/gather.rs, cost.rs. Moves ~2,200 (select_parallel ~900, write_parallel 42, join_hash ~600, partition_prune 365, others ~300). Exit: select_parallel.out and write_parallel.out exact; join_hash exact (hash_join_batches JSON needs the ExecChooseHashTableSize port from Phase 3).\n\nPhase 7 \u2014 index access methods (batch 7: P8, optional): GiST/SP-GiST/BRIN/hash/GIN-generic entries and scans with opclass operator support, KNN Order By, brin_summarize_*/brin_desummarize_range, gin_fuzzy_search_limit / gin_clean_pending_list, WindowAgg wrappers in create_index_spgist, geometry point_inside bug. Moves ~1,400. Exit: create_index_spgist, gist, spgist, brin, brin_multi, brin_bloom, gin, hash_index, box, polygon exact.\n\nLane discipline (from the architecture report): A = P0a owns exec.rs read path; B = P2/P4 pure planner modules (unit-testable like join.rs); C = P3 storage (pgkv/pgcatalog + exec.rs write-path index code); D = P0b renderer/deparser/parser options; E = Phase-0 (routine.rs, srf.rs, session.rs GUC table, window.rs order); F = P6 after A; G = P7 after A,B. Freeze Plan/PlanState/Executor trait in P0h first. Risks carried: cost fidelity is a page-count problem (heap-page simulator + estimate_rel_size fallback; 569 enable_* toggles limit the blast radius), statistics fidelity (compute_scalar_stats/estimate_num_groups/eqjoinsel/extended stats), hash iteration order needs PG hash functions + simplehash growth policy, sort tie order needs the sort_template.h port, RLS/privilege proofs must ride on Paths, distributed pushdowns stay preferred for sharded relations, memory policy change is soak-observable, cursors need Materialize under the portal for SCROLL.",
+ "open_questions": [
+  "Parallel query: accept plan-parallel/execute-serial accounting for Gather nodes (P7 = M; prints identical text, Launched always equals Planned) or require real parallel workers (XL; the planner survives a later swap)?",
+  "XML: target xml.out (libxml-parity xpath/xmltable in the native quick-xml implementation, N24 XL) or the no-libxml variant xml_1.out (1,327 lines today, mostly 'unsupported XML feature' stubs)? xmlmap -> xmlmap_1?",
+  "Variant expected files: compression (_1 = no-lz4 build, cheaper) vs lz4; collate.utf8 (real target collate.utf8.out needs the builtin collation provider; _1 is the skip variant); jsonpath_encoding (target the UTF8 expected file, not the _2 skip variant); password_1; prepared_xacts_1 (with max_prepared_transactions=0 the file is byte-exact = S); xml/xmlmap. Which variant is the certification target for each?",
+  "SERIALIZABLE isolation (SSI, XXL) for ~60 lines (tidscan 8, transactions 28, portals 17, vacuum 1) and PREPARE TRANSACTION (temp 22): in scope now, or accept those lines red?",
+  "Heap physical order after UPDATE (PG appends the new tuple version; ~40-80 lines across inherit, rules, returning, with, psql, cluster, constraints): emulate delete+insert placement against the timestamp-domain rowid contract (N36c, certify alone) or accept red?",
+  "Datetime calendar range (jiff +-9999 vs PG 4713 BC..294276 AD, 247 lines): replace jiff's civil arithmetic with a PG-faithful julian-day port (N21x, XXL) or accept red?",
+  "System catalog view definitions (rules 1,437 lines = pg_views dump of 80 pg_catalog views): honest route (bootstrap system_views.sql with dozens of SRFs, N29c XXL), accept red, or store definition text as catalog data for views Gres does not execute?",
+  "Rule system (N28, XXL, ~1,450 lines): full query rewriter, or scoped to the shapes in rules.sql/updatable_views.sql (DO INSTEAD/ALSO on INSERT/UPDATE/DELETE, ON SELECT view rules, conditional rules, RETURNING)?",
+  "Text search (N25, XXL, ~2,850 lines incl. ispell/hunspell/thesaurus dictionary files from src/backend/tsearch): full subsystem port now (batch 1) or after the planner?",
+  "Regex engine (N40a): port PostgreSQL's Spencer ARE engine (XL, ~500 lines) or keep the regex crate with a translation layer (covers \\m \\M and simple ARE differences but not back-references or PG error texts)?",
+  "exec.rs carve-out (N00, batch 0, certify alone) before the planner batches, or accept the per-batch exec.rs/session.rs/parser.rs region overlaps listed in the batches?",
+  "Cost fidelity policy: accept a heap-page simulator (relpages from tuple width, dead tuples until VACUUM) and certify per file, or first measure how many corpus plans depend on relpages of never-ANALYZEd tables (estimate_rel_size fallback) before committing to P4's scope?",
+  "Memory policy: statement-level cap + work_mem GUC without spill for the regress run (N02), or real spill in the node executor; the soak/loadtest harness observes the change and the CI knob (20MiB) may need raising.",
+  "Large objects (N37b, L, 880 lines) and the cumulative statistics system (N29a, XL, ~1,300 lines): in scope for this programme?",
+  "Dropped-column placeholders (stable attnums, '........pg.dropped.N........' rows; XL, cross-cluster; part-dropped-column-placeholders): in scope, or accept the 30 direct + downstream lines red?",
+  "Certification cadence: confirm which workstreams may share one certification run and which must be certified alone (proposal: N00, N02, N20, P0a per milestone, P3, N12a, P4, P5, P7, N36c, N40a, P8, N21x); and whether batches may be ratcheted before every member lands."
+ ],
+ "notes": "Markdown copy with the full workstream text: /tmp/claude-1001/-home-matt-git-crabka--claude-worktrees-pg-regress-gaps-explain-plan-4c4b57/314a02ed-ee01-440d-9f56-8434fe6850ba/scratchpad/analysis/synthesis.md. Sources: analysis/*/findings.md (16 clusters), analysis/verify/*.md (36 adversarial verdicts), analysis/explain_census/{census.json,diffcls.json,structured_compact.json}, analysis/executor_architecture/report.md, file_stats.json. Line estimates are whole-block and +-30 %; the workstream sum (~104k incl. planner ~26.7k) sits below 110,197 because ~5 % of small roots are not itemised and some gated blocks are counted once under their producer. Brief corrections carried forward from the verify notes: (1) 'no planner exists' is overstated \u2014 plan_dist.rs is a distributed pre-pass that must coexist; (2) the read path does consult a single-column local btree for col = const and GIN for tsvector @@ (exec.rs:18151), never ranges/ORDER BY/joins; btree keys are not order-preserving (pgkv key.rs:248); (3) EXPLAIN ANALYZE prints actual rows only on the root; (4) the memory flag reaches scans/joins only, sorts/DISTINCT/agg/CTE/setops/SRF use the 16 MiB constant; (5) select_parallel/explain/memoize/incremental_sort and every explain_* wrapper fail on routine.rs:2112 (SRF in select list), not on the planner; (6) partition_join/partition_prune are not cascades (86 %/71 % are EXPLAIN over existing tables); (7) geometry's 1,334 lines are cross-join row order fixable by a join-side heuristic, not cost-planner-only; (8) rowsecurity's ~946 explain-ish lines are 365 planner + 463 pure shape + 228 shape-after-INHERIT; (9) rules is 58 % one pg_views dump block; (10) select_views is 87 % a cascade of create_view's interpt_pp (S fix via the regression-C adapter); (11) datetime cluster is 40 % typmod discard, not formatting; (12) json_xml: the oracle was built without libxml (results/xml.out == xml_1.out) and pg_regress picked variants per file; (13) partition hash-row placement diffs come from custom hash opclasses being dropped, not the lookup3 port; (14) the CI harness connects to database 'crab' (132 psql lines); (15) file_stats error_lines are unreliable (portals 205 +ERROR lines, not 30). Shared-scratchpad hazard: helper scripts under analysis/verify/ were overwritten by sibling agents; each workstream should keep scratch under its own subdirectory."
+}

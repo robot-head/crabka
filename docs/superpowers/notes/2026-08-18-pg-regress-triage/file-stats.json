@@ -1,0 +1,1052 @@
+{
+"advisory_lock": {
+"changed_lines": 90,
+"hunks": 10,
+"explain_lines": 0,
+"error_lines": 0
+},
+"aggregates": {
+"changed_lines": 1760,
+"hunks": 72,
+"explain_lines": 691,
+"error_lines": 175
+},
+"alter_generic": {
+"changed_lines": 309,
+"hunks": 8,
+"explain_lines": 0,
+"error_lines": 172
+},
+"alter_operator": {
+"changed_lines": 135,
+"hunks": 5,
+"explain_lines": 0,
+"error_lines": 47
+},
+"alter_table": {
+"changed_lines": 1841,
+"hunks": 159,
+"explain_lines": 70,
+"error_lines": 579
+},
+"amutils": {
+"changed_lines": 180,
+"hunks": 7,
+"explain_lines": 0,
+"error_lines": 9
+},
+"arrays": {
+"changed_lines": 689,
+"hunks": 36,
+"explain_lines": 0,
+"error_lines": 93
+},
+"box": {
+"changed_lines": 183,
+"hunks": 9,
+"explain_lines": 116,
+"error_lines": 1
+},
+"brin": {
+"changed_lines": 148,
+"hunks": 8,
+"explain_lines": 20,
+"error_lines": 37
+},
+"brin_bloom": {
+"changed_lines": 121,
+"hunks": 5,
+"explain_lines": 10,
+"error_lines": 33
+},
+"brin_multi": {
+"changed_lines": 280,
+"hunks": 16,
+"explain_lines": 109,
+"error_lines": 48
+},
+"btree_index": {
+"changed_lines": 281,
+"hunks": 28,
+"explain_lines": 219,
+"error_lines": 10
+},
+"case": {
+"changed_lines": 138,
+"hunks": 9,
+"explain_lines": 24,
+"error_lines": 5
+},
+"cluster": {
+"changed_lines": 101,
+"hunks": 11,
+"explain_lines": 54,
+"error_lines": 7
+},
+"collate": {
+"changed_lines": 305,
+"hunks": 16,
+"explain_lines": 12,
+"error_lines": 64
+},
+"collate.utf8": {
+"changed_lines": 168,
+"hunks": 1,
+"explain_lines": 0,
+"error_lines": 0
+},
+"combocid": {
+"changed_lines": 101,
+"hunks": 2,
+"explain_lines": 0,
+"error_lines": 20
+},
+"compression": {
+"changed_lines": 245,
+"hunks": 3,
+"explain_lines": 0,
+"error_lines": 0
+},
+"constraints": {
+"changed_lines": 668,
+"hunks": 55,
+"explain_lines": 0,
+"error_lines": 265
+},
+"conversion": {
+"changed_lines": 448,
+"hunks": 14,
+"explain_lines": 0,
+"error_lines": 47
+},
+"copy": {
+"changed_lines": 45,
+"hunks": 5,
+"explain_lines": 0,
+"error_lines": 19
+},
+"copy2": {
+"changed_lines": 506,
+"hunks": 15,
+"explain_lines": 0,
+"error_lines": 102
+},
+"copydml": {
+"changed_lines": 58,
+"hunks": 2,
+"explain_lines": 0,
+"error_lines": 52
+},
+"copyencoding": {
+"changed_lines": 4,
+"hunks": 2,
+"explain_lines": 0,
+"error_lines": 3
+},
+"create_aggregate": {
+"changed_lines": 95,
+"hunks": 20,
+"explain_lines": 0,
+"error_lines": 56
+},
+"create_am": {
+"changed_lines": 295,
+"hunks": 21,
+"explain_lines": 20,
+"error_lines": 104
+},
+"create_cast": {
+"changed_lines": 34,
+"hunks": 3,
+"explain_lines": 0,
+"error_lines": 6
+},
+"create_function_sql": {
+"changed_lines": 349,
+"hunks": 16,
+"explain_lines": 13,
+"error_lines": 38
+},
+"create_index": {
+"changed_lines": 1489,
+"hunks": 112,
+"explain_lines": 789,
+"error_lines": 148
+},
+"create_index_spgist": {
+"changed_lines": 799,
+"hunks": 65,
+"explain_lines": 607,
+"error_lines": 24
+},
+"create_operator": {
+"changed_lines": 78,
+"hunks": 13,
+"explain_lines": 0,
+"error_lines": 43
+},
+"create_procedure": {
+"changed_lines": 275,
+"hunks": 13,
+"explain_lines": 0,
+"error_lines": 65
+},
+"create_role": {
+"changed_lines": 137,
+"hunks": 10,
+"explain_lines": 0,
+"error_lines": 83
+},
+"create_table": {
+"changed_lines": 495,
+"hunks": 32,
+"explain_lines": 9,
+"error_lines": 151
+},
+"create_table_like": {
+"changed_lines": 377,
+"hunks": 16,
+"explain_lines": 0,
+"error_lines": 58
+},
+"create_type": {
+"changed_lines": 197,
+"hunks": 11,
+"explain_lines": 0,
+"error_lines": 68
+},
+"create_view": {
+"changed_lines": 1633,
+"hunks": 57,
+"explain_lines": 47,
+"error_lines": 76
+},
+"database": {
+"changed_lines": 10,
+"hunks": 1,
+"explain_lines": 0,
+"error_lines": 10
+},
+"date": {
+"changed_lines": 8,
+"hunks": 1,
+"explain_lines": 0,
+"error_lines": 1
+},
+"dependency": {
+"changed_lines": 96,
+"hunks": 4,
+"explain_lines": 0,
+"error_lines": 39
+},
+"domain": {
+"changed_lines": 898,
+"hunks": 34,
+"explain_lines": 12,
+"error_lines": 318
+},
+"drop_if_exists": {
+"changed_lines": 170,
+"hunks": 9,
+"explain_lines": 0,
+"error_lines": 94
+},
+"encoding": {
+"changed_lines": 183,
+"hunks": 7,
+"explain_lines": 0,
+"error_lines": 20
+},
+"enum": {
+"changed_lines": 382,
+"hunks": 18,
+"explain_lines": 0,
+"error_lines": 51
+},
+"equivclass": {
+"changed_lines": 374,
+"hunks": 13,
+"explain_lines": 328,
+"error_lines": 14
+},
+"errors": {
+"changed_lines": 207,
+"hunks": 13,
+"explain_lines": 0,
+"error_lines": 101
+},
+"event_trigger": {
+"changed_lines": 247,
+"hunks": 19,
+"explain_lines": 0,
+"error_lines": 47
+},
+"explain": {
+"changed_lines": 693,
+"hunks": 4,
+"explain_lines": 105,
+"error_lines": 39
+},
+"expressions": {
+"changed_lines": 255,
+"hunks": 15,
+"explain_lines": 26,
+"error_lines": 27
+},
+"fast_default": {
+"changed_lines": 353,
+"hunks": 20,
+"explain_lines": 58,
+"error_lines": 112
+},
+"float8": {
+"changed_lines": 465,
+"hunks": 16,
+"explain_lines": 0,
+"error_lines": 47
+},
+"foreign_data": {
+"changed_lines": 1650,
+"hunks": 27,
+"explain_lines": 3,
+"error_lines": 529
+},
+"foreign_key": {
+"changed_lines": 1300,
+"hunks": 86,
+"explain_lines": 14,
+"error_lines": 421
+},
+"functional_deps": {
+"changed_lines": 70,
+"hunks": 9,
+"explain_lines": 0,
+"error_lines": 18
+},
+"generated_stored": {
+"changed_lines": 511,
+"hunks": 43,
+"explain_lines": 48,
+"error_lines": 131
+},
+"generated_virtual": {
+"changed_lines": 601,
+"hunks": 51,
+"explain_lines": 87,
+"error_lines": 148
+},
+"geometry": {
+"changed_lines": 1346,
+"hunks": 17,
+"explain_lines": 12,
+"error_lines": 0
+},
+"gin": {
+"changed_lines": 134,
+"hunks": 12,
+"explain_lines": 70,
+"error_lines": 9
+},
+"gist": {
+"changed_lines": 138,
+"hunks": 13,
+"explain_lines": 113,
+"error_lines": 2
+},
+"groupingsets": {
+"changed_lines": 1919,
+"hunks": 58,
+"explain_lines": 703,
+"error_lines": 34
+},
+"guc": {
+"changed_lines": 164,
+"hunks": 16,
+"explain_lines": 0,
+"error_lines": 38
+},
+"hash_func": {
+"changed_lines": 184,
+"hunks": 21,
+"explain_lines": 0,
+"error_lines": 41
+},
+"hash_index": {
+"changed_lines": 13,
+"hunks": 2,
+"explain_lines": 8,
+"error_lines": 5
+},
+"hash_part": {
+"changed_lines": 92,
+"hunks": 2,
+"explain_lines": 0,
+"error_lines": 31
+},
+"horology": {
+"changed_lines": 671,
+"hunks": 33,
+"explain_lines": 22,
+"error_lines": 56
+},
+"identity": {
+"changed_lines": 528,
+"hunks": 22,
+"explain_lines": 0,
+"error_lines": 139
+},
+"incremental_sort": {
+"changed_lines": 724,
+"hunks": 26,
+"explain_lines": 582,
+"error_lines": 14
+},
+"index_including": {
+"changed_lines": 270,
+"hunks": 6,
+"explain_lines": 20,
+"error_lines": 94
+},
+"index_including_gist": {
+"changed_lines": 83,
+"hunks": 9,
+"explain_lines": 20,
+"error_lines": 13
+},
+"indexing": {
+"changed_lines": 703,
+"hunks": 61,
+"explain_lines": 30,
+"error_lines": 148
+},
+"indirect_toast": {
+"changed_lines": 75,
+"hunks": 3,
+"explain_lines": 0,
+"error_lines": 8
+},
+"inet": {
+"changed_lines": 80,
+"hunks": 5,
+"explain_lines": 52,
+"error_lines": 0
+},
+"inherit": {
+"changed_lines": 2157,
+"hunks": 96,
+"explain_lines": 989,
+"error_lines": 238
+},
+"insert": {
+"changed_lines": 630,
+"hunks": 18,
+"explain_lines": 1,
+"error_lines": 259
+},
+"insert_conflict": {
+"changed_lines": 424,
+"hunks": 26,
+"explain_lines": 166,
+"error_lines": 115
+},
+"interval": {
+"changed_lines": 173,
+"hunks": 13,
+"explain_lines": 8,
+"error_lines": 41
+},
+"join": {
+"changed_lines": 7988,
+"hunks": 253,
+"explain_lines": 4608,
+"error_lines": 102
+},
+"join_hash": {
+"changed_lines": 843,
+"hunks": 10,
+"explain_lines": 322,
+"error_lines": 241
+},
+"json": {
+"changed_lines": 829,
+"hunks": 27,
+"explain_lines": 0,
+"error_lines": 182
+},
+"jsonb": {
+"changed_lines": 1386,
+"hunks": 50,
+"explain_lines": 30,
+"error_lines": 276
+},
+"jsonb_jsonpath": {
+"changed_lines": 2060,
+"hunks": 77,
+"explain_lines": 0,
+"error_lines": 355
+},
+"jsonpath": {
+"changed_lines": 909,
+"hunks": 20,
+"explain_lines": 0,
+"error_lines": 90
+},
+"jsonpath_encoding": {
+"changed_lines": 131,
+"hunks": 1,
+"explain_lines": 0,
+"error_lines": 0
+},
+"largeobject": {
+"changed_lines": 457,
+"hunks": 4,
+"explain_lines": 0,
+"error_lines": 99
+},
+"limit": {
+"changed_lines": 199,
+"hunks": 9,
+"explain_lines": 86,
+"error_lines": 9
+},
+"lock": {
+"changed_lines": 84,
+"hunks": 14,
+"explain_lines": 0,
+"error_lines": 6
+},
+"matview": {
+"changed_lines": 173,
+"hunks": 20,
+"explain_lines": 55,
+"error_lines": 25
+},
+"memoize": {
+"changed_lines": 308,
+"hunks": 11,
+"explain_lines": 187,
+"error_lines": 16
+},
+"merge": {
+"changed_lines": 984,
+"hunks": 85,
+"explain_lines": 218,
+"error_lines": 124
+},
+"misc": {
+"changed_lines": 231,
+"hunks": 5,
+"explain_lines": 0,
+"error_lines": 33
+},
+"misc_functions": {
+"changed_lines": 767,
+"hunks": 13,
+"explain_lines": 48,
+"error_lines": 124
+},
+"misc_sanity": {
+"changed_lines": 217,
+"hunks": 4,
+"explain_lines": 0,
+"error_lines": 1
+},
+"multirangetypes": {
+"changed_lines": 186,
+"hunks": 30,
+"explain_lines": 0,
+"error_lines": 37
+},
+"name": {
+"changed_lines": 102,
+"hunks": 6,
+"explain_lines": 0,
+"error_lines": 2
+},
+"namespace": {
+"changed_lines": 29,
+"hunks": 2,
+"explain_lines": 0,
+"error_lines": 4
+},
+"numeric": {
+"changed_lines": 269,
+"hunks": 24,
+"explain_lines": 0,
+"error_lines": 48
+},
+"numerology": {
+"changed_lines": 110,
+"hunks": 2,
+"explain_lines": 0,
+"error_lines": 54
+},
+"object_address": {
+"changed_lines": 691,
+"hunks": 6,
+"explain_lines": 0,
+"error_lines": 88
+},
+"oidjoins": {
+"changed_lines": 221,
+"hunks": 1,
+"explain_lines": 0,
+"error_lines": 1
+},
+"opr_sanity": {
+"changed_lines": 363,
+"hunks": 42,
+"explain_lines": 0,
+"error_lines": 33
+},
+"partition_aggregate": {
+"changed_lines": 1201,
+"hunks": 34,
+"explain_lines": 1079,
+"error_lines": 12
+},
+"partition_info": {
+"changed_lines": 312,
+"hunks": 6,
+"explain_lines": 0,
+"error_lines": 38
+},
+"partition_join": {
+"changed_lines": 4199,
+"hunks": 95,
+"explain_lines": 3726,
+"error_lines": 63
+},
+"partition_prune": {
+"changed_lines": 4035,
+"hunks": 71,
+"explain_lines": 3325,
+"error_lines": 123
+},
+"password": {
+"changed_lines": 71,
+"hunks": 5,
+"explain_lines": 0,
+"error_lines": 0
+},
+"pg_lsn": {
+"changed_lines": 22,
+"hunks": 1,
+"explain_lines": 20,
+"error_lines": 0
+},
+"plancache": {
+"changed_lines": 76,
+"hunks": 6,
+"explain_lines": 32,
+"error_lines": 4
+},
+"plpgsql": {
+"changed_lines": 1857,
+"hunks": 163,
+"explain_lines": 51,
+"error_lines": 366
+},
+"polygon": {
+"changed_lines": 157,
+"hunks": 13,
+"explain_lines": 131,
+"error_lines": 0
+},
+"polymorphism": {
+"changed_lines": 832,
+"hunks": 53,
+"explain_lines": 0,
+"error_lines": 144
+},
+"portals": {
+"changed_lines": 1232,
+"hunks": 16,
+"explain_lines": 37,
+"error_lines": 205
+},
+"predicate": {
+"changed_lines": 238,
+"hunks": 14,
+"explain_lines": 210,
+"error_lines": 0
+},
+"prepare": {
+"changed_lines": 81,
+"hunks": 2,
+"explain_lines": 0,
+"error_lines": 7
+},
+"prepared_xacts": {
+"changed_lines": 286,
+"hunks": 1,
+"explain_lines": 0,
+"error_lines": 0
+},
+"privileges": {
+"changed_lines": 1765,
+"hunks": 87,
+"explain_lines": 75,
+"error_lines": 622
+},
+"psql": {
+"changed_lines": 1197,
+"hunks": 71,
+"explain_lines": 33,
+"error_lines": 103
+},
+"psql_pipeline": {
+"changed_lines": 172,
+"hunks": 19,
+"explain_lines": 0,
+"error_lines": 33
+},
+"publication": {
+"changed_lines": 1202,
+"hunks": 31,
+"explain_lines": 0,
+"error_lines": 554
+},
+"random": {
+"changed_lines": 269,
+"hunks": 12,
+"explain_lines": 0,
+"error_lines": 16
+},
+"rangefuncs": {
+"changed_lines": 1896,
+"hunks": 50,
+"explain_lines": 110,
+"error_lines": 235
+},
+"rangetypes": {
+"changed_lines": 124,
+"hunks": 8,
+"explain_lines": 87,
+"error_lines": 1
+},
+"regex": {
+"changed_lines": 445,
+"hunks": 12,
+"explain_lines": 49,
+"error_lines": 65
+},
+"reloptions": {
+"changed_lines": 104,
+"hunks": 7,
+"explain_lines": 0,
+"error_lines": 3
+},
+"replica_identity": {
+"changed_lines": 73,
+"hunks": 15,
+"explain_lines": 0,
+"error_lines": 34
+},
+"returning": {
+"changed_lines": 608,
+"hunks": 15,
+"explain_lines": 165,
+"error_lines": 50
+},
+"rowsecurity": {
+"changed_lines": 2215,
+"hunks": 124,
+"explain_lines": 946,
+"error_lines": 168
+},
+"rowtypes": {
+"changed_lines": 753,
+"hunks": 30,
+"explain_lines": 126,
+"error_lines": 127
+},
+"rules": {
+"changed_lines": 2452,
+"hunks": 77,
+"explain_lines": 22,
+"error_lines": 138
+},
+"select": {
+"changed_lines": 183,
+"hunks": 17,
+"explain_lines": 100,
+"error_lines": 7
+},
+"select_distinct": {
+"changed_lines": 188,
+"hunks": 16,
+"explain_lines": 154,
+"error_lines": 0
+},
+"select_distinct_on": {
+"changed_lines": 93,
+"hunks": 7,
+"explain_lines": 79,
+"error_lines": 0
+},
+"select_into": {
+"changed_lines": 93,
+"hunks": 6,
+"explain_lines": 34,
+"error_lines": 18
+},
+"select_parallel": {
+"changed_lines": 1148,
+"hunks": 14,
+"explain_lines": 558,
+"error_lines": 199
+},
+"select_views": {
+"changed_lines": 1036,
+"hunks": 14,
+"explain_lines": 101,
+"error_lines": 3
+},
+"sequence": {
+"changed_lines": 445,
+"hunks": 24,
+"explain_lines": 0,
+"error_lines": 128
+},
+"spgist": {
+"changed_lines": 12,
+"hunks": 1,
+"explain_lines": 10,
+"error_lines": 0
+},
+"sqljson": {
+"changed_lines": 716,
+"hunks": 28,
+"explain_lines": 142,
+"error_lines": 121
+},
+"sqljson_jsontable": {
+"changed_lines": 313,
+"hunks": 19,
+"explain_lines": 71,
+"error_lines": 9
+},
+"sqljson_queryfuncs": {
+"changed_lines": 477,
+"hunks": 28,
+"explain_lines": 0,
+"error_lines": 92
+},
+"stats": {
+"changed_lines": 1397,
+"hunks": 37,
+"explain_lines": 47,
+"error_lines": 237
+},
+"stats_ext": {
+"changed_lines": 1392,
+"hunks": 44,
+"explain_lines": 41,
+"error_lines": 258
+},
+"stats_import": {
+"changed_lines": 726,
+"hunks": 59,
+"explain_lines": 0,
+"error_lines": 126
+},
+"strings": {
+"changed_lines": 432,
+"hunks": 24,
+"explain_lines": 54,
+"error_lines": 92
+},
+"subscription": {
+"changed_lines": 388,
+"hunks": 1,
+"explain_lines": 0,
+"error_lines": 197
+},
+"subselect": {
+"changed_lines": 1767,
+"hunks": 60,
+"explain_lines": 1264,
+"error_lines": 43
+},
+"sysviews": {
+"changed_lines": 130,
+"hunks": 6,
+"explain_lines": 0,
+"error_lines": 20
+},
+"tablesample": {
+"changed_lines": 178,
+"hunks": 8,
+"explain_lines": 51,
+"error_lines": 8
+},
+"tablespace": {
+"changed_lines": 527,
+"hunks": 27,
+"explain_lines": 1,
+"error_lines": 57
+},
+"temp": {
+"changed_lines": 125,
+"hunks": 15,
+"explain_lines": 0,
+"error_lines": 63
+},
+"text": {
+"changed_lines": 138,
+"hunks": 9,
+"explain_lines": 0,
+"error_lines": 26
+},
+"tidrangescan": {
+"changed_lines": 94,
+"hunks": 13,
+"explain_lines": 90,
+"error_lines": 0
+},
+"tidscan": {
+"changed_lines": 186,
+"hunks": 9,
+"explain_lines": 88,
+"error_lines": 18
+},
+"timestamp": {
+"changed_lines": 873,
+"hunks": 23,
+"explain_lines": 0,
+"error_lines": 20
+},
+"timestamptz": {
+"changed_lines": 1209,
+"hunks": 38,
+"explain_lines": 6,
+"error_lines": 43
+},
+"transactions": {
+"changed_lines": 262,
+"hunks": 39,
+"explain_lines": 0,
+"error_lines": 71
+},
+"triggers": {
+"changed_lines": 984,
+"hunks": 86,
+"explain_lines": 2,
+"error_lines": 214
+},
+"truncate": {
+"changed_lines": 158,
+"hunks": 10,
+"explain_lines": 0,
+"error_lines": 46
+},
+"tsdicts": {
+"changed_lines": 599,
+"hunks": 8,
+"explain_lines": 0,
+"error_lines": 96
+},
+"tsearch": {
+"changed_lines": 1388,
+"hunks": 68,
+"explain_lines": 78,
+"error_lines": 81
+},
+"tsrf": {
+"changed_lines": 499,
+"hunks": 12,
+"explain_lines": 66,
+"error_lines": 44
+},
+"tstypes": {
+"changed_lines": 489,
+"hunks": 23,
+"explain_lines": 0,
+"error_lines": 60
+},
+"tuplesort": {
+"changed_lines": 502,
+"hunks": 12,
+"explain_lines": 96,
+"error_lines": 50
+},
+"type_sanity": {
+"changed_lines": 329,
+"hunks": 25,
+"explain_lines": 0,
+"error_lines": 44
+},
+"typed_table": {
+"changed_lines": 108,
+"hunks": 1,
+"explain_lines": 0,
+"error_lines": 32
+},
+"union": {
+"changed_lines": 821,
+"hunks": 45,
+"explain_lines": 591,
+"error_lines": 32
+},
+"updatable_views": {
+"changed_lines": 1452,
+"hunks": 113,
+"explain_lines": 340,
+"error_lines": 256
+},
+"update": {
+"changed_lines": 538,
+"hunks": 27,
+"explain_lines": 45,
+"error_lines": 94
+},
+"uuid": {
+"changed_lines": 254,
+"hunks": 4,
+"explain_lines": 15,
+"error_lines": 65
+},
+"vacuum": {
+"changed_lines": 185,
+"hunks": 16,
+"explain_lines": 0,
+"error_lines": 38
+},
+"window": {
+"changed_lines": 2434,
+"hunks": 169,
+"explain_lines": 531,
+"error_lines": 58
+},
+"with": {
+"changed_lines": 1755,
+"hunks": 105,
+"explain_lines": 290,
+"error_lines": 161
+},
+"without_overlaps": {
+"changed_lines": 450,
+"hunks": 75,
+"explain_lines": 0,
+"error_lines": 178
+},
+"write_parallel": {
+"changed_lines": 56,
+"hunks": 2,
+"explain_lines": 45,
+"error_lines": 3
+},
+"xml": {
+"changed_lines": 1088,
+"hunks": 24,
+"explain_lines": 83,
+"error_lines": 168
+},
+"xmlmap": {
+"changed_lines": 131,
+"hunks": 2,
+"explain_lines": 0,
+"error_lines": 0
+}
+}

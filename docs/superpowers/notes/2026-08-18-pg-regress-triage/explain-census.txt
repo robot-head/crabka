@@ -1,0 +1,410 @@
+stmts_total 2106 with_block 2085 error 21
+plan_rows_total 16829
+blocks_with_costs 1 filtered 34 actual 126
+fmt Counter({'text': 2072, 'json': 10, 'yaml': 2, 'xml': 1})
+explain_changed_total 29857
+
+NODE TYPES
+  2886   63 Seq Scan
+   564   41 Sort
+   508   21 Append
+   474   22 Hash
+   420   35 Index Scan
+   396   38 Result
+   350   33 Nested Loop
+   340   33 Index Only Scan
+   246   33 Aggregate
+   216   27 Bitmap Index Scan
+   196   19 Hash Join
+   185   14 Nested Loop Left Join
+   183   25 Bitmap Heap Scan
+   158   16 Materialize
+   152   25 Limit
+   142    9 Parallel Seq Scan
+   118   17 HashAggregate
+   109    9 Update
+    92   20 Function Scan
+    92   15 Values Scan
+    92    6 Hash Right Join
+    91   12 Gather
+    75   10 WindowAgg
+    71   19 Subquery Scan
+    67    5 Hash Full Join
+    58    9 GroupAggregate
+    57    8 Hash Left Join
+    55   11 Unique
+    52    8 Merge Append
+    52   10 Incremental Sort
+    48    5 Partial HashAggregate
+    43    8 Delete
+    39    6 Finalize Aggregate
+    39    6 Partial Aggregate
+    37   12 ProjectSet
+    37   15 Merge Join
+    36    5 Memoize
+    34    4 Gather Merge
+    33    6 Index Only Scan Backward
+    33    4 Merge
+    32    7 Insert
+    29    6 CTE Scan
+    26    4 Parallel Append
+    23    4 BitmapOr
+    20    2 Finalize GroupAggregate
+    19    3 Hash Right Semi Join
+    19    1 Hash Right Anti Join
+    18    3 MixedAggregate
+    18    3 Sample Scan
+    17    4 Group
+    17    5 Hash Semi Join
+    16    3 Merge Left Join
+    15    4 Parallel Index Only Scan
+    14    1 Tid Range Scan
+    12    2 Parallel Index Scan
+    12    3 Parallel Hash
+    12    3 Nested Loop Semi Join
+    11    3 Index Scan Backward
+    11    5 Merge Full Join
+    11    2 Tid Scan
+    11    2 Table Function Scan
+    10    5 Finalize HashAggregate
+    10    2 Partial GroupAggregate
+     9    2 Recursive Union
+     9    2 WorkTable Scan
+     8    2 Parallel Hash Join
+     7    2 BitmapAnd
+     7    3 Hash Anti Join
+     7    2 Merge Semi Join
+     6    1 SetOp Intersect
+     5    4 LockRows
+     5    2 Nested Loop Anti Join
+     5    2 SetOp Except
+     4    1 ?Worker
+     3    1 Merge Right Join
+     3    2 HashSetOp Except
+     3    1 HashSetOp Intersect
+     2    1 Parallel Hash Full Join
+     2    2 Parallel Bitmap Heap Scan
+     1    1 Merge Right Anti Join
+     1    1 Parallel Hash Semi Join
+     1    1 HashSetOp Except All
+     1    1 Parallel Hash Left Join
+
+JSON NODE TYPES [('Seq Scan', 8), ('Incremental Sort', 2), ('Table Function Scan', 2), ('Sort', 1), ('Gather Merge', 1), ('ModifyTable', 1), ('Result', 1), ('Nested Loop', 1)]
+
+ANNOTATIONS
+  1834   58 Filter
+  1113   35 Output
+   815   51 Index Cond
+   681   41 Sort Key
+   486   23 Hash Cond
+   316   20 Group Key
+   176   18 Join Filter
+   172   23 Recheck Cond
+   125   12 Workers Planned
+   112   20 One-Time Filter
+    98    4 Index Searches
+    97   19 SubPlan
+    95   16 InitPlan
+    77    4 Hash Key
+    75   10 Window
+    73   16 Merge Cond
+    52   10 Presorted Key
+    51    7 CTE
+    41    1 Subplans Removed
+    36    5 Cache Key
+    36    5 Cache Mode
+    33    7 Function Call
+    25    0 (inline) Memory
+    25    3 TID Cond
+    24    6 Order By
+    23    4 Conflict Resolution
+    23    4 Conflict Arbiter Indexes
+    23    4 Rows Removed by Filter
+    20    5 Sort Method
+    18    3 Sampling
+    16    1 Heap Fetches
+    16    1 Run Condition
+    15    2 Workers Launched
+    14    8 Disabled
+    14    2 Inner Unique
+    14    1 Hits
+    14    0 (inline) Misses
+    14    0 (inline) Evictions
+    14    0 (inline) Overflows
+    14    0 (inline) Memory Usage
+    11    1 Planning Time
+    11    1 Execution Time
+    10    2 Table Function Call
+     8    3 Conflict Filter
+     7    1 Tuples
+     5    2 Storage
+     5    0 (inline) Maximum Storage
+     4    1 Serialization
+     4    1 Heap Blocks
+     3    1 Memory
+     3    1 Query Identifier
+     3    0 (inline) Average
+     3    0 (inline) Peak Memory
+     3    3 Single Copy
+     2    1 Full-sort Groups
+     2    0 (inline) Sort Methods
+     1    0 (inline) Sort Method
+     1    1 Pre-sorted Groups
+
+OPTIONS
+  1998   91 costs off
+   311   35 verbose on
+    89    9 analyze on
+    76    8 buffers off
+    72    8 timing off
+    71    7 summary off
+    15    1 (helper explain_mask_costs)
+    13    1 (helper explain_memoize)
+    12    1 (helper explain_parallel_append)
+     9    1 buffers on
+     8    4 format json
+     8    1 (helper explain_merge)
+     5    1 memory on
+     4    1 (helper explain_analyze_inc_sort_nodes)
+     3    1 serialize on
+     2    2 (no options)
+     2    1 format text
+     2    1 format yaml
+     2    1 generic_plan on
+     2    1 (helper explain_analyze)
+     1    1 format xml
+     1    1 settings on
+     1    1 summary on
+     1    1 serialize text
+     1    1 serialize binary
+     1    1 timing on
+     1    1 (helper explain_parallel_sort_stats)
+     1    1 (helper explain_sq_limit)
+
+GUCS
+   112   40 enable_seqscan {'off': 47, 'OFF': 15, 'on': 12, 'false': 10, '0': 9} ['aggregates', 'alter_table', 'arrays', 'box', 'brin', 'brin_bloom', 'brin_multi', 'btree_index', 'cluster', 'collate', 'create_am', 'create_index']
+    71   29 enable_bitmapscan {'off': 21, 'OFF': 12, '0': 8, 'ON': 7, '1': 6} ['alter_table', 'arrays', 'box', 'brin', 'brin_bloom', 'brin_multi', 'btree_index', 'create_am', 'create_index', 'create_index_spgist', 'enum', 'generated_stored']
+    51   14 work_mem {"'64kB'": 11, "'128kB'": 8, "'4MB'": 7, "'1MB'": 4, "'2MB'": 4} ['aggregates', 'explain', 'groupingsets', 'guc', 'incremental_sort', 'join', 'join_hash', 'memoize', 'psql', 'rangefuncs', 'rules', 'select_distinct']
+    50   19 enable_indexscan {'OFF': 9, 'ON': 9, 'off': 9, 'false': 8, 'on': 5} ['box', 'btree_index', 'cluster', 'create_am', 'create_index', 'create_index_spgist', 'groupingsets', 'inherit', 'join', 'multirangetypes', 'partition_prune', 'polygon']
+    46   13 max_parallel_workers_per_gather {'2': 25, '0': 10, '4': 8, '1': 3} ['aggregates', 'explain', 'incremental_sort', 'join', 'join_hash', 'memoize', 'numeric', 'partition_aggregate', 'partition_join', 'partition_prune', 'select_distinct', 'select_parallel']
+    36   15 enable_hashjoin {'off': 16, '0': 6, 'f': 4, 'on': 3, 't': 2} ['aggregates', 'collate', 'equivclass', 'incremental_sort', 'join', 'join_hash', 'memoize', 'multirangetypes', 'partition_join', 'partition_prune', 'rangetypes', 'select_parallel']
+    34   13 enable_hashagg {'off': 10, 'false': 8, 'on': 5, 'true': 4, 'OFF': 2} ['aggregates', 'groupingsets', 'incremental_sort', 'join', 'jsonb', 'partition_aggregate', 'select_distinct', 'select_distinct_on', 'select_parallel', 'subselect', 'tsrf', 'union']
+    30   10 enable_mergejoin {'off': 15, 'f': 4, 'on': 3, '0': 2, 't': 2} ['equivclass', 'incremental_sort', 'join', 'join_hash', 'memoize', 'multirangetypes', 'partition_prune', 'rangetypes', 'select_parallel', 'stats_ext']
+    29    8 reloption:parallel_workers {} ['aggregates', 'join_hash', 'jsonb', 'numeric', 'partition_aggregate', 'partition_prune', 'select_parallel', 'tsearch']
+    28   15 enable_sort {'off': 9, 'false': 6, 'true': 4, '0': 2, 'off;  -- try to make it pick a hash setop implementation': 2} ['aggregates', 'groupingsets', 'incremental_sort', 'inherit', 'join', 'join_hash', 'jsonb', 'multirangetypes', 'partition_prune', 'rangetypes', 'rowtypes', 'select']
+    28   12 enable_nestloop {'off': 11, '0': 4, 'f': 4, 'on': 2, 't': 2} ['aggregates', 'collate', 'equivclass', 'inherit', 'join', 'multirangetypes', 'partition_join', 'rangetypes', 'select_parallel', 'stats', 'stats_ext', 'tuplesort']
+    27   12 parallel_setup_cost {'0': 25, '10': 2} ['aggregates', 'explain', 'incremental_sort', 'join', 'join_hash', 'memoize', 'numeric', 'partition_aggregate', 'partition_prune', 'select_distinct', 'select_parallel', 'write_parallel']
+    22   13 min_parallel_table_scan_size {'0': 20, "'1kB'": 1, "'8kB'": 1} ['aggregates', 'brin', 'btree_index', 'explain', 'incremental_sort', 'join', 'join_hash', 'memoize', 'partition_aggregate', 'partition_prune', 'select_distinct', 'select_parallel']
+    21    3 hash_mem_multiplier {'1.0': 20, 'default': 1} ['groupingsets', 'join_hash', 'memoize']
+    20    5 debug_parallel_query {'1': 11, '0': 5, 'on': 3, 'off': 1} ['partition_join', 'plpgsql', 'privileges', 'psql', 'select_parallel']
+    18   10 parallel_tuple_cost {'0': 18} ['aggregates', 'explain', 'incremental_sort', 'join', 'join_hash', 'memoize', 'partition_prune', 'select_distinct', 'select_parallel', 'write_parallel']
+    17    1 enable_parallel_hash {'off': 9, 'on': 8} ['join_hash']
+    11    4 jit_above_cost {'0': 6, 'DEFAULT': 3, 'default': 2} ['aggregates', 'groupingsets', 'select_distinct', 'updatable_views']
+    10    3 parallel_leader_participation {'off': 9, '0': 1} ['aggregates', 'join_hash', 'select_parallel']
+     9    5 constraint_exclusion {"'partition'": 3, 'on': 3, "'partition'; -- this should not affect the result.": 1, "'off'; -- this should not affect the result.": 1, "'on'": 1} ['alter_table', 'generated_virtual', 'partition_prune', 'privileges', 'rules']
+     9    4 reloption:autovacuum_enabled {} ['alter_table', 'groupingsets', 'join_hash', 'privileges']
+     9    5 plan_cache_mode {'force_generic_plan': 4, 'auto': 2, 'force_custom_plan': 2, "'force_generic_plan'": 1} ['explain', 'partition_prune', 'plancache', 'rowsecurity', 'subselect']
+     9    4 enable_material {'off': 7, 'false': 2} ['incremental_sort', 'join_hash', 'select_parallel', 'tuplesort']
+     8    7 enable_indexonlyscan {'off': 7, 'on': 1} ['aggregates', 'gist', 'join', 'partition_prune', 'select_parallel', 'stats', 'union']
+     8    5 reloption:fillfactor {} ['alter_table', 'gist', 'hash_index', 'reloptions', 'spgist']
+     6    4 enable_partitionwise_join {'on': 3, 'true': 2, 'off': 1} ['join', 'memoize', 'partition_aggregate', 'partition_join']
+     5    4 min_parallel_index_scan_size {'0': 4, "'1kB'": 1} ['incremental_sort', 'select_distinct', 'select_parallel', 'vacuum']
+     4    2 enable_incremental_sort {'off': 3, 'on': 1} ['incremental_sort', 'partition_aggregate']
+     3    3 max_parallel_maintenance_workers {'4': 2, '0': 1} ['brin', 'btree_index', 'tuplesort']
+     3    1 track_io_timing {'off': 2, 'on': 1} ['explain']
+     3    2 enable_memoize {'off': 2, '0': 1} ['join', 'partition_prune']
+     3    2 max_parallel_workers {'0': 3} ['select_parallel', 'tuplesort']
+     2    2 jit {'off': 1, '0': 1} ['explain', 'misc_functions']
+     2    2 enable_parallel_append {"off; -- Don't let parallel-append interfere": 1, 'off': 1} ['inherit', 'select_parallel']
+     2    2 from_collapse_limit {'2': 1, '1; -- allows easy changing of join order': 1} ['join', 'join_hash']
+     2    2 enable_partitionwise_aggregate {'true': 2} ['partition_aggregate', 'partition_join']
+     2    1 enable_partition_pruning {'off': 2} ['partition_prune']
+     2    2 temp_buffers {'100': 2} ['stats', 'temp']
+     1    1 enable_presorted_aggregate {'off': 1} ['aggregates']
+     1    1 seq_page_cost {"'NaN'": 1} ['guc']
+     1    1 geqo {'on': 1} ['join']
+     1    1 geqo_threshold {'2': 1} ['join']
+     1    1 join_collapse_limit {'1': 1} ['join']
+     1    1 default_statistics_target {'10000': 1} ['privileges']
+     1    1 random_page_cost {'2': 1} ['select_parallel']
+     1    1 effective_io_concurrency {'50': 1} ['select_parallel']
+     1    1 allow_in_place_tablespaces {'true': 1} ['tablespace']
+
+HELPERS Counter({'check_estimated_rows': 381, 'explain_filter': 31, 'explain_mask_costs': 15, 'explain_memoize': 13, 'explain_parallel_append': 12, 'explain_merge': 8, 'explain_analyze_inc_sort_nodes': 4, 'explain_analyze_without_memory': 2, 'explain_analyze': 2, 'explain_parallel_sort_stats': 1, 'explain_sq_limit': 1})
+
+PER FILE: stmts plan_rows explain_changed changed_lines analyze_count
+  279   2434   4985   7988  22 join
+  135   2868   3877   4199  67 partition_join
+  265   2111   3639   4035   2 partition_prune
+   91    754   1386   1767   1 subselect
+   41    765   1130   1201   8 partition_aggregate
+   75    564   1089   2157   8 inherit
+   99    467   1034   2215   4 rowsecurity
+   80    342    854   1489   7 create_index
+   50    431    762   1919   2 groupingsets
+   62    425    753   1760   6 aggregates
+   71    285    657    799   0 create_index_spgist
+   44    282    643    821   1 union
+   43    389    615    724   6 incremental_sort
+   49    446    613   1148   0 select_parallel
+   38    312    585   2434   0 window
+   31    523    448    693   0 explain
+   33    264    372   1452   4 updatable_views
+   24    159    350    374   0 equivclass
+   26    254    350    843   3 join_hash
+   16    231    310   1755   0 with
+   16    185    265    984   2 merge
+   15    204    264    308   4 memoize
+   25     73    253    281   4 btree_index
+   22    110    230    238   2 predicate
+   22    104    184    424   0 insert_conflict
+   10    131    177    608   0 returning
+   15     71    174    188   1 select_distinct
+   22     73    165    716   0 sqljson
+   13     65    145    157   0 polygon
+   14     62    145    753   0 rowtypes
+   11     51    129    280   1 brin_multi
+   17     72    127   1896   0 rangefuncs
+   12     38    126    138   2 gist
+   14     33    120    183   0 box
+   11     41    116    183   1 select
+    8     53    113   1036   0 select_views
+    8     48    106    502   0 tuplesort
+   16     35    100    124   2 rangetypes
+   13     44     97    186   0 tidscan
+   19     35     94    767   0 misc_functions
+    7     45     93    601   1 generated_virtual
+    7     44     93    199   0 limit
+   13     30     93     94   0 tidrangescan
+    6     71     89   1088   0 xml
+    7     33     87     93   1 select_distinct_on
+    9     39     86   1388   1 tsearch
+   12     57     84   1765   4 privileges
+    7     32     82    313   0 sqljson_jsontable
+    6     34     79   1841   6 alter_table
+    7     33     79    134   1 gin
+    7     34     76    499   0 tsrf
+   15     22     65    173   0 matview
+    5     32     64    353   0 fast_default
+    6     12     60    101   0 cluster
+    6     20     60     80   0 inet
+    5     25     59    178   0 tablesample
+    9     25     56    445   0 regex
+    4     18     55   1857   4 plpgsql
+    5     29     54   1633   1 create_view
+    9     18     54    432   0 strings
+    9     32     52   1397   0 stats
+    4     28     52     56   0 write_parallel
+    6     12     48    511   1 generated_stored
+    2     33     48    538   0 update
+    5     14     46   1232   0 portals
+    4     23     46   1392  67 stats_ext
+   10      8     45     93   0 select_into
+    4     12     40     76   1 plancache
+    3     12     36    703   0 indexing
+    3     15     33   1386   1 jsonb
+    4      9     32    255   0 expressions
+    2     12     25   2452   0 rules
+    3     10     24    148   1 brin
+    3      6     24    138   0 case
+    4     12     24    671   0 horology
+    3     10     22    270   0 index_including
+    3      6     21     83   0 index_including_gist
+    1     12     21     22   0 pg_lsn
+    3     10     20    295   0 create_am
+    3      9     18    254   0 uuid
+    3      6     16    349   0 create_function_sql
+    1     10     16   1300   0 foreign_key
+    2      8     14    898   0 domain
+    2      6     12    121   1 brin_bloom
+    2      6     12    305   0 collate
+    2      8     12   1346   0 geometry
+    1      4     12     12   0 spgist
+    2      4     10    495   0 create_table
+    1      1     10    173   0 interval
+    1      2      8     13   4 hash_index
+    1      2      6   1209   0 timestamptz
+    1      0      2   1197   0 psql
+    0      0      0     90   0 advisory_lock
+    0      0      0    309   0 alter_generic
+    0      0      0    135   0 alter_operator
+    0      0      0    180   0 amutils
+    0      0      0    689   1 arrays
+    0      0      0    168   0 collate.utf8
+    0      0      0    101   0 combocid
+    0      0      0    245   0 compression
+    0      0      0    668   0 constraints
+    0      0      0    448   0 conversion
+    0      0      0     45   0 copy
+    0      0      0    506   0 copy2
+    0      0      0     58   0 copydml
+    0      0      0      4   0 copyencoding
+    0      0      0     95   0 create_aggregate
+    0      0      0     34   0 create_cast
+    0      0      0     78   0 create_operator
+    0      0      0    275   0 create_procedure
+    0      0      0    137   0 create_role
+    0      0      0    377   0 create_table_like
+    0      0      0    197   1 create_type
+    0      0      0     10   0 database
+    0      0      0      8   0 date
+    0      0      0     96   0 dependency
+    0      0      0    170   0 drop_if_exists
+    0      0      0    183   0 encoding
+    0      0      0    382   0 enum
+    0      0      0    207   0 errors
+    0      0      0    247   0 event_trigger
+    0      0      0    465   0 float8
+    1      0      0   1650   0 foreign_data
+    0      0      0     70   0 functional_deps
+    0      0      0    164   0 guc
+    0      0      0    184   0 hash_func
+    0      0      0     92   0 hash_part
+    0      0      0    528   0 identity
+    0      0      0     75   0 indirect_toast
+    0      0      0    630   0 insert
+    0      0      0    829   1 json
+    0      0      0   2060   0 jsonb_jsonpath
+    0      0      0    909   0 jsonpath
+    0      0      0    131   0 jsonpath_encoding
+    0      0      0    457   0 largeobject
+    0      0      0     84   0 lock
+    0      0      0    231   0 misc
+    0      0      0    217   0 misc_sanity
+    0      0      0    186   2 multirangetypes
+    0      0      0    102   0 name
+    0      0      0     29   1 namespace
+    0      0      0    269   8 numeric
+    0      0      0    110   0 numerology
+    0      0      0    691   0 object_address
+    0      0      0    221   0 oidjoins
+    0      0      0    363   0 opr_sanity
+    0      0      0    312   0 partition_info
+    0      0      0     71   0 password
+    0      0      0    832   0 polymorphism
+    0      0      0     81   0 prepare
+    0      0      0    286   0 prepared_xacts
+    0      0      0    172   0 psql_pipeline
+    0      0      0   1202   0 publication
+    0      0      0    269   0 random
+    0      0      0    104   0 reloptions
+    0      0      0     73   0 replica_identity
+    0      0      0    445   0 sequence
+    0      0      0    477   0 sqljson_queryfuncs
+    0      0      0    726   2 stats_import
+    0      0      0    388   0 subscription
+    0      0      0    130   0 sysviews
+    0      0      0    527   0 tablespace
+    0      0      0    125   0 temp
+    0      0      0    138   0 text
+    0      0      0    873   0 timestamp
+    0      0      0    262   1 transactions
+    0      0      0    984   0 triggers
+    0      0      0    158   0 truncate
+    0      0      0    599   0 tsdicts
+    0      0      0    489   0 tstypes
+    0      0      0    329   0 type_sanity
+    0      0      0    108   0 typed_table
+    0      0      0    185  46 vacuum
+    0      0      0    450   0 without_overlaps
+    0      0      0    131   0 xmlmap

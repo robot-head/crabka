@@ -1,0 +1,2917 @@
+{
+ "summary": "EXPLAIN census over the 175 failing files (oracle PostgreSQL 18.4). 88 files contain EXPLAIN; 87 contain none. 1,874 EXPLAIN statements yield a plan block (80 of them through PL/pgSQL wrappers: explain_filter 28, explain_memoize 13, explain_mask_costs 12, explain_parallel_append 12, explain_merge 8, others 7); 14,924 expected plan rows (20,546 lines with header/ruler/count). Changed lines inside QUERY PLAN blocks: 27,158 strict / 27,230 block-attributed of 110,197 (24.6%); file_stats.json's rough 27,138 agrees. Only 33 of 1,874 expected blocks are byte-identical today; Gres prints 1,477 blocks (5,515 rows, 15 node types) and errors on ~397 statements. Attribution: 15,971 lines (58.6%, 1,128 blocks) sit in blocks that contain a cost-chosen node/annotation and can ONLY be matched by a PostgreSQL-faithful cost-based planner + renderer; 6,592 lines (24.2%, 746 blocks) are non-cost plan-shape work (inheritance/partition child expansion, VERBOSE Output, InitPlan/SubPlan, One-Time Filter folding, CTE/WindowAgg/ProjectSet/SetOp/MERGE nodes, deparse); 4,667 lines (17.1%) are statements Gres refuses (largest single root: user-defined SRF in the select list, routine.rs validate_plpgsql_scalar, which kills all wrapper-based EXPLAINs and cascades select_parallel; then relation-missing cascades in partition_prune/updatable_views/inherit/partition_join, and parser gaps). Outside plan blocks, stats_ext prints 762 changed lines of estimated|actual selectivity values (Gres answers 0) and misc_functions 6 literal rows= estimates. Corpus is overwhelmingly COSTS OFF (1,834/1,874); literal costs appear in exactly 1 statement (inherit), masked cost=N..N in 39 (explain 25, misc_functions 12, incremental_sort 2). ANALYZE 117 statements (11 files; 89 blocks show actual rows, 28 masked), VERBOSE 271 (33 files). 50% of expected blocks (942) run under a non-default planner GUC (enable_* off, parallel costs zeroed, work_mem\u2026); 724 of the 1,128 planner-only blocks are GUC-forced. Test-setup VACUUM ANALYZE (tenk1/tenk2/onek/onek2/person/emp/\u2026) feeds join/create_index/subselect/select_parallel/aggregates/window; 33 files ANALYZE their own tables (partition_join 67, stats_ext 64, join 19\u2026); Gres ANALYZE stores only reltuples (relstats.rs), no pg_statistic.",
+ "node_types": [
+  {
+   "name": "Seq Scan",
+   "count": 2585,
+   "files": [
+    "aggregates",
+    "alter_table",
+    "brin",
+    "brin_bloom",
+    "brin_multi",
+    "btree_index",
+    "collate",
+    "create_function_sql",
+    "create_index",
+    "create_table",
+    "create_view",
+    "domain",
+    "+48 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Sort",
+   "count": 511,
+   "files": [
+    "aggregates",
+    "btree_index",
+    "collate",
+    "create_index",
+    "equivclass",
+    "explain",
+    "fast_default",
+    "geometry",
+    "groupingsets",
+    "incremental_sort",
+    "inet",
+    "inherit",
+    "+26 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Append",
+   "count": 467,
+   "files": [
+    "aggregates",
+    "alter_table",
+    "create_view",
+    "equivclass",
+    "explain",
+    "inherit",
+    "join",
+    "memoize",
+    "partition_aggregate",
+    "partition_join",
+    "partition_prune",
+    "predicate",
+    "+9 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Hash",
+   "count": 400,
+   "files": [
+    "aggregates",
+    "create_view",
+    "equivclass",
+    "generated_virtual",
+    "inherit",
+    "join",
+    "join_hash",
+    "merge",
+    "misc_functions",
+    "partition_aggregate",
+    "partition_join",
+    "privileges",
+    "+10 more"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Index Scan",
+   "count": 366,
+   "files": [
+    "aggregates",
+    "box",
+    "cluster",
+    "create_index",
+    "equivclass",
+    "generated_stored",
+    "gist",
+    "groupingsets",
+    "incremental_sort",
+    "inet",
+    "inherit",
+    "join",
+    "+20 more"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Result",
+   "count": 347,
+   "files": [
+    "aggregates",
+    "case",
+    "create_function_sql",
+    "create_index",
+    "explain",
+    "expressions",
+    "generated_virtual",
+    "groupingsets",
+    "inherit",
+    "insert_conflict",
+    "join",
+    "join_hash",
+    "+26 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Nested Loop",
+   "count": 305,
+   "files": [
+    "aggregates",
+    "create_index",
+    "equivclass",
+    "gist",
+    "groupingsets",
+    "incremental_sort",
+    "inherit",
+    "join",
+    "join_hash",
+    "memoize",
+    "misc_functions",
+    "partition_join",
+    "+19 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Index Only Scan",
+   "count": 300,
+   "files": [
+    "aggregates",
+    "box",
+    "btree_index",
+    "create_am",
+    "create_index",
+    "create_index_spgist",
+    "gist",
+    "groupingsets",
+    "incremental_sort",
+    "index_including",
+    "index_including_gist",
+    "inet",
+    "+21 more"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Aggregate",
+   "count": 220,
+   "files": [
+    "aggregates",
+    "create_am",
+    "create_index",
+    "create_index_spgist",
+    "gin",
+    "gist",
+    "groupingsets",
+    "horology",
+    "inherit",
+    "join",
+    "join_hash",
+    "jsonb",
+    "+20 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Bitmap Index Scan",
+   "count": 196,
+   "files": [
+    "brin",
+    "brin_bloom",
+    "brin_multi",
+    "btree_index",
+    "create_index",
+    "create_index_spgist",
+    "explain",
+    "fast_default",
+    "gin",
+    "groupingsets",
+    "index_including",
+    "indexing",
+    "+15 more"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Bitmap Heap Scan",
+   "count": 167,
+   "files": [
+    "brin",
+    "brin_bloom",
+    "brin_multi",
+    "btree_index",
+    "create_index",
+    "create_index_spgist",
+    "explain",
+    "fast_default",
+    "gin",
+    "groupingsets",
+    "index_including",
+    "indexing",
+    "+13 more"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Nested Loop Left Join",
+   "count": 163,
+   "files": [
+    "create_index",
+    "generated_virtual",
+    "incremental_sort",
+    "join",
+    "join_hash",
+    "memoize",
+    "merge",
+    "partition_join",
+    "partition_prune",
+    "predicate",
+    "select_parallel",
+    "subselect",
+    "+2 more"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Hash Join",
+   "count": 155,
+   "files": [
+    "aggregates",
+    "create_view",
+    "inherit",
+    "join",
+    "join_hash",
+    "merge",
+    "misc_functions",
+    "partition_aggregate",
+    "partition_join",
+    "privileges",
+    "returning",
+    "rowsecurity",
+    "+7 more"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Parallel Seq Scan",
+   "count": 139,
+   "files": [
+    "aggregates",
+    "incremental_sort",
+    "join_hash",
+    "partition_aggregate",
+    "partition_prune",
+    "select_distinct",
+    "select_parallel",
+    "write_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Materialize",
+   "count": 137,
+   "files": [
+    "create_index",
+    "equivclass",
+    "join",
+    "partition_join",
+    "partition_prune",
+    "pg_lsn",
+    "portals",
+    "predicate",
+    "privileges",
+    "rowsecurity",
+    "select_parallel",
+    "select_views",
+    "+2 more"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Limit",
+   "count": 129,
+   "files": [
+    "aggregates",
+    "btree_index",
+    "create_index",
+    "create_index_spgist",
+    "create_view",
+    "fast_default",
+    "gist",
+    "groupingsets",
+    "incremental_sort",
+    "index_including",
+    "inherit",
+    "join",
+    "+13 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "HashAggregate",
+   "count": 111,
+   "files": [
+    "aggregates",
+    "generated_virtual",
+    "groupingsets",
+    "inherit",
+    "join",
+    "matview",
+    "partition_aggregate",
+    "partition_join",
+    "partition_prune",
+    "pg_lsn",
+    "select_distinct",
+    "select_parallel",
+    "+5 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Update",
+   "count": 98,
+   "files": [
+    "domain",
+    "inherit",
+    "join",
+    "partition_prune",
+    "returning",
+    "rowsecurity",
+    "tidscan",
+    "updatable_views",
+    "update"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Function Scan",
+   "count": 89,
+   "files": [
+    "aggregates",
+    "create_index",
+    "create_view",
+    "explain",
+    "groupingsets",
+    "incremental_sort",
+    "inherit",
+    "join",
+    "misc_functions",
+    "pg_lsn",
+    "plpgsql",
+    "rangefuncs",
+    "+8 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Gather",
+   "count": 89,
+   "files": [
+    "aggregates",
+    "incremental_sort",
+    "join_hash",
+    "memoize",
+    "partition_aggregate",
+    "partition_join",
+    "partition_prune",
+    "plpgsql",
+    "select_distinct",
+    "select_parallel",
+    "write_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Hash Right Join",
+   "count": 89,
+   "files": [
+    "join",
+    "partition_aggregate",
+    "partition_join",
+    "subselect",
+    "updatable_views",
+    "with"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Values Scan",
+   "count": 87,
+   "files": [
+    "create_view",
+    "gist",
+    "groupingsets",
+    "join",
+    "plpgsql",
+    "returning",
+    "rowtypes",
+    "rules",
+    "select_parallel",
+    "sqljson",
+    "subselect",
+    "tablesample",
+    "+2 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "WindowAgg",
+   "count": 72,
+   "files": [
+    "box",
+    "create_index_spgist",
+    "explain",
+    "groupingsets",
+    "partition_prune",
+    "polygon",
+    "select_parallel",
+    "sqljson",
+    "window"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Subquery Scan",
+   "count": 62,
+   "files": [
+    "create_view",
+    "groupingsets",
+    "join",
+    "memoize",
+    "partition_join",
+    "partition_prune",
+    "privileges",
+    "rangefuncs",
+    "rowsecurity",
+    "rowtypes",
+    "select_distinct",
+    "select_distinct_on",
+    "+7 more"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Hash Left Join",
+   "count": 53,
+   "files": [
+    "generated_virtual",
+    "join",
+    "merge",
+    "partition_aggregate",
+    "partition_join",
+    "stats_ext",
+    "subselect",
+    "updatable_views"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Unique",
+   "count": 51,
+   "files": [
+    "aggregates",
+    "btree_index",
+    "groupingsets",
+    "incremental_sort",
+    "join",
+    "rangefuncs",
+    "select_distinct",
+    "select_distinct_on",
+    "subselect",
+    "union",
+    "window"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "GroupAggregate",
+   "count": 51,
+   "files": [
+    "aggregates",
+    "groupingsets",
+    "incremental_sort",
+    "limit",
+    "partition_aggregate",
+    "subselect",
+    "tuplesort"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Incremental Sort",
+   "count": 50,
+   "files": [
+    "aggregates",
+    "groupingsets",
+    "incremental_sort",
+    "partition_join",
+    "select_distinct",
+    "select_distinct_on",
+    "select_parallel",
+    "tuplesort",
+    "window"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Merge Append",
+   "count": 47,
+   "files": [
+    "aggregates",
+    "equivclass",
+    "incremental_sort",
+    "inherit",
+    "partition_aggregate",
+    "partition_join",
+    "partition_prune",
+    "union"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Partial HashAggregate",
+   "count": 47,
+   "files": [
+    "aggregates",
+    "incremental_sort",
+    "partition_aggregate",
+    "select_parallel",
+    "write_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Hash Full Join",
+   "count": 47,
+   "files": [
+    "equivclass",
+    "join",
+    "join_hash",
+    "partition_aggregate",
+    "partition_join"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Delete",
+   "count": 41,
+   "files": [
+    "fast_default",
+    "partition_join",
+    "partition_prune",
+    "returning",
+    "rowsecurity",
+    "updatable_views",
+    "with"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Finalize Aggregate",
+   "count": 39,
+   "files": [
+    "aggregates",
+    "incremental_sort",
+    "join_hash",
+    "memoize",
+    "partition_prune",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Partial Aggregate",
+   "count": 39,
+   "files": [
+    "aggregates",
+    "incremental_sort",
+    "join_hash",
+    "memoize",
+    "partition_prune",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "CTE Scan",
+   "count": 39,
+   "files": [
+    "create_view",
+    "partition_prune",
+    "rowsecurity",
+    "rowtypes",
+    "rules",
+    "subselect",
+    "with"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Memoize",
+   "count": 34,
+   "files": [
+    "create_index",
+    "join",
+    "memoize",
+    "partition_join",
+    "subselect"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Gather Merge",
+   "count": 34,
+   "files": [
+    "incremental_sort",
+    "partition_aggregate",
+    "select_distinct",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Merge (MERGE on)",
+   "count": 33,
+   "files": [
+    "merge",
+    "partition_prune",
+    "updatable_views",
+    "with"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "ProjectSet",
+   "count": 32,
+   "files": [
+    "aggregates",
+    "groupingsets",
+    "limit",
+    "matview",
+    "portals",
+    "rangefuncs",
+    "select_into",
+    "select_parallel",
+    "subselect",
+    "tsrf",
+    "union"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Merge Join",
+   "count": 30,
+   "files": [
+    "aggregates",
+    "equivclass",
+    "incremental_sort",
+    "join",
+    "merge",
+    "partition_join",
+    "select_parallel",
+    "subselect",
+    "tidscan",
+    "tuplesort",
+    "updatable_views",
+    "window",
+    "+1 more"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Index Only Scan Backward",
+   "count": 29,
+   "files": [
+    "aggregates",
+    "btree_index",
+    "create_index",
+    "inherit",
+    "partition_join"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Parallel Append",
+   "count": 26,
+   "files": [
+    "aggregates",
+    "partition_aggregate",
+    "partition_prune",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Insert",
+   "count": 25,
+   "files": [
+    "insert_conflict",
+    "partition_prune",
+    "returning",
+    "rowsecurity",
+    "rules",
+    "updatable_views",
+    "with"
+   ],
+   "gres_emits_today": true
+  },
+  {
+   "name": "BitmapOr",
+   "count": 21,
+   "files": [
+    "create_index",
+    "join",
+    "partition_join",
+    "select"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Finalize GroupAggregate",
+   "count": 20,
+   "files": [
+    "partition_aggregate",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Hash Right Anti Join",
+   "count": 19,
+   "files": [
+    "partition_join"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Sample Scan",
+   "count": 18,
+   "files": [
+    "join",
+    "partition_join",
+    "tablesample"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Hash Right Semi Join",
+   "count": 18,
+   "files": [
+    "partition_join",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Group",
+   "count": 17,
+   "files": [
+    "aggregates",
+    "join",
+    "partition_aggregate",
+    "partition_join"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "MixedAggregate",
+   "count": 17,
+   "files": [
+    "groupingsets",
+    "partition_aggregate"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Parallel Index Only Scan",
+   "count": 15,
+   "files": [
+    "aggregates",
+    "incremental_sort",
+    "select_distinct",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Tid Range Scan",
+   "count": 14,
+   "files": [
+    "tidrangescan"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Hash Semi Join",
+   "count": 13,
+   "files": [
+    "join",
+    "partition_join",
+    "select_parallel",
+    "subselect",
+    "with"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Merge Left Join",
+   "count": 13,
+   "files": [
+    "join",
+    "merge",
+    "partition_join"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Table Function Scan",
+   "count": 13,
+   "files": [
+    "sqljson_jsontable",
+    "xml"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Parallel Index Scan",
+   "count": 12,
+   "files": [
+    "incremental_sort",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Parallel Hash",
+   "count": 11,
+   "files": [
+    "incremental_sort",
+    "join_hash"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Tid Scan",
+   "count": 11,
+   "files": [
+    "rowsecurity",
+    "tidscan"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Index Scan Backward",
+   "count": 10,
+   "files": [
+    "btree_index",
+    "create_index",
+    "inherit"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Nested Loop Semi Join",
+   "count": 10,
+   "files": [
+    "join",
+    "partition_join",
+    "subselect"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Partial GroupAggregate",
+   "count": 10,
+   "files": [
+    "partition_aggregate",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Finalize HashAggregate",
+   "count": 9,
+   "files": [
+    "aggregates",
+    "incremental_sort",
+    "partition_aggregate",
+    "select_parallel",
+    "write_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Parallel Hash Join",
+   "count": 8,
+   "files": [
+    "incremental_sort",
+    "join_hash"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Merge Full Join",
+   "count": 8,
+   "files": [
+    "join",
+    "merge",
+    "partition_join",
+    "predicate"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Recursive Union",
+   "count": 8,
+   "files": [
+    "subselect",
+    "with"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "WorkTable Scan",
+   "count": 8,
+   "files": [
+    "subselect",
+    "with"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Merge Semi Join",
+   "count": 7,
+   "files": [
+    "partition_join",
+    "with"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Hash Anti Join",
+   "count": 6,
+   "files": [
+    "join",
+    "partition_join",
+    "subselect"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "SetOp Intersect",
+   "count": 6,
+   "files": [
+    "union"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "BitmapAnd",
+   "count": 5,
+   "files": [
+    "create_index"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "LockRows",
+   "count": 4,
+   "files": [
+    "rowsecurity",
+    "select",
+    "subselect"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "SetOp Except",
+   "count": 4,
+   "files": [
+    "union"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Nested Loop Anti Join",
+   "count": 3,
+   "files": [
+    "join",
+    "partition_join"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "HashSetOp Intersect",
+   "count": 3,
+   "files": [
+    "union"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Merge Right Join",
+   "count": 2,
+   "files": [
+    "join"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Parallel Hash Full Join",
+   "count": 2,
+   "files": [
+    "join_hash"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Parallel Bitmap Heap Scan",
+   "count": 2,
+   "files": [
+    "memoize",
+    "select_parallel"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "HashSetOp Except",
+   "count": 2,
+   "files": [
+    "union"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "ModifyTable (JSON form)",
+   "count": 1,
+   "files": [
+    "insert_conflict"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "HashSetOp Except All",
+   "count": 1,
+   "files": [
+    "join"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Parallel Hash Left Join",
+   "count": 1,
+   "files": [
+    "join_hash"
+   ],
+   "gres_emits_today": false
+  },
+  {
+   "name": "Utility Statement",
+   "count": 0,
+   "files": [],
+   "gres_emits_today": true
+  },
+  {
+   "name": "Foreign Scan / Custom Scan / Named Tuplestore Scan / Async Foreign Scan",
+   "count": 0,
+   "files": [],
+   "gres_emits_today": false
+  }
+ ],
+ "annotations": [
+  {
+   "name": "Filter",
+   "count": 1681,
+   "gres_emits_today": true
+  },
+  {
+   "name": "Output (VERBOSE)",
+   "count": 953,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Index Cond",
+   "count": 725,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Sort Key",
+   "count": 619,
+   "gres_emits_today": true
+  },
+  {
+   "name": "Hash Cond",
+   "count": 411,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Group Key",
+   "count": 292,
+   "gres_emits_today": true
+  },
+  {
+   "name": "Recheck Cond",
+   "count": 156,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Join Filter",
+   "count": 153,
+   "gres_emits_today": true
+  },
+  {
+   "name": "Workers Planned",
+   "count": 123,
+   "gres_emits_today": false
+  },
+  {
+   "name": "One-Time Filter",
+   "count": 102,
+   "gres_emits_today": true
+  },
+  {
+   "name": "Index Searches (PG18 ANALYZE)",
+   "count": 96,
+   "gres_emits_today": false
+  },
+  {
+   "name": "InitPlan N",
+   "count": 87,
+   "gres_emits_today": false
+  },
+  {
+   "name": "SubPlan N",
+   "count": 79,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Hash Key (MixedAggregate)",
+   "count": 76,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Window (PG18 WindowAgg)",
+   "count": 72,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Merge Cond",
+   "count": 59,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Presorted Key",
+   "count": 50,
+   "gres_emits_today": false
+  },
+  {
+   "name": "CTE <name> header",
+   "count": 37,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Subplans Removed",
+   "count": 36,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Cache Key",
+   "count": 34,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Cache Mode",
+   "count": 34,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Function Call",
+   "count": 33,
+   "gres_emits_today": false
+  },
+  {
+   "name": "TID Cond",
+   "count": 25,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Order By",
+   "count": 24,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Memory (Sort Method suffix)",
+   "count": 22,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Rows Removed by Filter",
+   "count": 21,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Sort Method",
+   "count": 19,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Conflict Resolution",
+   "count": 18,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Conflict Arbiter Indexes",
+   "count": 18,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Sampling",
+   "count": 18,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Heap Fetches",
+   "count": 16,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Run Condition",
+   "count": 16,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Workers Launched",
+   "count": 15,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Disabled (PG18 disabled_nodes)",
+   "count": 14,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Hits / Misses / Evictions / Overflows / Memory Usage (Memoize)",
+   "count": 14,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Inner Unique",
+   "count": 13,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Planning Time (masked)",
+   "count": 11,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Execution Time (masked)",
+   "count": 11,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Table Function Call",
+   "count": 10,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Conflict Filter",
+   "count": 8,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Tuples (MERGE)",
+   "count": 7,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Storage / Maximum Storage",
+   "count": 5,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Serialization",
+   "count": 4,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Heap Blocks",
+   "count": 4,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Worker N",
+   "count": 4,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Memory (MEMORY option)",
+   "count": 3,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Query Identifier",
+   "count": 3,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Average Memory / Peak Memory",
+   "count": 3,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Single Copy",
+   "count": 3,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Full-sort Groups",
+   "count": 2,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Sort Methods",
+   "count": 2,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Disk",
+   "count": 1,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Pre-sorted Groups",
+   "count": 1,
+   "gres_emits_today": false
+  },
+  {
+   "name": "Trigger / Buckets / Batches / Settings / Rows Removed by Index Recheck / Tuples Inserted / Conflicting Tuples",
+   "count": 0,
+   "gres_emits_today": false
+  },
+  {
+   "name": "cost=..rows=..width= (literal)",
+   "count": 2,
+   "gres_emits_today": false
+  },
+  {
+   "name": "cost=N..N (masked by wrapper)",
+   "count": 66,
+   "gres_emits_today": false
+  },
+  {
+   "name": "(actual rows=N loops=N) / (never executed)",
+   "count": 591,
+   "gres_emits_today": false
+  }
+ ],
+ "options": [
+  {
+   "name": "COSTS OFF",
+   "count": 1834,
+   "notes": "88 files; 40 statements lack it (explain 25 via explain_filter masking, misc_functions 12 via explain_mask_costs, incremental_sort 2 via wrapper, inherit 1 literal)"
+  },
+  {
+   "name": "VERBOSE",
+   "count": 271,
+   "notes": "33 files: join 65, subselect 32, sqljson 22, rangefuncs 17, with 12, rangetypes 12, returning 9, inherit 8, groupingsets 7, explain 7, sqljson_jsontable 7, tsrf 7, limit 6, ..."
+  },
+  {
+   "name": "BUFFERS OFF",
+   "count": 120,
+   "notes": "12 files, always with ANALYZE"
+  },
+  {
+   "name": "ANALYZE",
+   "count": 117,
+   "notes": "11 files: partition_prune 55, explain 15, memoize 13, brin_multi 9, merge 8, select_into 5, matview 4, select_parallel 3, incremental_sort 2, tidscan 2, select 1; 89 blocks print literal actual rows/loops, 28 masked (explain, memoize)"
+  },
+  {
+   "name": "TIMING OFF",
+   "count": 115,
+   "notes": "12 files"
+  },
+  {
+   "name": "SUMMARY OFF",
+   "count": 114,
+   "notes": "11 files"
+  },
+  {
+   "name": "BUFFERS ON",
+   "count": 8,
+   "notes": "explain only"
+  },
+  {
+   "name": "FORMAT JSON",
+   "count": 6,
+   "notes": "explain 3, insert_conflict 1, sqljson_jsontable 1, xml 1 (plus join_hash hash_join_batches x19 and gin explain_query_json x2 read JSON plans without printing them)"
+  },
+  {
+   "name": "MEMORY",
+   "count": 5,
+   "notes": "explain only"
+  },
+  {
+   "name": "SERIALIZE ON/TEXT/BINARY",
+   "count": 5,
+   "notes": "explain only (3/1/1)"
+  },
+  {
+   "name": "GENERIC_PLAN",
+   "count": 2,
+   "notes": "explain only"
+  },
+  {
+   "name": "FORMAT YAML",
+   "count": 2,
+   "notes": "explain only"
+  },
+  {
+   "name": "FORMAT XML",
+   "count": 1,
+   "notes": "explain only"
+  },
+  {
+   "name": "SUMMARY ON",
+   "count": 1,
+   "notes": "explain only"
+  },
+  {
+   "name": "SETTINGS",
+   "count": 2,
+   "notes": "explain only; output regex-filtered to OK, so no plan block"
+  },
+  {
+   "name": "WAL",
+   "count": 0,
+   "notes": "not used in failing corpus"
+  },
+  {
+   "name": "(none: bare EXPLAIN, costs on)",
+   "count": 3,
+   "notes": "inherit 1 (prints literal cost=0.00..0.00 rows=0 width=0/10), incremental_sort 2 (wrapper masks)"
+  },
+  {
+   "name": "literal cost/rows visible",
+   "count": 1,
+   "notes": "inherit: 'explain update parted_tab set a = 2 where false' -> Update on parted_tab (cost=0.00..0.00 rows=0 width=0) / Result (cost=0.00..0.00 rows=0 width=10) One-Time Filter: false"
+  },
+  {
+   "name": "masked cost=N..N with literal rows= estimate",
+   "count": 6,
+   "notes": "misc_functions explain_mask_costs keeps rows=30/5/1 from generate_series SupportRequestRows"
+  }
+ ],
+ "gucs": [
+  {
+   "name": "enable_seqscan",
+   "count": 170,
+   "files": [
+    "aggregates",
+    "alter_table",
+    "arrays",
+    "box",
+    "brin",
+    "brin_bloom",
+    "brin_multi",
+    "btree_index",
+    "cluster",
+    "collate",
+    "+30 more (40 files)"
+   ]
+  },
+  {
+   "name": "enable_bitmapscan",
+   "count": 102,
+   "files": [
+    "alter_table",
+    "arrays",
+    "box",
+    "brin",
+    "brin_bloom",
+    "brin_multi",
+    "btree_index",
+    "create_am",
+    "create_index",
+    "create_index_spgist",
+    "+19 more (29 files)"
+   ]
+  },
+  {
+   "name": "enable_indexscan",
+   "count": 70,
+   "files": [
+    "box",
+    "btree_index",
+    "cluster",
+    "create_am",
+    "create_index",
+    "create_index_spgist",
+    "groupingsets",
+    "inherit",
+    "join",
+    "multirangetypes",
+    "+9 more (19 files)"
+   ]
+  },
+  {
+   "name": "work_mem",
+   "count": 58,
+   "files": [
+    "aggregates",
+    "explain",
+    "groupingsets",
+    "guc",
+    "incremental_sort",
+    "join",
+    "join_hash",
+    "memoize",
+    "psql",
+    "rangefuncs",
+    "+4 more"
+   ]
+  },
+  {
+   "name": "max_parallel_workers_per_gather",
+   "count": 53,
+   "files": [
+    "aggregates",
+    "explain",
+    "incremental_sort",
+    "join",
+    "join_hash",
+    "memoize",
+    "numeric",
+    "partition_aggregate",
+    "partition_join",
+    "partition_prune",
+    "+3 more"
+   ]
+  },
+  {
+   "name": "enable_hashjoin",
+   "count": 53,
+   "files": [
+    "aggregates",
+    "collate",
+    "equivclass",
+    "incremental_sort",
+    "join",
+    "join_hash",
+    "memoize",
+    "multirangetypes",
+    "partition_join",
+    "partition_prune",
+    "+5 more"
+   ]
+  },
+  {
+   "name": "enable_hashagg",
+   "count": 51,
+   "files": [
+    "aggregates",
+    "groupingsets",
+    "incremental_sort",
+    "join",
+    "jsonb",
+    "partition_aggregate",
+    "select_distinct",
+    "select_distinct_on",
+    "select_parallel",
+    "subselect",
+    "+3 more"
+   ]
+  },
+  {
+   "name": "enable_nestloop",
+   "count": 41,
+   "files": [
+    "aggregates",
+    "collate",
+    "equivclass",
+    "inherit",
+    "join",
+    "multirangetypes",
+    "partition_join",
+    "rangetypes",
+    "select_parallel",
+    "stats",
+    "+2 more"
+   ]
+  },
+  {
+   "name": "enable_sort",
+   "count": 39,
+   "files": [
+    "aggregates",
+    "groupingsets",
+    "incremental_sort",
+    "inherit",
+    "join",
+    "join_hash",
+    "jsonb",
+    "multirangetypes",
+    "partition_prune",
+    "rangetypes",
+    "+5 more"
+   ]
+  },
+  {
+   "name": "parallel_setup_cost",
+   "count": 38,
+   "files": [
+    "aggregates",
+    "explain",
+    "incremental_sort",
+    "join",
+    "join_hash",
+    "memoize",
+    "numeric",
+    "partition_aggregate",
+    "partition_prune",
+    "select_distinct",
+    "+2 more"
+   ]
+  },
+  {
+   "name": "enable_mergejoin",
+   "count": 37,
+   "files": [
+    "equivclass",
+    "incremental_sort",
+    "join",
+    "join_hash",
+    "memoize",
+    "multirangetypes",
+    "partition_prune",
+    "rangetypes",
+    "select_parallel",
+    "stats_ext"
+   ]
+  },
+  {
+   "name": "min_parallel_table_scan_size",
+   "count": 30,
+   "files": [
+    "aggregates",
+    "brin",
+    "btree_index",
+    "explain",
+    "incremental_sort",
+    "join",
+    "join_hash",
+    "memoize",
+    "partition_aggregate",
+    "partition_prune",
+    "+3 more"
+   ]
+  },
+  {
+   "name": "debug_parallel_query",
+   "count": 26,
+   "files": [
+    "partition_join",
+    "plpgsql",
+    "privileges",
+    "psql",
+    "select_parallel"
+   ]
+  },
+  {
+   "name": "parallel_tuple_cost",
+   "count": 25,
+   "files": [
+    "aggregates",
+    "explain",
+    "incremental_sort",
+    "join",
+    "join_hash",
+    "memoize",
+    "partition_prune",
+    "select_distinct",
+    "select_parallel",
+    "write_parallel"
+   ]
+  },
+  {
+   "name": "hash_mem_multiplier",
+   "count": 22,
+   "files": [
+    "groupingsets",
+    "join_hash",
+    "memoize"
+   ]
+  },
+  {
+   "name": "enable_parallel_hash",
+   "count": 17,
+   "files": [
+    "join_hash"
+   ]
+  },
+  {
+   "name": "parallel_leader_participation",
+   "count": 14,
+   "files": [
+    "aggregates",
+    "join_hash",
+    "select_parallel"
+   ]
+  },
+  {
+   "name": "enable_indexonlyscan",
+   "count": 14,
+   "files": [
+    "aggregates",
+    "gist",
+    "join",
+    "partition_prune",
+    "select_parallel",
+    "stats",
+    "union"
+   ]
+  },
+  {
+   "name": "constraint_exclusion",
+   "count": 14,
+   "files": [
+    "alter_table",
+    "generated_virtual",
+    "partition_prune",
+    "privileges",
+    "rules"
+   ]
+  },
+  {
+   "name": "enable_material",
+   "count": 12,
+   "files": [
+    "incremental_sort",
+    "join_hash",
+    "select_parallel",
+    "tuplesort"
+   ]
+  },
+  {
+   "name": "jit_above_cost",
+   "count": 11,
+   "files": [
+    "aggregates",
+    "groupingsets",
+    "select_distinct",
+    "updatable_views"
+   ]
+  },
+  {
+   "name": "plan_cache_mode",
+   "count": 11,
+   "files": [
+    "explain",
+    "partition_prune",
+    "plancache",
+    "rowsecurity",
+    "subselect"
+   ]
+  },
+  {
+   "name": "min_parallel_index_scan_size",
+   "count": 9,
+   "files": [
+    "incremental_sort",
+    "select_distinct",
+    "select_parallel",
+    "vacuum"
+   ]
+  },
+  {
+   "name": "enable_partitionwise_join",
+   "count": 8,
+   "files": [
+    "join",
+    "memoize",
+    "partition_aggregate",
+    "partition_join"
+   ]
+  },
+  {
+   "name": "enable_memoize",
+   "count": 6,
+   "files": [
+    "join",
+    "partition_prune"
+   ]
+  },
+  {
+   "name": "enable_incremental_sort",
+   "count": 5,
+   "files": [
+    "incremental_sort",
+    "partition_aggregate"
+   ]
+  },
+  {
+   "name": "max_parallel_workers",
+   "count": 5,
+   "files": [
+    "select_parallel",
+    "tuplesort"
+   ]
+  },
+  {
+   "name": "enable_parallel_append",
+   "count": 4,
+   "files": [
+    "inherit",
+    "select_parallel"
+   ]
+  },
+  {
+   "name": "enable_partition_pruning",
+   "count": 4,
+   "files": [
+    "partition_prune"
+   ]
+  },
+  {
+   "name": "max_parallel_maintenance_workers",
+   "count": 3,
+   "files": [
+    "brin",
+    "btree_index",
+    "tuplesort"
+   ]
+  },
+  {
+   "name": "track_io_timing",
+   "count": 3,
+   "files": [
+    "explain"
+   ]
+  },
+  {
+   "name": "compute_query_id",
+   "count": 3,
+   "files": [
+    "explain",
+    "guc"
+   ]
+  },
+  {
+   "name": "enable_partitionwise_aggregate",
+   "count": 3,
+   "files": [
+    "partition_aggregate",
+    "partition_join"
+   ]
+  },
+  {
+   "name": "temp_buffers",
+   "count": 3,
+   "files": [
+    "stats",
+    "temp"
+   ]
+  },
+  {
+   "name": "enable_presorted_aggregate",
+   "count": 2,
+   "files": [
+    "aggregates"
+   ]
+  },
+  {
+   "name": "jit",
+   "count": 2,
+   "files": [
+    "explain",
+    "misc_functions"
+   ]
+  },
+  {
+   "name": "from_collapse_limit",
+   "count": 2,
+   "files": [
+    "join",
+    "join_hash"
+   ]
+  },
+  {
+   "name": "join_collapse_limit",
+   "count": 2,
+   "files": [
+    "join"
+   ]
+  },
+  {
+   "name": "default_statistics_target",
+   "count": 2,
+   "files": [
+    "privileges"
+   ]
+  },
+  {
+   "name": "statement_timeout",
+   "count": 2,
+   "files": [
+    "psql_pipeline"
+   ]
+  },
+  {
+   "name": "seq_page_cost",
+   "count": 1,
+   "files": [
+    "guc"
+   ]
+  },
+  {
+   "name": "geqo",
+   "count": 1,
+   "files": [
+    "join"
+   ]
+  },
+  {
+   "name": "geqo_threshold",
+   "count": 1,
+   "files": [
+    "join"
+   ]
+  },
+  {
+   "name": "random_page_cost",
+   "count": 1,
+   "files": [
+    "select_parallel"
+   ]
+  },
+  {
+   "name": "track_functions",
+   "count": 1,
+   "files": [
+    "stats"
+   ]
+  },
+  {
+   "name": "(unused in failing corpus) enable_self_join_elimination, enable_group_by_reordering, enable_distinct_reordering, enable_gathermerge, enable_tidscan, enable_async_append, cursor_tuple_fraction, cpu_*_cost, effective_cache_size",
+   "count": 0,
+   "files": []
+  }
+ ],
+ "files": [
+  {
+   "name": "join",
+   "explain_statements": 226,
+   "explain_changed_lines": 4085,
+   "dominant_needs": [
+    "total changed 7988",
+    "stmt errors 164 ln (LATERAL missing FROM-clause 6, column 2, mki* fns)",
+    "planner 2620 ln / shape 1301 ln",
+    "nested loop order + Materialize inner",
+    "Hash/Merge joins, Memoize",
+    "VERBOSE Output x65",
+    "tenk1/int4_tbl/int8_tbl setup stats"
+   ]
+  },
+  {
+   "name": "partition_join",
+   "explain_statements": 122,
+   "explain_changed_lines": 3547,
+   "dominant_needs": [
+    "total changed 4199",
+    "stmt errors 210 ln (relation-missing cascade 12)",
+    "planner 3218 ln / shape 119 ln",
+    "partitionwise Hash/Merge joins over Append of prt1_p1.. child aliases",
+    "67 ANALYZE on own tables",
+    "enable_partitionwise_join/aggregate, debug_parallel_query"
+   ]
+  },
+  {
+   "name": "partition_prune",
+   "explain_statements": 247,
+   "explain_changed_lines": 3397,
+   "dominant_needs": [
+    "total changed 4035",
+    "stmt errors 745 ln (relation-missing 35, parser 'expected On found Join' 4, prepared stmt 2, explain_parallel_append SRF-in-select 12)",
+    "planner 807 ln / shape 1845 ln",
+    "static + runtime partition pruning: Append child aliases, Subplans Removed, never executed",
+    "ANALYZE x55 with actual rows",
+    "plan_cache_mode, enable_partition_pruning"
+   ]
+  },
+  {
+   "name": "partition_aggregate",
+   "explain_statements": 40,
+   "explain_changed_lines": 1131,
+   "dominant_needs": [
+    "total changed 1201",
+    "planner 954 ln / shape 123 ln",
+    "partitionwise Partial/Finalize (Group|Hash)Aggregate over Append",
+    "parallel Gather/Gather Merge",
+    "enable_partitionwise_aggregate, enable_incremental_sort, enable_hashagg"
+   ]
+  },
+  {
+   "name": "subselect",
+   "explain_statements": 69,
+   "explain_changed_lines": 1071,
+   "dominant_needs": [
+    "total changed 1767",
+    "stmt errors 49 ln",
+    "planner 756 ln / shape 266 ln",
+    "VERBOSE Output x32",
+    "InitPlan/SubPlan numbering, hashed SubPlan",
+    "HashAggregate/Sort/Unique placement; onek/tenk1 stats"
+   ]
+  },
+  {
+   "name": "rowsecurity",
+   "explain_statements": 88,
+   "explain_changed_lines": 1008,
+   "dominant_needs": [
+    "total changed 2215",
+    "stmt errors 77 ln",
+    "planner 287 ln / shape 644 ln",
+    "policy Filter deparse, InitPlan (current_user subqueries)",
+    "Append over inheritance children",
+    "Nested Loop order"
+   ]
+  },
+  {
+   "name": "inherit",
+   "explain_statements": 68,
+   "explain_changed_lines": 961,
+   "dominant_needs": [
+    "total changed 2157",
+    "stmt errors 207 ln (relation-missing 16, tableoid)",
+    "planner 496 ln / shape 258 ln",
+    "Append/Merge Append child expansion with aliases",
+    "Index Scan/Index Only Scan Backward under enable_seqscan off",
+    "VERBOSE x8"
+   ]
+  },
+  {
+   "name": "create_index",
+   "explain_statements": 73,
+   "explain_changed_lines": 813,
+   "dominant_needs": [
+    "total changed 1489",
+    "planner 805 ln / shape 8 ln",
+    "index/bitmap scans (BitmapAnd/Or) on tenk1/point_tbl under enable_seqscan/indexscan/bitmapscan toggles",
+    "planagg Result/InitPlan/Limit/Index Only Scan Backward",
+    "6 ANALYZE own tables"
+   ]
+  },
+  {
+   "name": "groupingsets",
+   "explain_statements": 48,
+   "explain_changed_lines": 771,
+   "dominant_needs": [
+    "total changed 1919",
+    "stmt errors 60 ln",
+    "planner 678 ln / shape 33 ln",
+    "MixedAggregate/GroupAggregate + Hash Key/Group Key lists",
+    "Sort placement, enable_hashagg, work_mem/hash_mem_multiplier",
+    "VERBOSE x7"
+   ]
+  },
+  {
+   "name": "aggregates",
+   "explain_statements": 57,
+   "explain_changed_lines": 722,
+   "dominant_needs": [
+    "total changed 1760",
+    "stmt errors 78 ln",
+    "planner 516 ln / shape 128 ln",
+    "planagg MIN/MAX -> Result/InitPlan/Limit/Index Only Scan Backward (tenk1)",
+    "presorted aggregates, GROUP BY reordering, parallel Partial/Finalize",
+    "VERBOSE x5"
+   ]
+  },
+  {
+   "name": "create_index_spgist",
+   "explain_statements": 71,
+   "explain_changed_lines": 687,
+   "dominant_needs": [
+    "total changed 799",
+    "stmt errors 56 ln (geometric operator parse gaps)",
+    "planner 631 ln / shape 0 ln",
+    "Index Scan/Index Only Scan/Bitmap under enable_seqscan off",
+    "KNN Order By, WindowAgg row_number wrapper"
+   ]
+  },
+  {
+   "name": "incremental_sort",
+   "explain_statements": 41,
+   "explain_changed_lines": 622,
+   "dominant_needs": [
+    "total changed 724",
+    "stmt errors 123 ln (column-missing 6, wrappers explain_analyze_* SRF-in-select 4)",
+    "planner 499 ln / shape 0 ln",
+    "Incremental Sort + Presorted Key, Sort Method groups",
+    "parallel Gather Merge, enable_material/hashjoin/mergejoin",
+    "tenk1 stats + 6 ANALYZE t"
+   ]
+  },
+  {
+   "name": "union",
+   "explain_statements": 41,
+   "explain_changed_lines": 613,
+   "dominant_needs": [
+    "total changed 821",
+    "stmt errors 68 ln",
+    "planner 282 ln / shape 263 ln",
+    "SetOp/HashSetOp Intersect/Except, Unique/HashAggregate over Append",
+    "Merge Append with Index Only Scan",
+    "enable_hashagg/sort toggles"
+   ]
+  },
+  {
+   "name": "select_parallel",
+   "explain_statements": 49,
+   "explain_changed_lines": 613,
+   "dominant_needs": [
+    "total changed 1148",
+    "stmt errors 537 ln: cascade from 'select sp_test_func() order by 1' SRF-in-select-list refusal aborting the begin block (43 EXPLAINs) + pg_stat_force_next_flush/pg_stat_database",
+    "planner 76 ln / shape 0 ln",
+    "Gather/Gather Merge/Parallel Seq/Index/Bitmap, Partial/Finalize, Workers Planned",
+    "parallel_setup_cost=0, parallel_tuple_cost=0, min_parallel_table_scan_size=0, tenk1 stats"
+   ]
+  },
+  {
+   "name": "window",
+   "explain_statements": 36,
+   "explain_changed_lines": 579,
+   "dominant_needs": [
+    "total changed 2434",
+    "planner 389 ln / shape 181 ln",
+    "WindowAgg + PG18 'Window:' line + Run Condition",
+    "Sort/Incremental Sort/Unique placement, emp/tenk1 stats",
+    "enable_hashagg"
+   ]
+  },
+  {
+   "name": "explain",
+   "explain_statements": 28,
+   "explain_changed_lines": 444,
+   "dominant_needs": [
+    "total changed 693",
+    "stmt errors 444 ln: every statement goes through explain_filter() SRF-in-select-list (routine.rs refusal)",
+    "after that: options ANALYZE/BUFFERS/MEMORY/SERIALIZE/GENERIC_PLAN/SETTINGS/FORMAT JSON/YAML/XML fidelity, Planning/Execution Time, Query Identifier",
+    "int8_tbl/tenk1 stats"
+   ]
+  },
+  {
+   "name": "updatable_views",
+   "explain_statements": 32,
+   "explain_changed_lines": 356,
+   "dominant_needs": [
+    "total changed 1452",
+    "stmt errors 330 ln (relation-missing cascade 30)",
+    "planner 0 ln / shape 26 ln",
+    "after unblock: view flattening + security barrier Subquery Scan, Index Scan on person",
+    "4 ANALYZE own tables"
+   ]
+  },
+  {
+   "name": "equivclass",
+   "explain_statements": 22,
+   "explain_changed_lines": 330,
+   "dominant_needs": [
+    "total changed 374",
+    "planner 302 ln / shape 15 ln",
+    "equivalence-class derived Index Cond/Filter, Nested Loop/Merge under enable_hashjoin/mergejoin/nestloop toggles",
+    "Append child aliases"
+   ]
+  },
+  {
+   "name": "join_hash",
+   "explain_statements": 24,
+   "explain_changed_lines": 304,
+   "dominant_needs": [
+    "total changed 843",
+    "stmt errors 249 ln: cascade from 'update pg_class set reltuples' refused (pg_catalog.pg_class not updatable) aborting the transaction (23 EXPLAINs) + 19 hash_join_batches JSON reads",
+    "planner 55 ln",
+    "Parallel Hash Join, batches, work_mem/hash_mem_multiplier, enable_parallel_hash"
+   ]
+  },
+  {
+   "name": "with",
+   "explain_statements": 15,
+   "explain_changed_lines": 300,
+   "dominant_needs": [
+    "total changed 1755",
+    "stmt errors 134 ln (SEARCH/CYCLE 6, cte.rs)",
+    "planner 143 ln / shape 23 ln",
+    "CTE header + CTE Scan/WorkTable Scan/Recursive Union, VERBOSE x12",
+    "Hash Right Join, Merge Semi Join"
+   ]
+  },
+  {
+   "name": "merge",
+   "explain_statements": 16,
+   "explain_changed_lines": 265,
+   "dominant_needs": [
+    "total changed 984",
+    "stmt errors 120 ln (explain_merge SRF-in-select 8)",
+    "planner 132 ln / shape 13 ln",
+    "Merge on t + Tuples: line, ANALYZE x8 actual rows",
+    "Merge/Hash joins, 2 ANALYZE target"
+   ]
+  },
+  {
+   "name": "memoize",
+   "explain_statements": 15,
+   "explain_changed_lines": 264,
+   "dominant_needs": [
+    "total changed 308",
+    "stmt errors 216 ln (explain_memoize SRF-in-select 13)",
+    "planner 48 ln",
+    "Memoize + Cache Key/Mode + Hits/Misses/Evictions, Nested Loop inner Index Scan",
+    "enable_hashjoin/mergejoin/bitmapscan off, 3 ANALYZE"
+   ]
+  },
+  {
+   "name": "predicate",
+   "explain_statements": 18,
+   "explain_changed_lines": 202,
+   "dominant_needs": [
+    "total changed 238",
+    "planner 132 ln / shape 70 ln",
+    "predicate proofs -> Result One-Time Filter false / Filter dropped (predtest.c), Nested Loop + Materialize",
+    "2 ANALYZE own tables"
+   ]
+  },
+  {
+   "name": "sqljson",
+   "explain_statements": 22,
+   "explain_changed_lines": 178,
+   "dominant_needs": [
+    "total changed 716",
+    "stmt errors 50 ln (ON NULL/UNIQUE KEYS json aggregates 4)",
+    "planner 0 ln / shape 128 ln",
+    "VERBOSE Output deparse of JSON_* expressions (ruleutils) x22"
+   ]
+  },
+  {
+   "name": "returning",
+   "explain_statements": 9,
+   "explain_changed_lines": 169,
+   "dominant_needs": [
+    "total changed 608",
+    "stmt errors 122 ln (internal scalar subquery 3, relation 2)",
+    "shape 47 ln",
+    "VERBOSE Output on Insert/Update/Delete/Merge with RETURNING OLD/NEW, child alias expansion"
+   ]
+  },
+  {
+   "name": "insert_conflict",
+   "explain_statements": 14,
+   "explain_changed_lines": 151,
+   "dominant_needs": [
+    "total changed 424",
+    "stmt errors 50 ln",
+    "shape 89 ln / planner 12 ln",
+    "Insert on t + Conflict Resolution/Arbiter Indexes/Filter, FORMAT JSON x1, InitPlan"
+   ]
+  },
+  {
+   "name": "polygon",
+   "explain_statements": 12,
+   "explain_changed_lines": 145,
+   "dominant_needs": [
+    "total changed 157",
+    "planner 145 ln",
+    "Index Scan/Index Only Scan (spgist/gist) under enable_seqscan/indexscan/bitmapscan toggles, KNN Order By, WindowAgg wrapper"
+   ]
+  },
+  {
+   "name": "btree_index",
+   "explain_statements": 15,
+   "explain_changed_lines": 143,
+   "dominant_needs": [
+    "total changed 281",
+    "planner 143 ln",
+    "Index Scan/Index Only Scan (Backward), Bitmap, tenk1 + 4 ANALYZE own tables, GUC toggles"
+   ]
+  },
+  {
+   "name": "select_distinct",
+   "explain_statements": 11,
+   "explain_changed_lines": 135,
+   "dominant_needs": [
+    "total changed 188",
+    "planner 117 ln / shape 18 ln",
+    "Unique/HashAggregate/Sort/Incremental Sort choice, parallel Gather, distinct-by-index",
+    "tenk1 stats, enable_hashagg/sort, work_mem"
+   ]
+  },
+  {
+   "name": "brin_multi",
+   "explain_statements": 11,
+   "explain_changed_lines": 129,
+   "dominant_needs": [
+    "total changed 280",
+    "planner 129 ln",
+    "Bitmap Heap/Index Scan on brin under enable_seqscan off, ANALYZE x9 actual rows + Rows Removed by Index Recheck"
+   ]
+  },
+  {
+   "name": "rangefuncs",
+   "explain_statements": 17,
+   "explain_changed_lines": 128,
+   "dominant_needs": [
+    "total changed 1896",
+    "stmt errors 112 ln (testrngfunc/array_to_set missing, SRF-in-select 3, subquery cols 2)",
+    "shape 16 ln",
+    "VERBOSE Output x17, Function Scan on fn alias, ProjectSet"
+   ]
+  },
+  {
+   "name": "gist",
+   "explain_statements": 11,
+   "explain_changed_lines": 123,
+   "dominant_needs": [
+    "total changed 138",
+    "planner 123 ln",
+    "Index Scan/Index Only Scan gist, KNN Order By, VERBOSE x4, GUC toggles"
+   ]
+  },
+  {
+   "name": "box",
+   "explain_statements": 14,
+   "explain_changed_lines": 120,
+   "dominant_needs": [
+    "total changed 183",
+    "planner 120 ln",
+    "Index Only Scan using box_spgist under enable_seqscan off; box input parse gap ('(0,0)(0,100)') poisons rows"
+   ]
+  },
+  {
+   "name": "select_views",
+   "explain_statements": 8,
+   "explain_changed_lines": 113,
+   "dominant_needs": [
+    "total changed 1036",
+    "planner 73 ln / shape 40 ln",
+    "security-barrier view Subquery Scan + Filter, Hash Join, Materialize"
+   ]
+  },
+  {
+   "name": "rowtypes",
+   "explain_statements": 11,
+   "explain_changed_lines": 112,
+   "dominant_needs": [
+    "total changed 753",
+    "planner 63 ln / shape 38 ln",
+    "row comparison Index Cond, VERBOSE x4, CTE, tenk1 stats"
+   ]
+  },
+  {
+   "name": "rangetypes",
+   "explain_statements": 15,
+   "explain_changed_lines": 106,
+   "dominant_needs": [
+    "total changed 124",
+    "shape 90 ln / planner 16 ln",
+    "VERBOSE Output x12 (range ops deparse), Result/Limit, GUC toggles, 2 ANALYZE"
+   ]
+  },
+  {
+   "name": "select",
+   "explain_statements": 10,
+   "explain_changed_lines": 105,
+   "dominant_needs": [
+    "total changed 183",
+    "planner 94 ln",
+    "Index Scan/Index Only Scan Backward on onek2 with ORDER BY, ANALYZE x1, LockRows",
+    "enable_seqscan/bitmapscan/sort/indexscan toggles"
+   ]
+  },
+  {
+   "name": "tidscan",
+   "explain_statements": 12,
+   "explain_changed_lines": 102,
+   "dominant_needs": [
+    "total changed 186",
+    "planner 79 ln",
+    "Tid Scan + TID Cond, Update on tidscan, ANALYZE x2 actual rows, Merge Join under enable_hashjoin off"
+   ]
+  },
+  {
+   "name": "tidrangescan",
+   "explain_statements": 13,
+   "explain_changed_lines": 94,
+   "dominant_needs": [
+    "total changed 94",
+    "planner 94 ln",
+    "Tid Range Scan + TID Cond, backward scans, enable_seqscan off"
+   ]
+  },
+  {
+   "name": "limit",
+   "explain_statements": 6,
+   "explain_changed_lines": 88,
+   "dominant_needs": [
+    "total changed 199",
+    "shape 57 ln / planner 31 ln",
+    "VERBOSE Output x6, Limit/WindowAgg/Sort, GroupAggregate"
+   ]
+  },
+  {
+   "name": "privileges",
+   "explain_statements": 9,
+   "explain_changed_lines": 84,
+   "dominant_needs": [
+    "total changed 1765",
+    "stmt errors 84 ln (all EXPLAINs error: leaky-function/RLS/security-barrier setup gaps)",
+    "after unblock: Filter ordering by leakproof, Nested Loop, Index Scan",
+    "debug_parallel_query, default_statistics_target"
+   ]
+  },
+  {
+   "name": "sqljson_jsontable",
+   "explain_statements": 7,
+   "explain_changed_lines": 82,
+   "dominant_needs": [
+    "total changed 313",
+    "shape 76 ln",
+    "Table Function Scan on \"json_table\" + Table Function Call, VERBOSE x7, FORMAT JSON x1"
+   ]
+  },
+  {
+   "name": "generated_virtual",
+   "explain_statements": 6,
+   "explain_changed_lines": 79,
+   "dominant_needs": [
+    "total changed 601",
+    "planner 46 ln / shape 33 ln",
+    "virtual generated column expansion in Filter/Output, One-Time Filter, Hash Join, constraint_exclusion"
+   ]
+  },
+  {
+   "name": "gin",
+   "explain_statements": 7,
+   "explain_changed_lines": 84,
+   "dominant_needs": [
+    "total changed 134",
+    "planner 84 ln",
+    "Bitmap Heap/Index Scan gin under enable_seqscan off; explain_query_json LATERAL x2 for recheck counts"
+   ]
+  },
+  {
+   "name": "tsrf",
+   "explain_statements": 7,
+   "explain_changed_lines": 79,
+   "dominant_needs": [
+    "total changed 499",
+    "shape 71 ln",
+    "ProjectSet + VERBOSE Output x7, One-Time Filter, HashAggregate over SRF"
+   ]
+  },
+  {
+   "name": "misc_functions",
+   "explain_statements": 15,
+   "explain_changed_lines": 74,
+   "dominant_needs": [
+    "total changed 767",
+    "stmt errors 63 ln (explain_mask_costs SRF-in-select 12)",
+    "planner 10 ln",
+    "Function Scan rows= estimate from generate_series support fn (6 literal), Index Cond on tenk1"
+   ]
+  },
+  {
+   "name": "fast_default",
+   "explain_statements": 5,
+   "explain_changed_lines": 68,
+   "dominant_needs": [
+    "total changed 353",
+    "shape 52 ln / planner 16 ln",
+    "VERBOSE Output x5, Bitmap under enable_seqscan off"
+   ]
+  },
+  {
+   "name": "tsearch",
+   "explain_statements": 7,
+   "explain_changed_lines": 68,
+   "dominant_needs": [
+    "total changed 1388",
+    "planner 56 ln",
+    "Bitmap Heap/Index Scan gin/gist on tsvector under enable_seqscan off; to_tsquery(unknown) resolution gap"
+   ]
+  },
+  {
+   "name": "select_distinct_on",
+   "explain_statements": 5,
+   "explain_changed_lines": 67,
+   "dominant_needs": [
+    "total changed 93",
+    "planner 58 ln",
+    "Unique + Sort/Incremental Sort, Index Scan, enable_hashagg, ANALYZE own table"
+   ]
+  },
+  {
+   "name": "tuplesort",
+   "explain_statements": 5,
+   "explain_changed_lines": 66,
+   "dominant_needs": [
+    "total changed 502",
+    "planner 56 ln",
+    "Index Scan/Merge Join/Incremental Sort under enable_* toggles, max_parallel_maintenance_workers"
+   ]
+  },
+  {
+   "name": "matview",
+   "explain_statements": 13,
+   "explain_changed_lines": 65,
+   "dominant_needs": [
+    "total changed 173",
+    "shape 65 ln",
+    "HashAggregate/Sort/Unique on matviews, ANALYZE x4 actual rows, SetOp"
+   ]
+  },
+  {
+   "name": "regex",
+   "explain_statements": 9,
+   "explain_changed_lines": 63,
+   "dominant_needs": [
+    "total changed 445",
+    "planner 63 ln",
+    "regex prefix -> Index Cond (text_pattern_ops) with Filter (indxpath/regex prefix extraction)"
+   ]
+  },
+  {
+   "name": "tablesample",
+   "explain_statements": 5,
+   "explain_changed_lines": 61,
+   "dominant_needs": [
+    "total changed 178",
+    "shape 61 ln",
+    "Sample Scan + Sampling: line, Append over inheritance children, Nested Loop"
+   ]
+  },
+  {
+   "name": "cluster",
+   "explain_statements": 6,
+   "explain_changed_lines": 60,
+   "dominant_needs": [
+    "total changed 101",
+    "planner 60 ln",
+    "Index Scan/Index Only Scan under enable_seqscan/indexscan toggles"
+   ]
+  },
+  {
+   "name": "inet",
+   "explain_statements": 6,
+   "explain_changed_lines": 60,
+   "dominant_needs": [
+    "total changed 80",
+    "planner 60 ln",
+    "Index Scan/Index Only Scan (btree/gist/spgist inet ops) under enable_seqscan off"
+   ]
+  },
+  {
+   "name": "create_view",
+   "explain_statements": 5,
+   "explain_changed_lines": 55,
+   "dominant_needs": [
+    "total changed 1633",
+    "shape 22 ln / planner 21 ln",
+    "view flattening: Function/Values/Subquery Scan, VERBOSE x4, Append"
+   ]
+  },
+  {
+   "name": "stats",
+   "explain_statements": 9,
+   "explain_changed_lines": 55,
+   "dominant_needs": [
+    "total changed 1397",
+    "planner 52 ln",
+    "Index Scan/Index Only Scan for stats counters under enable_* toggles"
+   ]
+  },
+  {
+   "name": "strings",
+   "explain_statements": 9,
+   "explain_changed_lines": 54,
+   "dominant_needs": [
+    "total changed 432",
+    "shape 54 ln",
+    "Filter deparse of LIKE/~~ starts_with prefix conditions (text_tbl)"
+   ]
+  },
+  {
+   "name": "update",
+   "explain_statements": 2,
+   "explain_changed_lines": 49,
+   "dominant_needs": [
+    "total changed 538",
+    "shape 49 ln",
+    "Update on partitioned table with child scans + InitPlan/One-Time Filter, VERBOSE"
+   ]
+  },
+  {
+   "name": "xml",
+   "explain_statements": 6,
+   "explain_changed_lines": 60,
+   "dominant_needs": [
+    "total changed 1088",
+    "stmt errors 60 ln (xml_is_well_formed/xpath missing)",
+    "Table Function Scan on \"xmltable\", VERBOSE x5, FORMAT JSON x1"
+   ]
+  },
+  {
+   "name": "alter_table",
+   "explain_statements": 3,
+   "explain_changed_lines": 47,
+   "dominant_needs": [
+    "total changed 1841",
+    "shape 47 ln",
+    "Append over inheritance/partition children with constraint_exclusion, Filter"
+   ]
+  },
+  {
+   "name": "portals",
+   "explain_statements": 5,
+   "explain_changed_lines": 47,
+   "dominant_needs": [
+    "total changed 1232",
+    "planner 30 ln / shape 17 ln",
+    "InitPlan, Materialize, LockRows/Index Scan for scroll cursors"
+   ]
+  },
+  {
+   "name": "plpgsql",
+   "explain_statements": 4,
+   "explain_changed_lines": 46,
+   "dominant_needs": [
+    "total changed 1857",
+    "shape 33 ln / planner 13 ln",
+    "VERBOSE Output x4, Function Scan, transition-table Named Tuplestore, debug_parallel_query"
+   ]
+  },
+  {
+   "name": "generated_stored",
+   "explain_statements": 5,
+   "explain_changed_lines": 40,
+   "dominant_needs": [
+    "total changed 511",
+    "planner 40 ln",
+    "Index/Bitmap scans on generated-column indexes under enable_seqscan off"
+   ]
+  },
+  {
+   "name": "plancache",
+   "explain_statements": 4,
+   "explain_changed_lines": 40,
+   "dominant_needs": [
+    "total changed 76",
+    "planner 20 ln / shape 20 ln",
+    "generic vs custom plan (plan_cache_mode), Index Scan, ANALYZE own table"
+   ]
+  },
+  {
+   "name": "write_parallel",
+   "explain_statements": 3,
+   "explain_changed_lines": 38,
+   "dominant_needs": [
+    "total changed 56",
+    "planner 28 ln",
+    "Gather + Partial/Finalize HashAggregate for CREATE TABLE AS/matview, parallel GUCs, tenk1"
+   ]
+  },
+  {
+   "name": "indexing",
+   "explain_statements": 3,
+   "explain_changed_lines": 36,
+   "dominant_needs": [
+    "total changed 703",
+    "planner 36 ln",
+    "Index Scan on partitioned indexes under enable_seqscan off"
+   ]
+  },
+  {
+   "name": "jsonb",
+   "explain_statements": 3,
+   "explain_changed_lines": 36,
+   "dominant_needs": [
+    "total changed 1386",
+    "planner 36 ln",
+    "Bitmap Heap/Index Scan gin jsonb ops under enable_seqscan off"
+   ]
+  },
+  {
+   "name": "select_into",
+   "explain_statements": 5,
+   "explain_changed_lines": 29,
+   "dominant_needs": [
+    "total changed 93",
+    "stmt errors 13 ln",
+    "shape 16 ln",
+    "EXPLAIN ANALYZE CREATE TABLE AS / SELECT INTO with never executed, ProjectSet"
+   ]
+  },
+  {
+   "name": "stats_ext",
+   "explain_statements": 3,
+   "explain_changed_lines": 29,
+   "dominant_needs": [
+    "total changed 1392",
+    "planner 13 ln",
+    "plus 762 changed lines of check_estimated_rows estimated|actual (extended statistics selectivity), CREATE STATISTICS refused (0A000)"
+   ]
+  },
+  {
+   "name": "rules",
+   "explain_statements": 2,
+   "explain_changed_lines": 26,
+   "dominant_needs": [
+    "total changed 2452",
+    "shape 26 ln",
+    "CTE header + CTE Scan, rule-rewritten Insert/Update, constraint_exclusion"
+   ]
+  },
+  {
+   "name": "brin",
+   "explain_statements": 3,
+   "explain_changed_lines": 24,
+   "dominant_needs": [
+    "total changed 148",
+    "planner 24 ln",
+    "Bitmap Heap/Index Scan brin under enable_seqscan off"
+   ]
+  },
+  {
+   "name": "case",
+   "explain_statements": 3,
+   "explain_changed_lines": 24,
+   "dominant_needs": [
+    "total changed 138",
+    "shape 24 ln",
+    "Result + One-Time Filter constant folding of CASE"
+   ]
+  },
+  {
+   "name": "pg_lsn",
+   "explain_statements": 1,
+   "explain_changed_lines": 22,
+   "dominant_needs": [
+    "total changed 22",
+    "planner 22 ln",
+    "Nested Loop + Materialize + HashAggregate over generate_series"
+   ]
+  },
+  {
+   "name": "horology",
+   "explain_statements": 3,
+   "explain_changed_lines": 18,
+   "dominant_needs": [
+    "total changed 671",
+    "stmt errors 12 ln",
+    "Result/Filter deparse of timestamp expressions"
+   ]
+  },
+  {
+   "name": "index_including",
+   "explain_statements": 2,
+   "explain_changed_lines": 22,
+   "dominant_needs": [
+    "total changed 270",
+    "stmt errors 14 ln",
+    "Index Only Scan using covering index under enable_seqscan off"
+   ]
+  },
+  {
+   "name": "uuid",
+   "explain_statements": 3,
+   "explain_changed_lines": 18,
+   "dominant_needs": [
+    "total changed 254",
+    "stmt errors 18 ln",
+    "after unblock: Result/Filter"
+   ]
+  },
+  {
+   "name": "create_function_sql",
+   "explain_statements": 3,
+   "explain_changed_lines": 17,
+   "dominant_needs": [
+    "total changed 349",
+    "stmt errors 10 ln",
+    "VERBOSE Output x3 (inlined SQL functions)"
+   ]
+  },
+  {
+   "name": "index_including_gist",
+   "explain_statements": 2,
+   "explain_changed_lines": 16,
+   "dominant_needs": [
+    "total changed 83",
+    "planner 16 ln",
+    "Index Only Scan gist covering under enable_bitmapscan off"
+   ]
+  },
+  {
+   "name": "domain",
+   "explain_statements": 2,
+   "explain_changed_lines": 14,
+   "dominant_needs": [
+    "total changed 898",
+    "stmt errors 14 ln",
+    "VERBOSE x2 (domain coercion deparse)"
+   ]
+  },
+  {
+   "name": "brin_bloom",
+   "explain_statements": 2,
+   "explain_changed_lines": 12,
+   "dominant_needs": [
+    "total changed 121",
+    "planner 12 ln",
+    "Bitmap Heap/Index Scan brin bloom under enable_seqscan off"
+   ]
+  },
+  {
+   "name": "collate",
+   "explain_statements": 2,
+   "explain_changed_lines": 12,
+   "dominant_needs": [
+    "total changed 305",
+    "shape 12 ln",
+    "Sort Key with COLLATE deparse, HashAggregate"
+   ]
+  },
+  {
+   "name": "create_am",
+   "explain_statements": 2,
+   "explain_changed_lines": 12,
+   "dominant_needs": [
+    "total changed 295",
+    "planner 12 ln",
+    "Index Scan using gist2 index AM under GUC toggles"
+   ]
+  },
+  {
+   "name": "geometry",
+   "explain_statements": 2,
+   "explain_changed_lines": 12,
+   "dominant_needs": [
+    "total changed 1346",
+    "shape 12 ln",
+    "Sort Key/Filter deparse of geometric ops"
+   ]
+  },
+  {
+   "name": "spgist",
+   "explain_statements": 1,
+   "explain_changed_lines": 12,
+   "dominant_needs": [
+    "total changed 12",
+    "planner 12 ln",
+    "Index Only Scan spgist"
+   ]
+  },
+  {
+   "name": "interval",
+   "explain_statements": 1,
+   "explain_changed_lines": 10,
+   "dominant_needs": [
+    "total changed 173",
+    "planner 10 ln",
+    "Index Only Scan under enable_seqscan off"
+   ]
+  },
+  {
+   "name": "expressions",
+   "explain_statements": 1,
+   "explain_changed_lines": 7,
+   "dominant_needs": [
+    "total changed 255",
+    "shape 7 ln",
+    "VERBOSE Output x1 (IS DISTINCT FROM deparse)"
+   ]
+  },
+  {
+   "name": "create_table",
+   "explain_statements": 1,
+   "explain_changed_lines": 5,
+   "dominant_needs": [
+    "total changed 495",
+    "stmt errors 5 ln",
+    "Filter on partitioned table"
+   ]
+  }
+ ],
+ "costs_visible": "Literal costs are visible in exactly 1 expected statement in the whole failing corpus: inherit.out 'explain update parted_tab set a = 2 where false;' -> 'Update on parted_tab  (cost=0.00..0.00 rows=0 width=0)' / '->  Result  (cost=0.00..0.00 rows=0 width=10)' / 'One-Time Filter: false' (3 rows). 1,834 of 1,874 statements use COSTS OFF. Masked costs (cost=N..N / cost=N.N..N.N) appear in 39 statements via PL/pgSQL wrappers: explain 25 (explain_filter, also masks rows=N width=N time=N.N and Planning/Execution Time), misc_functions 12 (explain_mask_costs; 6 of them deliberately keep the literal row estimate 'rows=30', 'rows=5', 'rows=1' from generate_series_timestamp SupportRequestRows), incremental_sort 2 (explain_analyze_without_memory). Actual rows/loops are literal in 89 blocks across 10 files (partition_prune 51, brin_multi 9, merge 8, misc_functions 8, select_into 3, select_parallel 3, incremental_sort 2, matview 2, tidscan 2, select 1) and masked in 28 (explain 15, memoize 13). Row estimates also leak outside plan blocks: stats_ext check_estimated_rows() 382 calls -> 762 changed 'estimated | actual' lines (Gres prints 0 for every estimate); join_hash hash_join_batches() 19 calls read Hash Batches from EXPLAIN (ANALYZE, FORMAT JSON).",
+ "stats_dependence": "test_setup.out runs VACUUM ANALYZE (pg_statistic + relpages/reltuples) on onek, onek2, tenk1, tenk2, person, emp, student, stud_emp, road, ihighway, shighway, and plain VACUUM (relpages/reltuples only, no pg_statistic) on CHAR_TBL, FLOAT8_TBL, INT2_TBL, INT4_TBL, INT8_TBL, TEXT_TBL, VARCHAR_TBL; point_tbl is deliberately left unvacuumed. Gres ANALYZE stores only reltuples (crates/pgexec/src/relstats.rs) and relhassubclass; there is no pg_statistic (no MCV/histogram/ndistinct/correlation/nullfrac), no relpages, and CREATE STATISTICS is refused (0A000). Files whose EXPLAINs mostly read the setup tables and therefore need those stats: join (155 refs: tenk1 47, int4_tbl 45, int8_tbl 44, onek 11, text_tbl 6), create_index (tenk1 41, point_tbl 14, tenk2 4), subselect (onek 20, tenk1 12, int8_tbl 9, tenk2 7), select_parallel (tenk1 41, tenk2 9), aggregates (tenk1 22), window (emp 19, tenk1 4), explain (int8_tbl 18), union (tenk1 9, int8_tbl 4), incremental_sort (tenk1 12), select (onek2 9), strings (text_tbl 9), groupingsets (tenk1 7), rowtypes (tenk1 5), with, limit, tidscan, memoize, misc_functions, write_parallel, tablesample, equivclass, rangefuncs, plpgsql. Files that ANALYZE their own tables before EXPLAIN (need an ANALYZE that fills pg_statistic): partition_join 67, stats_ext 64, join 19, partition_aggregate 8, inherit 8, incremental_sort 6, create_index 6, aggregates 6, rowsecurity 4, updatable_views 4, btree_index 4, plpgsql 4, alter_table 4, join_hash 3 (plus 'update pg_class set reltuples' to lie), memoize 3, privileges 3, predicate 2, rangetypes 2, merge 2, groupingsets 2, partition_prune 2, and 12 files with 1 (union, select_distinct, select_distinct_on, select, plancache, jsonb, tsearch, gin, create_view, generated_virtual, generated_stored, ...). Files with no ANALYZE that still expect index plans rely on GUC forcing (enable_seqscan/indexscan/bitmapscan off): create_index_spgist 71 stmts, box, polygon, gist, gin, brin/brin_bloom/brin_multi, cluster, inet, regex, tsearch, indexing, jsonb, interval, spgist, index_including(_gist), create_am, generated_stored \u2014 942 of 1,874 blocks (50%) run under some non-default planner GUC, 724 of the 1,128 planner-only blocks. Plan shapes that only make sense with real row estimates: 'Index Scan using tenk1_unique1 on tenk1' for unique1 < 10 vs Seq Scan for wide ranges (join/create_index/aggregates); Hash vs Merge vs Nested Loop and which side is hashed/materialized (join: 137 Materialize, 400 Hash; partition_join with 200-row analyzed partitions); Memoize placement (memoize/join/predicate/subselect); Incremental Sort vs Sort from presorted-prefix estimates (incremental_sort); parallel plans gated by parallel_setup_cost=0/parallel_tuple_cost=0/min_parallel_table_scan_size=0 + parallel_workers reloption; MIN/MAX planagg to Result/InitPlan/Limit/Index Only Scan Backward (aggregates); GROUP BY key reordering and presorted aggregates (aggregates/groupingsets); stats_ext extended-statistics selectivity (762 lines); misc_functions SupportRequestRows estimates; join_hash batch counts from reltuples/work_mem.",
+ "planner_requirements": "To reproduce the corpus a planner must model, in rough order of corpus coverage (blocks of the 1,874 expected; lines of the 27,230 attributed): (1) A resolved query tree instead of the raw AST as the EXPLAIN input, with PostgreSQL's target-list/qual deparse rules (ruleutils.c: qualify columns only when >1 RTE, VERBOSE Output lists incl. schema-qualified relation/function names, operator/cast/const spelling) \u2014 touches every block; VERBOSE Output alone is 269 blocks / 3,316 lines / 33 files. (2) prepjointree.c/subselect.c/planner.c preprocessing: subquery pull-up into Subquery Scan or flattened joins, InitPlan/SubPlan numbering and hashed-subplan choice, `(InitPlan 1).col1` references (126 blocks, 1,873 lines), constant folding + predicate proofs (predtest.c) into `Result`/`One-Time Filter: false` (100 blocks), CTE materialization rules -> `CTE x` headers, CTE Scan/WorkTable Scan/Recursive Union (46 blocks), join removal (analyzejoins.c) and self-join elimination (join), outer-join strength reduction, EXISTS/IN -> Semi/Anti joins. (3) Inheritance/partition expansion + partprune.c static pruning + runtime pruning bookkeeping (`Append`/`Merge Append` with `t1 t1_1` child aliases, `Subplans Removed`, `never executed`) \u2014 457 blocks / ~7,900 lines across partition_prune, partition_join, partition_aggregate, inherit, rowsecurity, alter_table, tablesample, update; partitionwise join/aggregate (relnode.c/partbounds.c) is the whole of partition_join (3,218 planner lines) and partition_aggregate (954). (4) indxpath.c + selfuncs.c/clausesel.c: index path generation with Index Cond/Filter split, Index Only Scan visibility (Heap Fetches), Backward scans from pathkeys, Bitmap Heap/Index Scan + BitmapAnd/Or + Recheck Cond, KNN `Order By`, regex/LIKE prefix extraction, tidpath.c Tid/Tid Range scans (TID Cond) \u2014 579 blocks / 5,973 lines / 47 files, about two-thirds under enable_seqscan=off so `disabled_nodes` semantics (PG18 `Disabled: true`) matter more than fine cost ratios; requires pg_statistic (ANALYZE) for tenk1/onek-class tables and reltuples/relpages for the rest. (5) joinpath.c/joinrels.c/costsize.c: join order search (left/right/bushy, join_collapse_limit, geqo threshold), Nested Loop vs Hash vs Merge with all outer/semi/anti/right-semi/right-anti variants, which side is hashed (`Hash` under inner), Materialize on the nested-loop inner, Memoize (Cache Key/Mode, Inner Unique), Merge Cond/Hash Cond/Join Filter split, equivclass.c derived clauses (equivclass file), Sort placement for merge joins \u2014 279 join-method blocks / 5,254 lines plus 345 Nested Loop blocks whose side order is cost-chosen (join is the flagship: 2,620 planner lines). (6) pathkeys.c + planner.c grouping/ordering: Sort vs Incremental Sort (Presorted Key), HashAggregate vs GroupAggregate vs Sort+Unique, MixedAggregate for grouping sets (Hash Key lists), Group, GROUP BY reordering, presorted aggregates (adjust_group_pathkeys_for_groupagg), planagg.c MIN/MAX -> Result/InitPlan/Limit/Index Only Scan Backward, DISTINCT via Unique or index, WindowAgg with PG18 `Window:` line and Run Condition, SetOp/HashSetOp for INTERSECT/EXCEPT, LockRows, ProjectSet \u2014 358+75+55 blocks (~7,000 lines) in aggregates, groupingsets, incremental_sort, union, window, select_distinct(_on), tuplesort, subselect. (7) Parallel planning (allpaths.c/planner.c/costsize.c parallel costs): Gather/Gather Merge, Parallel Seq/Index/Index Only/Bitmap scans, Parallel Append, Parallel Hash (Join), Partial/Finalize aggregates, Workers Planned/Launched, Single Copy, parallel_workers reloption, parallel_leader_participation, debug_parallel_query \u2014 120 blocks / 1,850 lines / 11 files (select_parallel, partition_aggregate, incremental_sort, select_distinct, aggregates, join_hash, memoize, write_parallel, partition_prune, partition_join, plpgsql). (8) createplan.c/setrefs.c + explain.c renderer parity: node naming (`Index Scan using i on t alias`, `Function Scan on fn alias`, `Values Scan on \"*VALUES*\"`, `Table Function Scan on \"json_table\"/\"xmltable\"`, `Sample Scan` + `Sampling:`, `Merge on t` + `Tuples:`, ON CONFLICT lines), InitPlan/SubPlan/CTE headers, `Disabled`, JSON/YAML/XML formats, and executor instrumentation for ANALYZE (`actual rows/loops`, `never executed`, `Rows Removed by Filter`, `Sort Method`/`Memory`, `Heap Fetches`, `Index Searches`, Memoize Hits/Misses, `Storage`, Planning/Execution Time, `Buffers`, MEMORY/SERIALIZE/SETTINGS/Query Identifier lines) \u2014 117 ANALYZE statements / 1,572 lines plus the `explain` file (444 lines) and every FORMAT block. (9) Statistics: ANALYZE writing pg_statistic (MCV, histogram, ndistinct, nullfrac, width, correlation) with default_statistics_target, relpages/reltuples, extended statistics (stats_ext 762 estimate lines + CREATE STATISTICS), function ROWS/support functions (misc_functions), and `update pg_class set reltuples` (join_hash). (10) GUC plumbing for ~45 planner GUCs (enable_*, parallel_*, work_mem/hash_mem_multiplier, plan_cache_mode generic vs custom, constraint_exclusion, geqo, join/from_collapse_limit, jit) with SET LOCAL/RESET/savepoint semantics. Rough phasing by payoff: (a) resolved-tree renderer + deparse + inheritance/partition expansion + InitPlan/SubPlan + node coverage (non-cost, ~6,600 lines directly and a precondition for everything else); (b) statistics + index/bitmap/tid paths honoring enable_* (\u22486,000 lines, mostly GUC-forced); (c) join methods/order + Materialize/Memoize + equivalence classes (\u22485,300 + Nested Loop reorders); (d) grouping/ordering/window/setop placement (\u22487,000 lines shared with a-c); (e) parallel plans (\u22481,850); (f) ANALYZE instrumentation and rare EXPLAIN options (\u22482,000). Everything except (a) needs the cost model of costsize.c to pick the same path PostgreSQL picks; with COSTS OFF the numbers themselves never print except in the 1 inherit statement and the estimate tables of stats_ext/misc_functions.",
+ "notes": "REPORT (report.md could not be written by the harness; full content follows). Scripts and machine outputs are in scratchpad/analysis/explain_census/: census.py -> census.json + explain_statements.txt; diffcls.py -> diffcls.json (per-block classification, error histogram); features.py -> per_file_features.json; files_table.json; structured_compact.json.\n\n1. Corpus totals. 175 failing files; 88 contain EXPLAIN. 1,874 EXPLAIN statements produce a plan block (80 via PL/pgSQL wrappers: explain_filter 28, explain_memoize 13, explain_mask_costs 12, explain_parallel_append 12, explain_merge 8, explain_analyze_without_memory 2, explain_analyze_inc_sort_nodes_verify_invariants 2, explain_analyze 2, explain_parallel_sort_stats 1). EXPLAIN-driven statements without a plan block: explain 2 (Settings regex -> OK), select_into 1 (EXPLAIN ANALYZE CREATE TABLE in DO), psql 1 (EXPLAIN EXECUTE \\gdesc), stats_ext 382 check_estimated_rows, join_hash 19 hash_join_batches, gin 2 explain_query_json. Expected plan rows 14,924 (20,546 lines incl. header/ruler/count). Formats: TEXT 1,865, JSON 6, YAML 2, XML 1. Gres emits 1,477 blocks (5,515 rows) with 15 node types (Seq Scan 1898, Nested Loop 614, Subquery Scan 360, Sort 325, HashAggregate 182, Result 176, Aggregate 172, Limit 83, Append 75, Values Scan 55, Function Scan 35, Update 18, Delete 13, Insert 10, Unique 7) and 5 annotations (Filter 766, Sort Key 325, Join Filter 213, Group Key 155, One-Time Filter 3). Only 33/1,874 expected blocks are byte-identical (64 rows). Changed lines inside plan blocks: strict 27,158 / block-attributed 27,230 of 110,197 (24.6%); file_stats rough 27,138 agrees. Classification: planner-only 15,971 lines (1,128 blocks, 62 files); shape (non-cost) 6,592 lines (746 blocks); statement error 4,667 lines (~397 statements). GUC-forced: 942/1,874 blocks; 724/1,128 planner blocks (8,541 lines).\n\n2. Feature breakdown (blocks/lines among the 1,874): index/bitmap scan 579/5,973; hash join family 233/4,439; merge join family 46/815; Nested Loop 345/4,985; Materialize/Memoize 133/1,977; parallel 120/1,850; Incremental Sort 47/562; Merge Append 43/767; GroupAggregate/MixedAggregate 75/1,143; HashAggregate/Sort/Unique/Group placement 446/6,964; Append (inheritance/partition/union) 398/6,781; child alias _N expansion 457/7,861; VERBOSE Output 269/3,316; InitPlan/SubPlan 126/1,873; One-Time Filter 100/995; CTE header 36/502; Function/Values/CTE/Subquery scans 229/2,595; WindowAgg/ProjectSet/SetOp/LockRows 106/1,093; Tid scans 24/137; Sample Scan 8/99; ANALYZE actual rows 114/1,572; never executed 31/685; Subplans Removed 33/376.\n\n3. Roots. R-EXP-1 cost-based planner + PG EXPLAIN renderer: 15,971 lines, XXL; new planner module producing a Plan tree consumed by explain.rs and the executor (exec.rs/join.rs/scanner.rs), real ANALYZE -> pg_statistic (relstats.rs + pgcatalog), GUC plumbing in session.rs. R-EXP-2 non-cost plan-shape infrastructure: 6,592 lines, XL; replace explain.rs plan_select/plan_from/plan_table_expr (AST walk) with a walk over the resolved query (bind.rs/query.rs): inheritance/partition expansion (inheritance.rs, partition.rs) + static pruning, VERBOSE Output + schema-qualified names, InitPlan/SubPlan, qualification rule, constant folding, CTE nodes, WindowAgg/ProjectSet/SetOp/LockRows/Sample/Table Function/MERGE/ON CONFLICT/ModifyTable-children, Function Scan 'on fn alias', deparse parity. R-EXP-3 EXPLAIN options + instrumentation: L-XL; explain.rs render_* + executor hooks; parser.rs explain_stmt (6059) currently drops BUFFERS/WAL/TIMING/SUMMARY/SETTINGS/GENERIC_PLAN/MEMORY/SERIALIZE values. R-EXP-4 statement-level producer gaps (4,667 lines): (a) user-defined SRF in the select list -> 'set-returning function ... is only supported in FROM position' (crates/pgexec/src/routine.rs validate_plpgsql_scalar line 2112 and 2609; target-list SRF expansion in crates/pgexec/src/srf.rs) \u2014 direct: explain 28, memoize 13, misc_functions 12, partition_prune 12, merge 8, incremental_sort 4, rangefuncs 3; cascade: select_parallel 'select sp_test_func() order by 1' inside begin aborts the block (43 EXPLAINs, 537 lines). M. (b) 'update pg_class set reltuples' refused (pg_catalog.pg_class not updatable) -> join_hash transaction aborted (23 EXPLAINs, 249 lines + 19 hash_join_batches). (c) relation-missing cascades from earlier CREATE gaps: partition_prune 35, updatable_views 30, inherit 16, partition_join 12 (unblocked statements then need R-EXP-1/2). (d) parser gaps inside explained statements: '<'/'<='/'>=' unexpected token 13 (geometric/array ops), 'expected Keyword(On), found Keyword(Join)' 4, 'expected identifier, found Star' 3, 'unexpected token Keyword(From)' 5, 'expected RParen, found Ident' 7, 'expected RParen, found TypeCast/LParen/Union'. (e) SEARCH/CYCLE (crates/pgexec/src/cte.rs 338/524) with 6. (f) column-missing 17 (incremental_sort 6), missing FROM-clause entry 9 (join LATERAL 6), type-missing 7, 'internal: scalar subquery must be resolved before type inference' (returning 3), 'ON NULL and UNIQUE KEYS not supported on JSON aggregates' (sqljson 4), xml_is_well_formed/xpath missing (xml 5), 'arrays of type ... not supported' 2, testrngfunc/array_to_set/mki*/my_gen_series/_pg_expandarray/string_agg(varchar)/to_tsquery(unknown) resolution, prepared statement missing (partition_prune 2, plan_cache_mode cascade).\n\n4. Brief corrections. (i) PG_COMPAT_MATRIX 'EXPLAIN / plan text 15,520 (13.8%)' and the 2026-08-10 join figure (3,585) are stale: current certified run has 27,158 lines in plan blocks (24.6%), join alone 4,085. (ii) Beyond 'every join prints Nested Loop', Gres prints a bare 'Function Scan' for every non-table FROM item (no 'on fn alias'), never expands inheritance/partition children, has no CTE/WindowAgg/ProjectSet/SetOp/LockRows/MERGE/Sample/Table Function/Tid nodes, no InitPlan/SubPlan, and ignores VERBOSE \u2014 the renderer gap is wider than join method + index choice. (iii) The corpus is almost entirely COSTS OFF (1,834/1,874): a planner reproducing PostgreSQL's choices without printing its cost numbers would match; literal cost numbers matter in 1 statement, row estimates in inherit x1, misc_functions x6, stats_ext x382. (iv) 397/1,874 EXPLAIN statements never produce a plan for non-planner reasons; the biggest single reason (~120 blocks + select_parallel cascade) is the SRF-in-select-list refusal in routine.rs. (v) diff line-count subtlety: an expected '-- comment' line removed appears as '--- comment' in the diff and must not be dropped as a file header (only '^(\\\\+\\\\+\\\\+|---) /' are headers); my counts follow that rule (109,160 changed lines by that walk vs 110,197 in file_stats; the 1,037 gap is lines file_stats counted that start with '\\\\ No newline' or similar \u2014 not EXPLAIN-relevant)."
+}

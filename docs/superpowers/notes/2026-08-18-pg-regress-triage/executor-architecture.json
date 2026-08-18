@@ -1,0 +1,269 @@
+{
+ "pipeline": "Entry: crates/pgexec/src/session.rs:6732 Session::run_one -> run_one_inner (7050-7061 dispatch): Statement::Query with locking -> run_query_locking (8104) -> run_select_locking (8128) -> exec.rs:23808 execute_read_locking (own scan loop + EvalPlanQual); Query with a data-modifying CTE -> run_write; plain Query -> run_select (7869) -> run_select_inner -> run_select_traced (7902) which takes snapshot/read_ts, pins GC, builds subquery::SubCtx (subquery.rs:25) and spawns a blocking worker that calls exec.rs:23750 execute_read -> query.rs:7 query_to_relation -> query_to_relation_with_ctes (11): cte.rs evaluate_with_clause materialises every CTE eagerly; Select -> exec.rs:19170 select_to_relation_with_ctes; Values -> values.rs; Nested -> recurse; SetOp -> setops.rs set_expr_to_relation; then query.rs:144 relation_to_rows_result. THERE IS NO INTERMEDIATE REPRESENTATION: the executor interprets the AST directly. The only 'IR' is join.rs:29 Relation { scope: Scope, rows: Vec<Vec<Datum>> } (fully materialised) and bind.rs BoundExpr (the same Expr AST with columns rewritten to `$pos.N`); types are inferred lazily by eval.rs:4154 infer_type and never stored. No Volcano/iterator model, no plan node type, no per-node instrumentation. Order of operations inside select_to_relation_with_ctes (exec.rs:19170-19321): (1) subquery folding exec.rs:15530 resolve_select_subqueries \u2014 uncorrelated subqueries evaluated once and rewritten to Expr::Const/InList (subquery.rs module doc), correlated ones re-bound per row via LateralBinder (exec.rs:13981-14320), row_matches_correlated (16725), materialize_correlated_row_exprs (16541), scalar lookups plan_correlated_scalar_lookup (15106); (2) FROM: build_from (13374) -> build_table_expr (17685) per item, append_from_item (13548) left-fold; lateral items rebuilt per outer row in lateral_join (13745) with an AST-keyed cache of specialised right sides; (3) base relation build_base_table (17514) -> scan_stored_relation (17188): CTE / transition relation / virtual catalog / view (re-parsed and re-executed each reference at 17627) / stored table; inheritance tree inherited_scan (17133), partition tree partitioned_scan (17100) \u2014 both append child scans into one rls::RawScan under the parent's ReadPermit and policies; physical scan via scanner.rs:951 collect_cursor_bounded over RangeScanner::scan_cursor with a ScanRequest (scanner.rs:198: predicate/projection/partial-aggregate/top-K pushdown), or exec.rs:18151 try_scan_with_local_index; the whole relation is in memory before WHERE (comment 17224); (4) WHERE pushdown exec.rs:13612 push_local_where applies immutable+leakproof single-side conjuncts before a join, and append_from_item turns a cross-join WHERE into ON so the hash JoinIndex can key on it (13574); the full WHERE is re-evaluated after FROM (19276); (5) join join.rs:71 join_relations / 345 join_relations_impl: hash JoinIndex built over the RIGHT relation whenever a hash-safe equality key exists (JoinIndex::build, hashes_like_it_compares 969), else nested loop with the full predicate; output order = left order x candidate order; outer-join liveness markers; per-operator memory check; (6) distributed join exec.rs:17885 try_distributed_inner_equi_join (sharded tables only, RangeScanner::join with plan_dist::JoinStrategy); (7) WHERE loop 19275-19290; (8) window window.rs execute (called at 19302) above WHERE/GROUP BY, below DISTINCT/ORDER BY/LIMIT, owns the projection when present; (9) grouping grouping.rs is_grouping_query -> agg.rs:2742 aggregate_rows: one hash pass, groups in first-appearance order (HashMap<Vec<Datum>,usize> at 2854), grouping sets by input augmentation (grouping.rs doc); (10) projection/DISTINCT/ORDER BY/LIMIT/SRF exec.rs:24110 project_rows_ordered: HashSet dedup, Rust stable sort_by on key_source_rows (24225), apply_row_window (OFFSET/LIMIT/WITH TIES), distinct_on_plan (24290)+keep_first_per_distinct_on_group (24400), select-list SRFs to srf::project_rows_ordered (ProjectSet); (11) set ops setops.rs; CTE scan cte.rs requalify_cte (from 17580); SRF in FROM srf::from_item / routine::table_function_expansion (17745-17794); Values values.rs; cursors materialise at DECLARE (cursor.rs:1). Describe/RowDescription is a THIRD walk: query.rs:59 describe_query_expr -> exec.rs:19360 build_from_schema_of_select -> build_table_expr_schema_with_ctes (19419) -> resolve_projection (24790). Writes exec.rs:3308 execute_write use the same builders for their sources (build_from at 6036/6115/6931/7779; query_to_relation at 6210/7062/7786/8301). EXPLAIN today: session.rs:5176 explain runs describe_statement, then if ANALYZE runs the statement via run_one and keeps only rows.len(); then explain.rs:77 plan_statement builds a syntactic PlanNode tree from the AST (Seq Scan+Filter, Nested Loop for every join, Subquery Scan, HashAggregate/Aggregate/Unique/Sort/Limit/Result/Append/Values Scan/Insert/Update/Delete/Function Scan) and render_with_rows (852) prints text/json/yaml/xml with fixed (cost=0.00..0.00 rows=0 width=0), actual rows only on the root and 0 elsewhere, loops=1, no timing, no Planning/Execution Time, no VERBOSE Output lines.",
+ "operators_today": [
+  {
+   "name": "Seq Scan",
+   "exists": "yes",
+   "where": "exec.rs:17188 scan_stored_relation -> scanner.rs:951 collect_cursor_bounded / RangeScanner::scan_cursor (LocalRangeCursor scanner.rs:1310); materialised",
+   "notes": "Wrap as a streaming leaf; add Filter / Rows Removed by Filter counters"
+  },
+  {
+   "name": "Index Scan",
+   "exists": "partial",
+   "where": "exec.rs:18151 try_scan_with_local_index + 18221 choose_local_index_equality + 11509 lookup_local_index_equal",
+   "notes": "single-column local btree, col = const only, unordered, always heap-fetches via visible_rows_for_rowids (11601); index keys are not order-preserving (crates/pgkv/src/key.rs:248 uses u32 len + rowenc::encode_row, rowenc.rs:1 'NOT order-preserving'); needs memcomparable key encoding in pgkv keyenc.rs, multi-column prefix/range probes, Index Cond vs Filter split, backward scans, cost-based choice"
+  },
+  {
+   "name": "Index Only Scan",
+   "exists": "no",
+   "where": "\u2014",
+   "notes": "index entries carry no visibility; every probe reads version chains; INCLUDE refused (27 errors 'CREATE INDEX \u2026 INCLUDE is not supported'); needs ordered index + visibility-map analogue (Heap Fetches) + include columns"
+  },
+  {
+   "name": "Bitmap Index Scan / Bitmap Heap Scan",
+   "exists": "partial",
+   "where": "exec.rs:11555 gin_candidate_rowids builds BTreeSet<u64> rowid sets and unions/intersects them; heap side = visible_rows_for_rowids (11601)",
+   "notes": "a seed for bitmap plans; generalise to btree ranges, Recheck Cond, lossy pages, work_mem"
+  },
+  {
+   "name": "BitmapAnd / BitmapOr",
+   "exists": "partial",
+   "where": "TsQuery::And/Or folding in gin_candidate_rowids",
+   "notes": "node types over the same rowid sets"
+  },
+  {
+   "name": "Tid Scan / Tid Range Scan",
+   "exists": "no",
+   "where": "ctid is a derived system column scope.rs:153 row_ctid; pgkv key::row_key(table.id, rowid) allows a direct seek; visible_rows_for_rowids is the fetch",
+   "notes": "detect ctid =/IN/ANY and ctid </> predicates; map ctid to rowid; TID Cond"
+  },
+  {
+   "name": "Sample Scan",
+   "exists": "partial",
+   "where": "exec.rs:17806 apply_tablesample",
+   "notes": "samples the materialised relation with xorshift, not page-based; node + Sampling line; row set differs from PostgreSQL by design except 0%/100%"
+  },
+  {
+   "name": "Function Scan",
+   "exists": "yes",
+   "where": "exec.rs:17745-17794 srf::from_item, routine::table_function_expansion",
+   "notes": "node; Function Call in VERBOSE; user SRF in SELECT LIST is refused (routine.rs:2112) which hides the explain_* wrapper tests"
+  },
+  {
+   "name": "Values Scan",
+   "exists": "yes",
+   "where": "values.rs",
+   "notes": "node already printed for top-level VALUES"
+  },
+  {
+   "name": "CTE Scan",
+   "exists": "yes",
+   "where": "cte.rs evaluate_with_clause + requalify_cte (exec.rs:17580)",
+   "notes": "always materialised (cte.rs:7); inlining (NOT MATERIALIZED / single reference) is a planner rule"
+  },
+  {
+   "name": "WorkTable Scan / Recursive Union",
+   "exists": "yes",
+   "where": "cte.rs WITH RECURSIVE fixpoint",
+   "notes": "nodes; SEARCH/CYCLE refused (36 errors)"
+  },
+  {
+   "name": "Subquery Scan",
+   "exists": "yes",
+   "where": "exec.rs:17733 TableExpr::Derived -> query_to_relation_with_ctes + values::requalify_derived",
+   "notes": "node; PostgreSQL usually removes it (remove_unused_subquery) \u2014 a planner rule"
+  },
+  {
+   "name": "Named Tuplestore Scan",
+   "exists": "yes",
+   "where": "exec.rs:17582 transition relations",
+   "notes": "node"
+  },
+  {
+   "name": "Table Function Scan",
+   "exists": "yes",
+   "where": "jsontable::from_item (exec.rs:17795)",
+   "notes": "node 'Table Function Scan on \"json_table\"'"
+  },
+  {
+   "name": "Foreign Scan",
+   "exists": "yes",
+   "where": "exec.rs:17226 foreign path in scan_stored_relation",
+   "notes": "node; not in the core schedule"
+  },
+  {
+   "name": "Nested Loop (inner/left/right/full/semi/anti)",
+   "exists": "partial",
+   "where": "join.rs:345 join_relations_impl nested-loop branch (no index) for Inner/Cross/Left/Right/Full",
+   "notes": "no semi/anti: EXISTS/IN are folded by subquery.rs into constants or per-row lookups, never into joins; join order = FROM order; inner/outer choice by cost is what fixes the geometry/join reorder lines; Join Filter vs pushed Filter split; Materialize below the inner"
+  },
+  {
+   "name": "Hash Join (all kinds)",
+   "exists": "partial",
+   "where": "join.rs JoinIndex over the RIGHT relation whenever a hash-safe equality key exists (JoinIndex::build, candidate_rows)",
+   "notes": "no Hash node, no batches, hashes the right side regardless of size; output order = left x ascending candidate order whereas PostgreSQL emits LIFO bucket-chain order; needs Hash Join+Hash pair, Hash Cond, right/right-semi/right-anti variants, work_mem batching text"
+  },
+  {
+   "name": "Merge Join (all kinds)",
+   "exists": "no",
+   "where": "\u2014",
+   "notes": "needs sorted inputs (Sort or ordered Index Scan), mark/restore, Merge Cond"
+  },
+  {
+   "name": "Hash",
+   "exists": "no",
+   "where": "(part of JoinIndex)",
+   "notes": "node"
+  },
+  {
+   "name": "Materialize",
+   "exists": "partial",
+   "where": "lateral cache in exec.rs:13775; every relation is materialised anyway",
+   "notes": "placement by cost only"
+  },
+  {
+   "name": "Memoize",
+   "exists": "partial",
+   "where": "exec.rs:13775 lateral_join cache keyed by specialised AST",
+   "notes": "Cache Key/Cache Mode/hits/misses/evictions in ANALYZE; depends on parameterised inner path"
+  },
+  {
+   "name": "Sort",
+   "exists": "yes",
+   "where": "exec.rs:24190 sort_by in project_rows_ordered, values::apply_query_order, window.rs internal sorts",
+   "notes": "Rust stable sort; PostgreSQL pg_qsort tie order differs (window 818 reorder lines); Sort Method text for ANALYZE; work_mem"
+  },
+  {
+   "name": "Incremental Sort",
+   "exists": "no",
+   "where": "\u2014",
+   "notes": "Presorted Key, group counts (incremental_sort 724 lines)"
+  },
+  {
+   "name": "Aggregate / GroupAggregate / HashAggregate / MixedAggregate (partial/finalize)",
+   "exists": "partial",
+   "where": "agg.rs:2742 aggregate_rows (one hash pass, first-seen group order), grouping.rs augmentation for grouping sets",
+   "notes": "strategy choice; GroupAggregate needs sorted input and key-order output; MixedAggregate for grouping sets; Partial/Finalize split for parallel/partitionwise (48 'Partial HashAggregate' expected lines)"
+  },
+  {
+   "name": "Group",
+   "exists": "no",
+   "where": "\u2014",
+   "notes": "trivial over sorted input"
+  },
+  {
+   "name": "WindowAgg",
+   "exists": "yes",
+   "where": "window.rs execute (called exec.rs:19302)",
+   "notes": "must emit rows in Sort order (today input order \u2014 a window.rs defect); Run Condition; Sort below it"
+  },
+  {
+   "name": "Unique",
+   "exists": "partial",
+   "where": "exec.rs:24400 keep_first_per_distinct_on_group; DISTINCT is HashSet",
+   "notes": "Unique-vs-HashAggregate choice for DISTINCT"
+  },
+  {
+   "name": "SetOp / HashSetOp",
+   "exists": "partial",
+   "where": "setops.rs",
+   "notes": "PostgreSQL 18 prints HashSetOp Intersect / SetOp Except over sorted Append"
+  },
+  {
+   "name": "Limit",
+   "exists": "yes",
+   "where": "exec.rs apply_row_window",
+   "notes": "node; WITH TIES"
+  },
+  {
+   "name": "LockRows",
+   "exists": "yes",
+   "where": "exec.rs:23808 execute_read_locking (own scan loop)",
+   "notes": "joins under FOR UPDATE refused (23886)"
+  },
+  {
+   "name": "Result",
+   "exists": "yes",
+   "where": "FROM-less SELECT (exec.rs:19208), One-Time Filter in explain.rs:227",
+   "notes": "also a projection node above Append/Merge Append in PostgreSQL; gating quals"
+  },
+  {
+   "name": "ProjectSet",
+   "exists": "yes",
+   "where": "srf::project_rows_ordered (exec.rs:24121)",
+   "notes": "node"
+  },
+  {
+   "name": "Append / Merge Append",
+   "exists": "partial",
+   "where": "exec.rs:17133 inherited_scan, 17100 partitioned_scan concatenate child scans; setops UNION ALL concatenates",
+   "notes": "no partition pruning (Subplans Removed), no Merge Append; child order = KV key order (length-first) not OID order"
+  },
+  {
+   "name": "Recursive Union",
+   "exists": "yes",
+   "where": "cte.rs fixpoint",
+   "notes": "node"
+  },
+  {
+   "name": "Gather / Gather Merge",
+   "exists": "no",
+   "where": "plan_dist::JoinStrategy::Gather is a distributed term, not PostgreSQL's Gather",
+   "notes": "propose plan-parallel/execute-serial with nloops accounting"
+  },
+  {
+   "name": "ModifyTable (Insert/Update/Delete/Merge on)",
+   "exists": "yes",
+   "where": "exec.rs:3308 execute_write",
+   "notes": "node with -> source plan, Conflict Resolution, per-partition child list"
+  }
+ ],
+ "planner_insertion": "Between binding/name resolution and row production, replacing exec.rs:19170 select_to_relation_with_ctes and everything it calls: execute_read (exec.rs:23750) -> plan::bind_query(read_ctx, &QueryExpr) -> Query (typed range table + target list) -> plan::plan(read_ctx, &Query) -> Plan tree -> plan::execute(read_ctx, &Plan) -> rows; session.rs:5176 explain calls the same bind+plan and renders from the Plan or from an instrumented PlanState; execute_read_locking and execute_write sources plug into the same tree (LockRows/ModifyTable on top). Reusable as-is or nearly: scope.rs Scope/ColumnBinding/Exposure (per-RTE Var namespace; keep `$pos` binding from bind.rs as the executor's Var representation); BoundExpr + eval.rs:66 eval + infer_type (add a cached type: TypedExpr); resolve_select_subqueries / LateralBinder / scalar lookups become InitPlan ($0 params) / SubPlan drivers; join.rs JoinIndex, JoinCondition and outer-join marker logic become the Hash node body and the nested-loop predicate (add 'which side is hashed' as a plan input); agg.rs Acc/AggSpec/collect_specs/validate_grouped become Agg node bodies; grouping.rs augmentation stays (only printed shape must be MixedAggregate/Hash Key/Group Key); window.rs execute = WindowAgg body (emit in sorted order); setops.rs, values.rs, srf.rs, jsontable.rs, cte.rs unchanged as leaf/node bodies; scan_stored_relation/inherited_scan/partitioned_scan/RawScan/apply_row_security/ReadPermit remain the ONLY way to build a scan leaf; plan_dist.rs becomes plan/dist.rs (leaf pushdown + distributed join path for sharded relations); explain.rs deparser (deparse_with, deparse_bare_with, plan_sort_key, sort_order_suffix, cast/subscript/field parenthesisation, viewdef::unary_expr_text) becomes plan/deparse.rs fed with typed bound expressions (fixes the '-3'::integer gap at explain.rs:676); render_json/yaml/xml envelopes kept and completed; the describe walk (query.rs:59, exec.rs:19360-19610) is deleted once target lists are typed. Invariants to preserve by construction: (1) RLS default-deny \u2014 stored rows exist only as rls::RawScan whose only exit is apply_row_security (rls.rs:1-47), tree children under the parent's policies (RawScan::absorb), pushdowns require UnrestrictedTable (rls::sanitize_scan_plan at exec.rs:17272) \u2014 attach the proof to the Path, never re-derive at run time; (2) leakproof pushdown \u2014 push_local_where (exec.rs:13612) only pushes immutable && leakproof conjuncts below a join; encode security_level/leakproof on the RestrictInfo equivalent and order qual evaluation by it (rowsecurity's f_leak NOTICEs observe it); (3) privilege::ReadPermit::acquire (privilege.rs:542) before any byte is read, ReadPermit::inherited for tree children (PostgreSQL checks the named relation's ACL only); (4) snapshot / read timestamp / GC pin are statement-level in run_select_traced, the plan carries none; (5) session::check_query_canceled at operator boundaries; (6) TimestampedRangeScanner (scanner.rs:1146) supplies read_ts to sharded leaves \u2014 plan leaves must remain ScanRequests.",
+ "proposal": "Modules under crates/pgexec/src/plan/ (start inside pgexec: the planner needs pub(crate) Scope/eval/RLS/catalog types; split into crabka-pgplan later if the API stabilises): mod.rs (bind_and_plan / execute / explain entry), query.rs (Query IR: RangeTbl { RteRelation{table, alias, only, sample, permit, rls decision}, RteSubquery, RteJoin, RteFunction, RteValues, RteCte, RteNamedTuplestore, RteResult }, TargetEntry, Var{rti,attno,ty}, RestrictInfo{clause,is_pushed_down,security_level,leakproof,required_relids}, sort/group/window/distinct/limit/locking clauses), bind.rs (AST -> Query using scope.rs), rewrite.rs (view expansion \u2014 today build_base_table re-parses view text per reference; RLS qual injection; CTE inlining; sublink -> semi/anti join; pull_up_subqueries; reduce_outer_joins; const folding; WHERE false), stats.rs (relpages/reltuples + pg_statistic-like nullfrac/width/ndistinct/MCV/histogram/correlation written by ANALYZE with PostgreSQL's compute_scalar_stats; estimate_rel_size fallback), selfuncs.rs (eqsel/scalarltsel/eqjoinsel/nulltestsel/\u2026, clauselist_selectivity, estimate_num_groups, DEFAULT_* constants), cost.rs (every cost_* function, PostgreSQL 18 disabled_nodes accounting, all planner GUCs), paths.rs (RelOptInfo, Path enum, add_path dominance, pathkeys, equivalence classes), indexpath.rs (clause-to-index matching via existing builtin_opclasses.rs/builtin_opfamilies.rs, Index Cond/Filter split, bitmap OR/AND, index-only eligibility), joinpath.rs (join_search_one_level, nestloop/hash/merge, parameterised paths for Memoize/Index inner, semi/anti/unique), grouping.rs (hash/sort/mixed agg, grouping sets, distinct, window, setop paths, limit/top-N), partition.rs (plan+exec-time pruning, partitionwise join/agg, Append/MergeAppend children in OID order, inheritance expansion), parallel.rs (partial paths, Gather/Gather Merge, worker counts from GUCs/reloptions), createplan.rs (Path -> Plan, set_plan_references: Var -> OUTER/INNER refs \u2014 what makes 'Sort Key: (count(*))' print its parentheses), exec/ (Volcano PlanState: one struct per node kind implementing next(); ntuples/nloops/rows_removed counters; leaves wrap existing scan/index/values/function/cte code), explain.rs (renderer over Plan/PlanState), deparse.rs (moved from explain.rs), dist.rs (from plan_dist.rs). Core types: Query, RangeTblEntry, RestrictInfo, EquivalenceClass, PathKey, RelOptInfo, Path, Plan (one variant per node type), PlanState, PlannedStmt (plan + rtable + subplans for 'SubPlan N' / 'InitPlan N (returns $0)' naming). PHASES: Phase 0 prerequisites (non-planner): user SRF in the select list in routine.rs/srf.rs (M) \u2014 unblocks ~81 explain_* wrapper statements in explain/memoize/incremental_sort/select_parallel/merge/partition_prune/misc_functions/stats_ext; full planner GUC surface in session.rs GUC table (enable_* x20, work_mem, hash_mem_multiplier, seq/random_page_cost, cpu_*_cost, parallel_*_cost, min_parallel_*_scan_size, max_parallel_workers[_per_gather], debug_parallel_query, jit, track_io_timing, plan_cache_mode, geqo*, join/from_collapse_limit, constraint_exclusion, enable_partition_pruning, enable_partitionwise_*, default_statistics_target, effective_cache_size, cursor_tuple_fraction) (M); window.rs output order (S). Phase 1 (XL): Query IR + single-relation plan tree executed for real (Seq Scan -> Filter -> Agg|Sort|Unique|Limit|ProjectSet|WindowAgg|Result, Values/Function/Subquery/CTE/Named Tuplestore/Table Function scans), ANALYZE counters, VERBOSE Output with schema qualification, full JSON/YAML/XML key set with COSTS zeros, SUMMARY; strict refactor, old path deleted at the end; buys single-relation EXPLAIN text minus cost numbers, ~1,119 'Output:' lines (join 418, subselect 174, with 76, returning 49), 'Rows Removed by Filter'. Phase 2 (XXL): stats.rs + selfuncs.rs + cost.rs + paths.rs + joinpath.rs + indexpath.rs, ordered index key encoding in pgkv (L, runs in parallel), Hash/Merge/NestLoop/Materialize/Memoize operators, semi/anti joins from sublinks, Index/Index Only/Bitmap/Tid leaves; buys the bulk of join (4,608 EXPLAIN + 444 reorder), subselect 1,264, aggregates 691, create_index 789, union 591, join_hash 322, updatable_views 340, rowsecurity 946, inherit 989 (Append trees), equivclass, predicate, select_distinct*, tidscan, tidrangescan, btree_index, hash_index, plus nested-loop reorder lines (geometry 1,334); only 46 unmasked 'cost=' lines exist (explain 30, misc_functions 14) so decision fidelity, not numeric fidelity, is the target. Phase 3 (L): upper rels \u2014 Hash/Group/Mixed aggregation with partial aggregation, Incremental Sort, WindowAgg Run Condition, DISTINCT Unique-vs-Hash, SetOp/HashSetOp, LockRows, ordered-set placement, top-N; buys window (531 EXPLAIN + 818 reorder), groupingsets 703, incremental_sort 582, aggregates remainder, select_distinct_on, tuplesort. Phase 4 (L): partition pruning at plan and exec time (Subplans Removed), partitionwise join/agg, Merge Append, run-time pruning with Params, OID-order children; buys partition_join 3,726, partition_prune 3,325, partition_aggregate 1,079, inherit remainder (~8k) \u2014 after those files' producer defects (relation-does-not-exist cascades, expression partition keys) are fixed by other slices. Phase 5 (M planner; XL only if executed for real): DECISION \u2014 plan parallel, execute serially, account as if parallel. Evidence select_parallel.out:583-598 prints 'Parallel Seq Scan on tenk1 (actual rows=1960.00 loops=50)' i.e. ntuples/nloops with nloops = outer_loops x (workers+1); EXPLAIN prints averages, so a serial executor that sets nloops on nodes below Gather that way and keeps ntuples as the total prints identical text; 'Workers Planned/Launched: N' and 'Worker N: Sort Method \u2026' are plan-time strings (memory masked by the tests). Trade-off stated plainly: the plan claims parallelism that does not happen, no wall-clock benefit, Launched always equals Planned; honest enough for the corpus (all 59 Workers lines in select_parallel are Planned or Launched: 4); real parallel execution can replace the accounting later without touching the planner. Buys select_parallel 558, write_parallel, ~350 embedded parallel lines in join_hash/partition_prune/partition_aggregate/aggregates/select_distinct/incremental_sort. Phase 6 (XXL, optional per file): GiST/SP-GiST/BRIN/hash index scans with operator classes (create_index_spgist 607, gist, brin*, hash_index). EXPLAIN rendering from PlanState: ExplainState { format, verbose, costs, analyze, timing, summary, buffers, settings, wal, memory, serialize } (extend pgparser ExplainOptions; parser.rs:6095 currently discards buffers/wal/timing/summary/settings/generic_plan/memory/serialize); walk PlanState and emit headline ('Node Type on rel alias', 'using idx', 'Backward', 'Parallel', 'Partial/Finalize'), '(cost=.. rows= width=)', '(actual time=.. rows=.. loops=..)' with two-decimal rows, ordered detail lines (Output, Index Cond, Recheck Cond, Filter, Join Filter, Hash Cond, Merge Cond, Sort Key, Presorted Key, Group Key, Cache Key, One-Time Filter, Rows Removed by \u2026, Heap Fetches, Sort Method, Buckets/Batches/Memory Usage, Workers, Subplans Removed, Disabled: true), 'InitPlan N (returns $0)' / 'SubPlan N' children, '->' children, Planning Time / Execution Time / Triggers blocks, JSON/YAML/XML with every key PostgreSQL emits (Startup/Total Cost, Plan Rows/Width, Actual*, Disabled, Buffers block of zeros under BUFFERS, Planning block, 'Triggers: []'). DEAD CODE to delete in exec.rs (no shims): roughly lines 13300-19330 and 24100-24900 \u2014 build_from, append_from_item, push_local_where, leakproof_predicate, immutable_row_predicate, filter_relation, is_lateral_item, lateral_join, lateral_cacheable*, LateralBinder and the whole correlated-subquery rewriting family (plan_correlated_scalar_lookup, plan_correlated_exists_lookup, install_lazy_initplans, resolve_select_subqueries, fold_correlated_lazy_expressions, materialize_correlated_row_exprs, replace_subqueries_with_typed_nulls, \u2026), try_execute_partial_aggregate_pushdown, try_execute_local_streaming_aggregate, try_execute_local_join_count, single_table_scan_plan, top_k_pushdown_*, select_to_relation_with_ctes, project_rows_ordered, key_source_rows, distinct_on_plan, keep_first_per_distinct_on_group, apply_row_window, the describe walk (build_from_schema_*, build_table_expr_schema_with_ctes, lateral_schema_item, query.rs::describe_query_expr*), explain.rs::plan_* (keep the deparser); join.rs join_relations*/count_join_rows become Hash/NestLoop node bodies; subquery.rs constant folding becomes InitPlan evaluation. Estimated 8-10k lines removed from exec.rs. Planner-only estimate: 24k-27k EXPLAIN lines + >=3.0k pure-reorder lines caused by plan shape + part of the Output lines \u2248 27k-30k of 110,197 (25-27%).",
+ "risks": [
+  "Cost fidelity is a page-count problem: PostgreSQL choices depend on relpages/reltuples from the heap file; Gres has no pages. Synthesising relpages from tuple width reproduces freshly loaded tables but not tables after UPDATE/DELETE (dead tuples keep pages until VACUUM), HOT chains, TOAST, fillfactor. Mitigation: port estimate_rel_size exactly and keep a heap-page simulator per table; measure per file. Most regress plans are steered by enable_* (569 toggles in 51 files) which limits the blast radius.",
+  "Statistics fidelity: compute_scalar_stats (MCV/histogram/ndistinct/correlation; deterministic for <=30k rows since all rows are read), estimate_num_groups, eqjoinsel MCV matching, extended statistics (143 errors 'extended planner statistics objects are not supported' in stats_ext) \u2014 a large port; any deviation flips plans in stats_ext, join, aggregates.",
+  "Unordered output order beyond nested loops: hash join emits probe-side order with LIFO bucket chains; HashAggregate emits simplehash iteration order (depends on hash_any/type hash functions and table growth); UNION dedup likewise. Reproducing needs PostgreSQL's hash functions and simplehash growth policy \u2014 feasible but a distinct L item; without it ~1-2k 'same rows different order' lines stay red even with a perfect planner.",
+  "Sort tie order: PostgreSQL pg_qsort (median-of-3, insertion sort n<7, presorted check) vs Rust stable sort (window 818 reorder lines); port sort_template.h's algorithm as the Sort node's loop (M).",
+  "exec.rs (39k lines) is the serialisation bottleneck for parallel agents: only lane A (Query IR + exec skeleton) may edit it; every other lane creates files under plan/ or edits pgkv/pgcatalog/parser; freeze the Plan/PlanState enum and Executor trait in one small header commit first.",
+  "RLS/privilege regressions: RawScan / UnrestrictedTable / ReadPermit are the strongest invariants; the planner must keep them as the sole constructors of scan leaves and pushdown paths; any bypass is a security hole visible in rowsecurity (2,215 lines).",
+  "Distributed regressions: sharded pushdowns and try_distributed_inner_equi_join have their own conformance/sharded gates; keep them as paths the planner always prefers for sharded relations until costs exist; index paths must stay local-only (IndexPlacement::Local, non-sharded).",
+  "Memory policy: replacing the per-operator 53200 (which today uses the hard-coded 16 MiB constant in sort/DISTINCT/agg/CTE/setops/SRF sites, exec.rs:24253/24427, agg.rs:2872, grouping.rs:496, cte.rs:492, setops.rs:353, srf.rs:2321) with a work_mem GUC + statement-level cap changes behaviour the soak/loadtest harness observes; keep the RangeScanner scan cap.",
+  "ANALYZE-time drift: no autovacuum in Gres, so plans over never-analysed tables must use PostgreSQL's un-analysed defaults (which is what the expected files also reflect for tables the tests never ANALYZE) \u2014 an advantage only if ANALYZE semantics and defaults match exactly.",
+  "Ordered-index encoding for text under non-C collations (en_US in some tests) requires collation sort keys; start with C/POSIX and default collation and accept red where the corpus depends on locale order.",
+  "Cursor/portal semantics: cursor.rs assumes materialised results; SCROLL/backward fetch over a streaming plan needs a Materialize under the portal (PostgreSQL does the same) \u2014 small but easy to forget.",
+  "Phase 0 must land first or the planner cannot be measured on explain/memoize/incremental_sort/select_parallel/merge/partition_prune: their EXPLAIN calls go through PL/pgSQL SETOF text wrappers refused by routine.rs:2112; unblocked statements will then fail longer on plan text.",
+  "Parallel-plan accounting is a deliberate fiction (serial execution, nloops multiplied); document it in PG_COMPAT_MATRIX and keep the switch to real workers open."
+ ],
+ "brief_corrections": [
+  "The brief says the read path 'does not consult secondary indexes for ordinary scans'. Nearly right; precisely: exec.rs:18151 try_scan_with_local_index consults a single-column LOCAL btree for `col = const` (choose_local_index_equality 18221) and a GIN for `tsvector @@ const` (choose_local_gin_index 18204), only when the relation is not sharded, has no partial aggregate pushed and is an UnrestrictedTable (no RLS). Never for ranges, ORDER BY, joins, multi-column keys. Btree entries are stored under a non-order-preserving key (crates/pgkv/src/key.rs:232-257: u32 length + rowenc::encode_row), so the index is physically equality-only.",
+  "EXPLAIN ANALYZE indeed runs the statement for real (session.rs:5196 run_one) but prints `actual rows` only on the ROOT node and 0 on every inner node, `loops=1` everywhere, no timing, no Planning/Execution Time lines (explain.rs:888-896).",
+  "read_gate.rs is not an executor operator: it is the linearizable-read `Linearizer` seam (LocalLinearizer no-op / RaftLinearizer ReadIndex), unrelated to planning.",
+  "plan_dist.rs's `Gather` (JoinStrategy::Gather) is a distributed strategy (gather rows from ranges), not PostgreSQL's Gather node; there is no parallel-execution concept in pgexec.",
+  "--pgexec-blocking-query-memory=20MiB reaches only base scans (collect_cursor_bounded) and joins (JoinPolicy.memory); sorts, DISTINCT, aggregates, grouping sets, CTEs, set operations and SRF buffers use the compile-time constant scanner::BLOCKING_QUERY_MEMORY = 16 MiB (scanner.rs:939), so the flag does not raise those budgets.",
+  "The 'EXPLAIN' files explain, memoize, incremental_sort and the explain_* wrapper calls in select_parallel/merge/partition_prune/partition_join/misc_functions/stats_ext fail on a NON-planner defect: routine.rs:2112 validate_plpgsql_scalar refuses a user-defined SETOF function in the select list ('set-returning function \u2026 is only supported in FROM position', 81 statements). Attribute those cascades to that root; the plan text underneath then needs the planner.",
+  "The classifier line counts differ: PG_COMPAT_MATRIX.md:37 says 15,520 EXPLAIN lines, scratchpad/classify.py says 27,138 (it also counts rulers/row-count frames inside plan hunks). Both are cited in the report; the planner-only estimate is 24k-27k EXPLAIN lines plus >=3,032 pure-reorder lines (a lower bound measured per hunk) whose cause is plan shape.",
+  "exec.rs `Statement::Query` execution is not one function: run_select_traced spawns a spawn_blocking worker and drives PL/pgSQL scalar-function requests from the async side (session.rs:8023 drive_scalar_worker); a plan executor must keep that request channel (routine::with_scalar_runtime) available inside node bodies."
+ ],
+ "distributed_impact": "Leaf scans go through the RangeScanner trait (scanner.rs:716: scan(ScanRequest), scan_cursor (paged, back-pressured), join(JoinRangeRequest), join_strategy[_for_keys]); crates/gres-ranges/src/forward.rs:3260 implements it across ranges; TimestampedRangeScanner (scanner.rs:1146) stamps the statement read timestamp onto sharded requests. The pushdown contract is plan_dist::DistributedScanPlan (plan_dist.rs:336): PredicatePushdown::Conjunctive(ColumnPredicate{column,op,value}), ProjectionPushdown, PartialAggregateSpec, TopKSpec, TextSearchPredicate; plan_dist::plan_join (278) picks Broadcast|CoPartitioned|Gather from Stats::estimated_bytes (StoredRowStats reads the rowid counter and a bounded key count) \u2014 a distributed strategy for two SHARDED base tables only, chosen in exec.rs:17885 try_distributed_inner_equi_join. Constraints on a plan tree: (1) every leaf that reads a stored relation must be expressible as a ScanRequest (pushdowns are optional accelerators; residual qual re-applied above); (2) Index Scan / Bitmap / Tid leaves are local-only (try_scan_with_local_index already declines table.sharded; IndexPlacement::Global needs the timestamp-transaction path) so the planner must generate index paths only for non-sharded relations with Local indexes at first; (3) sharded reads carry the statement read_ts, so the plan carries no per-node snapshot state; (4) try_distributed_inner_equi_join becomes one physical join path (DistributedHashJoin) for two sharded base tables with a single equality key, RLS-open, no virtual generated columns, printable as Hash Join with a Gres-specific 'Distributed:' line \u2014 the regress corpus has no sharded tables so fidelity is unaffected; (5) RLS/privilege proofs (UnrestrictedTable, ReadPermit) gate the pushdowns (rls::sanitize_scan_plan at exec.rs:17272) and must ride on the leaf Path, not be re-derived; (6) the per-scan memory cap in collect_cursor_bounded is distributed backpressure and should stay. Nothing in plan_dist conflicts with a PostgreSQL-shaped planner: keep it as plan/dist.rs (path generation for sharded relations) and always prefer its paths for sharded tables until they are costed.",
+ "explain_today": "explain.rs (1,440 lines) is a purely syntactic walk of the parser AST: plan_statement (77) -> plan_query (121) -> plan_set_expr (137) -> plan_select (162) -> plan_from (225) / plan_table_expr (268) / scan_node (298). It prints Seq Scan on <rel> [alias] + Filter (single relation prints unqualified columns), Nested Loop for every join with Join Filter, Subquery Scan, Function Scan for anything else, HashAggregate + Group Key for GROUP BY and DISTINCT, Aggregate for plain aggregates, Unique + Group Key for DISTINCT ON, Sort + Sort Key (with set_dummy_tlist_references parentheses rule at 344), Limit, Result + One-Time Filter, Values Scan on \\\"*VALUES*\\\", Append (+HashAggregate for UNION), Insert/Update/Delete on <rel>. Never Hash/Hash Join/Merge Join/Materialize/Memoize/Index*/Bitmap*/Gather/Incremental Sort/GroupAggregate/MixedAggregate/SetOp/WindowAgg/ProjectSet/CTE Scan/LockRows/Recursive Union. session.rs:5176 explain: describe_statement first (so 42P01/42703 match), if ANALYZE runs the statement via run_one and takes rows.len(), then renders. render_text_node (871): fixed ' (cost=0.00..0.00 rows=0 width=0)' when COSTS on, ' (actual rows=N.00 loops=1)' with N only on the root, no timing, no Planning/Execution Time, no Rows Removed, no VERBOSE Output/schema qualification; render_json/yaml/xml (907/972/1000) emit Node Type, Parallel Aware, Async Capable, Relation Name, Alias, Disabled and the detail keys only (no cost/rows/width/actual/Planning/Triggers). The deparser (deparse_with/deparse_bare_with 494/605, cast_operand, subscript_base, field_base, deparse_plain_call, plan_sort_key, sort_order_suffix, binary_op_text via eval::op_spelling) is a real ruleutils port worth keeping; known gap: untyped constants print '-3' not '-3'::integer because the AST carries no types (676). parser.rs:6095 accepts but discards buffers/wal/timing/summary/settings/generic_plan/memory/serialize; ExplainOptions (ast.rs:1805) holds only analyze/verbose/costs/format. The corpus's explain_filter/explain_mask_costs/... wrappers are user SRFs in the select list, refused by routine.rs:2112, so those tests never reach the renderer.",
+ "index_read_path": "Reads consult a secondary index only in exec.rs:18151 try_scan_with_local_index (called from scan_stored_relation 17274 when the relation is not sharded, no partial aggregate is pushed, and rls::UnrestrictedTable::from_decision proves no RLS): (a) tsvector @@ const via choose_local_gin_index (18204) + lookup_local_gin (11533) + gin_candidate_rowids (11555, BTreeSet<u64> rowid sets with And/Or folding, prefix terms and NOT bail out); (b) col = const via choose_local_index_equality (18221: first single-column Local btree matching a PredicatePushdown::Conjunctive Eq predicate) + lookup_local_index_equal (11509: scan_prefix over secondary_index_entry_prefix, collect rowids, visible_rows_for_rowids 11601 reads each version chain under the snapshot, recheck indexed values). Everything else is a full scan (RangeScanner::scan_cursor over rowid intervals). What physically stores entries \u2014 index_entries (exec.rs:11240): IndexMethod::Btree -> one entry of the key tuple; Gin -> one entry per tsvector lexeme (only tsvector; jsonb/array GIN not indexed); Hash/Gist/Spgist -> NO entries (catalog-only); any expression key -> no entries; brin refused at CREATE ('index access method \\\"brin\\\" is not supported', 36 errors); expression indexes catalog-only and restricted (17 errors); partial indexes refused (42 errors); INCLUDE refused (27 errors). The catalog Index (crates/pgcatalog/src/lib.rs:397) has no per-column direction/nulls/opclass/collation, no predicate, no include list. Key layout crates/pgkv/src/key.rs:232-257: [table_id][index_id+INDEX_PRIMARY][u32 len][rowenc::encode_row(canonicalize_row_for_key(values))][rowid]; rowenc.rs:1 'It is NOT order-preserving'; keyenc.rs:1 'Sortable encodings for arbitrary PRIMARY KEY column types are deferred'. So indexes are NOT ordered: no range probe, no leading-column prefix, no ORDER BY satisfaction, no Merge Join input, no Index Scan Backward. Entries carry no xmin/xmax, so every index read is a bitmap-heap-scan-with-recheck; there is no visibility map, so Index Only Scan (Heap Fetches: 0) is not honestly available. Unique constraints and FK lookups use the same equality probe on the write path (local_index_entry_ops 11220, backfill 10060). What an Index Scan / Index Only Scan / Bitmap Heap Scan need: (1) pgkv keyenc.rs memcomparable encoding for indexable Datums (ints, numeric, text under C collation, date/time, uuid, bool, arrays for GIN keys) with NULLS FIRST/LAST and DESC by inversion, drop the length prefix, add secondary_index_range(start,end); rebuild by re-running local_index_backfill_ops (greenfield, no migration); (2) pgcatalog Index/NewIndex per-key (expr|column, direction, nulls_first, opclass, collation), predicate, include; pg_index indkey/indoption/indexprs/indpred rows; (3) pgexec IndexPath builder (indxpath.c port using existing builtin_opclasses.rs/builtin_opfamilies.rs), an ordered index cursor in scanner.rs (local KV only; IndexPlacement::Global excluded until global-index reads exist), a bitmap path over rowid sets (already the shape of gin_candidate_rowids + visible_rows_for_rowids), Index Cond vs Filter split, Recheck Cond; (4) hash-method entries are a one-line change in index_entries; GiST/SP-GiST/BRIN operator scans are a separate XXL. Merge Join, ORDER BY via index, Merge Append and Index Scan Backward all follow from (1)+(3).",
+ "memory_policy": "--pgexec-blocking-query-memory (crates/gres/src/lib.rs:857; CI passes 20MiB from scripts/gres-pg-regress.sh:267) -> SqlEngine.blocking_query_memory (pgexec lib.rs:409) -> Session -> SubCtx.blocking_query_memory (subquery.rs:44) -> JoinPolicy.memory (subquery.rs:171). It is a PER-OPERATOR cap on retained bytes that raises 53200 'blocking query exceeded the memory budget' (scanner.rs:1136) instead of spilling: applied by collect_cursor_bounded (each base scan, scanner.rs:951), push_bounded_join_row / JoinIndex::build / count_join_rows (join.rs), the lateral cache (exec.rs:13818), key_source_rows (each sort, exec.rs:24251), ensure_blocking_rows_fit (DISTINCT, 24423), agg.rs:2872 (groups), grouping.rs:496, cte.rs:492, setops.rs:353, srf.rs:2321. Inconsistency: the sort/DISTINCT/aggregate/grouping/CTE/setops/SRF sites use the compile-time constant scanner::BLOCKING_QUERY_MEMORY = 16 MiB (scanner.rs:939), not the configured 20MiB; only scans and joins honour the flag. Corpus effect: 104 statements fail with 53200 (type_sanity 23, opr_sanity 18 \u2014 catalog self-joins pg_proc x pg_type \u2014, tuplesort 16, join 10, portals 5, limit 4, psql 3, numeric 3, memoize 3, brin* 7, \u2026). PostgreSQL's work_mem (4MB default; regress sets 64kB in tuplesort/incremental_sort/memoize/join_hash/select_parallel) is a SPILL threshold that only changes Sort Method / Batches / lossy-bitmap text, never the answer; Gres answers 'unrecognized configuration parameter \\\"work_mem\\\"' (4 errors). Planner interaction: work_mem is an input to cost_sort, cost_agg's hash-vs-sort choice (hash_mem_multiplier x work_mem), ExecChooseHashTableSize batches (printed by join_hash), Memoize cache size, bitmap lossiness, Materialize decisions. Recommendation: (a) add a work_mem GUC that feeds the cost model and the ANALYZE text (Sort Method: quicksort/top-N heapsort/external merge, Batches: n, Memory Usage masked by tests); (b) make the flag a STATEMENT-level hard cap on total retained bytes (still 53200 when exceeded) rather than per operator, and raise it for the regress run so opr_sanity/type_sanity fit; (c) keep the RangeScanner scan cap unchanged (distributed backpressure); (d) real spill-to-disk sort and hash-join batching is a later optional operator feature \u2014 a planner-chosen hash join or sort must never turn a query that PostgreSQL answers into a 53200.",
+ "files_to_touch": [
+  "crates/pgexec/src/plan/ (new: mod.rs, query.rs, bind.rs, rewrite.rs, stats.rs, selfuncs.rs, cost.rs, paths.rs, indexpath.rs, joinpath.rs, grouping.rs, partition.rs, parallel.rs, createplan.rs, exec/*.rs, explain.rs, deparse.rs, dist.rs)",
+  "crates/pgexec/src/exec.rs (execute_read 23750, execute_read_locking 23808, execute_write 3308 call the planner; delete the read-path region ~13300-19330 and 24100-24900; index_entries 11240 / local_index_backfill_ops 10060 for ordered keys) \u2014 lane A only",
+  "crates/pgexec/src/session.rs (explain 5176; run_select_traced 7902; GUC registry used by set_guc 7077 gains the planner GUC set; run_maintenance ANALYZE writes column statistics)",
+  "crates/pgexec/src/explain.rs (becomes plan/deparse.rs; plan_* deleted)",
+  "crates/pgexec/src/join.rs, agg.rs, grouping.rs, window.rs (emit in sort order), setops.rs, srf.rs, values.rs, cte.rs, subquery.rs (bodies re-homed under plan/exec)",
+  "crates/pgexec/src/scanner.rs (streaming cursor exposed to the Seq Scan node; ordered index cursor; work_mem-aware bounds; BLOCKING_QUERY_MEMORY sites)",
+  "crates/pgexec/src/relstats.rs -> plan/stats.rs (relpages/reltuples + pg_statistic-like data)",
+  "crates/pgexec/src/routine.rs:2112 validate_plpgsql_scalar and srf.rs (user SRF in the select list \u2014 phase 0)",
+  "crates/pgexec/src/rls.rs, privilege.rs (unchanged API; RawScan/UnrestrictedTable/ReadPermit carried on plan leaves)",
+  "crates/pgexec/src/plan_dist.rs -> plan/dist.rs",
+  "crates/pgkv/src/key.rs (secondary_index_entry_key/prefix/rowid_of), keyenc.rs (memcomparable encoders), rowenc.rs (unchanged; stop using it for index keys)",
+  "crates/pgcatalog/src/lib.rs Index/NewIndex (per-key direction/nulls/opclass/collation, predicate, include) and serde.rs",
+  "crates/pgparser/src/ast.rs ExplainOptions (1805) and parser.rs explain_stmt (6059) \u2014 keep buffers/wal/timing/summary/settings/generic_plan/memory/serialize flags",
+  "crates/gres/src/lib.rs (flag semantics if the memory cap becomes statement-level) and scripts/gres-pg-regress.sh:267 (budget value)",
+  "docs/PG_COMPAT_MATRIX.md:274 EXPLAIN row and the Window/JSON_TABLE rows that mention plan shape"
+ ]
+}
