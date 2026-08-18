@@ -16776,7 +16776,25 @@ mod tests {
 
         let (snapshot, own, gsnap) = session.read_context().await.expect("read context");
         let eval_ctx = session.eval_ctx();
-        let ctes = crate::cte::CteContext::empty();
+        let mut ctes = crate::cte::CteContext::empty();
+        ctes.insert(
+            "planned_cte".into(),
+            crate::join::Relation {
+                scope: crate::scope::Scope {
+                    columns: vec![crate::scope::ColumnBinding {
+                        exposure: crate::scope::Exposure::Output,
+                        qualifier: None,
+                        name: "n".into(),
+                        ty: crabka_pgtypes::ColumnType::Int4,
+                    }],
+                },
+                rows: vec![
+                    vec![crabka_pgtypes::Datum::Int4(1)],
+                    vec![crabka_pgtypes::Datum::Int4(2)],
+                    vec![crabka_pgtypes::Datum::Int4(3)],
+                ],
+            },
+        );
         let resolution = session.resolution_scope();
         let fctx = crate::exec::ForeignCtx {
             scanner: session.foreign_scanner.as_ref(),
@@ -16817,7 +16835,6 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(2)],
             ]
         );
-
         let select_of = |sql: &str| {
             let statements = crabka_pgparser::parse(sql).expect(sql);
             let [crabka_pgparser::ast::Statement::Query(query)] = statements.as_slice() else {
@@ -16837,6 +16854,19 @@ mod tests {
             select.locking = query.locking.clone();
             select
         };
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n FROM planned_cte WHERE n > 1"),
+        )
+        .expect("CteScan plan executes")
+        .expect("CTE source uses CteScan");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(3)],
+            ]
+        );
         for (sql, expected) in [
             ("SELECT a FROM seq_scan_test LIMIT 1", vec![1]),
             ("SELECT a FROM seq_scan_test OFFSET 1", vec![2, 2]),
@@ -16900,6 +16930,14 @@ mod tests {
             "SELECT n FROM generate_series(1, 3) AS g(n) ORDER BY n",
             "SELECT n FROM generate_series(1, 3) AS g(n) LIMIT 1",
             "SELECT n FROM planned_table_function()",
+            "SELECT DISTINCT n FROM planned_cte",
+            "SELECT n FROM planned_cte AS p(n)",
+            "SELECT n FROM planned_cte TABLESAMPLE BERNOULLI(100)",
+            "SELECT n FROM planned_cte ORDER BY n",
+            "SELECT n FROM planned_cte LIMIT 1",
+            "SELECT count(*) FROM planned_cte",
+            "SELECT grouping(n) FROM planned_cte",
+            "SELECT row_number() OVER () FROM planned_cte",
             "SELECT count(*) FROM generate_series(1, 3) AS g(n)",
             "SELECT 1 FROM generate_series(1, 3) AS g(n) HAVING count(*) > 0",
             "SELECT grouping(n) FROM generate_series(1, 3) AS g(n)",
