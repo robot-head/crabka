@@ -18400,6 +18400,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn window_aggregates_filter_frames_and_share_statement_memory() {
+        let mut session = SqlEngine::new().connect();
+        assert!(
+            rows_or_sqlstate(
+                &mut session,
+                "SELECT count(*) FILTER (WHERE v > 1) \
+                 OVER (ORDER BY v ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
+                 FROM (VALUES (1), (2), (3)) AS t(v) ORDER BY v",
+            )
+            .await
+                == Ok(vec![
+                    vec!["0".into()],
+                    vec!["1".into()],
+                    vec!["2".into()],
+                ])
+        );
+
+        let mut constrained = SqlEngine::new_with_policy(crate::RuntimePolicy {
+            blocking_query_memory: crabka_units::bytes(1),
+            ..Default::default()
+        })
+        .expect("policy")
+        .connect();
+        assert!(
+            sqlstate(
+                &mut constrained,
+                "SELECT sum(v) OVER (ORDER BY v ROWS BETWEEN CURRENT ROW AND CURRENT ROW) \
+                 FROM (VALUES (1)) AS t(v)",
+            )
+            .await
+                == "53200"
+        );
+    }
+
+    #[tokio::test]
     async fn bounded_result_sink_matches_collecting_simple_query() {
         use crabka_pgwire::engine::{CollectingResultSink, ResultPage};
 
