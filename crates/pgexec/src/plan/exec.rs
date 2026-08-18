@@ -43,11 +43,71 @@ pub(crate) fn try_execute_seq_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
+    if select.from.len() == 2 {
+        return try_execute_nested_loop(read_ctx, select);
+    }
     let Some(planned) = plan_seq_scan(read_ctx, select)? else {
         return Ok(None);
     };
     let mut state = PlanState::new(planned.plan.clone(), Scope::empty());
     execute_seq_scan_plan(&mut state, read_ctx, planned).map(Some)
+}
+
+fn try_execute_nested_loop(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+) -> Result<Option<Relation>, ExecError> {
+    let [outer, inner] = select.from.as_slice() else { return Ok(None) };
+    if !crate::exec::is_direct_stored_base_table(read_ctx, outer)
+        || !crate::exec::is_direct_stored_base_table(read_ctx, inner)
+        || !matches!(select.distinct, DistinctClause::All)
+        || !select.order_by.is_empty()
+        || select.limit.is_some()
+        || select.offset.is_some()
+        || crate::grouping::is_grouping_query(select)
+        || crate::window::has_window_calls(select)
+    {
+        return Ok(None);
+    }
+    let scope = crate::exec::build_from_schema_of_select(
+        read_ctx.catalog_kv,
+        read_ctx.fctx.resolution,
+        select,
+        read_ctx.ctes,
+    )?.scope;
+    let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
+    if crate::srf::exprs_contain_srf(&exprs) { return Ok(None) }
+    let scan = || Plan {
+        target_list: Vec::new(), quals: Vec::new(), node: PlanNode::SeqScan { scanrelid: 1 },
+    };
+    let plan = Plan {
+        target_list: bind_target_list(&exprs, &fields, &scope)?,
+        quals: bind_optional(select.filter.as_ref(), &scope)?.into_iter().map(|clause| RestrictInfo {
+            clause, is_pushed_down: false, security_level: 0, leakproof: true,
+            required_relids: BTreeSet::from([1, 2]),
+        }).collect(),
+        node: PlanNode::Filter { input: Box::new(Plan {
+            target_list: Vec::new(), quals: Vec::new(),
+            node: PlanNode::NestedLoop { outer: Box::new(scan()), inner: Box::new(scan()) },
+        }) },
+    };
+    let mut state = PlanState::new(plan, Scope::empty());
+    let PlanNode::Filter { input } = &state.plan.node else { unreachable!() };
+    let PlanNode::NestedLoop { outer: outer_plan, inner: inner_plan } = &input.node else { unreachable!() };
+    let mut outer_state = PlanState::new((**outer_plan).clone(), Scope::empty());
+    let mut inner_state = PlanState::new((**inner_plan).clone(), Scope::empty());
+    let outer_relation = SeqScanExecutor { read_ctx, source: outer.clone() }.execute(&mut outer_state)?;
+    let inner_relation = SeqScanExecutor { read_ctx, source: inner.clone() }.execute(&mut inner_state)?;
+    let mut loop_state = PlanState::new((**input).clone(), Scope::empty());
+    loop_state.begin_loop();
+    let relation = crate::join::join_relations(
+        outer_relation, inner_relation, crabka_pgparser::ast::JoinKind::Cross,
+        &crabka_pgparser::ast::JoinConstraint::None, read_ctx.eval_ctx, read_ctx.join_policy(),
+    )?;
+    loop_state.scope = relation.scope.clone();
+    for _ in &relation.rows { loop_state.emit_row(); }
+    let relation = filter_relation_rows(&mut state, relation, read_ctx.eval_ctx)?;
+    Ok(Some(project_filter_rows(&state, relation, &fields, &tys, read_ctx.eval_ctx)?))
 }
 
 fn execute_seq_scan_plan(
