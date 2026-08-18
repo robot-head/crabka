@@ -38,6 +38,7 @@ pub(crate) fn validate_comparison(
             | BinaryOp::Ge
             | BinaryOp::IsDistinctFrom
             | BinaryOp::IsNotDistinctFrom
+            | BinaryOp::Overlaps
     ) {
         return Ok(());
     }
@@ -166,10 +167,36 @@ pub(crate) fn eval_binary(
             | BinaryOp::Ge
             | BinaryOp::IsDistinctFrom
             | BinaryOp::IsNotDistinctFrom
+            | BinaryOp::Overlaps
     ) {
         return Ok(None);
     }
     let (lv, rv) = (fields(l, &mut eval_child)?, fields(r, &mut eval_child)?);
+    if op == BinaryOp::Overlaps {
+        if lv.len() != 2 || rv.len() != 2 {
+            return Err(ExecError::UndefinedFunction(
+                "function overlaps(record, record) does not exist".into(),
+            ));
+        }
+        if lv.iter().chain(&rv).any(Datum::is_null) {
+            return Ok(Some(Datum::Null));
+        }
+        let before = |a: &Datum, b: &Datum| -> Result<bool, ExecError> {
+            crate::eval::require_runtime_comparison(a, b)?;
+            Ok(ops::compare(a, b)? == Some(Ordering::Less))
+        };
+        let (ls, le) = if before(&lv[1], &lv[0])? {
+            (&lv[1], &lv[0])
+        } else {
+            (&lv[0], &lv[1])
+        };
+        let (rs, re) = if before(&rv[1], &rv[0])? {
+            (&rv[1], &rv[0])
+        } else {
+            (&rv[0], &rv[1])
+        };
+        return Ok(Some(Datum::Bool(before(ls, re)? && before(rs, le)?)));
+    }
     if matches!(op, BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom) {
         let distinct = distinct(&lv, &rv)?;
         return Ok(Some(Datum::Bool(
@@ -346,5 +373,40 @@ mod tests {
         assert!(distinct(&[int(1), Datum::Null], &[int(1), Datum::Null]).expect("ok") == false);
         assert!(distinct(&[int(1), Datum::Null], &[int(1), int(2)]).expect("ok") == true);
         assert!(distinct(&[int(1), int(2)], &[int(1), int(2)]).expect("ok") == false);
+    }
+
+    #[test]
+    fn temporal_row_pairs_overlap_only_when_their_half_open_periods_intersect() {
+        let ctx = crate::clock::EvalCtx::test_default();
+        for (sql, expected) in [
+            ("(date '2024-01-01', date '2024-01-03') OVERLAPS (date '2024-01-02', date '2024-01-04')", true),
+            ("(date '2024-01-01', date '2024-01-02') OVERLAPS (date '2024-01-02', date '2024-01-03')", false),
+            ("(date '2024-01-03', date '2024-01-01') OVERLAPS (date '2024-01-02', date '2024-01-04')", true),
+        ] {
+            let expr = crabka_pgparser::parser::parse_expr_for_test(sql).expect("parse");
+            assert!(
+                crate::eval::eval(&expr, &Scope::empty(), &[], &ctx).expect("eval")
+                    == Datum::Bool(expected),
+                "{sql}"
+            );
+            assert!(
+                crate::eval::infer_type(&expr, &Scope::empty()).expect("type") == ColumnType::Bool
+            );
+        }
+        let left = crabka_pgparser::parser::parse_expr_for_test(
+            "ROW(date '2024-01-01', date '2024-01-02')",
+        )
+        .expect("left row");
+        let right = crabka_pgparser::parser::parse_expr_for_test("ROW(date '2024-01-01')")
+            .expect("right row");
+        assert!(
+            eval_binary(BinaryOp::Overlaps, &left, &right, |expr| {
+                crate::eval::eval(expr, &Scope::empty(), &[], &ctx)
+            })
+            .expect_err("row arity")
+            .into_pg()
+            .code
+                == "42883"
+        );
     }
 }

@@ -4479,6 +4479,9 @@ fn infer_binary_type(
     scope: &Scope,
 ) -> Result<ColumnType, ExecError> {
     reject_uncomparable_comparison(op, left, right, scope)?;
+    if op == BinaryOp::Overlaps && matches!((left, right), (Expr::Row(_), Expr::Row(_))) {
+        return Ok(ColumnType::Bool);
+    }
     if let Some(resolved) = geometric_literal_operator(op, left, right, scope)? {
         return Ok(resolved);
     }

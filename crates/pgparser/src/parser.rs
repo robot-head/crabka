@@ -1141,6 +1141,13 @@ impl Parser {
             Token::JsonPathExists => (BinaryOp::JsonPathExists, 7, 8),
             Token::JsonPathMatch => (BinaryOp::JsonPathMatch, 7, 8),
             Token::Overlaps => (BinaryOp::Overlaps, 7, 8),
+            Token::Ident(word)
+                if !explicit
+                    && word.eq_ignore_ascii_case("overlaps")
+                    && self.peek_n_starts_expr(1) =>
+            {
+                (BinaryOp::Overlaps, 7, 8)
+            }
             Token::Same => (BinaryOp::Same, 7, 8),
             Token::DoesNotExtendAbove => (BinaryOp::DoesNotExtendAbove, 7, 8),
             Token::DoesNotExtendBelow => (BinaryOp::DoesNotExtendBelow, 7, 8),
@@ -23693,6 +23700,8 @@ mod json_array_conflict_notify_tests {
                 "{expression}"
             );
         }
+        assert!(super::parse_expr_for_test("a b").is_err());
+        assert!(super::parse_expr_for_test("a foo b").is_err());
     }
 
     #[test]
@@ -23955,6 +23964,7 @@ mod json_array_conflict_notify_tests {
             ("a ?| b", BinaryOp::KeyExistsAny),
             ("a ?& b", BinaryOp::KeyExistsAll),
             ("a && b", BinaryOp::Overlaps),
+            ("a overlaps b", BinaryOp::Overlaps),
             // `||` and `-` are shared with text concatenation and subtraction:
             // the operand types, not the parse, pick the jsonb/array meaning.
             ("a || b", BinaryOp::Concat),
