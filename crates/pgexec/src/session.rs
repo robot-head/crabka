@@ -17239,6 +17239,31 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
             ]
         );
+        let project_set_select = select_of(
+            "SELECT n, generate_series(1, 2) \
+             FROM unnest(ARRAY[1]) AS g(n)",
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &project_set_select)
+        .expect("FunctionScan ProjectSet plan executes")
+        .expect("FROM SRF projection SRF uses ProjectSet");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let planned = crate::plan::exec::function_scan_plan_for_test(
+            &read_ctx,
+            &project_set_select,
+            &project_set_select.from[0],
+        )
+        .expect("FunctionScan ProjectSet plans")
+        .expect("FROM SRF projection SRF uses ProjectSet");
+        let crate::plan::query::PlanNode::ProjectSet { input } = &planned.node else {
+            panic!("FunctionScan projection SRF should plan a ProjectSet");
+        };
+        assert!(input.target_list.is_empty(), "Filter leaves projection to ProjectSet");
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of("SELECT count(*) FROM unnest(ARRAY[1, 1, 2]) AS g(n) WHERE n = 1"),
@@ -17317,6 +17342,11 @@ mod tests {
             "SELECT n, row_number() OVER () FROM generate_series(1, 3) AS g(n) ORDER BY 1",
             "SELECT n, row_number() OVER () FROM generate_series(1, 3) AS g(n) LIMIT 1",
             "SELECT row_number() OVER () FROM generate_series(1, 3) AS g(n) OFFSET 1",
+            "SELECT count(*), generate_series(1, 2) FROM generate_series(1, 3) AS g(n)",
+            "SELECT DISTINCT n, generate_series(1, 2) FROM generate_series(1, 3) AS g(n)",
+            "SELECT n, generate_series(1, 2) FROM generate_series(1, 3) AS g(n) ORDER BY 1",
+            "SELECT n, generate_series(1, 2) FROM generate_series(1, 3) AS g(n) LIMIT 1",
+            "SELECT n, generate_series(1, 2) FROM generate_series(1, 3) AS g(n) OFFSET 1",
         ] {
             assert!(
                 crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))

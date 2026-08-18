@@ -1051,7 +1051,14 @@ fn plan_function_scan(
         }));
     }
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
-    if crate::srf::exprs_contain_srf(&exprs) {
+    let project_set = crate::srf::exprs_contain_srf(&exprs);
+    if project_set
+        && (aggregate
+            || !matches!(select.distinct, DistinctClause::All)
+            || !select.order_by.is_empty()
+            || select.limit.is_some()
+            || select.offset.is_some())
+    {
         return Ok(None);
     }
     let target_list = bind_target_list(&exprs, &fields, &scope)?;
@@ -1072,7 +1079,7 @@ fn plan_function_scan(
         sort_positions.push(index);
     }
     let filter = Plan {
-        target_list: if aggregate {
+        target_list: if aggregate || project_set {
             Vec::new()
         } else {
             target_list.clone()
@@ -1101,7 +1108,7 @@ fn plan_function_scan(
     };
     let plan = if aggregate {
         Plan {
-            target_list,
+            target_list: target_list.clone(),
             quals: Vec::new(),
             node: PlanNode::Aggregate {
                 input: Box::new(filter),
@@ -1109,6 +1116,17 @@ fn plan_function_scan(
         }
     } else {
         filter
+    };
+    let plan = if project_set {
+        Plan {
+            target_list: target_list.clone(),
+            quals: Vec::new(),
+            node: PlanNode::ProjectSet {
+                input: Box::new(plan),
+            },
+        }
+    } else {
+        plan
     };
     let plan = if distinct {
         Plan {
@@ -1153,9 +1171,18 @@ fn plan_function_scan(
         order_by: select.order_by.clone(),
         sort_positions,
         aggregate: aggregate.then(|| select.clone()),
-        project_set: None,
+        project_set: project_set.then(|| select.clone()),
         window: None,
     }))
+}
+
+#[cfg(test)]
+pub(crate) fn function_scan_plan_for_test(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+    source: &TableExpr,
+) -> Result<Option<Plan>, ExecError> {
+    plan_function_scan(read_ctx, select, source).map(|plan| plan.map(|planned| planned.plan))
 }
 
 fn plan_subquery_scan(
