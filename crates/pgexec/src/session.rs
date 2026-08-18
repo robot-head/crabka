@@ -17017,6 +17017,19 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT a, n FROM seq_scan_test, planned_transition WHERE a = 1 AND n > 1"),
+        )
+        .expect("NestedLoop NamedTuplestoreScan plan executes")
+        .expect("stored table and transition source use NestedLoop");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(3)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of(
                 "SELECT a, n FROM seq_scan_test, (VALUES (1), (2)) AS derived(n) \
                  WHERE a = 1 ORDER BY n",

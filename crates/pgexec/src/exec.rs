@@ -17664,6 +17664,24 @@ pub(crate) fn build_from_schema_of_select(
     )
 }
 
+pub(crate) fn build_from_schema_of_select_with_context(
+    catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    select: &SelectStmt,
+    ctes: &crate::cte::CteContext,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Relation, ExecError> {
+    let refs = crate::scope::StatementRefs::of_select(select);
+    build_from_schema_described(
+        catalog_kv,
+        resolution,
+        &select.from,
+        ctes,
+        Some(ctx),
+        Some(&refs),
+    )
+}
+
 /// The describe walk, told which statement it is describing.
 ///
 /// `refs` is the very thing the read path carries on its

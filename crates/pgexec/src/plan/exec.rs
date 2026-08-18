@@ -90,11 +90,12 @@ fn try_execute_nested_loop(
     {
         return Ok(None);
     }
-    let scope = crate::exec::build_from_schema_of_select(
+    let scope = crate::exec::build_from_schema_of_select_with_context(
         read_ctx.catalog_kv,
         read_ctx.fctx.resolution,
         select,
         read_ctx.ctes,
+        read_ctx.eval_ctx,
     )?
     .scope;
     if window {
@@ -429,7 +430,18 @@ fn is_nested_loop_source(
             columns.is_none()
                 && sample.is_none()
                 && (crate::exec::is_direct_stored_base_table(read_ctx, source)
-                    || (name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_some()))
+                    || (name.schema.is_none()
+                        && (read_ctx.ctes.lookup(&name.name).is_some()
+                            || read_ctx
+                                .eval_ctx
+                                .transition_relations
+                                .as_ref()
+                                .is_some_and(|runtime| {
+                                    runtime
+                                        .lock()
+                                        .expect("transition relation mutex")
+                                        .contains_key(&name.name)
+                                }))))
         }
         TableExpr::Function {
             lateral, functions, ..
@@ -499,6 +511,21 @@ fn plan_nested_loop_source(
                 {
                     PlanNode::CteScan
                 }
+                TableExpr::Table { name, .. }
+                    if name.schema.is_none()
+                        && read_ctx
+                            .eval_ctx
+                            .transition_relations
+                            .as_ref()
+                            .is_some_and(|runtime| {
+                                runtime
+                                    .lock()
+                                    .expect("transition relation mutex")
+                                    .contains_key(&name.name)
+                            }) =>
+                {
+                    PlanNode::NamedTuplestoreScan
+                }
                 _ => PlanNode::SeqScan { scanrelid: 0 },
             };
             Some(Plan {
@@ -557,7 +584,8 @@ fn execute_nested_loop_plan(
         | PlanNode::FunctionScan
         | PlanNode::TableFunctionScan
         | PlanNode::SubqueryScan { .. }
-        | PlanNode::CteScan => {
+        | PlanNode::CteScan
+        | PlanNode::NamedTuplestoreScan => {
             let source = sources
                 .next()
                 .ok_or_else(|| {
@@ -574,6 +602,9 @@ fn execute_nested_loop_plan(
                     SubqueryScanExecutor { read_ctx, source: source.clone() }.execute(state)
                 }
                 PlanNode::CteScan => CteScanExecutor { read_ctx, source: source.clone() }.execute(state),
+                PlanNode::NamedTuplestoreScan => {
+                    NamedTuplestoreScanExecutor { read_ctx, source: source.clone() }.execute(state)
+                }
                 _ => unreachable!("nested-loop leaf was matched above"),
             }
         }
