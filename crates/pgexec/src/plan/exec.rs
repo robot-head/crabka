@@ -243,6 +243,7 @@ impl Executor for ResultExecutor<'_> {
                 "ResultExecutor received a non-Result plan".into(),
             ));
         }
+        crate::session::check_query_canceled()?;
         state.begin_loop();
         let row = Vec::new();
         for qual in &state.plan.quals {
@@ -280,6 +281,7 @@ impl Executor for SeqScanExecutor<'_, '_> {
                 "SeqScanExecutor received a non-SeqScan plan".into(),
             ));
         }
+        crate::session::check_query_canceled()?;
         state.begin_loop();
         let TableExpr::Table { name, .. } = &self.source else {
             return Err(ExecError::Unsupported(
@@ -316,6 +318,7 @@ impl Executor for FilterExecutor<'_, '_> {
                 "FilterExecutor received a non-Filter plan".into(),
             ));
         };
+        crate::session::check_query_canceled()?;
         let mut child = PlanState::new((**input).clone(), Scope::empty());
         let relation = SeqScanExecutor {
             read_ctx: self.read_ctx,
@@ -382,6 +385,7 @@ impl Executor for ValuesExecutor<'_, '_> {
                 "ValuesExecutor received a non-ValuesScan plan".into(),
             ));
         }
+        crate::session::check_query_canceled()?;
         state.begin_loop();
         let mut relation = crate::values::values_to_relation_with_ctes(self.ctx, self.values)?;
         let order_by = crate::subquery::resolve_order_items(self.ctx, &self.query.order_by)?;
@@ -397,6 +401,11 @@ impl Executor for ValuesExecutor<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use crabka_pgparser::ast::{Expr, GroupingClause, QueryBody, SetExpr, Statement};
     use crabka_pgtypes::{ColumnType, Datum};
 
@@ -482,6 +491,20 @@ mod tests {
 
         assert_eq!(emitted.rows, vec![vec![crabka_pgtypes::Datum::Int4(5)]]);
         assert!(rejected.rows.is_empty());
+    }
+
+    #[test]
+    fn result_executor_observes_query_cancellation_before_work() {
+        let canceled = Arc::new(AtomicBool::new(true));
+        let result = crate::session::with_query_cancel_runtime(Some(Arc::clone(&canceled)), || {
+            try_execute_result(
+                &select("SELECT 2 + 3"),
+                &crate::clock::EvalCtx::test_default(),
+            )
+        });
+
+        assert!(result.is_err());
+        assert!(canceled.load(Ordering::Acquire));
     }
 
     #[test]
