@@ -955,7 +955,7 @@ fn plan_function_scan(
         return Ok(None);
     };
     if *lateral
-        || !matches!(select.distinct, DistinctClause::All)
+        || matches!(select.distinct, DistinctClause::On(_))
         || !select.order_by.is_empty()
         || select.limit.is_some()
         || select.offset.is_some()
@@ -996,7 +996,13 @@ fn plan_function_scan(
     if crate::srf::exprs_contain_srf(&exprs) {
         return Ok(None);
     }
-    let plan = Plan {
+    let distinct = matches!(select.distinct, DistinctClause::Distinct);
+    if distinct {
+        for ty in &tys {
+            crate::eval::require_equality_operator(*ty)?;
+        }
+    }
+    let filter = Plan {
         target_list: bind_target_list(&exprs, &fields, &scope)?,
         quals: bind_optional(select.filter.as_ref(), &scope)?
             .into_iter()
@@ -1019,6 +1025,17 @@ fn plan_function_scan(
                 },
             }),
         },
+    };
+    let plan = if distinct {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Unique {
+                input: Box::new(filter),
+            },
+        }
+    } else {
+        filter
     };
     Ok(Some(SeqScanPlan {
         plan,

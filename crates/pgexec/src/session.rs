@@ -17187,9 +17187,21 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(3)],
             ]
         );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT DISTINCT n FROM unnest(ARRAY[1, 1, 2]) AS g(n)"),
+        )
+        .expect("FunctionScan DISTINCT plan executes")
+        .expect("FROM SRF DISTINCT uses Unique");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
         for sql in [
             "SELECT n FROM LATERAL generate_series(1, 3) AS g(n)",
-            "SELECT DISTINCT n FROM generate_series(1, 3) AS g(n)",
             "SELECT n FROM generate_series(1, 3) AS g(n) ORDER BY n",
             "SELECT n FROM generate_series(1, 3) AS g(n) LIMIT 1",
             "SELECT a FROM seq_scan_test, generate_series(1, 3) AS g(n)",
