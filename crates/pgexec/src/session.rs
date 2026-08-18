@@ -17761,10 +17761,13 @@ mod tests {
             ),
         ] {
             assert!(sqlstate(&mut s, sql).await == "00000", "{sql}");
-            assert!(scalar(&mut s, show).await == expected, "{sql}");
+            assert!(
+                super::session_conformance_tests::scalar(&mut s, show).await == expected,
+                "{sql}"
+            );
         }
         assert!(
-            scalar(
+            super::session_conformance_tests::scalar(
                 &mut s,
                 "SELECT current_setting('max_prepared_transactions')"
             )
@@ -17772,7 +17775,7 @@ mod tests {
                 == "0"
         );
         assert!(
-            scalar(
+            super::session_conformance_tests::scalar(
                 &mut s,
                 "SELECT set_config('role', 'regress_parallel_worker', false)",
             )
@@ -22488,7 +22491,7 @@ mod session_conformance_tests {
             .map_or_else(String::new, |error| error.message)
     }
 
-    async fn scalar(session: &mut SqlSession, sql: &str) -> String {
+    pub(super) async fn scalar(session: &mut SqlSession, sql: &str) -> String {
         let rows = run(session, sql).await.expect(sql);
         let [row] = rows.as_slice() else {
             panic!("expected exactly one row from {sql}");
