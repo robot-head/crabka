@@ -86,6 +86,13 @@ pub(crate) fn is_datetime_func(name: &str) -> bool {
     datetime_func(name).is_some()
 }
 
+/// Is this the two-argument date/time constructor overload which must win over
+/// the one-argument scalar casts of the same name?
+pub(crate) fn is_datetime_constructor(fc: &FuncCall) -> bool {
+    matches!(fc.name.as_str(), "timestamp" | "timestamptz")
+        && matches!(&fc.args, FuncArgs::Exprs(args) if args.len() == 2)
+}
+
 fn undefined_function(name: &str) -> ExecError {
     ExecError::UndefinedFunction(format!("function {name}(...) does not exist"))
 }
@@ -185,6 +192,55 @@ pub(crate) fn datetime_func_result_type(
             crate::eval::infer_type(&args[1], scope)?
         }
     })
+}
+
+/// Statically infer the two-argument `timestamp`/`timestamptz` constructors.
+pub(crate) fn datetime_constructor_result_type(
+    fc: &FuncCall,
+    _scope: &Scope,
+) -> Result<ColumnType, ExecError> {
+    require_arity(fc, is_datetime_constructor(fc))?;
+    match fc.name.as_str() {
+        "timestamp" => Ok(ColumnType::Timestamp),
+        "timestamptz" => Ok(ColumnType::Timestamptz),
+        _ => Err(undefined_function(&fc.name)),
+    }
+}
+
+/// Evaluate the two-argument `timestamp`/`timestamptz` constructors.
+///
+/// The date-plus-time arithmetic belongs to `pgtypes::ops`: it also carries
+/// the non-finite and `24:00` rules. Only a civil `timestamp` promoted to a
+/// `timestamptz` needs the session zone here.
+pub(crate) fn eval_datetime_constructor(
+    fc: &FuncCall,
+    ctx: &EvalCtx,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> Result<Datum, ExecError> {
+    require_arity(fc, is_datetime_constructor(fc))?;
+    let args = exprs_of(fc)?;
+    let date = eval_child(&args[0])?;
+    let time = eval_child(&args[1])?;
+    if date.is_null() || time.is_null() {
+        return Ok(Datum::Null);
+    }
+    match (fc.name.as_str(), &date, &time) {
+        ("timestamp", Datum::Date(_), Datum::Time(_)) => {
+            Ok(crabka_pgtypes::ops::add(&date, &time)?)
+        }
+        ("timestamptz", Datum::Date(_), Datum::Time(_)) => {
+            let Datum::Timestamp(timestamp) = crabka_pgtypes::ops::add(&date, &time)? else {
+                unreachable!("date + time always returns timestamp");
+            };
+            crabka_pgtypes::datetime::zoned_instant(timestamp, &ctx.time_zone)
+                .map(Datum::Timestamptz)
+                .map_err(|_| invalid_param("timestamp out of range for time zone conversion"))
+        }
+        ("timestamptz", Datum::Date(_), Datum::Timetz(_)) => {
+            Ok(crabka_pgtypes::ops::add(&date, &time)?)
+        }
+        _ => Err(undefined_function(&fc.name)),
+    }
 }
 
 /// Evaluate a date/time call. `eval_child` evaluates each argument against the
@@ -1647,6 +1703,56 @@ mod tests {
             ev("current_date", &ctx),
             Datum::Date(crabka_pgtypes::datetime::parse_date("2024-01-15").expect("d"))
         );
+    }
+
+    #[test]
+    fn date_and_time_constructor_functions_use_their_respective_zone_rules() {
+        let los_angeles = jiff::tz::TimeZone::get("America/Los_Angeles").expect("zone");
+        let ctx = ctx_at_zone("2024-01-15T12:00:00Z", los_angeles);
+
+        assert_eq!(
+            ev("timestamp(date '2000-01-01', time '11:00')", &ctx),
+            Datum::Timestamp("2000-01-01T11:00:00".parse().expect("timestamp"))
+        );
+        // The same name retains its ordinary one-argument cast overload.
+        assert_eq!(
+            ev("timestamp(date '2000-01-01')", &ctx),
+            Datum::Timestamp("2000-01-01T00:00:00".parse().expect("timestamp"))
+        );
+        // A two-argument call to another scalar family must not be intercepted.
+        assert_eq!(ev("power(2, 3)", &ctx), Datum::Float8(8.0));
+        assert_eq!(
+            ev("timestamptz(date '2000-01-01', time '11:00')", &ctx),
+            Datum::Timestamptz("2000-01-01T19:00:00Z".parse().expect("instant"))
+        );
+        assert_eq!(
+            ev(
+                "timestamptz(date '2000-01-01', time with time zone '11:00-05')",
+                &ctx
+            ),
+            Datum::Timestamptz("2000-01-01T16:00:00Z".parse().expect("instant"))
+        );
+        assert_eq!(
+            ev("timestamp(NULL::date, time '11:00')", &ctx),
+            Datum::Null
+        );
+        for (sql, expected) in [
+            ("timestamp(date '2000-01-01', time '11:00')", ColumnType::Timestamp),
+            (
+                "timestamptz(date '2000-01-01', time with time zone '11:00-05')",
+                ColumnType::Timestamptz,
+            ),
+        ] {
+            assert_eq!(
+                crate::eval::infer_type(
+                    &crabka_pgparser::parser::parse_expr_for_test(sql).expect("parse"),
+                    &Scope::empty(),
+                )
+                .expect("type"),
+                expected,
+                "{sql}"
+            );
+        }
     }
 
     #[test]

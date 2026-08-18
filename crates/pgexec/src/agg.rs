@@ -1466,6 +1466,11 @@ fn eval_grouped_depth(
         {
             result
         }
+        Expr::Func(fc) if crate::datetime_fn::is_datetime_constructor(fc) => {
+            crate::datetime_fn::eval_datetime_constructor(fc, ctx, |e| {
+                eval_grouped_depth(e, grouped, d)
+            })
+        }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
             crate::func::eval_scalar(fc, Some(scope), ctx, |e| eval_grouped_depth(e, grouped, d))
         }
@@ -3991,6 +3996,28 @@ mod tests {
                 vec![Some("1".into()), Some("2024".into())],
                 vec![Some("2".into()), Some("2025".into())],
             ]
+        );
+    }
+
+    #[test]
+    fn datetime_constructor_wrapping_an_aggregate_composes() {
+        let t = ts_table();
+        let rows = vec![
+            r(&[Datum::Int4(1), ts("2020-03-04 00:00:00")]),
+            r(&[Datum::Int4(1), ts("2024-12-31 23:59:59")]),
+        ];
+        assert_eq!(
+            agg_text(
+                "SELECT timestamp(max(ts)::date, max(ts)::time), \
+                 timestamptz(max(ts)::date, max(ts)::time) FROM t",
+                Some(&t),
+                rows,
+            )
+            .expect("datetime constructors over aggregate"),
+            vec![vec![
+                Some("2024-12-31 23:59:59".into()),
+                Some("2024-12-31 23:59:59+00".into()),
+            ]]
         );
     }
 
