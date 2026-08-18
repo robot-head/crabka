@@ -1811,9 +1811,7 @@ fn parse_guc_value(
                         definition.name
                     ),
                 )
-                .with_hint(
-                    "Available values: postgres, postgres_verbose, sql_standard, iso_8601.",
-                ),
+                .with_hint("Available values: postgres, postgres_verbose, sql_standard, iso_8601."),
             );
         }
         invalid()
@@ -16834,7 +16832,10 @@ mod tests {
             ("SELECT a FROM seq_scan_test LIMIT 1", vec![1]),
             ("SELECT a FROM seq_scan_test OFFSET 1", vec![2]),
             ("SELECT a FROM seq_scan_test ORDER BY a DESC", vec![2, 1]),
-            ("SELECT a FROM seq_scan_test ORDER BY a DESC LIMIT 1", vec![2]),
+            (
+                "SELECT a FROM seq_scan_test ORDER BY a DESC LIMIT 1",
+                vec![2],
+            ),
         ] {
             let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
                 .expect(sql)
@@ -16851,6 +16852,7 @@ mod tests {
             "SELECT DISTINCT a FROM seq_scan_test",
             "SELECT count(*) FROM seq_scan_test",
             "SELECT a FROM seq_scan_test GROUP BY a",
+            "SELECT a FROM seq_scan_test HAVING true",
             "SELECT row_number() OVER () FROM seq_scan_test",
         ] {
             let select = select_of(sql);
@@ -17924,9 +17926,8 @@ mod tests {
             "22023",
             "invalid value for parameter \"IntervalStyle\": \"asd\"",
         );
-        expected = expected.with_hint(
-            "Available values: postgres, postgres_verbose, sql_standard, iso_8601.",
-        );
+        expected = expected
+            .with_hint("Available values: postgres, postgres_verbose, sql_standard, iso_8601.");
         assert!(error == expected);
         let error = s
             .simple_query("SET password_encryption = 'novalue'")

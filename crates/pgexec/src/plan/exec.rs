@@ -131,18 +131,7 @@ fn plan_result(select: &SelectStmt) -> Result<Option<ResultPlan>, ExecError> {
     if crate::srf::exprs_contain_srf(&exprs) {
         return Ok(None);
     }
-    let target_list = exprs
-        .iter()
-        .zip(&fields)
-        .enumerate()
-        .map(|(index, (expr, field))| {
-            Ok(TargetEntry {
-                expr: BoundExpr::new(expr, &scope)?,
-                resno: index + 1,
-                resname: field.name.clone(),
-            })
-        })
-        .collect::<Result<_, ExecError>>()?;
+    let target_list = bind_target_list(&exprs, &fields, &scope)?;
     let quals = bind_optional(select.filter.as_ref(), &scope)?
         .into_iter()
         .map(|clause| RestrictInfo {
@@ -179,17 +168,43 @@ fn plan_seq_scan(
     let [source] = select.from.as_slice() else {
         return Ok(None);
     };
-    if !crate::exec::is_direct_stored_base_table(read_ctx, source)
-        || !matches!(select.distinct, DistinctClause::All)
-        || select.with_ties
-        || !select.group_by.is_empty()
-        || select.grouping.is_some()
-        || select.having.is_some()
-        || is_ungrouped_aggregate(select)
-        || crate::grouping::is_grouping_query(select)
-        || crate::window::has_window_calls(select)
-    {
+    if !crate::exec::is_direct_stored_base_table(read_ctx, source) {
         return Ok(None);
+    }
+    if !matches!(select.distinct, DistinctClause::All) {
+        return Ok(None);
+    }
+    if select.with_ties {
+        return Ok(None);
+    }
+    if !select.group_by.is_empty() {
+        return Ok(None);
+    }
+    if select.having.is_some() {
+        return Ok(None);
+    }
+    if crate::grouping::is_grouping_query(select) {
+        return Ok(None);
+    }
+    if crate::window::has_window_calls(select) {
+        return Ok(None);
+    }
+
+    // The legacy path already turns filtered indexed tables into bounded index
+    // probes. Keep that access path until P3 supplies an index scan leaf.
+    if select.filter.is_some() {
+        let TableExpr::Table { name, .. } = source else {
+            return Ok(None);
+        };
+        let relation = crate::relname::resolve_relation(
+            read_ctx.catalog_kv,
+            read_ctx.fctx.resolution,
+            name,
+            crate::relname::SchemaDisposition::Reference,
+        )?;
+        if !crabka_pgcatalog::list_table_indexes(read_ctx.catalog_kv, &relation)?.is_empty() {
+            return Ok(None);
+        }
     }
 
     let scope = crate::exec::build_from_schema_of_select(
@@ -203,18 +218,7 @@ fn plan_seq_scan(
     if crate::srf::exprs_contain_srf(&exprs) {
         return Ok(None);
     }
-    let target_list = exprs
-        .iter()
-        .zip(&fields)
-        .enumerate()
-        .map(|(index, (expr, field))| {
-            Ok(TargetEntry {
-                expr: BoundExpr::new(expr, &scope)?,
-                resno: index + 1,
-                resname: field.name.clone(),
-            })
-        })
-        .collect::<Result<_, ExecError>>()?;
+    let target_list = bind_target_list(&exprs, &fields, &scope)?;
     let quals = bind_optional(select.filter.as_ref(), &scope)?
         .into_iter()
         .map(|clause| RestrictInfo {
@@ -279,6 +283,25 @@ fn plan_seq_scan(
         order_by: select.order_by.clone(),
         sort_positions,
     }))
+}
+
+fn bind_target_list(
+    exprs: &[crabka_pgparser::ast::Expr],
+    fields: &[crabka_pgwire::engine::FieldDescription],
+    scope: &Scope,
+) -> Result<Vec<TargetEntry>, ExecError> {
+    exprs
+        .iter()
+        .zip(fields)
+        .enumerate()
+        .map(|(index, (expr, field))| {
+            Ok(TargetEntry {
+                expr: BoundExpr::new(expr, scope)?,
+                resno: index + 1,
+                resname: field.name.clone(),
+            })
+        })
+        .collect()
 }
 
 fn is_ungrouped_aggregate(select: &SelectStmt) -> bool {
@@ -658,6 +681,29 @@ mod tests {
             planned
                 .plan
                 .target_list
+                .iter()
+                .map(|target| (target.resname.as_str(), target.resno))
+                .collect::<Vec<_>>(),
+            vec![("one", 1), ("two", 2)]
+        );
+    }
+
+    #[test]
+    fn target_entries_keep_one_based_positions_for_scan_plans() {
+        let scope = Scope::empty();
+        let exprs = [
+            crabka_pgparser::parser::parse_expression("1").expect("first expression"),
+            crabka_pgparser::parser::parse_expression("2").expect("second expression"),
+        ];
+        let fields = [
+            exec::field("one", ColumnType::Int4),
+            exec::field("two", ColumnType::Int4),
+        ];
+
+        let target_list = bind_target_list(&exprs, &fields, &scope).expect("target list binds");
+
+        assert_eq!(
+            target_list
                 .iter()
                 .map(|target| (target.resname.as_str(), target.resno))
                 .collect::<Vec<_>>(),
