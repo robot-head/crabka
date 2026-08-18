@@ -16908,6 +16908,22 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of(
+                "SELECT n, count(*) AS c FROM planned_cte \
+                 GROUP BY n ORDER BY c DESC LIMIT 1",
+            ),
+        )
+        .expect("CTE Aggregate tail plan executes")
+        .expect("CTE aggregate tail uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int8(1),
+            ]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT DISTINCT count(*) FROM generate_series(1, 3) AS g(n)"),
         )
         .expect("function Aggregate distinct plan executes")
@@ -18024,10 +18040,6 @@ mod tests {
             "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived LIMIT 1",
             "SELECT n, generate_series(1, 2) FROM (SELECT 1 AS n) AS derived OFFSET 1",
             "SELECT grouping(n) FROM planned_cte",
-            "SELECT DISTINCT count(*) FROM planned_cte",
-            "SELECT count(*) FROM planned_cte ORDER BY 1",
-            "SELECT count(*) FROM planned_cte LIMIT 1",
-            "SELECT count(*) FROM planned_cte OFFSET 1",
             "SELECT count(*), row_number() OVER () FROM planned_cte",
             "SELECT generate_series(1, 2), row_number() OVER () FROM planned_cte",
             "SELECT DISTINCT n, row_number() OVER () FROM planned_cte",

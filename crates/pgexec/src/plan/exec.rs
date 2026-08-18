@@ -1662,12 +1662,6 @@ fn plan_cte_scan(
                 || !select.order_by.is_empty()
                 || select.limit.is_some()
                 || select.offset.is_some()))
-        || (aggregate
-            && (!matches!(select.distinct, DistinctClause::All)
-                || !select.order_by.is_empty()
-                || select.limit.is_some()
-                || select.offset.is_some()
-                || select.grouping.is_some()))
     {
         return Ok(None);
     }
@@ -1740,16 +1734,6 @@ fn plan_cte_scan(
             crate::eval::require_equality_operator(*ty)?;
         }
     }
-    let order_keys =
-        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
-    let mut sort_positions = Vec::with_capacity(order_keys.len());
-    for key in order_keys {
-        let exec::SelectOrderKey::Output(index) = key else {
-            return Ok(None);
-        };
-        crate::eval::require_ordering_operator(tys[index])?;
-        sort_positions.push(index);
-    }
     let filter = Plan {
         target_list: if aggregate || project_set {
             Vec::new()
@@ -1774,27 +1758,48 @@ fn plan_cte_scan(
             }),
         },
     };
-    let aggregate_plan = if aggregate {
-        Plan {
-            target_list: target_list.clone(),
-            quals: Vec::new(),
-            node: PlanNode::Aggregate {
-                input: Box::new(filter),
+    if aggregate {
+        return Ok(Some(SeqScanPlan {
+            plan: Plan {
+                target_list,
+                quals: Vec::new(),
+                node: PlanNode::Aggregate {
+                    input: Box::new(filter),
+                },
             },
-        }
-    } else {
-        filter
-    };
+            source: source.clone(),
+            fields,
+            tys,
+            limit: select.limit.clone(),
+            offset: select.offset.clone(),
+            order_by: select.order_by.clone(),
+            sort_positions: Vec::new(),
+            with_ties: select.with_ties,
+            aggregate: Some(select.clone()),
+            project_set: None,
+            window: None,
+        }));
+    }
+    let order_keys =
+        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
+    let mut sort_positions = Vec::with_capacity(order_keys.len());
+    for key in order_keys {
+        let exec::SelectOrderKey::Output(index) = key else {
+            return Ok(None);
+        };
+        crate::eval::require_ordering_operator(tys[index])?;
+        sort_positions.push(index);
+    }
     let project_set_plan = if project_set {
         Plan {
             target_list: target_list.clone(),
             quals: Vec::new(),
             node: PlanNode::ProjectSet {
-                input: Box::new(aggregate_plan),
+                input: Box::new(filter),
             },
         }
     } else {
-        aggregate_plan
+        filter
     };
     let unique = if distinct {
         Plan {
@@ -1838,7 +1843,7 @@ fn plan_cte_scan(
         offset: select.offset.clone(),
         order_by: select.order_by.clone(),
         sort_positions,
-        aggregate: aggregate.then(|| select.clone()),
+        aggregate: None,
         project_set: project_set.then(|| select.clone()),
         with_ties: select.with_ties,
         window: None,
