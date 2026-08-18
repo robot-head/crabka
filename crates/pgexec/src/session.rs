@@ -17595,6 +17595,22 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(2)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of(
+                "SELECT n, count(*) AS c FROM (VALUES (1), (1), (2)) AS derived(n) \
+                 GROUP BY n ORDER BY c DESC LIMIT 1",
+            ),
+        )
+        .expect("derived Aggregate tail plan executes")
+        .expect("derived aggregate tail uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int8(2),
+            ]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT n, count(*) FROM planned_cte GROUP BY n"),
         )
         .expect("CteScan grouped Aggregate plan executes")
@@ -17996,10 +18012,6 @@ mod tests {
             "SELECT n FROM (WITH x AS (SELECT 1 AS n) SELECT n FROM x) AS derived",
             "SELECT n FROM (WITH x AS (SELECT 1) VALUES (1)) AS derived(n)",
             "SELECT grouping(n) FROM (SELECT 1 AS n) AS derived",
-            "SELECT DISTINCT count(*) FROM (SELECT 1 AS n) AS derived",
-            "SELECT count(*) FROM (SELECT 1 AS n) AS derived ORDER BY 1",
-            "SELECT count(*) FROM (SELECT 1 AS n) AS derived LIMIT 1",
-            "SELECT count(*) FROM (SELECT 1 AS n) AS derived OFFSET 1",
             "SELECT count(*), row_number() OVER () FROM (SELECT 1 AS n) AS derived",
             "SELECT generate_series(1, 2), row_number() OVER () FROM (SELECT 1 AS n) AS derived",
             "SELECT DISTINCT n, row_number() OVER () FROM (SELECT 1 AS n) AS derived",
