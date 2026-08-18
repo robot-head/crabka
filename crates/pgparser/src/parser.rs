@@ -3325,19 +3325,45 @@ impl Parser {
         })
     }
 
-    /// `expr [NOT] BETWEEN low AND high`, positioned at `BETWEEN`. The bounds are
-    /// parsed at `min_bp = 4` so the separating `AND` (left bp 3) is NOT consumed
-    /// as a boolean `AND`; thus `a BETWEEN 1 AND 2 AND b` → `(a BETWEEN 1 AND 2) AND b`.
+    /// `expr [NOT] BETWEEN [ASYMMETRIC|SYMMETRIC] low AND high`, positioned at
+    /// `BETWEEN`. The bounds are parsed at `min_bp = 4` so the separating `AND`
+    /// (left bp 3) is NOT consumed as a boolean `AND`; thus `a BETWEEN 1 AND 2
+    /// AND b` → `(a BETWEEN 1 AND 2) AND b`. Symmetric BETWEEN lowers to the
+    /// two ordinary directions, as `PostgreSQL`'s parse analysis does.
     fn parse_between(&mut self, lhs: Expr, negated: bool) -> Result<Expr, ParseError> {
         self.expect(&Token::Keyword(Keyword::Between))?;
+        let symmetric = self.eat_ident_eq("symmetric");
+        if !symmetric {
+            self.eat_ident_eq("asymmetric");
+        }
         let low = self.expr(4)?;
         self.expect(&Token::Keyword(Keyword::And))?;
         let high = self.expr(4)?;
-        Ok(Expr::Between {
+        let first = Expr::Between {
             expr: Box::new(lhs),
             low: Box::new(low),
             high: Box::new(high),
             negated,
+        };
+        if !symmetric {
+            return Ok(first);
+        }
+        let Expr::Between {
+            expr, low, high, ..
+        } = &first
+        else {
+            unreachable!("constructed between expression")
+        };
+        let second = Expr::Between {
+            expr: Box::new((**expr).clone()),
+            low: Box::new((**high).clone()),
+            high: Box::new((**low).clone()),
+            negated,
+        };
+        Ok(Expr::Binary {
+            op: if negated { BinaryOp::And } else { BinaryOp::Or },
+            left: Box::new(first),
+            right: Box::new(second),
         })
     }
 
@@ -20055,6 +20081,16 @@ mod tests {
         assert!(matches!(
             expr("a NOT BETWEEN 1 AND 10"),
             Expr::Between { negated: true, .. }
+        ));
+        for (sql, op) in [
+            ("a BETWEEN SYMMETRIC 1 AND 10", BinaryOp::Or),
+            ("a NOT BETWEEN SYMMETRIC 1 AND 10", BinaryOp::And),
+        ] {
+            assert!(matches!(expr(sql), Expr::Binary { op: got, .. } if got == op), "{sql}");
+        }
+        assert!(matches!(
+            expr("a BETWEEN ASYMMETRIC 1 AND 10"),
+            Expr::Between { negated: false, .. }
         ));
     }
 

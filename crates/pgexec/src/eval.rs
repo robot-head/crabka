@@ -5721,6 +5721,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn between_symmetric_checks_both_bound_orders() {
+        let cases: &[(&str, Datum)] = &[
+            ("2 BETWEEN SYMMETRIC 3 AND 1", Datum::Bool(true)),
+            ("2 NOT BETWEEN SYMMETRIC 3 AND 1", Datum::Bool(false)),
+            ("0 NOT BETWEEN SYMMETRIC 3 AND 1", Datum::Bool(true)),
+            ("2 BETWEEN ASYMMETRIC 3 AND 1", Datum::Bool(false)),
+            ("NULL::int BETWEEN SYMMETRIC 3 AND 1", Datum::Null),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == *expected, "{sql}");
+        }
+    }
+
     /// Resolving the literal fixes the operator's *result* type too: `1 + '1'`
     /// is an `integer` sum in PostgreSQL, not a pair widened through an
     /// unresolved operand.
