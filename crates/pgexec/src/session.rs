@@ -16649,7 +16649,7 @@ mod tests {
 
     use super::{
         ColumnType, GucState, RowLockManager, SqlSession, canonical_guc_value, decode_bound_param,
-        guc_default, guc_vartype,
+        guc_default, guc_vartype, parse_enum_guc,
     };
     use crate::{ExecError, SqlEngine};
 
@@ -20075,6 +20075,17 @@ mod tests {
                 Err(ExecError::InvalidGucValue { .. })
             ));
         }
+    }
+
+    #[test]
+    fn enum_gucs_accept_boolean_spellings_only_for_on_off_pairs() {
+        assert!(
+            parse_enum_guc(&["on", "off"], "false")
+                .expect("on/off enum accepts false")
+                .render()
+                == "off"
+        );
+        assert!(parse_enum_guc(&["on"], "false").is_err());
     }
 
     #[tokio::test]
