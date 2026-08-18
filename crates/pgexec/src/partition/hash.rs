@@ -209,6 +209,18 @@ fn hash_int64_extended(value: i64, seed: u64) -> u64 {
     hash_uint32_extended(folded, seed)
 }
 
+/// `hashint8`: the unseeded, 32-bit hash PostgreSQL exposes to SQL.
+///
+/// Keeping this beside [`hash_int64_extended`] makes the scalar hash functions
+/// and partition-key support share the same compatibility-critical fold.
+pub(crate) fn hash_int64(value: i64) -> i32 {
+    let (lohalf, hihalf) = halves(value.cast_unsigned());
+    let folded = lohalf ^ if value >= 0 { hihalf } else { !hihalf };
+    let (a, b, c) = seeded_state(U32_KEY_LEN, 0);
+    let (_, _, hash) = final_mix(a.wrapping_add(folded), b, c);
+    hash.cast_signed()
+}
+
 /// `hash_uint32_extended` from `src/common/hashfn.c`.
 fn hash_uint32_extended(key: u32, seed: u64) -> u64 {
     let (a, b, c) = seeded_state(U32_KEY_LEN, seed);

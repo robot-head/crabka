@@ -116,6 +116,8 @@ enum ScalarFunc {
     /// Regression helper exposing PostgreSQL's `IsBinaryCoercible`.
     BinaryCoercible,
     PgNumaAvailable,
+    /// `interval_hash(interval)`: hash the canonical 30-day-month span.
+    IntervalHash,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -241,6 +243,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_input_is_valid" => ScalarFunc::PgInputIsValid,
         "binary_coercible" => ScalarFunc::BinaryCoercible,
         "pg_numa_available" => ScalarFunc::PgNumaAvailable,
+        "interval_hash" => ScalarFunc::IntervalHash,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -1064,6 +1067,16 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             require_arity(fc, n == 0)?;
             Ok(ColumnType::Bool)
         }
+        ScalarFunc::IntervalHash => {
+            require_arity(fc, n == 1)?;
+            if is_unknown_literal(&args[0])
+                || crate::eval::infer_type(&args[0], scope)? == ColumnType::Interval
+            {
+                Ok(ColumnType::Int4)
+            } else {
+                Err(no_matching_function())
+            }
+        }
         ScalarFunc::RangeConstructor(range) => {
             require_arity(fc, (1..=3).contains(&n))?;
             Ok(ColumnType::Range(range))
@@ -1437,6 +1450,7 @@ fn coerce_unknown_args(
     }
     let target = match f {
         ScalarFunc::BoolCompare { .. } => ColumnType::Bool,
+        ScalarFunc::IntervalHash => ColumnType::Interval,
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -2192,6 +2206,15 @@ fn eval_eager(
         ScalarFunc::PgNumaAvailable => {
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Bool(false))
+        }
+        ScalarFunc::IntervalHash => {
+            require_arity(fc, vals.len() == 1)?;
+            let Datum::Interval(interval) = vals[0] else {
+                return Err(type_error("interval_hash", &vals[0]));
+            };
+            Ok(Datum::Int4(crate::partition::hash::hash_int64(
+                interval.canonical_micros() as i64,
+            )))
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
@@ -4443,5 +4466,31 @@ mod tests {
         }
         assert!(err_code("unicode_assigned(1)", None) == "42883");
         assert!(err_code("unicode_assigned('a', 'b')", None) == "42883");
+    }
+
+    /// `interval_hash` follows interval comparison rather than storage fields:
+    /// one month and thirty days are equal and must therefore hash equally.
+    #[test]
+    fn interval_hash_uses_the_canonical_interval_span() {
+        let scope = Scope::empty();
+        let ty = |sql: &str| {
+            crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type")
+        };
+        assert!(ty("interval_hash('30 days')") == ColumnType::Int4);
+        assert!(
+            ev("interval_hash('30 days') = interval_hash('1 month')") == Datum::Bool(true)
+        );
+        assert!(ev("interval_hash('30 days') = interval_hash('1 day')") == Datum::Bool(false));
+        // PostgreSQL 18.4 values cover the fold's positive and negative halves.
+        for (sql, expected) in [
+            ("interval_hash('30 days')", 1_574_789_525),
+            ("interval_hash('1 day')", -2_053_980_660),
+            ("interval_hash('-1 day')", -1_092_701_610),
+            ("interval_hash('100000 years')", -1_374_199_132),
+            ("interval_hash('-100000 years')", 1_889_647_881),
+        ] {
+            assert!(ev(sql) == Datum::Int4(expected), "{sql}");
+        }
+        assert!(err_code("interval_hash(1)", None) == "42883");
     }
 }
