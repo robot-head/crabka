@@ -91,6 +91,7 @@ mod network_fn;
 pub mod notify;
 mod partition;
 mod pattern;
+mod plan;
 pub mod plan_dist;
 mod plpgsql;
 mod plpgsql_sqlstate;
