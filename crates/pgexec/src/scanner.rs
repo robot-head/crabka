@@ -1065,8 +1065,9 @@ impl MemoryBudget {
 #[cfg(test)]
 mod statement_memory_tests {
     use assert2::assert;
+    use crabka_pgtypes::Datum;
 
-    use super::StatementMemory;
+    use super::{MemoryBudget, StatementMemory};
 
     #[test]
     fn clones_share_one_charge() {
@@ -1093,6 +1094,32 @@ mod statement_memory_tests {
         memory
             .charge(1)
             .expect("discarded attempt releases only its own charge");
+    }
+
+    #[test]
+    fn committed_reservation_keeps_its_charge() {
+        let memory = StatementMemory::new(crabka_units::bytes(1));
+        let reservation = memory.reserve();
+        reservation.memory().charge(1).expect("charge fits");
+        reservation.commit();
+
+        assert!(memory.charge(1).is_err());
+    }
+
+    #[test]
+    fn replacement_keeps_exactly_its_charge() {
+        let memory = StatementMemory::new(crabka_units::bytes(3));
+        memory.charge(1).expect("prior charge fits");
+        memory.reserve().replace_with(2).expect("replacement fits");
+
+        assert!(memory.charge(1).is_err());
+    }
+
+    #[test]
+    fn row_charge_enforces_the_byte_limit() {
+        let mut budget = MemoryBudget::new(crabka_units::bytes(0));
+
+        assert!(budget.charge_row(&[Datum::Int4(1)]).is_err());
     }
 }
 
