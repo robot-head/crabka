@@ -17078,6 +17078,97 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT count(*) FROM planned_cte WHERE n > 1"),
+        )
+        .expect("CteScan Aggregate plan executes")
+        .expect("CTE aggregate uses Aggregate");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(2)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n, count(*) FROM planned_cte GROUP BY n"),
+        )
+        .expect("CteScan grouped Aggregate plan executes")
+        .expect("CTE grouping uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(1)],
+                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int8(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT DISTINCT n % 2 FROM planned_cte"),
+        )
+        .expect("CteScan Unique plan executes")
+        .expect("CTE distinct uses Unique");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(0)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n FROM planned_cte ORDER BY n DESC LIMIT 2 OFFSET 1"),
+        )
+        .expect("CteScan Sort/Limit plan executes")
+        .expect("CTE sort and limit use Sort and Limit");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n FROM planned_cte ORDER BY n DESC LIMIT 1"),
+        )
+        .expect("CteScan Limit plan executes")
+        .expect("CTE limit uses Limit");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(3)]]);
+        let cte_project_set_select =
+            select_of("SELECT n, generate_series(1, 2) FROM planned_cte WHERE n = 1");
+        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &cte_project_set_select)
+        .expect("CteScan ProjectSet plan executes")
+        .expect("CTE projection SRF uses ProjectSet");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let planned = crate::plan::exec::cte_scan_plan_for_test(
+            &read_ctx,
+            &cte_project_set_select,
+            &cte_project_set_select.from[0],
+        )
+        .expect("CteScan ProjectSet plans")
+        .expect("CTE projection SRF uses ProjectSet");
+        let crate::plan::query::PlanNode::ProjectSet { input } = &planned.node else {
+            panic!("CTE projection SRF should plan a ProjectSet");
+        };
+        assert!(input.target_list.is_empty(), "Filter leaves projection to ProjectSet");
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n, row_number() OVER (ORDER BY n DESC) FROM planned_cte"),
+        )
+        .expect("CteScan WindowAgg plan executes")
+        .expect("CTE window uses WindowAgg");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
+                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int8(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT n FROM (SELECT 1 AS n) AS derived WHERE n > 0"),
         )
         .expect("SubqueryScan plan executes")
@@ -17315,14 +17406,24 @@ mod tests {
             "SELECT count(*) FROM (SELECT 1 AS n) AS derived",
             "SELECT grouping(n) FROM (SELECT 1 AS n) AS derived",
             "SELECT row_number() OVER () FROM (SELECT 1 AS n) AS derived",
-            "SELECT DISTINCT n FROM planned_cte",
             "SELECT n FROM planned_cte AS p(n)",
             "SELECT n FROM planned_cte TABLESAMPLE BERNOULLI(100)",
-            "SELECT n FROM planned_cte ORDER BY n",
-            "SELECT n FROM planned_cte LIMIT 1",
-            "SELECT count(*) FROM planned_cte",
             "SELECT grouping(n) FROM planned_cte",
-            "SELECT row_number() OVER () FROM planned_cte",
+            "SELECT DISTINCT count(*) FROM planned_cte",
+            "SELECT count(*) FROM planned_cte ORDER BY 1",
+            "SELECT count(*) FROM planned_cte LIMIT 1",
+            "SELECT count(*) FROM planned_cte OFFSET 1",
+            "SELECT count(*), row_number() OVER () FROM planned_cte",
+            "SELECT generate_series(1, 2), row_number() OVER () FROM planned_cte",
+            "SELECT DISTINCT n, row_number() OVER () FROM planned_cte",
+            "SELECT n, row_number() OVER () FROM planned_cte ORDER BY 1",
+            "SELECT n, row_number() OVER () FROM planned_cte LIMIT 1",
+            "SELECT row_number() OVER () FROM planned_cte OFFSET 1",
+            "SELECT count(*), generate_series(1, 2) FROM planned_cte",
+            "SELECT DISTINCT n, generate_series(1, 2) FROM planned_cte",
+            "SELECT n, generate_series(1, 2) FROM planned_cte ORDER BY 1",
+            "SELECT n, generate_series(1, 2) FROM planned_cte LIMIT 1",
+            "SELECT n, generate_series(1, 2) FROM planned_cte OFFSET 1",
             "SELECT DISTINCT n FROM planned_transition",
             "SELECT n FROM planned_transition AS p(n)",
             "SELECT n FROM planned_transition TABLESAMPLE BERNOULLI(100)",
