@@ -374,6 +374,7 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
                 ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 => {
                     Ok(ColumnType::Numeric(None))
                 }
+                ColumnType::Interval => Ok(ColumnType::Interval),
                 _ if t.is_numeric() => Ok(ColumnType::Numeric(None)),
                 other => Err(undefined_for_arg("avg", other)),
             }
@@ -773,20 +774,10 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
             {
                 return Err(undefined_for_arg(&fc.name, arg_type));
             }
-            // sum/avg accept only numeric arguments (int4/int8/float8/numeric),
-            // plus — for `sum` alone — `money`: PostgreSQL has `sum(money)` but
-            // deliberately no `avg(money)`.
-            let accepts = matches!(
-                arg_type,
-                ColumnType::Int2
-                    | ColumnType::Int4
-                    | ColumnType::Int8
-                    | ColumnType::Float4
-                    | ColumnType::Float8
-            ) || arg_type.is_numeric()
-                || (func == AggFunc::Sum && arg_type == ColumnType::Money);
-            if matches!(func, AggFunc::Sum | AggFunc::Avg) && !accepts {
-                return Err(undefined_for_arg(&fc.name, arg_type));
+            if matches!(func, AggFunc::Sum | AggFunc::Avg) {
+                // Use the same overload check that supplies RowDescription;
+                // this prevents aggregate planning and projection from drifting.
+                func_result_type(fc, scope)?;
             }
             Ok(AggSpec {
                 func,
@@ -1651,6 +1642,12 @@ enum AccState {
         sum: Option<Datum>,
         n: i64,
     },
+    /// `avg(interval)`: sum then divide, preserving PostgreSQL's calendar
+    /// fields until the final division.
+    AvgInterval {
+        sum: Option<Datum>,
+        n: i64,
+    },
     /// `array_agg`, the values in fold order, NULLs included.
     ///
     /// An empty state means zero rows were folded, which is SQL NULL and not an
@@ -1927,6 +1924,8 @@ impl AccState {
             AggFunc::Avg => {
                 if matches!(spec.arg_type, Some(ColumnType::Float4 | ColumnType::Float8)) {
                     AccState::Avg { sum: 0.0, n: 0 }
+                } else if spec.arg_type == Some(ColumnType::Interval) {
+                    AccState::AvgInterval { sum: None, n: 0 }
                 } else {
                     AccState::AvgN { sum: None, n: 0 }
                 }
@@ -2064,6 +2063,13 @@ impl AccState {
                 *sum = Some(match sum.take() {
                     None => vn,
                     Some(cur) => ops::add(&cur, &vn)?,
+                });
+                *n += 1;
+            }
+            AccState::AvgInterval { sum, n } => {
+                *sum = Some(match sum.take() {
+                    None => v,
+                    Some(cur) => ops::add(&cur, &v)?,
                 });
                 *n += 1;
             }
@@ -2346,6 +2352,10 @@ impl AccState {
             // SP32: numeric mean = sum / count, with PostgreSQL's division scale.
             AccState::AvgN { sum, n } => match sum {
                 Some(s) if *n > 0 => ops::div(s, &Datum::Int8(*n))?,
+                _ => Datum::Null,
+            },
+            AccState::AvgInterval { sum, n } => match sum {
+                Some(s) => ops::div(s, &Datum::Int8(*n))?,
                 _ => Datum::Null,
             },
             // PostgreSQL's array_agg over zero rows is NULL, NOT an empty array.
@@ -3793,6 +3803,48 @@ mod tests {
         assert_eq!(
             agg_text("SELECT avg(v) FROM t", Some(&t), vec![]).expect("agg"),
             vec![vec![None]]
+        );
+    }
+
+    #[test]
+    fn avg_over_intervals_preserves_calendar_fields_until_division() {
+        let mut t = table();
+        t.columns[1].ty = ColumnType::Interval;
+        let interval = |months, days, micros| {
+            Datum::Interval(crabka_pgtypes::datetime::Interval {
+                months,
+                days,
+                micros,
+            })
+        };
+        assert!(
+            agg_text(
+                "SELECT avg(v) FROM t",
+                Some(&t),
+                vec![
+                    r(&[Datum::Int4(1), interval(1, 0, 0)]),
+                    r(&[Datum::Int4(1), interval(0, 30, 0)]),
+                    r(&[Datum::Int4(1), Datum::Null]),
+                ],
+            )
+            .expect("interval avg")
+                == vec![vec![Some("30 days".into())]]
+        );
+        assert!(
+            agg_text(
+                "SELECT avg(v) FROM t",
+                Some(&t),
+                vec![
+                    r(&[Datum::Int4(1), interval(1, 0, 0)]),
+                    r(&[Datum::Int4(1), interval(0, 1, 0)]),
+                ],
+            )
+            .expect("calendar avg")
+                == vec![vec![Some("15 days 12:00:00".into())]]
+        );
+        assert!(
+            agg_text("SELECT avg(v) FROM t", Some(&t), vec![]).expect("empty interval avg")
+                == vec![vec![None]]
         );
     }
 
