@@ -886,13 +886,6 @@ fn plan_seq_scan(
     if !aggregate && crate::grouping::is_grouping_query(select) {
         return Ok(None);
     }
-    if !select
-        .group_by
-        .iter()
-        .all(|expr| matches!(expr, crabka_pgparser::ast::Expr::Column { .. }))
-    {
-        return Ok(None);
-    }
     let window = crate::window::has_window_calls(select);
     if window
         && (aggregate
@@ -929,6 +922,11 @@ fn plan_seq_scan(
         read_ctx.ctes,
     )?
     .scope;
+    if aggregate {
+        // Preserve SQL92 positional-reference validation before the aggregate
+        // executor evaluates a computed grouping expression.
+        crate::grouping::resolve_group_references(select, &scope)?;
+    }
     if window {
         let quals = bind_optional(select.filter.as_ref(), &scope)?
             .into_iter()
@@ -1017,10 +1015,9 @@ fn plan_seq_scan(
         node: PlanNode::SeqScan { scanrelid: 1 },
     };
     let filter = Plan {
-        target_list: if aggregate || project_set {
-            Vec::new()
-        } else {
-            target_list.clone()
+        target_list: match (aggregate, project_set) {
+            (false, false) => target_list.clone(),
+            _ => Vec::new(),
         },
         quals,
         node: PlanNode::Filter {

@@ -16892,6 +16892,36 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT a % 2, count(*) FROM seq_scan_test GROUP BY a % 2"),
+        )
+        .expect("computed GROUP BY Aggregate plan executes")
+        .expect("stored table computed GROUP BY uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
+                vec![crabka_pgtypes::Datum::Int4(0), crabka_pgtypes::Datum::Int8(2)],
+            ]
+        );
+        for sql in [
+            "SELECT count(*) FROM seq_scan_test LIMIT 1",
+            "SELECT generate_series(1, 2), row_number() OVER () FROM seq_scan_test",
+            "SELECT DISTINCT a, row_number() OVER () FROM seq_scan_test",
+            "SELECT a, row_number() OVER () FROM seq_scan_test ORDER BY 1",
+            "SELECT a, row_number() OVER () FROM seq_scan_test LIMIT 1",
+            "SELECT a, row_number() OVER () FROM seq_scan_test OFFSET 1",
+            "SELECT DISTINCT a, generate_series(1, 2) FROM seq_scan_test",
+            "SELECT a, generate_series(1, 2) FROM seq_scan_test OFFSET 1",
+        ] {
+            assert!(
+                crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
+                    .expect("unsupported direct SeqScan shape falls back")
+                    .is_none(),
+                "{sql}"
+            );
+        }
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of(
                 "SELECT a FROM (SELECT a FROM seq_scan_test ORDER BY a DESC LIMIT 2) AS derived",
             ),
