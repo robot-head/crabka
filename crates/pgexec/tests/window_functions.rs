@@ -596,6 +596,36 @@ async fn range_offsets_use_the_ordering_column_type_arithmetic() {
 }
 
 #[tokio::test]
+async fn range_offsets_support_timetz_typmods_and_infinite_intervals() {
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(concat!(
+            "CREATE TABLE timed (t timetz(2), v int4); ",
+            "INSERT INTO timed VALUES ('10:00+00', 1), ('10:30+00', 2), ('12:00+00', 4); ",
+            "CREATE TABLE clock (t time, v int4); ",
+            "INSERT INTO clock VALUES ('01:00', 1), ('02:00', 2), ('03:00', 4)",
+        ))
+        .await
+        .expect("fixture");
+    assert!(
+        rows(
+            &client,
+            "SELECT sum(v) OVER (ORDER BY t RANGE BETWEEN INTERVAL '1 hour' PRECEDING AND CURRENT ROW) FROM timed ORDER BY t",
+        )
+        .await
+            == vec!["1", "3", "4"]
+    );
+    assert!(
+        rows(
+            &client,
+            "SELECT count(*) OVER (ORDER BY t RANGE BETWEEN 'infinity'::interval PRECEDING AND 'infinity'::interval FOLLOWING) FROM clock ORDER BY t",
+        )
+        .await
+            == vec!["3", "3", "3"]
+    );
+}
+
+#[tokio::test]
 async fn window_over_an_empty_relation_produces_no_rows() {
     let client = connect(spawn().await).await;
     client

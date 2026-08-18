@@ -22,6 +22,7 @@ pub(crate) fn query_to_relation_with_ctes(
                 ));
             }
             let s = crate::plan::exec::select_with_query_tail(q, s);
+            crate::window::reject_misplaced_calls(&s)?;
             crate::grouping::reject_misplaced_calls(&s)?;
             if !crate::exec::select_contains_subquery(&s) {
                 let planned = crate::subquery::resolve_in_select(&query_ctx, &s)?;

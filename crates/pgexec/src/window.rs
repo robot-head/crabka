@@ -1475,7 +1475,7 @@ fn validate_range_offsets(
 /// declares, and it is what its "invalid input syntax for type …" message names
 /// when the literal does not parse.
 fn range_offset_unknown_type(column: ColumnType) -> Option<ColumnType> {
-    match column {
+    match range_offset_base_type(column) {
         ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 | ColumnType::Numeric(_) => {
             Some(column)
         }
@@ -1484,6 +1484,7 @@ fn range_offset_unknown_type(column: ColumnType) -> Option<ColumnType> {
         ColumnType::Float4 | ColumnType::Float8 => Some(ColumnType::Float8),
         ColumnType::Date
         | ColumnType::Time
+        | ColumnType::Timetz
         | ColumnType::Timestamp
         | ColumnType::Timestamptz
         | ColumnType::Interval => Some(ColumnType::Interval),
@@ -1508,7 +1509,7 @@ fn range_offset_message(column: ColumnType, offset: ColumnType) -> String {
 
 fn range_offset_column_supported(column: ColumnType) -> bool {
     matches!(
-        column,
+        range_offset_base_type(column),
         ColumnType::Int2
             | ColumnType::Int4
             | ColumnType::Int8
@@ -1517,6 +1518,7 @@ fn range_offset_column_supported(column: ColumnType) -> bool {
             | ColumnType::Float8
             | ColumnType::Date
             | ColumnType::Time
+            | ColumnType::Timetz
             | ColumnType::Timestamp
             | ColumnType::Timestamptz
             | ColumnType::Interval
@@ -1524,6 +1526,8 @@ fn range_offset_column_supported(column: ColumnType) -> bool {
 }
 
 fn range_offset_supported(column: ColumnType, offset: ColumnType) -> bool {
+    let column = range_offset_base_type(column);
+    let offset = range_offset_base_type(offset);
     let integral = matches!(
         offset,
         ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8
@@ -1543,11 +1547,18 @@ fn range_offset_supported(column: ColumnType, offset: ColumnType) -> bool {
         }
         ColumnType::Date
         | ColumnType::Time
+        | ColumnType::Timetz
         | ColumnType::Timestamp
         | ColumnType::Timestamptz
         | ColumnType::Interval => offset == ColumnType::Interval,
         _ => false,
     }
+}
+
+/// A temporal typmod does not change which `in_range` support function a
+/// `RANGE` frame uses.
+fn range_offset_base_type(column: ColumnType) -> ColumnType {
+    column.temporal_base().map_or(column, |(base, _)| base)
 }
 
 fn mode_word(mode: FrameMode) -> &'static str {
@@ -2137,6 +2148,12 @@ fn offset_limit(
     subtract: bool,
     ctx: &EvalCtx,
 ) -> Result<RangeLimit, ExecError> {
+    // PostgreSQL treats an infinite interval frame offset as unbounded. This
+    // must happen before time/timetz arithmetic, whose ordinary operators
+    // correctly reject an infinite shift.
+    if matches!(offset, Datum::Interval(interval) if interval.is_infinite()) {
+        return Ok(RangeLimit::EveryOrderedValue);
+    }
     // `+inf` infinitely precedes `+inf` and `-inf` infinitely follows `-inf`:
     // the arithmetic would be NaN, and PostgreSQL's float and numeric `in_range`
     // instead admit every finite and infinite value (but not NaN) to the frame.
