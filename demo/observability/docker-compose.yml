@@ -447,7 +447,7 @@ services:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
 
   grafana:
-    image: mirror.gcr.io/grafana/grafana:13.1
+    image: mirror.gcr.io/grafana/grafana:13.2
     <<: *grafana-res
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
