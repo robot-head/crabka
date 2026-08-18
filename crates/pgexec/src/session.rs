@@ -17098,6 +17098,22 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT l.a, count(*) AS c FROM seq_scan_test AS l, seq_scan_third AS r \
+                 GROUP BY l.a ORDER BY c DESC LIMIT 1",
+            ),
+        )
+        .expect("nested Aggregate tail plan executes")
+        .expect("nested aggregate tail uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(2),
+                crabka_pgtypes::Datum::Int8(2),
+            ]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT a FROM (SELECT a FROM seq_scan_test ORDER BY a FETCH FIRST 2 ROWS WITH TIES) AS derived",
             ),
         )
@@ -18096,10 +18112,6 @@ mod tests {
             "SELECT a FROM seq_scan_test, public.planned_cte",
             "SELECT a.i FROM generate_series(1, 2) AS a(i) \
              JOIN generate_series(1, 2) AS b(i) ON a.i = b.i",
-            "SELECT DISTINCT count(*) FROM seq_scan_test AS l, seq_scan_third AS r",
-            "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r ORDER BY 1",
-            "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
-            "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1",
             "SELECT count(*), row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r",
             "SELECT generate_series(1, 2), row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r",
             "SELECT DISTINCT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r",

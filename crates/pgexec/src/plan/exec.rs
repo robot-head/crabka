@@ -80,11 +80,6 @@ fn try_execute_nested_loop(
                 || !select.order_by.is_empty()
                 || select.limit.is_some()
                 || select.offset.is_some()))
-        || (aggregate
-            && (!matches!(select.distinct, DistinctClause::All)
-                || !select.order_by.is_empty()
-                || select.limit.is_some()
-                || select.offset.is_some()))
     {
         return Ok(None);
     }
@@ -112,16 +107,6 @@ fn try_execute_nested_loop(
             crate::eval::require_equality_operator(*ty)?;
         }
     }
-    let order_keys =
-        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
-    let mut sort_positions = Vec::with_capacity(order_keys.len());
-    for key in order_keys {
-        let exec::SelectOrderKey::Output(index) = key else {
-            return Ok(None);
-        };
-        crate::eval::require_ordering_operator(tys[index])?;
-        sort_positions.push(index);
-    }
     let Some((sources, loop_plan)) = nested_loop_input_plan(read_ctx, select) else {
         return Ok(None);
     };
@@ -145,27 +130,49 @@ fn try_execute_nested_loop(
             input: Box::new(loop_plan),
         },
     };
-    let aggregate_plan = if aggregate {
-        Plan {
+    if aggregate {
+        let plan = Plan {
             target_list: bind_target_list(&exprs, &fields, &scope)?,
             quals: Vec::new(),
             node: PlanNode::Aggregate {
                 input: Box::new(filter),
             },
+        };
+        let mut state = PlanState::new(plan, Scope::empty());
+        return NestedLoopTail {
+            read_ctx,
+            sources: &sources,
+            fields: &fields,
+            tys: &tys,
+            order_by: &select.order_by,
+            sort_positions: &[],
+            limit: select.limit.as_ref(),
+            offset: select.offset.as_ref(),
+            select,
         }
-    } else {
-        filter
-    };
+        .execute(&mut state)
+        .map(Some);
+    }
+    let order_keys =
+        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
+    let mut sort_positions = Vec::with_capacity(order_keys.len());
+    for key in order_keys {
+        let exec::SelectOrderKey::Output(index) = key else {
+            return Ok(None);
+        };
+        crate::eval::require_ordering_operator(tys[index])?;
+        sort_positions.push(index);
+    }
     let project_set_plan = if project_set {
         Plan {
             target_list: bind_target_list(&exprs, &fields, &scope)?,
             quals: Vec::new(),
             node: PlanNode::ProjectSet {
-                input: Box::new(aggregate_plan),
+                input: Box::new(filter),
             },
         }
     } else {
-        aggregate_plan
+        filter
     };
     let unique = if distinct {
         Plan {
