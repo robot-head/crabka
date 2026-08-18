@@ -455,9 +455,10 @@ fn is_nested_loop_source(
                     !references_column
                 })
         }
-        TableExpr::Derived { .. } => {
+        TableExpr::Derived { lateral: false, .. } => {
             matches!(plan_subquery_input(read_ctx, source), Ok(Some(_)))
         }
+        TableExpr::Derived { lateral: true, .. } => false,
         TableExpr::JsonTable(table) => {
             !table.lateral && table.exprs().into_iter().all(|expr| {
                 let mut references_column = false;
@@ -1369,20 +1370,13 @@ fn plan_subquery_scan(
     select: &SelectStmt,
     source: &TableExpr,
 ) -> Result<Option<SeqScanPlan>, ExecError> {
-    let TableExpr::Derived {
-        subquery, lateral, ..
-    } = source
+    let TableExpr::Derived { .. } = source
     else {
         return Ok(None);
     };
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
-    if *lateral
-        || !subquery.order_by.is_empty()
-        || subquery.limit.is_some()
-        || subquery.offset.is_some()
-        || subquery.locking.is_some()
-        || (!aggregate && crate::grouping::is_grouping_query(select))
+    if !aggregate && crate::grouping::is_grouping_query(select)
         || (window
             && (aggregate
                 || crate::srf::projection_contains_srf(&select.projection)
@@ -1584,14 +1578,11 @@ fn plan_subquery_input(
     read_ctx: &crate::subquery::SubCtx<'_>,
     source: &TableExpr,
 ) -> Result<Option<Plan>, ExecError> {
-    let TableExpr::Derived {
-        subquery, lateral, ..
-    } = source
+    let TableExpr::Derived { subquery, .. } = source
     else {
         return Ok(None);
     };
-    if *lateral
-        || subquery.with.is_some()
+    if subquery.with.is_some()
         || !subquery.order_by.is_empty()
         || subquery.limit.is_some()
         || subquery.offset.is_some()

@@ -16892,6 +16892,13 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT n FROM LATERAL (SELECT 1 AS n) AS derived"),
+        )
+        .expect("standalone LATERAL SubqueryScan plan executes")
+        .expect("standalone LATERAL derived table uses SubqueryScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of(
                 "SELECT a FROM seq_scan_test TABLESAMPLE BERNOULLI (100) WHERE a = 2",
             ),
@@ -17833,10 +17840,13 @@ mod tests {
             "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r ORDER BY 1",
             "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
             "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1",
-            "SELECT n FROM LATERAL (SELECT 1 AS n) AS derived",
             "SELECT n FROM (SELECT 1 AS n ORDER BY n) AS derived",
             "SELECT n FROM (SELECT 1 AS n OFFSET 0) AS derived",
             "SELECT n FROM (SELECT 1 AS n FOR UPDATE) AS derived",
+            "SELECT n FROM (WITH x AS (SELECT 1 AS n) SELECT n FROM x) AS derived",
+            "SELECT n FROM (VALUES (1) ORDER BY 1) AS derived(n)",
+            "SELECT n FROM (VALUES (1) LIMIT 1) AS derived(n)",
+            "SELECT n FROM (VALUES (1) OFFSET 0) AS derived(n)",
             "SELECT grouping(n) FROM (SELECT 1 AS n) AS derived",
             "SELECT DISTINCT count(*) FROM (SELECT 1 AS n) AS derived",
             "SELECT count(*) FROM (SELECT 1 AS n) AS derived ORDER BY 1",
