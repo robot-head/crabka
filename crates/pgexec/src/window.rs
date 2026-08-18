@@ -535,7 +535,15 @@ pub(crate) fn execute_with_memory(
     // A grouped query's window functions run over the GROUPED rows, so the whole
     // select list — and the window specs themselves — are re-expressed against
     // the aggregate output first.
-    let lowered = lower_over_grouping(s, scope, &fields, &out_exprs, rows, ctx)?;
+    let lowered = lower_over_grouping(
+        s,
+        scope,
+        &fields,
+        &out_exprs,
+        rows,
+        ctx,
+        statement_memory,
+    )?;
     let calls = match &lowered.calls {
         Some(lowered_calls) => {
             let windows = resolve_window_clause(&s.windows)?;
@@ -550,7 +558,13 @@ pub(crate) fn execute_with_memory(
     let base_scope = extend_scope(&lowered.scope, &calls, &names);
 
     let mut base_rows = lowered.rows;
-    let values = evaluate_calls(&calls, &lowered.scope, &base_rows, ctx)?;
+    let values = evaluate_calls(
+        &calls,
+        &lowered.scope,
+        &base_rows,
+        ctx,
+        statement_memory,
+    )?;
     for (index, row) in base_rows.iter_mut().enumerate() {
         for column in &values {
             row.push(column[index].clone());
@@ -695,6 +709,7 @@ fn lower_over_grouping(
     out_exprs: &[Expr],
     rows: Vec<Vec<Datum>>,
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<WindowInput, ExecError> {
     if !is_grouped(s, out_exprs, &s.window_calls) {
         return Ok(WindowInput {
@@ -747,7 +762,13 @@ fn lower_over_grouping(
     // Through `crate::grouping`, not `crate::agg`: a grouping-set clause survives
     // into the leaf select, and it is that pass which expands it. Skipping it
     // would silently drop the clause and fold the input to one group per key.
-    let leaf_rows = crate::grouping::aggregate_rows(&inner, scope, rows, ctx)?;
+    let leaf_rows = crate::grouping::aggregate_rows_with_memory(
+        &inner,
+        scope,
+        rows,
+        ctx,
+        statement_memory,
+    )?;
     let mut leaf_scope = Scope::empty();
     for (index, leaf) in leaves.iter().enumerate() {
         leaf_scope.columns.push(ColumnBinding {
@@ -1031,10 +1052,11 @@ fn evaluate_calls(
     scope: &Scope,
     rows: &[Vec<Datum>],
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut out = Vec::with_capacity(calls.len());
     for call in calls {
-        out.push(evaluate_call(call, scope, rows, ctx)?);
+        out.push(evaluate_call(call, scope, rows, ctx, statement_memory)?);
     }
     Ok(out)
 }
@@ -1044,6 +1066,7 @@ fn evaluate_call(
     scope: &Scope,
     rows: &[Vec<Datum>],
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Datum>, ExecError> {
     let order_by = &call.spec.order_by;
     let sort_keys = eval_key_rows(order_by.iter().map(|item| &item.expr), scope, rows, ctx)?;
@@ -1077,6 +1100,7 @@ fn evaluate_call(
                 &FramedCall {
                     call,
                     frame: &frame,
+                    statement_memory,
                 },
                 &partition,
                 position,
@@ -1666,6 +1690,7 @@ fn offset_count(value: &Datum) -> usize {
 struct FramedCall<'a> {
     call: &'a PlannedCall,
     frame: &'a ResolvedFrame,
+    statement_memory: &'a crate::scanner::StatementMemory,
 }
 
 fn evaluate_position(
@@ -1677,7 +1702,11 @@ fn evaluate_position(
     rows: &[Vec<Datum>],
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
-    let FramedCall { call, frame } = framed;
+    let FramedCall {
+        call,
+        frame,
+        statement_memory,
+    } = framed;
     let ascending = call.spec.order_by.first().is_none_or(|item| item.asc);
     let total = partition.ordered.len();
     let place = RowPlace::of(partition, position);
@@ -1733,7 +1762,15 @@ fn evaluate_position(
                 _ => Ok(Datum::Null),
             }
         }
-        _ => aggregate_over_frame(call, partition, &frame_rows, scope, rows, ctx),
+        _ => aggregate_over_frame(
+            call,
+            partition,
+            &frame_rows,
+            scope,
+            rows,
+            ctx,
+            statement_memory,
+        ),
     }
 }
 
@@ -1905,6 +1942,7 @@ fn aggregate_over_frame(
     scope: &Scope,
     rows: &[Vec<Datum>],
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Datum, ExecError> {
     let mut input = Vec::with_capacity(frame_rows.len());
     for position in frame_rows {
@@ -1916,7 +1954,13 @@ fn aggregate_over_frame(
         }
         input.push(row.clone());
     }
-    let folded = crate::agg::aggregate_rows(&bare_aggregate_select(&call.call), scope, input, ctx)?;
+    let folded = crate::agg::aggregate_rows_with_memory(
+        &bare_aggregate_select(&call.call),
+        scope,
+        input,
+        ctx,
+        statement_memory,
+    )?;
     Ok(folded
         .into_iter()
         .next()

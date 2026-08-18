@@ -235,23 +235,6 @@ fn mentions_grouping_call(s: &SelectStmt) -> bool {
         || s.order_by.iter().any(|o| contains_grouping_call(&o.expr))
 }
 
-/// Run an aggregate/grouping query over the already-`WHERE`-filtered `rows`.
-///
-/// For a plain aggregate this function delegates straight to
-/// [`crate::agg::aggregate_rows`]. Otherwise it resolves output references,
-/// expands the grouping sets, and runs the augmented-relation rewrite the module
-/// docs describe.
-pub(crate) fn aggregate_rows(
-    s: &SelectStmt,
-    scope: &Scope,
-    rows: Vec<Vec<Datum>>,
-    ctx: &EvalCtx,
-) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let statement_memory =
-        crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
-    aggregate_rows_with_memory(s, scope, rows, ctx, &statement_memory)
-}
-
 /// Run a grouping-set aggregate with the enclosing statement's blocking-memory
 /// limit.
 pub(crate) fn aggregate_rows_with_memory(

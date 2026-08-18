@@ -21,6 +21,7 @@ use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall, SelectItem, SelectStmt};
 use crabka_pgtypes::{
     ColumnType, Datum, ElemType, TypeError, json::Layout, numeric::NumericValue, ops,
 };
+#[cfg(test)]
 use crabka_pgwire::engine::QueryResult;
 
 use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
@@ -2717,7 +2718,7 @@ fn as_f64(d: &Datum) -> Option<f64> {
 /// core that derived tables share through `select_to_relation`. `ctx` carries
 /// the session zone and clock for any temporal evaluation. Non-temporal
 /// aggregation ignores `ctx`, and UTC/epoch reproduces prior behavior.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn execute_aggregate(
     s: &SelectStmt,
     scope: &Scope,
@@ -2739,6 +2740,7 @@ pub(crate) fn execute_aggregate(
 /// HAVING, DISTINCT, ORDER BY, OFFSET and LIMIT are all applied.
 /// `execute_aggregate` renders these rows to a `QueryResult`. A derived table
 /// re-qualifies them under its alias.
+#[cfg(test)]
 pub(crate) fn aggregate_rows(
     s: &SelectStmt,
     scope: &Scope,
