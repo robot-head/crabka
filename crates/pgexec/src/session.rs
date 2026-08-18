@@ -13065,17 +13065,26 @@ pub(crate) fn decode_binary_value(
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        ColumnType::Temporal(kind, _) => decode_binary_value(
-            value,
-            match kind {
-                crabka_pgtypes::TemporalType::Time => ColumnType::Time,
-                crabka_pgtypes::TemporalType::Timetz => ColumnType::Timetz,
-                crabka_pgtypes::TemporalType::Timestamp => ColumnType::Timestamp,
-                crabka_pgtypes::TemporalType::Timestamptz => ColumnType::Timestamptz,
-                crabka_pgtypes::TemporalType::Interval => ColumnType::Interval,
-            },
-            time_zone,
-        ),
+        ColumnType::Temporal(kind, precision) => {
+            let decoded = decode_binary_value(
+                value,
+                match kind {
+                    crabka_pgtypes::TemporalType::Time => ColumnType::Time,
+                    crabka_pgtypes::TemporalType::Timetz => ColumnType::Timetz,
+                    crabka_pgtypes::TemporalType::Timestamp => ColumnType::Timestamp,
+                    crabka_pgtypes::TemporalType::Timestamptz => ColumnType::Timestamptz,
+                    crabka_pgtypes::TemporalType::Interval => ColumnType::Interval,
+                },
+                time_zone,
+            )?;
+            crabka_pgtypes::cast::cast_assign(
+                &decoded,
+                ColumnType::Temporal(kind, precision),
+                time_zone,
+            )
+            .map_err(ExecError::from)
+            .map_err(ExecError::into_pg)
+        }
         ColumnType::Jsonb => decode_jsonb_binary(value),
         // `json_recv` is `textrecv` plus a syntax check: no version byte, and
         // the bytes are kept as sent.
@@ -22926,7 +22935,9 @@ mod compatibility_refusal_tests {
 mod notify_and_binary_parameter_tests {
     use assert2::assert;
     use crabka_pgparser::ast::Statement;
-    use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, encoding, oids};
+    use crabka_pgtypes::{
+        ArrayValue, ColumnType, Datum, ElemType, TemporalType, encoding, oids,
+    };
     use crabka_pgwire::{engine::BoundParam, error::PgError};
 
     use super::{
@@ -23016,6 +23027,35 @@ mod notify_and_binary_parameter_tests {
             assert!(encoded[0] == encoding::JSONB_BINARY_VERSION, "{text}");
             let decoded = decode(&param(oids::JSONB, 1, &encoded), ColumnType::Jsonb);
             assert!(decoded.expect("decode") == value, "{text}");
+        }
+    }
+
+    #[test]
+    fn binary_temporal_parameters_apply_the_target_typmod() {
+        let cases = [
+            (
+                Datum::Time(crabka_pgtypes::datetime::parse_time("12:34:56.785").expect("time")),
+                ColumnType::Temporal(TemporalType::Time, 2),
+                Datum::Time(crabka_pgtypes::datetime::parse_time("12:34:56.79").expect("rounded time")),
+            ),
+            (
+                Datum::Timestamp(
+                    crabka_pgtypes::datetime::parse_timestamp("2024-01-02 03:04:05.5")
+                        .expect("timestamp"),
+                ),
+                ColumnType::Temporal(TemporalType::Timestamp, 0),
+                Datum::Timestamp(
+                    crabka_pgtypes::datetime::parse_timestamp("2024-01-02 03:04:06")
+                        .expect("rounded timestamp"),
+                ),
+            ),
+        ];
+        for (value, ty, expected) in cases {
+            let encoded = encoding::encode_binary(&value);
+            assert!(
+                decode(&param(ty.oid(), 1, &encoded), ty).expect("binary temporal parameter")
+                    == expected
+            );
         }
     }
 
