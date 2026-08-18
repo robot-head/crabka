@@ -26,13 +26,20 @@ pub(crate) fn try_execute_result(
     select: &SelectStmt,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Option<Relation>, ExecError> {
+    Ok(try_execute_result_with_state(select, ctx)?.map(|(relation, _)| relation))
+}
+
+/// Execute a scalar `Result` and retain its runtime counters for EXPLAIN.
+pub(crate) fn try_execute_result_with_state(
+    select: &SelectStmt,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Option<(Relation, PlanState)>, ExecError> {
     let Some(ResultPlan { plan, fields, tys }) = plan_result(select)? else {
         return Ok(None);
     };
     let mut state = PlanState::new(plan, Scope::empty());
-    ResultExecutor { ctx, fields, tys }
-        .execute(&mut state)
-        .map(Some)
+    let relation = ResultExecutor { ctx, fields, tys }.execute(&mut state)?;
+    Ok(Some((relation, state)))
 }
 
 /// Execute the simple single-table slice of SELECT through `SeqScan`.
@@ -43,20 +50,29 @@ pub(crate) fn try_execute_seq_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
+    Ok(try_execute_seq_scan_with_state(read_ctx, select)?.map(|(relation, _)| relation))
+}
+
+/// Execute a simple scan plan and retain its runtime tree for EXPLAIN ANALYZE.
+pub(crate) fn try_execute_seq_scan_with_state(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+) -> Result<Option<(Relation, PlanState)>, ExecError> {
     if select.from.len() >= 2 || matches!(select.from.as_slice(), [TableExpr::Join { .. }]) {
-        return try_execute_nested_loop(read_ctx, select);
+        return try_execute_nested_loop_with_state(read_ctx, select);
     }
     let Some(planned) = plan_seq_scan(read_ctx, select)? else {
         return Ok(None);
     };
     let mut state = PlanState::new(planned.plan.clone(), Scope::empty());
-    execute_seq_scan_plan(&mut state, read_ctx, planned).map(Some)
+    let relation = execute_seq_scan_plan(&mut state, read_ctx, planned)?;
+    Ok(Some((relation, state)))
 }
 
-fn try_execute_nested_loop(
+fn try_execute_nested_loop_with_state(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
-) -> Result<Option<Relation>, ExecError> {
+) -> Result<Option<(Relation, PlanState)>, ExecError> {
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if select.from.is_empty() {
@@ -88,7 +104,7 @@ fn try_execute_nested_loop(
     )?
     .scope;
     if window {
-        return execute_nested_loop_window(read_ctx, select, &scope).map(Some);
+        return execute_nested_loop_window_with_state(read_ctx, select, &scope).map(Some);
     }
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
     let project_set = crate::srf::exprs_contain_srf(&exprs);
@@ -135,7 +151,7 @@ fn try_execute_nested_loop(
             },
         };
         let mut state = PlanState::new(plan, Scope::empty());
-        return NestedLoopTail {
+        let relation = NestedLoopTail {
             read_ctx,
             sources: &sources,
             fields: &fields,
@@ -146,8 +162,8 @@ fn try_execute_nested_loop(
             offset: select.offset.as_ref(),
             select,
         }
-        .execute(&mut state)
-        .map(Some);
+        .execute(&mut state)?;
+        return Ok(Some((relation, state)));
     }
     let order_keys =
         exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
@@ -204,7 +220,7 @@ fn try_execute_nested_loop(
         sort
     };
     let mut state = PlanState::new(plan, Scope::empty());
-    NestedLoopTail {
+    let relation = NestedLoopTail {
         read_ctx,
         sources: &sources,
         fields: &fields,
@@ -215,8 +231,8 @@ fn try_execute_nested_loop(
         offset: select.offset.as_ref(),
         select,
     }
-    .execute(&mut state)
-    .map(Some)
+    .execute(&mut state)?;
+    Ok(Some((relation, state)))
 }
 
 fn nested_loop_input_plan(
@@ -247,11 +263,11 @@ fn nested_loop_input_plan(
     Some((sources, loop_plan))
 }
 
-fn execute_nested_loop_window(
+fn execute_nested_loop_window_with_state(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
     scope: &Scope,
-) -> Result<Relation, ExecError> {
+) -> Result<(Relation, PlanState), ExecError> {
     let Some((sources, loop_plan)) = nested_loop_input_plan(read_ctx, select) else {
         return Err(ExecError::Unsupported("WindowAgg had no nested-loop input".into()));
     };
@@ -282,24 +298,27 @@ fn execute_nested_loop_window(
     let PlanNode::WindowAgg { input } = &state.plan.node else {
         unreachable!()
     };
-    let mut filter_state = PlanState::new((**input).clone(), Scope::empty());
-    let PlanNode::Filter { input } = &filter_state.plan.node else {
-        unreachable!()
-    };
-    let mut loop_state = PlanState::new((**input).clone(), Scope::empty());
-    let relation = execute_nested_loop_plan(&mut loop_state, read_ctx, &mut sources.iter())?;
-    filter_state.begin_loop();
-    let relation = filter_relation_rows(&mut filter_state, relation, read_ctx.eval_ctx)?;
+    let relation = state.execute_child((**input).clone(), |filter_state| {
+        let PlanNode::Filter { input } = &filter_state.plan.node else {
+            unreachable!()
+        };
+        let relation = filter_state.execute_child((**input).clone(), |loop_state| {
+            execute_nested_loop_plan(loop_state, read_ctx, &mut sources.iter())
+        })?;
+        filter_state.begin_loop();
+        filter_relation_rows(filter_state, relation, read_ctx.eval_ctx)
+    })?;
     state.begin_loop();
     let (fields, tys, rows) = crate::window::execute(select, &relation.scope, relation.rows, read_ctx.eval_ctx)?;
     state.scope = exec::projected_scope(&fields, &tys);
     for _ in &rows {
         state.emit_row();
     }
-    Ok(Relation {
+    let relation = Relation {
         scope: state.scope.clone(),
         rows,
-    })
+    };
+    Ok((relation, state))
 }
 
 struct NestedLoopTail<'a, 'b> {
@@ -319,8 +338,9 @@ impl NestedLoopTail<'_, '_> {
         crate::session::check_query_canceled()?;
         match &state.plan.node {
         PlanNode::Filter { input } => {
-            let mut child = PlanState::new((**input).clone(), Scope::empty());
-            let relation = execute_nested_loop_plan(&mut child, self.read_ctx, &mut self.sources.iter())?;
+            let relation = state.execute_child((**input).clone(), |child| {
+                execute_nested_loop_plan(child, self.read_ctx, &mut self.sources.iter())
+            })?;
             state.begin_loop();
             let relation = filter_relation_rows(state, relation, self.read_ctx.eval_ctx)?;
             if state.plan.target_list.is_empty() {
@@ -330,8 +350,7 @@ impl NestedLoopTail<'_, '_> {
             }
         }
         PlanNode::Aggregate { input } => {
-            let mut child = PlanState::new((**input).clone(), Scope::empty());
-            let relation = self.execute(&mut child)?;
+            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
             state.begin_loop();
             let rows = crate::grouping::aggregate_rows_with_memory(
                 self.select,
@@ -350,8 +369,7 @@ impl NestedLoopTail<'_, '_> {
             })
         }
         PlanNode::ProjectSet { input } => {
-            let mut child = PlanState::new((**input).clone(), Scope::empty());
-            let relation = self.execute(&mut child)?;
+            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
             let (_, exprs, _) = exec::resolve_projection(&self.select.projection, &relation.scope)?;
             state.begin_loop();
             let rows = crate::srf::project_rows_ordered_with_memory(
@@ -373,14 +391,12 @@ impl NestedLoopTail<'_, '_> {
             })
         }
         PlanNode::Unique { input } => {
-            let mut child = PlanState::new((**input).clone(), Scope::empty());
-            let relation = self.execute(&mut child)?;
+            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
             state.begin_loop();
             unique_relation_rows(state, relation, &self.read_ctx.statement_memory)
         }
         PlanNode::Sort { input } => {
-            let mut child = PlanState::new((**input).clone(), Scope::empty());
-            let relation = self.execute(&mut child)?;
+            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
             state.begin_loop();
             sort_relation_rows(
                 state,
@@ -391,8 +407,7 @@ impl NestedLoopTail<'_, '_> {
             )
         }
         PlanNode::Limit { input } => {
-            let mut child = PlanState::new((**input).clone(), Scope::empty());
-            let relation = self.execute(&mut child)?;
+            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
             let offset = crate::exec::eval_row_count(
                 self.offset,
                 crate::exec::RowCountClause::Offset,
@@ -659,12 +674,16 @@ fn execute_nested_loop_plan(
             kind,
             constraint,
         } => {
-            let mut outer_state = PlanState::new((**outer).clone(), Scope::empty());
-            let mut inner_state = PlanState::new((**inner).clone(), Scope::empty());
             let kind = *kind;
             let constraint = constraint.clone();
-            let outer_relation = execute_nested_loop_plan(&mut outer_state, read_ctx, sources)?;
-            let inner_relation = execute_nested_loop_plan(&mut inner_state, read_ctx, sources)?;
+            let outer = (**outer).clone();
+            let inner = (**inner).clone();
+            let outer_relation = state.execute_child(outer, |child| {
+                execute_nested_loop_plan(child, read_ctx, sources)
+            })?;
+            let inner_relation = state.execute_child(inner, |child| {
+                execute_nested_loop_plan(child, read_ctx, sources)
+            })?;
             state.begin_loop();
             let relation = crate::join::join_relations(
                 outer_relation,
@@ -2329,13 +2348,14 @@ impl Executor for FunctionScanExecutor<'_, '_> {
                                 "TableFunctionScan requires a Result function body".into(),
                             ));
                         };
-                        let mut child = PlanState::new(plan.clone(), Scope::empty());
-                        ResultExecutor {
-                            ctx: self.read_ctx.eval_ctx,
-                            fields,
-                            tys,
-                        }
-                        .execute(&mut child)?
+                        state.execute_child(plan, |child| {
+                            ResultExecutor {
+                                ctx: self.read_ctx.eval_ctx,
+                                fields,
+                                tys,
+                            }
+                            .execute(child)
+                        })?
                     }
                     crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(
                         values,
@@ -2345,13 +2365,14 @@ impl Executor for FunctionScanExecutor<'_, '_> {
                             quals: Vec::new(),
                             node: PlanNode::ValuesScan,
                         };
-                        let mut child = PlanState::new(plan.clone(), Scope::empty());
-                        ValuesExecutor {
-                            ctx: self.read_ctx,
-                            query: &query,
-                            values,
-                        }
-                        .execute(&mut child)?
+                        state.execute_child(plan, |child| {
+                            ValuesExecutor {
+                                ctx: self.read_ctx,
+                                query: &query,
+                                values,
+                            }
+                            .execute(child)
+                        })?
                     }
                     _ => {
                         return Err(ExecError::Unsupported(
@@ -2409,8 +2430,8 @@ impl Executor for SubqueryScanExecutor<'_, '_> {
                 "SubqueryScanExecutor received a non-derived source".into(),
             ));
         };
-        let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = match &subquery.body {
+        let child_plan = (**input).clone();
+        let relation = state.execute_child(child_plan, |child| match &subquery.body {
             crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
                 inner,
             )) => {
@@ -2426,7 +2447,7 @@ impl Executor for SubqueryScanExecutor<'_, '_> {
                         fields,
                         tys,
                     }
-                    .execute(&mut child)?
+                    .execute(child)
                 } else {
                     let Some(planned) = plan_seq_scan(self.read_ctx, &inner)? else {
                         return Err(ExecError::Unsupported(
@@ -2438,7 +2459,7 @@ impl Executor for SubqueryScanExecutor<'_, '_> {
                             "SubqueryScanExecutor child plan did not match its subquery".into(),
                         ));
                     }
-                    execute_seq_scan_plan(&mut child, self.read_ctx, planned)?
+                    execute_seq_scan_plan(child, self.read_ctx, planned)
                 }
             }
             crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(
@@ -2448,13 +2469,13 @@ impl Executor for SubqueryScanExecutor<'_, '_> {
                 query: subquery,
                 values,
             }
-            .execute(&mut child)?,
+            .execute(child),
             _ => {
-                return Err(ExecError::Unsupported(
+                Err(ExecError::Unsupported(
                     "SubqueryScanExecutor received an unsupported subquery".into(),
-                ));
+                ))
             }
-        };
+        })?;
         state.begin_loop();
         let relation = crate::values::requalify_derived(relation, alias, columns)?;
         state.scope = relation.scope.clone();
@@ -2628,26 +2649,19 @@ fn execute_filter_input(
         ));
     };
     crate::session::check_query_canceled()?;
-    let mut child = PlanState::new((**input).clone(), Scope::empty());
-    let relation = match child.plan.node {
-        PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source }.execute(&mut child)?,
-        PlanNode::FunctionScan => FunctionScanExecutor { read_ctx, source }.execute(&mut child)?,
-        PlanNode::TableFunctionScan => {
-            FunctionScanExecutor { read_ctx, source }.execute(&mut child)?
-        }
-        PlanNode::SubqueryScan { .. } => {
-            SubqueryScanExecutor { read_ctx, source }.execute(&mut child)?
-        }
-        PlanNode::CteScan => CteScanExecutor { read_ctx, source }.execute(&mut child)?,
+    let relation = state.execute_child((**input).clone(), |child| match child.plan.node {
+        PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source }.execute(child),
+        PlanNode::FunctionScan => FunctionScanExecutor { read_ctx, source }.execute(child),
+        PlanNode::TableFunctionScan => FunctionScanExecutor { read_ctx, source }.execute(child),
+        PlanNode::SubqueryScan { .. } => SubqueryScanExecutor { read_ctx, source }.execute(child),
+        PlanNode::CteScan => CteScanExecutor { read_ctx, source }.execute(child),
         PlanNode::NamedTuplestoreScan => {
-            NamedTuplestoreScanExecutor { read_ctx, source }.execute(&mut child)?
+            NamedTuplestoreScanExecutor { read_ctx, source }.execute(child)
         }
-        _ => {
-            return Err(ExecError::Unsupported(
-                "FilterExecutor input was not a scan plan".into(),
-            ));
-        }
-    };
+        _ => Err(ExecError::Unsupported(
+            "FilterExecutor input was not a scan plan".into(),
+        )),
+    })?;
     state.begin_loop();
     filter_relation_rows(state, relation, read_ctx.eval_ctx)
 }
@@ -2727,8 +2741,9 @@ impl Executor for AggregateExecutor<'_, '_> {
             ));
         };
         crate::session::check_query_canceled()?;
-        let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = execute_filter_input(&mut child, self.read_ctx, self.source.clone())?;
+        let relation = state.execute_child((**input).clone(), |child| {
+            execute_filter_input(child, self.read_ctx, self.source.clone())
+        })?;
         state.begin_loop();
         let rows = crate::grouping::aggregate_rows_with_memory(
             &self.select,
@@ -2764,8 +2779,9 @@ impl Executor for ProjectSetExecutor<'_, '_> {
             ));
         };
         crate::session::check_query_canceled()?;
-        let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = execute_filter_input(&mut child, self.read_ctx, self.source.clone())?;
+        let relation = state.execute_child((**input).clone(), |child| {
+            execute_filter_input(child, self.read_ctx, self.source.clone())
+        })?;
         let (_, exprs, _) = exec::resolve_projection(&self.select.projection, &relation.scope)?;
         state.begin_loop();
         let rows = crate::srf::project_rows_ordered_with_memory(
@@ -2802,8 +2818,9 @@ impl Executor for WindowAggExecutor<'_, '_> {
             ));
         };
         crate::session::check_query_canceled()?;
-        let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = execute_filter_input(&mut child, self.read_ctx, self.source.clone())?;
+        let relation = state.execute_child((**input).clone(), |child| {
+            execute_filter_input(child, self.read_ctx, self.source.clone())
+        })?;
         state.begin_loop();
         let (fields, tys, rows) = crate::window::execute(
             &self.select,
@@ -2842,16 +2859,17 @@ impl Executor for LimitExecutor<'_, '_> {
             ));
         };
         crate::session::check_query_canceled()?;
-        let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = execute_seq_scan_input(
-            &mut child,
-            self.read_ctx,
-            self.source.clone(),
-            self.fields.clone(),
-            self.tys.clone(),
-            self.order_by.clone(),
-            self.sort_positions.clone(),
-        )?;
+        let relation = state.execute_child((**input).clone(), |child| {
+            execute_seq_scan_input(
+                child,
+                self.read_ctx,
+                self.source.clone(),
+                self.fields.clone(),
+                self.tys.clone(),
+                self.order_by.clone(),
+                self.sort_positions.clone(),
+            )
+        })?;
         let offset = crate::exec::eval_row_count(
             self.offset.as_ref(),
             crate::exec::RowCountClause::Offset,
@@ -2938,16 +2956,17 @@ impl Executor for UniqueExecutor<'_, '_> {
             ));
         };
         crate::session::check_query_canceled()?;
-        let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = execute_seq_scan_input(
-            &mut child,
-            self.read_ctx,
-            self.source.clone(),
-            self.fields.clone(),
-            self.tys.clone(),
-            Vec::new(),
-            Vec::new(),
-        )?;
+        let relation = state.execute_child((**input).clone(), |child| {
+            execute_seq_scan_input(
+                child,
+                self.read_ctx,
+                self.source.clone(),
+                self.fields.clone(),
+                self.tys.clone(),
+                Vec::new(),
+                Vec::new(),
+            )
+        })?;
         state.begin_loop();
         unique_relation_rows(state, relation, &self.read_ctx.statement_memory)
     }
@@ -2984,16 +3003,17 @@ impl Executor for SortExecutor<'_, '_> {
             ));
         };
         crate::session::check_query_canceled()?;
-        let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = execute_seq_scan_input(
-            &mut child,
-            self.read_ctx,
-            self.source.clone(),
-            self.fields.clone(),
-            self.tys.clone(),
-            Vec::new(),
-            Vec::new(),
-        )?;
+        let relation = state.execute_child((**input).clone(), |child| {
+            execute_seq_scan_input(
+                child,
+                self.read_ctx,
+                self.source.clone(),
+                self.fields.clone(),
+                self.tys.clone(),
+                Vec::new(),
+                Vec::new(),
+            )
+        })?;
         state.begin_loop();
         sort_relation_rows(
             state,
@@ -3227,15 +3247,29 @@ mod tests {
     #[test]
     fn result_executor_emits_or_rejects_its_single_row() {
         let ctx = crate::clock::EvalCtx::test_default();
-        let emitted = try_execute_result(&select("SELECT 2 + 3 WHERE true"), &ctx)
+        let (emitted, emitted_state) = try_execute_result_with_state(
+            &select("SELECT 2 + 3 WHERE true"),
+            &ctx,
+        )
             .expect("execute ok")
             .expect("Result plan");
-        let rejected = try_execute_result(&select("SELECT 2 + 3 WHERE false"), &ctx)
+        let (rejected, rejected_state) = try_execute_result_with_state(
+            &select("SELECT 2 + 3 WHERE false"),
+            &ctx,
+        )
             .expect("execute ok")
             .expect("Result plan");
 
         assert_eq!(emitted.rows, vec![vec![crabka_pgtypes::Datum::Int4(5)]]);
         assert!(rejected.rows.is_empty());
+        assert_eq!(
+            (emitted_state.nloops, emitted_state.ntuples, emitted_state.rows_removed),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            (rejected_state.nloops, rejected_state.ntuples, rejected_state.rows_removed),
+            (1, 0, 1)
+        );
     }
 
     #[test]

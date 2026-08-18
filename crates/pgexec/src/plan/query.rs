@@ -105,6 +105,7 @@ pub(crate) struct PlanState {
     pub(crate) nloops: u64,
     pub(crate) ntuples: u64,
     pub(crate) rows_removed: u64,
+    pub(crate) children: Vec<PlanState>,
 }
 
 impl PlanState {
@@ -115,6 +116,7 @@ impl PlanState {
             nloops: 0,
             ntuples: 0,
             rows_removed: 0,
+            children: Vec::new(),
         }
     }
 
@@ -131,6 +133,18 @@ impl PlanState {
     /// Record one row rejected by this node's filter or join condition.
     pub(crate) fn remove_row(&mut self) {
         self.rows_removed += 1;
+    }
+
+    /// Execute and retain one child state, including its counters on failure.
+    pub(crate) fn execute_child<T>(
+        &mut self,
+        plan: Plan,
+        execute: impl FnOnce(&mut Self) -> Result<T, ExecError>,
+    ) -> Result<T, ExecError> {
+        let mut child = Self::new(plan, Scope::empty());
+        let result = execute(&mut child);
+        self.children.push(child);
+        result
     }
 }
 
@@ -163,6 +177,26 @@ mod tests {
         assert_eq!((state.nloops, state.ntuples, state.rows_removed), (2, 2, 1));
         assert!(matches!(state.plan.node, PlanNode::Result));
         assert!(state.scope.columns.is_empty());
+        assert!(state.children.is_empty());
+    }
+
+    #[test]
+    fn plan_state_retains_a_completed_child_tree() {
+        let mut state = PlanState::new(result_plan(), Scope::empty());
+        state
+            .execute_child(result_plan(), |child| {
+                child.begin_loop();
+                child.emit_row();
+                Ok(())
+            })
+            .expect("child executes");
+
+        assert_eq!(state.children.len(), 1);
+        assert_eq!(
+            (state.children[0].nloops, state.children[0].ntuples),
+            (1, 1)
+        );
+        assert!(matches!(state.children[0].plan.node, PlanNode::Result));
     }
 
     #[test]
