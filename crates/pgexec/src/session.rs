@@ -17668,6 +17668,22 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT n, row_number() OVER (ORDER BY n DESC) AS rn FROM planned_transition \
+                 ORDER BY rn DESC LIMIT 2",
+            ),
+        )
+        .expect("NamedTuplestoreScan WindowAgg tail plan executes")
+        .expect("transition window owns ordering and limit");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT n, row_number() OVER (ORDER BY n DESC) AS rn FROM planned_cte \
                  ORDER BY rn DESC LIMIT 2",
             ),
@@ -18217,9 +18233,6 @@ mod tests {
             "SELECT generate_series(1, 2), row_number() OVER () FROM planned_cte",
             "SELECT count(*), generate_series(1, 2) FROM planned_cte",
             "SELECT grouping(n) FROM planned_transition",
-            "SELECT n, row_number() OVER () FROM planned_transition ORDER BY 1",
-            "SELECT row_number() OVER () FROM planned_transition OFFSET 1",
-            "SELECT DISTINCT n, row_number() OVER () FROM planned_transition",
             "SELECT generate_series(1, 2), row_number() OVER () FROM planned_transition",
             "SELECT count(*), row_number() OVER () FROM planned_transition",
             "SELECT count(*), generate_series(1, 2) FROM planned_transition",

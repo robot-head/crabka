@@ -1895,11 +1895,7 @@ fn plan_named_tuplestore_scan(
         || (!aggregate && crate::grouping::is_grouping_query(select))
         || (window
             && (aggregate
-                || crate::srf::projection_contains_srf(&select.projection)
-                || !matches!(select.distinct, DistinctClause::All)
-                || !select.order_by.is_empty()
-                || select.limit.is_some()
-                || select.offset.is_some()))
+                || crate::srf::projection_contains_srf(&select.projection)))
     {
         return Ok(None);
     }
