@@ -8249,16 +8249,32 @@ mod make_justify_tests {
     fn temporal_typmods_round_half_away_from_zero() {
         use super::{
             Interval, apply_interval_typmod, apply_time_typmod, apply_timestamp_typmod,
-            parse_time, parse_timestamp, time_to_text, timestamp_to_text,
+            apply_timestamptz_typmod, parse_time, parse_timestamp, parse_timestamptz,
+            time_to_text, timestamp_to_text, timestamptz_to_text,
         };
+        use jiff::tz::TimeZone;
 
         let time = parse_time("12:34:56.500001").expect("time");
         assert_eq!(time_to_text(apply_time_typmod(time, Some(0)).expect("round")), "12:34:57");
+        assert_eq!(
+            time_to_text(apply_time_typmod(time, Some(2)).expect("round")),
+            "12:34:56.5"
+        );
 
         let timestamp = parse_timestamp("1999-12-31 23:59:59.500000").expect("timestamp");
         assert_eq!(
             timestamp_to_text(apply_timestamp_typmod(timestamp, Some(0)).expect("round")),
             "1999-12-31 23:59:59"
+        );
+
+        let timestamptz = parse_timestamptz("2000-01-01 00:00:00.500000", &TimeZone::UTC)
+            .expect("timestamptz");
+        assert_eq!(
+            timestamptz_to_text(
+                apply_timestamptz_typmod(timestamptz, Some(0)).expect("round"),
+                &TimeZone::UTC,
+            ),
+            "2000-01-01 00:00:01+00"
         );
 
         assert_eq!(
@@ -8273,6 +8289,36 @@ mod make_justify_tests {
             .expect("round")
             .micros,
             -2_000_000
+        );
+    }
+
+    #[test]
+    fn interval_field_ranges_discard_finer_fields() {
+        use super::{Interval, IntervalField, parse_interval_ranged};
+
+        assert_eq!(
+            parse_interval_ranged(
+                "1 day 02:03:04.5",
+                Some((IntervalField::Day, IntervalField::Minute)),
+            )
+            .expect("minute range"),
+            Interval {
+                months: 0,
+                days: 1,
+                micros: 7_380_000_000,
+            }
+        );
+        assert_eq!(
+            parse_interval_ranged(
+                "2 months 3 days 04:05:06",
+                Some((IntervalField::Year, IntervalField::Month)),
+            )
+            .expect("month range"),
+            Interval {
+                months: 2,
+                days: 0,
+                micros: 0,
+            }
         );
     }
 }
