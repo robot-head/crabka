@@ -25,7 +25,7 @@ GRES_BIN="${GRES_PG_REGRESS_BIN:-${ROOT_DIR}/target/debug/crabka-gres}"
 GRES_HOST="127.0.0.1"
 GRES_PORT=""
 GRES_USER="${GRES_PG_REGRESS_USER:-crab}"
-GRES_DB="${GRES_PG_REGRESS_DB:-crab}"
+GRES_DB="${GRES_PG_REGRESS_DB:-regression}"
 GRES_PID=""
 declare -a FOCUS_TESTS=()
 

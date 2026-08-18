@@ -750,11 +750,22 @@ fn parse_real_millis_guc(value: &str, _: Option<&GucValue>) -> Result<GucValue, 
 /// An enum GUC: `PostgreSQL` folds the value to lowercase and rejects anything
 /// outside the parameter's list with 22023.
 fn parse_enum_guc(allowed: &[&str], value: &str) -> Result<GucValue, ExecError> {
-    allowed
+    if let Some(value) = allowed
         .iter()
         .find(|candidate| candidate.eq_ignore_ascii_case(value.trim()))
-        .map(|candidate| GucValue::Text((*candidate).to_string()))
-        .ok_or_else(|| ExecError::InvalidParameterValue(value.to_string()))
+    {
+        return Ok(GucValue::Text((*value).to_string()));
+    }
+    // PostgreSQL enum GUCs that declare `on` and `off` also accept bool
+    // spellings, while SHOW keeps the canonical enum spelling.
+    if allowed.contains(&"on") && allowed.contains(&"off") {
+        return parse_bool(value, None).map(|value| match value {
+            GucValue::Bool(true) => GucValue::Text("on".into()),
+            GucValue::Bool(false) => GucValue::Text("off".into()),
+            _ => unreachable!("boolean GUC parser returns a boolean"),
+        });
+    }
+    Err(ExecError::InvalidParameterValue(value.to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1139,6 +1150,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     guc("row_security", "bool", "on", parse_bool),
     guc("transaction_deferrable", "bool", "off", parse_bool),
     guc("transaction_read_only", "bool", "off", parse_bool),
+    guc("track_io_timing", "bool", "off", parse_bool).context(GucContext::Superuser),
     guc("transform_null_equals", "bool", "off", parse_bool),
     guc("block_size", "integer", "8192", parse_integer_guc)
         .ranged(None, 8192.0, 8192.0)
@@ -1167,6 +1179,10 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         2_147_483_647.0,
     ),
     guc("geqo_effort", "integer", "5", parse_integer_guc).ranged(None, 1.0, 10.0),
+    guc("geqo_generations", "integer", "0", parse_integer_guc).ranged(None, 0.0, 2_147_483_647.0),
+    guc("geqo_pool_size", "integer", "0", parse_integer_guc).ranged(None, 0.0, 2_147_483_647.0),
+    guc("geqo_seed", "real", "0", parse_real_guc).ranged(None, 0.0, 1.0),
+    guc("geqo_selection_bias", "real", "2", parse_real_guc).ranged(None, 1.5, 2.0),
     guc("geqo_threshold", "integer", "12", parse_integer_guc).ranged(None, 2.0, 2_147_483_647.0),
     guc("join_collapse_limit", "integer", "8", parse_integer_guc).ranged(
         None,
@@ -1194,6 +1210,14 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         parse_integer_guc,
     )
     .ranged(None, 0.0, 1024.0),
+    guc(
+        "max_prepared_transactions",
+        "integer",
+        "0",
+        parse_integer_guc,
+    )
+    .ranged(None, 0.0, 262_143.0)
+    .context(GucContext::Postmaster),
     guc("server_version_num", "integer", "180004", parse_integer_guc)
         .ranged(None, 180_004.0, 180_004.0)
         .context(GucContext::Internal),
@@ -1283,6 +1307,12 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         "partition",
         &["partition", "on", "off"],
     ),
+    guc_enum(
+        "compute_query_id",
+        "auto",
+        &["auto", "regress", "on", "off"],
+    )
+    .context(GucContext::Superuser),
     guc_enum("debug_parallel_query", "off", &["off", "on", "regress"]),
     guc_enum(
         "default_transaction_isolation",
@@ -1353,6 +1383,9 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     guc_string("lc_numeric", "C"),
     guc_string("lc_time", "C"),
     guc_string("restrict_nonsystem_relation_kind", ""),
+    // SQL function `SET role = ...` uses the GUC spelling rather than the
+    // utility statement, so it must be available to the function runtime.
+    guc_string("role", "none"),
     guc_string("server_encoding", "UTF8").context(GucContext::Internal),
     guc_string("temp_tablespaces", ""),
     guc_string("timezone_abbreviations", "Default"),
@@ -1752,7 +1785,21 @@ fn parse_guc_value(
         value: value.to_string(),
     };
     if !definition.allowed.is_empty() {
-        return parse_enum_guc(definition.allowed, value).map_err(|_| invalid());
+        return parse_enum_guc(definition.allowed, value).map_err(|_| {
+            ExecError::Remote(
+                PgError::error(
+                    "22023",
+                    format!(
+                        "invalid value for parameter \"{}\": \"{value}\"",
+                        definition.name
+                    ),
+                )
+                .with_hint(format!(
+                    "Available values: {}.",
+                    definition.allowed.join(", ")
+                )),
+            )
+        });
     }
     let parsed = (definition.parse)(value, current).map_err(|_| invalid())?;
     // PostgreSQL's integer parameters are C `int`s, and a spelling whose
@@ -17675,6 +17722,75 @@ mod tests {
         assert!(sqlstate(&mut s, "SET no_such_parameter = 1").await == "42704");
         assert!(sqlstate(&mut s, "SHOW no_such_parameter").await == "42704");
         assert!(sqlstate(&mut s, "RESET no_such_parameter").await == "42704");
+    }
+
+    #[tokio::test]
+    async fn planner_compatibility_gucs_keep_postgres_values_and_enum_hints() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        for (sql, show, expected) in [
+            ("SET compute_query_id = 1", "SHOW compute_query_id", "on"),
+            (
+                "SET debug_parallel_query = false",
+                "SHOW debug_parallel_query",
+                "off",
+            ),
+            ("SET track_io_timing = on", "SHOW track_io_timing", "on"),
+            ("SET geqo_generations = 3", "SHOW geqo_generations", "3"),
+            ("SET geqo_pool_size = 4", "SHOW geqo_pool_size", "4"),
+            ("SET geqo_seed = .5", "SHOW geqo_seed", "0.5"),
+            (
+                "SET geqo_selection_bias = 1.5",
+                "SHOW geqo_selection_bias",
+                "1.5",
+            ),
+        ] {
+            assert!(sqlstate(&mut s, sql).await == "00000", "{sql}");
+            assert!(scalar(&mut s, show).await == expected, "{sql}");
+        }
+        assert!(
+            scalar(
+                &mut s,
+                "SELECT current_setting('max_prepared_transactions')"
+            )
+            .await
+                == "0"
+        );
+        assert!(
+            scalar(
+                &mut s,
+                "SELECT set_config('role', 'regress_parallel_worker', false)",
+            )
+            .await
+                == "regress_parallel_worker"
+        );
+        let error = s
+            .simple_query("SET intervalstyle = 'asd'")
+            .await
+            .expect_err("interval style should be rejected");
+        assert!(
+            error
+                == crabka_pgwire::error::PgError::error(
+                    "22023",
+                    "invalid value for parameter \"IntervalStyle\": \"asd\"",
+                )
+                .with_hint(
+                    "Available values: postgres, postgres_verbose, sql_standard, iso_8601.",
+                )
+        );
+        let error = s
+            .simple_query("SET password_encryption = 'novalue'")
+            .await
+            .expect_err("password encryption should be rejected");
+        assert!(
+            error
+                == crabka_pgwire::error::PgError::error(
+                    "22023",
+                    "invalid value for parameter \"password_encryption\": \"novalue\"",
+                )
+                .with_hint("Available values: md5, scram-sha-256.")
+        );
     }
 
     #[tokio::test]
