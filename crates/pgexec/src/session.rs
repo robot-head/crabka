@@ -18172,6 +18172,19 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
             ]
         );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT n, row_number() OVER (ORDER BY n) AS rn \
+                 FROM unnest(ARRAY[2, 1]) AS g(n) ORDER BY rn DESC LIMIT 1",
+            ),
+        )
+        .expect("FunctionScan WindowAgg tail plan executes")
+        .expect("FROM SRF window owns ordering and limit");
+        assert_eq!(
+            relation.rows,
+            vec![vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)]]
+        );
         let project_set_select = select_of(
             "SELECT n, generate_series(1, 2) \
              FROM unnest(ARRAY[1]) AS g(n)",
@@ -18248,10 +18261,6 @@ mod tests {
             "SELECT grouping(n) FROM generate_series(1, 3) AS g(n)",
             "SELECT count(*), row_number() OVER () FROM generate_series(1, 3) AS g(n)",
             "SELECT generate_series(1, 2), row_number() OVER () FROM generate_series(1, 3) AS g(n)",
-            "SELECT DISTINCT n, row_number() OVER () FROM generate_series(1, 3) AS g(n)",
-            "SELECT n, row_number() OVER () FROM generate_series(1, 3) AS g(n) ORDER BY 1",
-            "SELECT n, row_number() OVER () FROM generate_series(1, 3) AS g(n) LIMIT 1",
-            "SELECT row_number() OVER () FROM generate_series(1, 3) AS g(n) OFFSET 1",
             "SELECT count(*), generate_series(1, 2) FROM generate_series(1, 3) AS g(n)",
         ] {
             assert!(
