@@ -954,10 +954,17 @@ fn plan_function_scan(
     else {
         return Ok(None);
     };
+    let aggregate = needs_aggregate_node(select);
     if *lateral
         || matches!(select.distinct, DistinctClause::On(_))
-        || crate::grouping::is_grouping_query(select)
+        || (!aggregate && crate::grouping::is_grouping_query(select))
         || crate::window::has_window_calls(select)
+        || (aggregate
+            && (!matches!(select.distinct, DistinctClause::All)
+                || !select.order_by.is_empty()
+                || select.limit.is_some()
+                || select.offset.is_some()
+                || select.grouping.is_some()))
     {
         return Ok(None);
     }
@@ -993,6 +1000,7 @@ fn plan_function_scan(
     if crate::srf::exprs_contain_srf(&exprs) {
         return Ok(None);
     }
+    let target_list = bind_target_list(&exprs, &fields, &scope)?;
     let distinct = matches!(select.distinct, DistinctClause::Distinct);
     if distinct {
         for ty in &tys {
@@ -1010,7 +1018,11 @@ fn plan_function_scan(
         sort_positions.push(index);
     }
     let filter = Plan {
-        target_list: bind_target_list(&exprs, &fields, &scope)?,
+        target_list: if aggregate {
+            Vec::new()
+        } else {
+            target_list.clone()
+        },
         quals: bind_optional(select.filter.as_ref(), &scope)?
             .into_iter()
             .map(|clause| RestrictInfo {
@@ -1033,16 +1045,27 @@ fn plan_function_scan(
             }),
         },
     };
-    let plan = if distinct {
+    let plan = if aggregate {
         Plan {
-            target_list: Vec::new(),
+            target_list,
             quals: Vec::new(),
-            node: PlanNode::Unique {
+            node: PlanNode::Aggregate {
                 input: Box::new(filter),
             },
         }
     } else {
         filter
+    };
+    let plan = if distinct {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Unique {
+                input: Box::new(plan),
+            },
+        }
+    } else {
+        plan
     };
     let plan = if select.order_by.is_empty() {
         plan
@@ -1075,7 +1098,7 @@ fn plan_function_scan(
         offset: select.offset.clone(),
         order_by: select.order_by.clone(),
         sort_positions,
-        aggregate: None,
+        aggregate: aggregate.then(|| select.clone()),
         project_set: None,
         window: None,
     }))
