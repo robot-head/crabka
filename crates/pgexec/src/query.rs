@@ -200,4 +200,16 @@ mod tests {
             vec![vec![Some("1".into())]]
         );
     }
+
+    #[tokio::test]
+    async fn fromless_select_uses_the_result_plan_for_its_filter_and_projection() {
+        assert_eq!(
+            cells(run("SELECT 2 + 3 WHERE true").await),
+            vec![vec![Some("5".into())]]
+        );
+        assert_eq!(
+            cells(run("SELECT 2 + 3 WHERE false").await),
+            Vec::<Vec<Option<String>>>::new()
+        );
+    }
 }

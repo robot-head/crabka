@@ -17400,6 +17400,9 @@ pub(crate) fn select_to_relation_with_ctes(
     let s = &resolved;
     crate::window::reject_misplaced_calls(s)?;
     crate::grouping::reject_misplaced_calls(s)?;
+    if let Some(relation) = crate::plan::exec::try_execute_result(s, ctx)? {
+        return Ok(relation);
+    }
     let relation = if s.from.is_empty() {
         reject_from_less_wildcard(&s.projection)?;
         Relation {
@@ -19555,7 +19558,7 @@ fn wildcard_reference(scope: &Scope, index: usize, column: &ColumnBinding) -> Ex
 
 /// The output scope of a projected relation: the field names with their types
 /// and no base-table qualifier.
-fn projected_scope(fields: &[FieldDescription], tys: &[ColumnType]) -> Scope {
+pub(crate) fn projected_scope(fields: &[FieldDescription], tys: &[ColumnType]) -> Scope {
     Scope {
         columns: fields
             .iter()
