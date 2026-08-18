@@ -16875,6 +16875,32 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT count(*) FROM seq_scan_test AS l \
+                 INNER JOIN seq_scan_third AS r ON l.a = r.a - 2",
+            ),
+        )
+        .expect("NestedLoop plan executes")
+        .expect("joined aggregate uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![vec![crabka_pgtypes::Datum::Int8(1)]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT l.a FROM seq_scan_test AS l, seq_scan_third AS r GROUP BY l.a"),
+        )
+        .expect("NestedLoop plan executes")
+        .expect("joined GROUP BY uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT DISTINCT l.a FROM seq_scan_test AS l, seq_scan_test AS r \
                  WHERE r.a = 2",
             ),
@@ -17120,7 +17146,10 @@ mod tests {
             "SELECT n FROM generate_series(1, 3) AS g(n) LIMIT 1",
             "SELECT a FROM seq_scan_test, generate_series(1, 3) AS g(n)",
             "SELECT a FROM generate_series(1, 3) AS g(n), seq_scan_test",
-            "SELECT l.a FROM seq_scan_test AS l, seq_scan_test AS r GROUP BY l.a",
+            "SELECT DISTINCT count(*) FROM seq_scan_test AS l, seq_scan_third AS r",
+            "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r ORDER BY 1",
+            "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
+            "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1",
             "SELECT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_test AS r",
             "SELECT l.a FROM seq_scan_test AS l, seq_scan_third AS r \
              ORDER BY 1 FETCH FIRST 1 ROW WITH TIES",

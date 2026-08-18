@@ -57,6 +57,7 @@ fn try_execute_nested_loop(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
+    let aggregate = needs_aggregate_node(select);
     if select.from.is_empty() {
         return Ok(None);
     }
@@ -66,8 +67,13 @@ fn try_execute_nested_loop(
         .all(|source| is_direct_nested_loop_source(read_ctx, source))
         || matches!(select.distinct, DistinctClause::On(_))
         || select.with_ties
-        || crate::grouping::is_grouping_query(select)
+        || select.grouping.is_some()
         || crate::window::has_window_calls(select)
+        || (aggregate
+            && (!matches!(select.distinct, DistinctClause::All)
+                || !select.order_by.is_empty()
+                || select.limit.is_some()
+                || select.offset.is_some()))
     {
         return Ok(None);
     }
@@ -123,7 +129,11 @@ fn try_execute_nested_loop(
         };
     }
     let filter = Plan {
-        target_list: bind_target_list(&exprs, &fields, &scope)?,
+        target_list: if aggregate {
+            Vec::new()
+        } else {
+            bind_target_list(&exprs, &fields, &scope)?
+        },
         quals: bind_optional(select.filter.as_ref(), &scope)?
             .into_iter()
             .map(|clause| RestrictInfo {
@@ -138,16 +148,27 @@ fn try_execute_nested_loop(
             input: Box::new(loop_plan),
         },
     };
-    let unique = if distinct {
+    let aggregate = if aggregate {
         Plan {
-            target_list: Vec::new(),
+            target_list: bind_target_list(&exprs, &fields, &scope)?,
             quals: Vec::new(),
-            node: PlanNode::Unique {
+            node: PlanNode::Aggregate {
                 input: Box::new(filter),
             },
         }
     } else {
         filter
+    };
+    let unique = if distinct {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Unique {
+                input: Box::new(aggregate),
+            },
+        }
+    } else {
+        aggregate
     };
     let sort = if select.order_by.is_empty() {
         unique
@@ -181,6 +202,7 @@ fn try_execute_nested_loop(
         sort_positions: &sort_positions,
         limit: select.limit.as_ref(),
         offset: select.offset.as_ref(),
+        select,
     }
     .execute(&mut state)
     .map(Some)
@@ -195,6 +217,7 @@ struct NestedLoopTail<'a, 'b> {
     sort_positions: &'a [usize],
     limit: Option<&'a crabka_pgparser::ast::Expr>,
     offset: Option<&'a crabka_pgparser::ast::Expr>,
+    select: &'a SelectStmt,
 }
 
 impl NestedLoopTail<'_, '_> {
@@ -206,7 +229,31 @@ impl NestedLoopTail<'_, '_> {
             let relation = execute_nested_loop_plan(&mut child, self.read_ctx, self.sources)?;
             state.begin_loop();
             let relation = filter_relation_rows(state, relation, self.read_ctx.eval_ctx)?;
-            project_filter_rows(state, relation, self.fields, self.tys, self.read_ctx.eval_ctx)
+            if state.plan.target_list.is_empty() {
+                Ok(relation)
+            } else {
+                project_filter_rows(state, relation, self.fields, self.tys, self.read_ctx.eval_ctx)
+            }
+        }
+        PlanNode::Aggregate { input } => {
+            let mut child = PlanState::new((**input).clone(), Scope::empty());
+            let relation = self.execute(&mut child)?;
+            state.begin_loop();
+            let rows = crate::agg::aggregate_rows_with_memory(
+                self.select,
+                &relation.scope,
+                relation.rows,
+                self.read_ctx.eval_ctx,
+                &self.read_ctx.statement_memory,
+            )?;
+            state.scope = exec::projected_scope(self.fields, self.tys);
+            for _ in &rows {
+                state.emit_row();
+            }
+            Ok(Relation {
+                scope: state.scope.clone(),
+                rows,
+            })
         }
         PlanNode::Unique { input } => {
             let mut child = PlanState::new((**input).clone(), Scope::empty());
