@@ -43,7 +43,7 @@ pub(crate) fn try_execute_seq_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
-    if select.from.len() >= 2 {
+    if select.from.len() >= 2 || matches!(select.from.as_slice(), [TableExpr::Join { .. }]) {
         return try_execute_nested_loop(read_ctx, select);
     }
     let Some(planned) = plan_seq_scan(read_ctx, select)? else {
@@ -57,11 +57,11 @@ fn try_execute_nested_loop(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
-    if select.from.len() < 2
+    if select.from.is_empty()
         || !select
             .from
             .iter()
-            .all(|source| crate::exec::is_direct_stored_base_table(read_ctx, source))
+            .all(|source| is_direct_nested_loop_source(read_ctx, source))
         || !matches!(select.distinct, DistinctClause::All)
         || !select.order_by.is_empty()
         || select.limit.is_some()
@@ -82,22 +82,27 @@ fn try_execute_nested_loop(
     if crate::srf::exprs_contain_srf(&exprs) {
         return Ok(None);
     }
-    let scan = |scanrelid| Plan {
-        target_list: Vec::new(),
-        quals: Vec::new(),
-        node: PlanNode::SeqScan { scanrelid },
-    };
-    let mut inputs = (1..=select.from.len()).map(scan);
-    let Some(mut loop_plan) = inputs.next() else {
+    let mut sources = Vec::new();
+    for source in &select.from {
+        collect_nested_loop_sources(source, &mut sources);
+    }
+    let mut scanrelid = 1;
+    let mut plans = select
+        .from
+        .iter()
+        .map(|source| plan_nested_loop_source(source, &mut scanrelid));
+    let Some(mut loop_plan) = plans.next() else {
         return Ok(None);
     };
-    for inner in inputs {
+    for inner in plans {
         loop_plan = Plan {
             target_list: Vec::new(),
             quals: Vec::new(),
             node: PlanNode::NestedLoop {
                 outer: Box::new(loop_plan),
                 inner: Box::new(inner),
+                kind: crabka_pgparser::ast::JoinKind::Cross,
+                constraint: crabka_pgparser::ast::JoinConstraint::None,
             },
         };
     }
@@ -110,7 +115,7 @@ fn try_execute_nested_loop(
                 is_pushed_down: false,
                 security_level: 0,
                 leakproof: true,
-                required_relids: (1..=select.from.len()).collect(),
+                required_relids: (1..=sources.len()).collect(),
             })
             .collect(),
         node: PlanNode::Filter {
@@ -122,7 +127,7 @@ fn try_execute_nested_loop(
         unreachable!()
     };
     let mut loop_state = PlanState::new((**input).clone(), Scope::empty());
-    let relation = execute_nested_loop_plan(&mut loop_state, read_ctx, &select.from)?;
+    let relation = execute_nested_loop_plan(&mut loop_state, read_ctx, &sources)?;
     let relation = filter_relation_rows(&mut state, relation, read_ctx.eval_ctx)?;
     Ok(Some(project_filter_rows(
         &state,
@@ -131,6 +136,73 @@ fn try_execute_nested_loop(
         &tys,
         read_ctx.eval_ctx,
     )?))
+}
+
+fn is_direct_nested_loop_source(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    source: &TableExpr,
+) -> bool {
+    match source {
+        TableExpr::Table { .. } => crate::exec::is_direct_stored_base_table(read_ctx, source),
+        TableExpr::Join {
+            left,
+            right,
+            constraint,
+            ..
+        } => {
+            is_direct_nested_loop_source(read_ctx, left)
+                && is_direct_nested_loop_source(read_ctx, right)
+                && !matches!(
+                    constraint,
+                    crabka_pgparser::ast::JoinConstraint::On(expr)
+                        if crate::agg::contains_aggregate(expr)
+                )
+        }
+        _ => false,
+    }
+}
+
+fn collect_nested_loop_sources(source: &TableExpr, sources: &mut Vec<TableExpr>) {
+    match source {
+        TableExpr::Table { .. } => sources.push(source.clone()),
+        TableExpr::Join { left, right, .. } => {
+            collect_nested_loop_sources(left, sources);
+            collect_nested_loop_sources(right, sources);
+        }
+        _ => unreachable!("nested loop sources were validated before planning"),
+    }
+}
+
+fn plan_nested_loop_source(source: &TableExpr, scanrelid: &mut usize) -> Plan {
+    match source {
+        TableExpr::Table { .. } => {
+            let plan = Plan {
+                target_list: Vec::new(),
+                quals: Vec::new(),
+                node: PlanNode::SeqScan {
+                    scanrelid: *scanrelid,
+                },
+            };
+            *scanrelid += 1;
+            plan
+        }
+        TableExpr::Join {
+            left,
+            right,
+            kind,
+            constraint,
+        } => Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::NestedLoop {
+                outer: Box::new(plan_nested_loop_source(left, scanrelid)),
+                inner: Box::new(plan_nested_loop_source(right, scanrelid)),
+                kind: *kind,
+                constraint: constraint.clone(),
+            },
+        },
+        _ => unreachable!("nested loop sources were validated before planning"),
+    }
 }
 
 fn execute_nested_loop_plan(
@@ -157,17 +229,24 @@ fn execute_nested_loop_plan(
             }
             .execute(state)
         }
-        PlanNode::NestedLoop { outer, inner } => {
+        PlanNode::NestedLoop {
+            outer,
+            inner,
+            kind,
+            constraint,
+        } => {
             let mut outer_state = PlanState::new((**outer).clone(), Scope::empty());
             let mut inner_state = PlanState::new((**inner).clone(), Scope::empty());
+            let kind = *kind;
+            let constraint = constraint.clone();
             let outer_relation = execute_nested_loop_plan(&mut outer_state, read_ctx, sources)?;
             let inner_relation = execute_nested_loop_plan(&mut inner_state, read_ctx, sources)?;
             state.begin_loop();
             let relation = crate::join::join_relations(
                 outer_relation,
                 inner_relation,
-                crabka_pgparser::ast::JoinKind::Cross,
-                &crabka_pgparser::ast::JoinConstraint::None,
+                kind,
+                &constraint,
                 read_ctx.eval_ctx,
                 read_ctx.join_policy(),
             )?;

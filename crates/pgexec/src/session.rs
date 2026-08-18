@@ -16842,16 +16842,6 @@ mod tests {
             refs: None,
         };
 
-        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &select)
-            .expect("plan executes")
-            .expect("stored-table shape uses SeqScan");
-        assert_eq!(
-            relation.rows,
-            vec![
-                vec![crabka_pgtypes::Datum::Int4(2)],
-                vec![crabka_pgtypes::Datum::Int4(2)],
-            ]
-        );
         let select_of = |sql: &str| {
             let statements = crabka_pgparser::parse(sql).expect(sql);
             let [crabka_pgparser::ast::Statement::Query(query)] = statements.as_slice() else {
@@ -16871,6 +16861,50 @@ mod tests {
             select.locking = query.locking.clone();
             select
         };
+
+        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &select)
+            .expect("plan executes")
+            .expect("stored-table shape uses SeqScan");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT l.a, r.a FROM seq_scan_test AS l \
+                 INNER JOIN seq_scan_third AS r ON l.a = r.a - 2",
+            ),
+        )
+        .expect("NestedLoop plan executes")
+        .expect("inner join uses nested loop");
+        assert_eq!(
+            relation.rows,
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int4(3),
+            ]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT l.a, r.a FROM seq_scan_test AS l \
+                 LEFT JOIN seq_scan_third AS r ON l.a = r.a",
+            ),
+        )
+        .expect("NestedLoop plan executes")
+        .expect("left join uses nested loop");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Null],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Null],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Null],
+            ]
+        );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(

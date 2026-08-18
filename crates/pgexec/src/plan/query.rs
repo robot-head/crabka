@@ -89,7 +89,12 @@ pub(crate) enum PlanNode {
     CteScan,
     NamedTuplestoreScan,
     TableFunctionScan,
-    NestedLoop { outer: Box<Plan>, inner: Box<Plan> },
+    NestedLoop {
+        outer: Box<Plan>,
+        inner: Box<Plan>,
+        kind: crabka_pgparser::ast::JoinKind,
+        constraint: crabka_pgparser::ast::JoinConstraint,
+    },
 }
 
 /// Mutable, per-execution node state used for EXPLAIN ANALYZE counters.
