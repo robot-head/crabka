@@ -427,10 +427,10 @@ fn is_nested_loop_source(
             sample,
             ..
         } => {
-            columns.is_none()
-                && sample.is_none()
-                && (crate::exec::is_direct_stored_base_table(read_ctx, source)
-                    || (name.schema.is_none()
+            sample.is_none()
+                && (is_direct_stored_scan_source(read_ctx, source)
+                    || (columns.is_none()
+                        && name.schema.is_none()
                         && (read_ctx.ctes.lookup(&name.name).is_some()
                             || read_ctx
                                 .eval_ctx
@@ -482,6 +482,35 @@ fn is_nested_loop_source(
                 )
         }
     }
+}
+
+fn is_direct_stored_scan_source(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    source: &TableExpr,
+) -> bool {
+    if crate::exec::is_direct_stored_base_table(read_ctx, source) {
+        return true;
+    }
+    let TableExpr::Table {
+        name,
+        only,
+        alias,
+        columns: Some(_),
+        sample: None,
+    } = source
+    else {
+        return false;
+    };
+    crate::exec::is_direct_stored_base_table(
+        read_ctx,
+        &TableExpr::Table {
+            name: name.clone(),
+            only: *only,
+            alias: alias.clone(),
+            columns: None,
+            sample: None,
+        },
+    )
 }
 
 fn nested_loop_function_count(source: &TableExpr) -> usize {
@@ -823,7 +852,7 @@ fn plan_seq_scan(
     if matches!(source, TableExpr::Table { name, .. } if name.schema.is_none() && read_ctx.eval_ctx.transition_relations.as_ref().is_some_and(|runtime| runtime.lock().expect("transition relation mutex").contains_key(&name.name))) {
         return plan_named_tuplestore_scan(read_ctx, select, source);
     }
-    if !crate::exec::is_direct_stored_base_table(read_ctx, source) {
+    if !is_direct_stored_scan_source(read_ctx, source) {
         return Ok(None);
     }
     let aggregate = needs_aggregate_node(select);
@@ -2153,6 +2182,19 @@ impl Executor for SeqScanExecutor<'_, '_> {
         )?;
         let relation =
             exec::scan_stored_base_table(self.read_ctx, &self.source, &name, None, None)?;
+        let relation = if let TableExpr::Table {
+            name, alias, columns, ..
+        } = &self.source
+            && let Some(columns) = columns
+        {
+            crate::values::requalify_derived(
+                relation,
+                alias.as_deref().unwrap_or(&name.name),
+                &Some(columns.clone()),
+            )?
+        } else {
+            relation
+        };
         state.scope = relation.scope.clone();
         for _ in &relation.rows {
             state.emit_row();

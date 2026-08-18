@@ -16885,6 +16885,13 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of("SELECT x FROM seq_scan_test AS renamed(x) WHERE x = 1"),
+        )
+        .expect("aliased SeqScan plan executes")
+        .expect("stored table column aliases use SeqScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of(
                 "SELECT count(*) FROM seq_scan_test AS l \
                  INNER JOIN seq_scan_third AS r ON l.a = r.a - 2",
@@ -16930,6 +16937,19 @@ mod tests {
                     crabka_pgtypes::Datum::Int4(2),
                 ],
             ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT l.x, r.a FROM seq_scan_test AS l(x), seq_scan_third AS r \
+                 WHERE l.x = 1",
+            ),
+        )
+        .expect("NestedLoop aliased SeqScan plan executes")
+        .expect("stored-table column aliases use NestedLoop");
+        assert_eq!(
+            relation.rows,
+            vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(3)]]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
@@ -17081,6 +17101,9 @@ mod tests {
         for sql in [
             "SELECT a FROM seq_scan_test, LATERAL (VALUES (1)) AS derived(n)",
             "SELECT a FROM seq_scan_test, (SELECT a FROM seq_scan_third ORDER BY a) AS derived",
+            "SELECT v FROM LATERAL JSON_TABLE(jsonb '[1]', '$[*]' COLUMNS (v int PATH '$'))",
+            "SELECT a, v FROM seq_scan_test, \
+             JSON_TABLE(a::text::jsonb, '$' COLUMNS (v int PATH '$'))",
         ] {
             assert!(
                 crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
