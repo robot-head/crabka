@@ -1630,7 +1630,7 @@ fn plan_cte_scan(
 ) -> Result<Option<SeqScanPlan>, ExecError> {
     let TableExpr::Table {
         name,
-        columns,
+        columns: _,
         sample,
         ..
     } = source
@@ -1640,7 +1640,6 @@ fn plan_cte_scan(
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if name.schema.is_some()
-        || columns.is_some()
         || sample.is_some()
         || (!aggregate && crate::grouping::is_grouping_query(select))
         || (window
@@ -1858,7 +1857,6 @@ fn plan_named_tuplestore_scan(
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if name.schema.is_some()
-        || columns.is_some()
         || sample.is_some()
         || (!aggregate && crate::grouping::is_grouping_query(select))
         || (window
@@ -1903,6 +1901,16 @@ fn plan_named_tuplestore_scan(
                 ty,
             })
             .collect(),
+    };
+    let scope = if let Some(columns) = columns {
+        crate::values::requalify_derived(
+            Relation { scope, rows: Vec::new() },
+            qualifier,
+            &Some(columns.clone()),
+        )?
+        .scope
+    } else {
+        scope
     };
     if window {
         let quals = bind_optional(select.filter.as_ref(), &scope)?
@@ -2438,7 +2446,14 @@ impl Executor for CteScanExecutor<'_, '_> {
             ));
         }
         crate::session::check_query_canceled()?;
-        let TableExpr::Table { name, alias, .. } = &self.source else {
+        let TableExpr::Table {
+            name,
+            alias,
+            columns,
+            ..
+        } = &self.source
+        else
+        {
             return Err(ExecError::Unsupported(
                 "CteScanExecutor received a non-table source".into(),
             ));
@@ -2450,6 +2465,15 @@ impl Executor for CteScanExecutor<'_, '_> {
             .flatten()
             .map(|relation| crate::cte::requalify_cte(relation, alias.as_deref().unwrap_or(&name.name)))
             .ok_or_else(|| ExecError::Unsupported("CteScanExecutor source is not a CTE".into()))?;
+        let relation = if let Some(columns) = columns {
+            crate::values::requalify_derived(
+                relation,
+                alias.as_deref().unwrap_or(&name.name),
+                &Some(columns.clone()),
+            )?
+        } else {
+            relation
+        };
         state.begin_loop();
         state.scope = relation.scope.clone();
         for _ in &relation.rows {
@@ -2472,7 +2496,14 @@ impl Executor for NamedTuplestoreScanExecutor<'_, '_> {
             ));
         }
         crate::session::check_query_canceled()?;
-        let TableExpr::Table { name, alias, .. } = &self.source else {
+        let TableExpr::Table {
+            name,
+            alias,
+            columns,
+            ..
+        } = &self.source
+        else
+        {
             return Err(ExecError::Unsupported(
                 "NamedTuplestoreScanExecutor received a non-table source".into(),
             ));
@@ -2508,6 +2539,11 @@ impl Executor for NamedTuplestoreScanExecutor<'_, '_> {
                     .collect(),
             },
             rows: transition.rows,
+        };
+        let relation = if let Some(columns) = columns {
+            crate::values::requalify_derived(relation, qualifier, &Some(columns.clone()))?
+        } else {
+            relation
         };
         state.scope = relation.scope.clone();
         for _ in &relation.rows {
