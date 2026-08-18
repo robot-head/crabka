@@ -65,7 +65,13 @@ fn try_execute_nested_loop(
     if !select
         .from
         .iter()
-        .all(|source| is_direct_nested_loop_source(read_ctx, source))
+        .all(|source| is_nested_loop_source(read_ctx, source))
+        || select
+            .from
+            .iter()
+            .map(nested_loop_function_count)
+            .sum::<usize>()
+            > 1
         || matches!(select.distinct, DistinctClause::On(_))
         || select.with_ties
         || select.grouping.is_some()
@@ -121,7 +127,7 @@ fn try_execute_nested_loop(
         crate::eval::require_ordering_operator(tys[index])?;
         sort_positions.push(index);
     }
-    let Some((sources, loop_plan)) = nested_loop_input_plan(select) else {
+    let Some((sources, loop_plan)) = nested_loop_input_plan(read_ctx, select) else {
         return Ok(None);
     };
     let filter = Plan {
@@ -215,24 +221,26 @@ fn try_execute_nested_loop(
     .map(Some)
 }
 
-fn nested_loop_input_plan(select: &SelectStmt) -> Option<(Vec<TableExpr>, Plan)> {
+fn nested_loop_input_plan(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+) -> Option<(Vec<TableExpr>, Plan)> {
     let mut sources = Vec::new();
     for source in &select.from {
         collect_nested_loop_sources(source, &mut sources);
     }
-    let mut scanrelid = 1;
     let mut plans = select
         .from
         .iter()
-        .map(|source| plan_nested_loop_source(source, &mut scanrelid));
-    let mut loop_plan = plans.next()?;
+        .map(|source| plan_nested_loop_source(read_ctx, source));
+    let mut loop_plan = plans.next()??;
     for inner in plans {
         loop_plan = Plan {
             target_list: Vec::new(),
             quals: Vec::new(),
             node: PlanNode::NestedLoop {
                 outer: Box::new(loop_plan),
-                inner: Box::new(inner),
+                inner: Box::new(inner?),
                 kind: crabka_pgparser::ast::JoinKind::Cross,
                 constraint: crabka_pgparser::ast::JoinConstraint::None,
             },
@@ -246,7 +254,7 @@ fn execute_nested_loop_window(
     select: &SelectStmt,
     scope: &Scope,
 ) -> Result<Relation, ExecError> {
-    let Some((sources, loop_plan)) = nested_loop_input_plan(select) else {
+    let Some((sources, loop_plan)) = nested_loop_input_plan(read_ctx, select) else {
         return Err(ExecError::Unsupported("WindowAgg had no nested-loop input".into()));
     };
     let filter = Plan {
@@ -281,7 +289,7 @@ fn execute_nested_loop_window(
         unreachable!()
     };
     let mut loop_state = PlanState::new((**input).clone(), Scope::empty());
-    let relation = execute_nested_loop_plan(&mut loop_state, read_ctx, &sources)?;
+    let relation = execute_nested_loop_plan(&mut loop_state, read_ctx, &mut sources.iter())?;
     filter_state.begin_loop();
     let relation = filter_relation_rows(&mut filter_state, relation, read_ctx.eval_ctx)?;
     state.begin_loop();
@@ -314,7 +322,7 @@ impl NestedLoopTail<'_, '_> {
         match &state.plan.node {
         PlanNode::Filter { input } => {
             let mut child = PlanState::new((**input).clone(), Scope::empty());
-            let relation = execute_nested_loop_plan(&mut child, self.read_ctx, self.sources)?;
+            let relation = execute_nested_loop_plan(&mut child, self.read_ctx, &mut self.sources.iter())?;
             state.begin_loop();
             let relation = filter_relation_rows(state, relation, self.read_ctx.eval_ctx)?;
             if state.plan.target_list.is_empty() {
@@ -407,20 +415,42 @@ impl NestedLoopTail<'_, '_> {
     }
 }
 
-fn is_direct_nested_loop_source(
+fn is_nested_loop_source(
     read_ctx: &crate::subquery::SubCtx<'_>,
     source: &TableExpr,
 ) -> bool {
     match source {
-        TableExpr::Table { .. } => crate::exec::is_direct_stored_base_table(read_ctx, source),
+        TableExpr::Table {
+            name,
+            columns,
+            sample,
+            ..
+        } => {
+            columns.is_none()
+                && sample.is_none()
+                && (crate::exec::is_direct_stored_base_table(read_ctx, source)
+                    || (name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_some()))
+        }
+        TableExpr::Function {
+            lateral, functions, ..
+        } => {
+            !lateral
+                && functions.iter().flat_map(|function| &function.args).all(|arg| {
+                    let mut references_column = false;
+                    crate::grouping::visit_expr(arg, &mut |node| {
+                        references_column |= matches!(node, crabka_pgparser::ast::Expr::Column { .. });
+                    });
+                    !references_column
+                })
+        }
         TableExpr::Join {
             left,
             right,
             constraint,
             ..
         } => {
-            is_direct_nested_loop_source(read_ctx, left)
-                && is_direct_nested_loop_source(read_ctx, right)
+            is_nested_loop_source(read_ctx, left)
+                && is_nested_loop_source(read_ctx, right)
                 && !matches!(
                     constraint,
                     crabka_pgparser::ast::JoinConstraint::On(expr)
@@ -431,9 +461,19 @@ fn is_direct_nested_loop_source(
     }
 }
 
+fn nested_loop_function_count(source: &TableExpr) -> usize {
+    match source {
+        TableExpr::Function { .. } => 1,
+        TableExpr::Join { left, right, .. } => {
+            nested_loop_function_count(left) + nested_loop_function_count(right)
+        }
+        _ => 0,
+    }
+}
+
 fn collect_nested_loop_sources(source: &TableExpr, sources: &mut Vec<TableExpr>) {
     match source {
-        TableExpr::Table { .. } => sources.push(source.clone()),
+        TableExpr::Table { .. } | TableExpr::Function { .. } => sources.push(source.clone()),
         TableExpr::Join { left, right, .. } => {
             collect_nested_loop_sources(left, sources);
             collect_nested_loop_sources(right, sources);
@@ -442,61 +482,79 @@ fn collect_nested_loop_sources(source: &TableExpr, sources: &mut Vec<TableExpr>)
     }
 }
 
-fn plan_nested_loop_source(source: &TableExpr, scanrelid: &mut usize) -> Plan {
+fn plan_nested_loop_source(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    source: &TableExpr,
+) -> Option<Plan> {
     match source {
         TableExpr::Table { .. } => {
-            let plan = Plan {
+            let node = match source {
+                TableExpr::Table { name, .. }
+                    if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_some() =>
+                {
+                    PlanNode::CteScan
+                }
+                _ => PlanNode::SeqScan { scanrelid: 0 },
+            };
+            Some(Plan {
                 target_list: Vec::new(),
                 quals: Vec::new(),
-                node: PlanNode::SeqScan {
-                    scanrelid: *scanrelid,
-                },
-            };
-            *scanrelid += 1;
-            plan
+                node,
+            })
         }
+        TableExpr::Function { functions, .. } => Some(Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: if crate::routine::expands_as_table(read_ctx.catalog_kv, functions) {
+                PlanNode::TableFunctionScan
+            } else {
+                PlanNode::FunctionScan
+            },
+        }),
         TableExpr::Join {
             left,
             right,
             kind,
             constraint,
-        } => Plan {
+        } => Some(Plan {
             target_list: Vec::new(),
             quals: Vec::new(),
             node: PlanNode::NestedLoop {
-                outer: Box::new(plan_nested_loop_source(left, scanrelid)),
-                inner: Box::new(plan_nested_loop_source(right, scanrelid)),
+                outer: Box::new(plan_nested_loop_source(read_ctx, left)?),
+                inner: Box::new(plan_nested_loop_source(read_ctx, right)?),
                 kind: *kind,
                 constraint: constraint.clone(),
             },
-        },
-        _ => unreachable!("nested loop sources were validated before planning"),
+        }),
+        _ => None,
     }
 }
 
 fn execute_nested_loop_plan(
     state: &mut PlanState,
     read_ctx: &crate::subquery::SubCtx<'_>,
-    sources: &[TableExpr],
+    sources: &mut std::slice::Iter<'_, TableExpr>,
 ) -> Result<Relation, ExecError> {
     match &state.plan.node {
-        PlanNode::SeqScan { scanrelid } => {
+        PlanNode::SeqScan { .. }
+        | PlanNode::FunctionScan
+        | PlanNode::TableFunctionScan
+        | PlanNode::CteScan => {
             let source = sources
-                .get(scanrelid.checked_sub(1).ok_or_else(|| {
-                    ExecError::Unsupported(
-                        "NestedLoop SeqScan had an invalid range-table index".into(),
-                    )
-                })?)
+                .next()
                 .ok_or_else(|| {
                     ExecError::Unsupported(
-                        "NestedLoop SeqScan had an unknown range-table index".into(),
+                        "NestedLoop had an unknown range-table entry".into(),
                     )
                 })?;
-            SeqScanExecutor {
-                read_ctx,
-                source: source.clone(),
+            match &state.plan.node {
+                PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source: source.clone() }.execute(state),
+                PlanNode::FunctionScan | PlanNode::TableFunctionScan => {
+                    FunctionScanExecutor { read_ctx, source: source.clone() }.execute(state)
+                }
+                PlanNode::CteScan => CteScanExecutor { read_ctx, source: source.clone() }.execute(state),
+                _ => unreachable!("nested-loop leaf was matched above"),
             }
-            .execute(state)
         }
         PlanNode::NestedLoop {
             outer,

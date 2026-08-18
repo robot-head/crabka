@@ -16991,6 +16991,32 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of(
+                "SELECT a, n FROM seq_scan_test, generate_series(1, 2) AS g(n) \
+                 WHERE a = 1 ORDER BY n",
+            ),
+        )
+        .expect("NestedLoop FunctionScan plan executes")
+        .expect("stored table and function source use NestedLoop");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT a, n FROM seq_scan_test, planned_cte WHERE a = 1 AND n = 2"),
+        )
+        .expect("NestedLoop CteScan plan executes")
+        .expect("stored table and CTE source use NestedLoop");
+        assert_eq!(
+            relation.rows,
+            vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT l.a FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1"),
         )
         .expect("NestedLoop plan executes")
@@ -17561,9 +17587,12 @@ mod tests {
             ]
         );
         for sql in [
+            "SELECT a FROM seq_scan_test, planned_cte AS p(n)",
+            "SELECT a FROM seq_scan_test, planned_cte TABLESAMPLE BERNOULLI(100)",
+            "SELECT a FROM seq_scan_test, public.planned_cte",
+            "SELECT a.i FROM generate_series(1, 2) AS a(i) \
+             JOIN generate_series(1, 2) AS b(i) ON a.i = b.i",
             "SELECT n FROM LATERAL generate_series(1, 3) AS g(n)",
-            "SELECT a FROM seq_scan_test, generate_series(1, 3) AS g(n)",
-            "SELECT a FROM generate_series(1, 3) AS g(n), seq_scan_test",
             "SELECT DISTINCT count(*) FROM seq_scan_test AS l, seq_scan_third AS r",
             "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r ORDER BY 1",
             "SELECT count(*) FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
