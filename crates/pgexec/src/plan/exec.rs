@@ -6,7 +6,9 @@
 
 use std::collections::BTreeSet;
 
-use crabka_pgparser::ast::{DistinctClause, QueryExpr, SelectStmt, TableExpr, ValuesStmt};
+use crabka_pgparser::ast::{
+    DistinctClause, QueryExpr, SelectItem, SelectStmt, TableExpr, ValuesStmt,
+};
 
 use crate::{
     bind::{BoundExpr, bind_optional},
@@ -50,12 +52,23 @@ pub(crate) fn try_execute_seq_scan(
         offset,
         order_by,
         sort_positions,
+        aggregate,
     }) = plan_seq_scan(read_ctx, select)?
     else {
         return Ok(None);
     };
     let mut state = PlanState::new(plan, Scope::empty());
-    if matches!(state.plan.node, PlanNode::Limit { .. }) {
+    if let Some(select) = aggregate {
+        AggregateExecutor {
+            read_ctx,
+            source,
+            fields,
+            tys,
+            select,
+        }
+        .execute(&mut state)
+        .map(Some)
+    } else if matches!(state.plan.node, PlanNode::Limit { .. }) {
         LimitExecutor {
             read_ctx,
             source,
@@ -159,6 +172,7 @@ struct SeqScanPlan {
     offset: Option<crabka_pgparser::ast::Expr>,
     order_by: Vec<crabka_pgparser::ast::OrderItem>,
     sort_positions: Vec<usize>,
+    aggregate: Option<SelectStmt>,
 }
 
 fn plan_seq_scan(
@@ -171,19 +185,38 @@ fn plan_seq_scan(
     if !crate::exec::is_direct_stored_base_table(read_ctx, source) {
         return Ok(None);
     }
-    if matches!(select.distinct, DistinctClause::On(_)) {
+    let aggregate = needs_aggregate_node(select);
+    if aggregate
+        && (matches!(
+            select.distinct,
+            DistinctClause::On(_) | DistinctClause::Distinct
+        ) || !select.order_by.is_empty()
+            || select.limit.is_some()
+            || select.offset.is_some()
+            || select.grouping.is_some())
+    {
+        return Ok(None);
+    }
+    if !aggregate && matches!(select.distinct, DistinctClause::On(_)) {
         return Ok(None);
     }
     if select.with_ties {
         return Ok(None);
     }
-    if !select.group_by.is_empty() {
+    if !aggregate && !select.group_by.is_empty() {
         return Ok(None);
     }
-    if select.having.is_some() {
+    if !aggregate && select.having.is_some() {
         return Ok(None);
     }
-    if crate::grouping::is_grouping_query(select) {
+    if !aggregate && crate::grouping::is_grouping_query(select) {
+        return Ok(None);
+    }
+    if !select
+        .group_by
+        .iter()
+        .all(|expr| matches!(expr, crabka_pgparser::ast::Expr::Column { .. }))
+    {
         return Ok(None);
     }
     if crate::window::has_window_calls(select) {
@@ -251,22 +284,37 @@ fn plan_seq_scan(
         node: PlanNode::SeqScan { scanrelid: 1 },
     };
     let filter = Plan {
-        target_list,
+        target_list: if aggregate {
+            Vec::new()
+        } else {
+            target_list.clone()
+        },
         quals,
         node: PlanNode::Filter {
             input: Box::new(scan),
         },
+    };
+    let aggregate = if aggregate {
+        Plan {
+            target_list,
+            quals: Vec::new(),
+            node: PlanNode::Aggregate {
+                input: Box::new(filter),
+            },
+        }
+    } else {
+        filter
     };
     let unique = if distinct {
         Plan {
             target_list: Vec::new(),
             quals: Vec::new(),
             node: PlanNode::Unique {
-                input: Box::new(filter),
+                input: Box::new(aggregate),
             },
         }
     } else {
-        filter
+        aggregate
     };
     let sort = if select.order_by.is_empty() {
         unique
@@ -299,7 +347,23 @@ fn plan_seq_scan(
         offset: select.offset.clone(),
         order_by: select.order_by.clone(),
         sort_positions,
+        aggregate: needs_aggregate_node(select).then(|| select.clone()),
     }))
+}
+
+fn needs_aggregate_node(select: &SelectStmt) -> bool {
+    !select.group_by.is_empty()
+        || select.projection.iter().any(|item| {
+            matches!(item, SelectItem::Expr { expr, .. } if crate::agg::contains_aggregate(expr))
+        })
+        || select
+            .order_by
+            .iter()
+            .any(|item| crate::agg::contains_aggregate(&item.expr))
+        || select
+            .having
+            .as_ref()
+            .is_some_and(crate::agg::contains_aggregate)
 }
 
 fn bind_target_list(
@@ -411,20 +475,8 @@ struct FilterExecutor<'a, 'b> {
 
 impl Executor for FilterExecutor<'_, '_> {
     fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
-        let PlanNode::Filter { input } = &state.plan.node else {
-            return Err(ExecError::Unsupported(
-                "FilterExecutor received a non-Filter plan".into(),
-            ));
-        };
-        crate::session::check_query_canceled()?;
-        let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = SeqScanExecutor {
-            read_ctx: self.read_ctx,
-            source: self.source.clone(),
-        }
-        .execute(&mut child)?;
-        state.begin_loop();
-        execute_filter_rows(
+        let relation = execute_filter_input(state, self.read_ctx, self.source.clone())?;
+        project_filter_rows(
             state,
             relation,
             &self.fields,
@@ -434,11 +486,57 @@ impl Executor for FilterExecutor<'_, '_> {
     }
 }
 
+fn execute_filter_input(
+    state: &mut PlanState,
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    source: TableExpr,
+) -> Result<Relation, ExecError> {
+    let PlanNode::Filter { input } = &state.plan.node else {
+        return Err(ExecError::Unsupported(
+            "FilterExecutor received a non-Filter plan".into(),
+        ));
+    };
+    crate::session::check_query_canceled()?;
+    let mut child = PlanState::new((**input).clone(), Scope::empty());
+    let relation = SeqScanExecutor { read_ctx, source }.execute(&mut child)?;
+    state.begin_loop();
+    filter_relation_rows(state, relation, read_ctx.eval_ctx)
+}
+
+#[cfg(test)]
 fn execute_filter_rows(
     state: &mut PlanState,
     relation: Relation,
     fields: &[crabka_pgwire::engine::FieldDescription],
     tys: &[crabka_pgtypes::ColumnType],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Relation, ExecError> {
+    let relation = filter_relation_rows(state, relation, ctx)?;
+    project_filter_rows(state, relation, fields, tys, ctx)
+}
+
+fn project_filter_rows(
+    state: &PlanState,
+    relation: Relation,
+    fields: &[crabka_pgwire::engine::FieldDescription],
+    tys: &[crabka_pgtypes::ColumnType],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Relation, ExecError> {
+    let exprs: Vec<_> = state
+        .plan
+        .target_list
+        .iter()
+        .map(|target| target.expr.expr().clone())
+        .collect();
+    Ok(Relation {
+        scope: exec::projected_scope(fields, tys),
+        rows: exec::project_rows(&exprs, &relation.scope, &relation.rows, ctx)?,
+    })
+}
+
+fn filter_relation_rows(
+    state: &mut PlanState,
+    relation: Relation,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Relation, ExecError> {
     state.scope = relation.scope.clone();
@@ -458,16 +556,47 @@ fn execute_filter_rows(
             state.remove_row();
         }
     }
-    let exprs: Vec<_> = state
-        .plan
-        .target_list
-        .iter()
-        .map(|target| target.expr.expr().clone())
-        .collect();
     Ok(Relation {
-        scope: exec::projected_scope(fields, tys),
-        rows: exec::project_rows(&exprs, &state.scope, &kept, ctx)?,
+        scope: state.scope.clone(),
+        rows: kept,
     })
+}
+
+struct AggregateExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+    fields: Vec<crabka_pgwire::engine::FieldDescription>,
+    tys: Vec<crabka_pgtypes::ColumnType>,
+    select: SelectStmt,
+}
+
+impl Executor for AggregateExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        let PlanNode::Aggregate { input } = &state.plan.node else {
+            return Err(ExecError::Unsupported(
+                "AggregateExecutor received a non-Aggregate plan".into(),
+            ));
+        };
+        crate::session::check_query_canceled()?;
+        let mut child = PlanState::new((**input).clone(), Scope::empty());
+        let relation = execute_filter_input(&mut child, self.read_ctx, self.source.clone())?;
+        state.begin_loop();
+        let rows = crate::agg::aggregate_rows_with_memory(
+            &self.select,
+            &relation.scope,
+            relation.rows,
+            self.read_ctx.eval_ctx,
+            &self.read_ctx.statement_memory,
+        )?;
+        state.scope = exec::projected_scope(&self.fields, &self.tys);
+        for _ in &rows {
+            state.emit_row();
+        }
+        Ok(Relation {
+            scope: state.scope.clone(),
+            rows,
+        })
+    }
 }
 
 struct LimitExecutor<'a, 'b> {
@@ -786,6 +915,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("one", 1), ("two", 2)]
         );
+    }
+
+    #[test]
+    fn aggregate_node_detection_keeps_plain_rows_out_of_grouping() {
+        assert!(needs_aggregate_node(&select("SELECT a FROM t GROUP BY a")));
+        assert!(needs_aggregate_node(&select("SELECT count(*) FROM t")));
+        assert!(!needs_aggregate_node(&select("SELECT a FROM t")));
+        assert!(!needs_aggregate_node(&select("SELECT grouping(a) FROM t")));
     }
 
     #[test]

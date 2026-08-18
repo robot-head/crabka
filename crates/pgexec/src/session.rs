@@ -16859,9 +16859,53 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT a, count(*) FROM seq_scan_test WHERE a > 0 GROUP BY a"),
+        )
+        .expect("aggregate plan executes")
+        .expect("stored-table aggregate uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(1),
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(2),
+                ],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT count(*) FROM seq_scan_test"),
+        )
+        .expect("aggregate plan executes")
+        .expect("stored-table aggregate uses Aggregate");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(3)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT 1 FROM seq_scan_test HAVING count(*) > 0"),
+        )
+        .expect("aggregate plan executes")
+        .expect("stored-table aggregate uses Aggregate");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT a FROM seq_scan_test GROUP BY a"),
+        )
+        .expect("group plan executes")
+        .expect("stored-table group uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
         for sql in [
-            "SELECT count(*) FROM seq_scan_test",
-            "SELECT a FROM seq_scan_test GROUP BY a",
             "SELECT a FROM seq_scan_test HAVING true",
             "SELECT row_number() OVER () FROM seq_scan_test",
         ] {
