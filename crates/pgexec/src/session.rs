@@ -17225,6 +17225,22 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of(
+                "SELECT n, row_number() OVER (ORDER BY n) \
+                 FROM unnest(ARRAY[2, 1]) AS g(n)",
+            ),
+        )
+        .expect("FunctionScan WindowAgg plan executes")
+        .expect("FROM SRF window uses WindowAgg");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT count(*) FROM unnest(ARRAY[1, 1, 2]) AS g(n) WHERE n = 1"),
         )
         .expect("FunctionScan Aggregate plan executes")
@@ -17295,7 +17311,12 @@ mod tests {
             "SELECT count(*) FROM generate_series(1, 3) AS g(n) LIMIT 1",
             "SELECT count(*) FROM generate_series(1, 3) AS g(n) OFFSET 1",
             "SELECT grouping(n) FROM generate_series(1, 3) AS g(n)",
-            "SELECT row_number() OVER () FROM generate_series(1, 3) AS g(n)",
+            "SELECT count(*), row_number() OVER () FROM generate_series(1, 3) AS g(n)",
+            "SELECT generate_series(1, 2), row_number() OVER () FROM generate_series(1, 3) AS g(n)",
+            "SELECT DISTINCT n, row_number() OVER () FROM generate_series(1, 3) AS g(n)",
+            "SELECT n, row_number() OVER () FROM generate_series(1, 3) AS g(n) ORDER BY 1",
+            "SELECT n, row_number() OVER () FROM generate_series(1, 3) AS g(n) LIMIT 1",
+            "SELECT row_number() OVER () FROM generate_series(1, 3) AS g(n) OFFSET 1",
         ] {
             assert!(
                 crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))

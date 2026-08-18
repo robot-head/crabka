@@ -955,10 +955,17 @@ fn plan_function_scan(
         return Ok(None);
     };
     let aggregate = needs_aggregate_node(select);
+    let window = crate::window::has_window_calls(select);
     if *lateral
         || matches!(select.distinct, DistinctClause::On(_))
         || (!aggregate && crate::grouping::is_grouping_query(select))
-        || crate::window::has_window_calls(select)
+        || (window
+            && (aggregate
+                || crate::srf::projection_contains_srf(&select.projection)
+                || !matches!(select.distinct, DistinctClause::All)
+                || !select.order_by.is_empty()
+                || select.limit.is_some()
+                || select.offset.is_some()))
         || (aggregate
             && (!matches!(select.distinct, DistinctClause::All)
                 || !select.order_by.is_empty()
@@ -996,6 +1003,53 @@ fn plan_function_scan(
             read_ctx.ctes,
         )?.scope
     };
+    if window {
+        let quals = bind_optional(select.filter.as_ref(), &scope)?
+            .into_iter()
+            .map(|clause| RestrictInfo {
+                clause,
+                is_pushed_down: false,
+                security_level: 0,
+                leakproof: true,
+                required_relids: BTreeSet::from([1]),
+            })
+            .collect();
+        let scan = Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: if table_function {
+                PlanNode::TableFunctionScan
+            } else {
+                PlanNode::FunctionScan
+            },
+        };
+        let filter = Plan {
+            target_list: Vec::new(),
+            quals,
+            node: PlanNode::Filter {
+                input: Box::new(scan),
+            },
+        };
+        return Ok(Some(SeqScanPlan {
+            plan: Plan {
+                target_list: Vec::new(),
+                quals: Vec::new(),
+                node: PlanNode::WindowAgg {
+                    input: Box::new(filter),
+                },
+            },
+            source: source.clone(),
+            fields: Vec::new(),
+            tys: Vec::new(),
+            limit: None,
+            offset: None,
+            order_by: Vec::new(),
+            sort_positions: Vec::new(),
+            aggregate: None,
+            project_set: None,
+            window: Some(select.clone()),
+        }));
+    }
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
     if crate::srf::exprs_contain_srf(&exprs) {
         return Ok(None);
