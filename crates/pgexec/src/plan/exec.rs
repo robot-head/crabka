@@ -58,6 +58,7 @@ fn try_execute_nested_loop(
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
     let aggregate = needs_aggregate_node(select);
+    let window = crate::window::has_window_calls(select);
     if select.from.is_empty() {
         return Ok(None);
     }
@@ -68,7 +69,13 @@ fn try_execute_nested_loop(
         || matches!(select.distinct, DistinctClause::On(_))
         || select.with_ties
         || select.grouping.is_some()
-        || crate::window::has_window_calls(select)
+        || (window
+            && (aggregate
+                || crate::srf::projection_contains_srf(&select.projection)
+                || !matches!(select.distinct, DistinctClause::All)
+                || !select.order_by.is_empty()
+                || select.limit.is_some()
+                || select.offset.is_some()))
         || (aggregate
             && (!matches!(select.distinct, DistinctClause::All)
                 || !select.order_by.is_empty()
@@ -84,6 +91,9 @@ fn try_execute_nested_loop(
         read_ctx.ctes,
     )?
     .scope;
+    if window {
+        return execute_nested_loop_window(read_ctx, select, &scope).map(Some);
+    }
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
     if crate::srf::exprs_contain_srf(&exprs) {
         return Ok(None);
@@ -104,30 +114,9 @@ fn try_execute_nested_loop(
         crate::eval::require_ordering_operator(tys[index])?;
         sort_positions.push(index);
     }
-    let mut sources = Vec::new();
-    for source in &select.from {
-        collect_nested_loop_sources(source, &mut sources);
-    }
-    let mut scanrelid = 1;
-    let mut plans = select
-        .from
-        .iter()
-        .map(|source| plan_nested_loop_source(source, &mut scanrelid));
-    let Some(mut loop_plan) = plans.next() else {
+    let Some((sources, loop_plan)) = nested_loop_input_plan(select) else {
         return Ok(None);
     };
-    for inner in plans {
-        loop_plan = Plan {
-            target_list: Vec::new(),
-            quals: Vec::new(),
-            node: PlanNode::NestedLoop {
-                outer: Box::new(loop_plan),
-                inner: Box::new(inner),
-                kind: crabka_pgparser::ast::JoinKind::Cross,
-                constraint: crabka_pgparser::ast::JoinConstraint::None,
-            },
-        };
-    }
     let filter = Plan {
         target_list: if aggregate {
             Vec::new()
@@ -206,6 +195,87 @@ fn try_execute_nested_loop(
     }
     .execute(&mut state)
     .map(Some)
+}
+
+fn nested_loop_input_plan(select: &SelectStmt) -> Option<(Vec<TableExpr>, Plan)> {
+    let mut sources = Vec::new();
+    for source in &select.from {
+        collect_nested_loop_sources(source, &mut sources);
+    }
+    let mut scanrelid = 1;
+    let mut plans = select
+        .from
+        .iter()
+        .map(|source| plan_nested_loop_source(source, &mut scanrelid));
+    let mut loop_plan = plans.next()?;
+    for inner in plans {
+        loop_plan = Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::NestedLoop {
+                outer: Box::new(loop_plan),
+                inner: Box::new(inner),
+                kind: crabka_pgparser::ast::JoinKind::Cross,
+                constraint: crabka_pgparser::ast::JoinConstraint::None,
+            },
+        };
+    }
+    Some((sources, loop_plan))
+}
+
+fn execute_nested_loop_window(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+    scope: &Scope,
+) -> Result<Relation, ExecError> {
+    let Some((sources, loop_plan)) = nested_loop_input_plan(select) else {
+        return Err(ExecError::Unsupported("WindowAgg had no nested-loop input".into()));
+    };
+    let filter = Plan {
+        target_list: Vec::new(),
+        quals: bind_optional(select.filter.as_ref(), scope)?
+            .into_iter()
+            .map(|clause| RestrictInfo {
+                clause,
+                is_pushed_down: false,
+                security_level: 0,
+                leakproof: true,
+                required_relids: (1..=sources.len()).collect(),
+            })
+            .collect(),
+        node: PlanNode::Filter {
+            input: Box::new(loop_plan),
+        },
+    };
+    let plan = Plan {
+        target_list: Vec::new(),
+        quals: Vec::new(),
+        node: PlanNode::WindowAgg {
+            input: Box::new(filter),
+        },
+    };
+    let mut state = PlanState::new(plan, Scope::empty());
+    let PlanNode::WindowAgg { input } = &state.plan.node else {
+        unreachable!()
+    };
+    let mut filter_state = PlanState::new((**input).clone(), Scope::empty());
+    let PlanNode::Filter { input } = &filter_state.plan.node else {
+        unreachable!()
+    };
+    let mut loop_state = PlanState::new((**input).clone(), Scope::empty());
+    let relation = execute_nested_loop_plan(&mut loop_state, read_ctx, &sources)?;
+    filter_state.begin_loop();
+    let relation = filter_relation_rows(&mut filter_state, relation, read_ctx.eval_ctx)?;
+    state.begin_loop();
+    let (fields, tys, rows) = crate::window::execute(select, &relation.scope, relation.rows, read_ctx.eval_ctx)?;
+    state.scope = exec::projected_scope(&fields, &tys);
+    for _ in &rows {
+        state.emit_row();
+    }
+    Ok(Relation {
+        scope: state.scope.clone(),
+        rows,
+    })
 }
 
 struct NestedLoopTail<'a, 'b> {
