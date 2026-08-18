@@ -427,21 +427,21 @@ fn is_nested_loop_source(
             sample,
             ..
         } => {
-            sample.is_none()
-                && (is_direct_stored_scan_source(read_ctx, source)
-                    || (columns.is_none()
-                        && name.schema.is_none()
-                        && (read_ctx.ctes.lookup(&name.name).is_some()
-                            || read_ctx
-                                .eval_ctx
-                                .transition_relations
-                                .as_ref()
-                                .is_some_and(|runtime| {
-                                    runtime
-                                        .lock()
-                                        .expect("transition relation mutex")
-                                        .contains_key(&name.name)
-                                }))))
+            is_direct_stored_scan_source(read_ctx, source)
+                || (sample.is_none()
+                    && columns.is_none()
+                    && name.schema.is_none()
+                    && (read_ctx.ctes.lookup(&name.name).is_some()
+                        || read_ctx
+                            .eval_ctx
+                            .transition_relations
+                            .as_ref()
+                            .is_some_and(|runtime| {
+                                runtime
+                                    .lock()
+                                    .expect("transition relation mutex")
+                                    .contains_key(&name.name)
+                            })))
         }
         TableExpr::Function {
             lateral, functions, ..
@@ -495,12 +495,15 @@ fn is_direct_stored_scan_source(
         name,
         only,
         alias,
-        columns: Some(_),
-        sample: None,
+        columns,
+        sample,
     } = source
     else {
         return false;
     };
+    if columns.is_none() && sample.is_none() {
+        return false;
+    }
     crate::exec::is_direct_stored_base_table(
         read_ctx,
         &TableExpr::Table {
@@ -2182,6 +2185,14 @@ impl Executor for SeqScanExecutor<'_, '_> {
         )?;
         let relation =
             exec::scan_stored_base_table(self.read_ctx, &self.source, &name, None, None)?;
+        let relation = if let TableExpr::Table {
+            sample: Some(sample), ..
+        } = &self.source
+        {
+            exec::apply_tablesample(relation, sample, self.read_ctx.eval_ctx)?
+        } else {
+            relation
+        };
         let relation = if let TableExpr::Table {
             name, alias, columns, ..
         } = &self.source

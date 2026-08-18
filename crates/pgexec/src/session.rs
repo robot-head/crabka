@@ -16893,6 +16893,28 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT a FROM seq_scan_test TABLESAMPLE BERNOULLI (100) WHERE a = 2",
+            ),
+        )
+        .expect("sampled SeqScan plan executes")
+        .expect("stored table TABLESAMPLE uses SeqScan");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT count(*) FROM seq_scan_test TABLESAMPLE SYSTEM (0)"),
+        )
+        .expect("sampled aggregate SeqScan plan executes")
+        .expect("stored table TABLESAMPLE aggregate uses SeqScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(0)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT count(*) FROM seq_scan_test AS l \
                  INNER JOIN seq_scan_third AS r ON l.a = r.a - 2",
             ),

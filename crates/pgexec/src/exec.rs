@@ -16067,7 +16067,7 @@ fn build_table_expr(
 /// independently at the given probability. The percentage checks, the `42704`
 /// for an unknown method, and the deterministic 0% / 100% ends match
 /// `PostgreSQL` exactly; which rows a partial sample returns does not.
-fn apply_tablesample(
+pub(crate) fn apply_tablesample(
     relation: Relation,
     sample: &crabka_pgparser::ast::TableSample,
     ctx: &crate::clock::EvalCtx,
