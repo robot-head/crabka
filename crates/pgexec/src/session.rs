@@ -17541,6 +17541,20 @@ mod tests {
         .expect("NestedLoop derived SelectSort and Limit plan executes")
         .expect("nested derived SELECT tail uses SubqueryScan");
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT l.a, row_number() OVER (ORDER BY r.b) AS rn \
+                 FROM (VALUES (1)) AS l(a), (VALUES (2), (1)) AS r(b) \
+                 ORDER BY rn DESC LIMIT 1",
+            ),
+        )
+        .expect("NestedLoop WindowAgg tail plan executes")
+        .expect("nested window owns ordering and limit");
+        assert_eq!(
+            relation.rows,
+            vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(2)]]
+        );
         for sql in [
             "SELECT a FROM seq_scan_test, LATERAL (VALUES (1)) AS derived(n)",
             "SELECT a, v FROM seq_scan_test, \
@@ -18236,10 +18250,6 @@ mod tests {
              JOIN generate_series(1, 2) AS b(i) ON a.i = b.i",
             "SELECT count(*), row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r",
             "SELECT generate_series(1, 2), row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r",
-            "SELECT DISTINCT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r",
-            "SELECT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r ORDER BY 1",
-            "SELECT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
-            "SELECT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1",
             "SELECT count(*), generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r",
             "SELECT n FROM (SELECT 1 AS n ORDER BY n) AS derived",
             "SELECT n FROM (SELECT 1 AS n OFFSET 0) AS derived",
