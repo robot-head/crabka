@@ -2663,7 +2663,11 @@ mod tests {
                 column_defs: None,
             }];
             let schema = from_item_schema(&item, false, false, None, &None).expect("schema");
-            let executed = from_item(&item, false, false, None, &None, &ctx()).expect("rows");
+            let statement_memory =
+                crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
+            let executed =
+                from_item_with_memory(&item, false, false, None, &None, &ctx(), &statement_memory)
+                    .expect("rows");
             assert!(schema.scope == executed.scope, "describing {name}");
         }
     }
