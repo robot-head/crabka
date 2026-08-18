@@ -16751,6 +16751,8 @@ mod tests {
             .simple_query(
                 "CREATE TABLE seq_scan_test (a int); \
                  INSERT INTO seq_scan_test VALUES (1), (2), (2); \
+                 CREATE TABLE seq_scan_third (a int); \
+                 INSERT INTO seq_scan_third VALUES (3); \
                  CREATE FUNCTION planned_table_function() RETURNS TABLE (n int) \
                  LANGUAGE sql AS 'SELECT 1'; \
                  CREATE FUNCTION planned_values_function() RETURNS TABLE (n int) \
@@ -16871,7 +16873,9 @@ mod tests {
         };
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
-            &select_of("SELECT l.a FROM seq_scan_test AS l, seq_scan_test AS r WHERE l.a = 1 AND r.a = 2"),
+            &select_of(
+                "SELECT l.a FROM seq_scan_test AS l, seq_scan_test AS r WHERE l.a = 1 AND r.a = 2",
+            ),
         )
         .expect("NestedLoop plan executes")
         .expect("two base tables use NestedLoop");
@@ -16880,6 +16884,30 @@ mod tests {
             vec![
                 vec![crabka_pgtypes::Datum::Int4(1)],
                 vec![crabka_pgtypes::Datum::Int4(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT l.a, m.a, r.a FROM seq_scan_test AS l, seq_scan_test AS m, \
+                 seq_scan_third AS r WHERE l.a = 1 AND m.a = 2 AND r.a = 3",
+            ),
+        )
+        .expect("NestedLoop plan executes")
+        .expect("three base tables use nested loops");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(3),
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(3),
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(

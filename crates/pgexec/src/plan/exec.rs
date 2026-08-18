@@ -43,7 +43,7 @@ pub(crate) fn try_execute_seq_scan(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
-    if select.from.len() == 2 {
+    if select.from.len() >= 2 {
         return try_execute_nested_loop(read_ctx, select);
     }
     let Some(planned) = plan_seq_scan(read_ctx, select)? else {
@@ -57,9 +57,11 @@ fn try_execute_nested_loop(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<Relation>, ExecError> {
-    let [outer, inner] = select.from.as_slice() else { return Ok(None) };
-    if !crate::exec::is_direct_stored_base_table(read_ctx, outer)
-        || !crate::exec::is_direct_stored_base_table(read_ctx, inner)
+    if select.from.len() < 2
+        || !select
+            .from
+            .iter()
+            .all(|source| crate::exec::is_direct_stored_base_table(read_ctx, source))
         || !matches!(select.distinct, DistinctClause::All)
         || !select.order_by.is_empty()
         || select.limit.is_some()
@@ -74,40 +76,111 @@ fn try_execute_nested_loop(
         read_ctx.fctx.resolution,
         select,
         read_ctx.ctes,
-    )?.scope;
+    )?
+    .scope;
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
-    if crate::srf::exprs_contain_srf(&exprs) { return Ok(None) }
-    let scan = || Plan {
-        target_list: Vec::new(), quals: Vec::new(), node: PlanNode::SeqScan { scanrelid: 1 },
+    if crate::srf::exprs_contain_srf(&exprs) {
+        return Ok(None);
+    }
+    let scan = |scanrelid| Plan {
+        target_list: Vec::new(),
+        quals: Vec::new(),
+        node: PlanNode::SeqScan { scanrelid },
     };
+    let mut inputs = (1..=select.from.len()).map(scan);
+    let Some(mut loop_plan) = inputs.next() else {
+        return Ok(None);
+    };
+    for inner in inputs {
+        loop_plan = Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::NestedLoop {
+                outer: Box::new(loop_plan),
+                inner: Box::new(inner),
+            },
+        };
+    }
     let plan = Plan {
         target_list: bind_target_list(&exprs, &fields, &scope)?,
-        quals: bind_optional(select.filter.as_ref(), &scope)?.into_iter().map(|clause| RestrictInfo {
-            clause, is_pushed_down: false, security_level: 0, leakproof: true,
-            required_relids: BTreeSet::from([1, 2]),
-        }).collect(),
-        node: PlanNode::Filter { input: Box::new(Plan {
-            target_list: Vec::new(), quals: Vec::new(),
-            node: PlanNode::NestedLoop { outer: Box::new(scan()), inner: Box::new(scan()) },
-        }) },
+        quals: bind_optional(select.filter.as_ref(), &scope)?
+            .into_iter()
+            .map(|clause| RestrictInfo {
+                clause,
+                is_pushed_down: false,
+                security_level: 0,
+                leakproof: true,
+                required_relids: (1..=select.from.len()).collect(),
+            })
+            .collect(),
+        node: PlanNode::Filter {
+            input: Box::new(loop_plan),
+        },
     };
     let mut state = PlanState::new(plan, Scope::empty());
-    let PlanNode::Filter { input } = &state.plan.node else { unreachable!() };
-    let PlanNode::NestedLoop { outer: outer_plan, inner: inner_plan } = &input.node else { unreachable!() };
-    let mut outer_state = PlanState::new((**outer_plan).clone(), Scope::empty());
-    let mut inner_state = PlanState::new((**inner_plan).clone(), Scope::empty());
-    let outer_relation = SeqScanExecutor { read_ctx, source: outer.clone() }.execute(&mut outer_state)?;
-    let inner_relation = SeqScanExecutor { read_ctx, source: inner.clone() }.execute(&mut inner_state)?;
+    let PlanNode::Filter { input } = &state.plan.node else {
+        unreachable!()
+    };
     let mut loop_state = PlanState::new((**input).clone(), Scope::empty());
-    loop_state.begin_loop();
-    let relation = crate::join::join_relations(
-        outer_relation, inner_relation, crabka_pgparser::ast::JoinKind::Cross,
-        &crabka_pgparser::ast::JoinConstraint::None, read_ctx.eval_ctx, read_ctx.join_policy(),
-    )?;
-    loop_state.scope = relation.scope.clone();
-    for _ in &relation.rows { loop_state.emit_row(); }
+    let relation = execute_nested_loop_plan(&mut loop_state, read_ctx, &select.from)?;
     let relation = filter_relation_rows(&mut state, relation, read_ctx.eval_ctx)?;
-    Ok(Some(project_filter_rows(&state, relation, &fields, &tys, read_ctx.eval_ctx)?))
+    Ok(Some(project_filter_rows(
+        &state,
+        relation,
+        &fields,
+        &tys,
+        read_ctx.eval_ctx,
+    )?))
+}
+
+fn execute_nested_loop_plan(
+    state: &mut PlanState,
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    sources: &[TableExpr],
+) -> Result<Relation, ExecError> {
+    match &state.plan.node {
+        PlanNode::SeqScan { scanrelid } => {
+            let source = sources
+                .get(scanrelid.checked_sub(1).ok_or_else(|| {
+                    ExecError::Unsupported(
+                        "NestedLoop SeqScan had an invalid range-table index".into(),
+                    )
+                })?)
+                .ok_or_else(|| {
+                    ExecError::Unsupported(
+                        "NestedLoop SeqScan had an unknown range-table index".into(),
+                    )
+                })?;
+            SeqScanExecutor {
+                read_ctx,
+                source: source.clone(),
+            }
+            .execute(state)
+        }
+        PlanNode::NestedLoop { outer, inner } => {
+            let mut outer_state = PlanState::new((**outer).clone(), Scope::empty());
+            let mut inner_state = PlanState::new((**inner).clone(), Scope::empty());
+            let outer_relation = execute_nested_loop_plan(&mut outer_state, read_ctx, sources)?;
+            let inner_relation = execute_nested_loop_plan(&mut inner_state, read_ctx, sources)?;
+            state.begin_loop();
+            let relation = crate::join::join_relations(
+                outer_relation,
+                inner_relation,
+                crabka_pgparser::ast::JoinKind::Cross,
+                &crabka_pgparser::ast::JoinConstraint::None,
+                read_ctx.eval_ctx,
+                read_ctx.join_policy(),
+            )?;
+            state.scope = relation.scope.clone();
+            for _ in &relation.rows {
+                state.emit_row();
+            }
+            Ok(relation)
+        }
+        _ => Err(ExecError::Unsupported(
+            "NestedLoopExecutor received a non-NestedLoop plan".into(),
+        )),
+    }
 }
 
 fn execute_seq_scan_plan(
@@ -960,7 +1033,7 @@ struct SeqScanExecutor<'a, 'b> {
 
 impl Executor for SeqScanExecutor<'_, '_> {
     fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
-        if !matches!(state.plan.node, PlanNode::SeqScan { scanrelid: 1 }) {
+        if !matches!(state.plan.node, PlanNode::SeqScan { .. }) {
             return Err(ExecError::Unsupported(
                 "SeqScanExecutor received a non-SeqScan plan".into(),
             ));
