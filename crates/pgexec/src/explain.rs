@@ -948,8 +948,12 @@ fn render_text_node(
             loops: 1,
             rows_removed: 0,
         });
-        write!(headline, " (actual rows={}.00 loops={})", actual.rows, actual.loops)
-            .expect("String write");
+        if actual.loops == 0 {
+            headline.push_str(" (never executed)");
+        } else {
+            write!(headline, " (actual rows={}.00 loops={})", actual.rows, actual.loops)
+                .expect("String write");
+        }
     }
     lines.push(headline);
     let detail_indent = " ".repeat(2 + depth * 6);
@@ -1213,6 +1217,60 @@ mod tests {
                     "  Rows Removed by Filter: 1",
                     "  ->  Seq Scan (actual rows=3.00 loops=1)",
                 ]
+        );
+    }
+
+    #[test]
+    fn runtime_tree_marks_an_unentered_node_never_executed() {
+        use crate::plan::query::{Plan as ExecutablePlan, PlanNode as ExecutableNode, PlanState};
+        use crate::scope::Scope;
+
+        let plan = ExecutablePlan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: ExecutableNode::SeqScan { scanrelid: 1 },
+        };
+        let state = PlanState::new(plan, Scope::empty());
+        let options = ExplainOptions {
+            analyze: true,
+            costs: false,
+            ..ExplainOptions::default()
+        };
+
+        assert!(
+            render_with_rows(&plan_runtime_state(&state), &options, 0)
+                == vec!["Seq Scan (never executed)"]
+        );
+    }
+
+    #[test]
+    fn runtime_tree_omits_zero_filter_removals() {
+        use crate::plan::query::{Plan as ExecutablePlan, PlanNode as ExecutableNode, PlanState};
+        use crate::scope::Scope;
+
+        let scan = ExecutablePlan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: ExecutableNode::SeqScan { scanrelid: 1 },
+        };
+        let filter = ExecutablePlan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: ExecutableNode::Filter {
+                input: Box::new(scan),
+            },
+        };
+        let mut state = PlanState::new(filter, Scope::empty());
+        state.nloops = 1;
+        let options = ExplainOptions {
+            analyze: true,
+            costs: false,
+            ..ExplainOptions::default()
+        };
+
+        assert!(
+            render_with_rows(&plan_runtime_state(&state), &options, 0)
+                == vec!["Filter (actual rows=0.00 loops=1)"]
         );
     }
 
