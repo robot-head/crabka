@@ -956,9 +956,6 @@ fn plan_function_scan(
     };
     if *lateral
         || matches!(select.distinct, DistinctClause::On(_))
-        || !select.order_by.is_empty()
-        || select.limit.is_some()
-        || select.offset.is_some()
         || crate::grouping::is_grouping_query(select)
         || crate::window::has_window_calls(select)
     {
@@ -1002,6 +999,16 @@ fn plan_function_scan(
             crate::eval::require_equality_operator(*ty)?;
         }
     }
+    let order_keys =
+        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
+    let mut sort_positions = Vec::with_capacity(order_keys.len());
+    for key in order_keys {
+        let exec::SelectOrderKey::Output(index) = key else {
+            return Ok(None);
+        };
+        crate::eval::require_ordering_operator(tys[index])?;
+        sort_positions.push(index);
+    }
     let filter = Plan {
         target_list: bind_target_list(&exprs, &fields, &scope)?,
         quals: bind_optional(select.filter.as_ref(), &scope)?
@@ -1037,15 +1044,37 @@ fn plan_function_scan(
     } else {
         filter
     };
+    let plan = if select.order_by.is_empty() {
+        plan
+    } else {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Sort {
+                input: Box::new(plan),
+            },
+        }
+    };
+    let plan = if select.limit.is_some() || select.offset.is_some() {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Limit {
+                input: Box::new(plan),
+            },
+        }
+    } else {
+        plan
+    };
     Ok(Some(SeqScanPlan {
         plan,
         source: source.clone(),
         fields,
         tys,
-        limit: None,
-        offset: None,
-        order_by: Vec::new(),
-        sort_positions: Vec::new(),
+        limit: select.limit.clone(),
+        offset: select.offset.clone(),
+        order_by: select.order_by.clone(),
+        sort_positions,
         aggregate: None,
         project_set: None,
         window: None,

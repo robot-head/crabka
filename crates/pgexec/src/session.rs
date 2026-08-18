@@ -17200,10 +17200,31 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(2)],
             ]
         );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT n FROM unnest(ARRAY[1, 2, 1]) AS g(n) \
+                 ORDER BY n DESC LIMIT 2 OFFSET 1",
+            ),
+        )
+        .expect("FunctionScan Sort/Limit plan executes")
+        .expect("FROM SRF Sort/Limit uses Sort and Limit");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n FROM unnest(ARRAY[1, 2, 1]) AS g(n) ORDER BY n DESC LIMIT 1"),
+        )
+        .expect("FunctionScan Limit plan executes")
+        .expect("FROM SRF LIMIT uses Limit");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
         for sql in [
             "SELECT n FROM LATERAL generate_series(1, 3) AS g(n)",
-            "SELECT n FROM generate_series(1, 3) AS g(n) ORDER BY n",
-            "SELECT n FROM generate_series(1, 3) AS g(n) LIMIT 1",
             "SELECT a FROM seq_scan_test, generate_series(1, 3) AS g(n)",
             "SELECT a FROM generate_series(1, 3) AS g(n), seq_scan_test",
             "SELECT DISTINCT count(*) FROM seq_scan_test AS l, seq_scan_third AS r",
