@@ -15509,9 +15509,8 @@ fn scan_stored_relation(
                 },
                 fallback_attempt.memory(),
             )
-            .map(|rows| {
+            .inspect(|_| {
                 fallback_attempt.commit();
-                rows
             })?
         }
         Err(error) => return Err(error),
