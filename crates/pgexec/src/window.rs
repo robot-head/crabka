@@ -510,11 +510,14 @@ pub(crate) type WindowOutput = (Vec<FieldDescription>, Vec<ColumnType>, Vec<Vec<
 /// Returns the output field descriptions, their types, and the projected rows.
 /// `DISTINCT`, `ORDER BY`, `OFFSET` and `LIMIT` are all applied, exactly as the
 /// non-window path applies them.
-pub(crate) fn execute(
+/// Run a window query under the enclosing statement's shared blocking-memory
+/// budget.
+pub(crate) fn execute_with_memory(
     s: &SelectStmt,
     scope: &Scope,
     rows: Vec<Vec<Datum>>,
     ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<WindowOutput, ExecError> {
     let windows = resolve_window_clause(&s.windows)?;
     let mut calls = Vec::with_capacity(s.window_calls.len());
@@ -578,13 +581,14 @@ pub(crate) fn execute(
         ),
         other => other,
     };
-    let rows = crate::exec::project_rows_ordered(
+    let rows = crate::exec::project_rows_ordered_with_memory(
         &projected,
         &base_scope,
         &fields,
         &lowered.out_exprs,
         base_rows,
         ctx,
+        statement_memory,
     )?;
     Ok((fields, tys, rows))
 }

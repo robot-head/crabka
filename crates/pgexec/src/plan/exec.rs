@@ -311,7 +311,13 @@ fn execute_nested_loop_window_with_state(
         filter_relation_rows(filter_state, relation, read_ctx.eval_ctx)
     })?;
     state.begin_loop();
-    let (fields, tys, rows) = crate::window::execute(select, &relation.scope, relation.rows, read_ctx.eval_ctx)?;
+    let (fields, tys, rows) = crate::window::execute_with_memory(
+        select,
+        &relation.scope,
+        relation.rows,
+        read_ctx.eval_ctx,
+        &read_ctx.statement_memory,
+    )?;
     state.scope = exec::projected_scope(&fields, &tys);
     for _ in &rows {
         state.emit_row();
@@ -2824,11 +2830,12 @@ impl Executor for WindowAggExecutor<'_, '_> {
             execute_filter_input(child, self.read_ctx, self.source.clone())
         })?;
         state.begin_loop();
-        let (fields, tys, rows) = crate::window::execute(
+        let (fields, tys, rows) = crate::window::execute_with_memory(
             &self.select,
             &relation.scope,
             relation.rows,
             self.read_ctx.eval_ctx,
+            &self.read_ctx.statement_memory,
         )?;
         state.scope = exec::projected_scope(&fields, &tys);
         for _ in &rows {

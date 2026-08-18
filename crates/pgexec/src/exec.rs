@@ -16776,7 +16776,7 @@ fn try_execute_local_streaming_aggregate(
                     top_k: None,
                 },
                 plan.specs(),
-                crate::scanner::BLOCKING_QUERY_MEMORY,
+                read_ctx.statement_memory.limit(),
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -17588,7 +17588,13 @@ pub(crate) fn select_to_relation_with_ctes(
     // BY/LIMIT, so they own the whole projection shape for the queries that use
     // them (including the grouped ones).
     let (fields, out_exprs, tys) = if crate::window::has_window_calls(s) {
-        let (fields, tys, rows) = crate::window::execute(s, &scope, kept, ctx)?;
+        let (fields, tys, rows) = crate::window::execute_with_memory(
+            s,
+            &scope,
+            kept,
+            ctx,
+            &read_ctx.statement_memory,
+        )?;
         return Ok(Relation {
             scope: projected_scope(&fields, &tys),
             rows,
@@ -18855,22 +18861,9 @@ pub(crate) async fn execute_read_locking(
 /// projected output Datum rows. Shared by the top-level row path and derived
 /// tables. `ctx` carries the session zone + transaction/statement clock used by
 /// temporal eval.
-pub(crate) fn project_rows_ordered(
-    s: &SelectStmt,
-    scope: &Scope,
-    fields: &[FieldDescription],
-    out_exprs: &[Expr],
-    kept: Vec<Vec<Datum>>,
-    ctx: &crate::clock::EvalCtx,
-) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let statement_memory =
-        crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
-    project_rows_ordered_with_memory(s, scope, fields, out_exprs, kept, ctx, &statement_memory)
-}
-
 /// Apply DISTINCT / ORDER BY / OFFSET / LIMIT and projection using the
 /// enclosing statement's shared blocking-memory budget.
-fn project_rows_ordered_with_memory(
+pub(crate) fn project_rows_ordered_with_memory(
     s: &SelectStmt,
     scope: &Scope,
     fields: &[FieldDescription],
@@ -18928,7 +18921,7 @@ fn project_rows_ordered_with_memory(
     // the select-list output (ordinal, alias/name, or the exact select expression).
     if matches!(s.distinct, crabka_pgparser::ast::DistinctClause::Distinct) {
         let mut projected = project_rows(out_exprs, scope, &kept, ctx)?;
-        ensure_blocking_rows_fit(&projected)?;
+        ensure_blocking_rows_fit(&projected, statement_memory)?;
         let mut seen: std::collections::HashSet<Vec<Datum>> = std::collections::HashSet::new();
         projected.retain(|r| seen.insert(r.clone()));
         let keyed: Vec<(Vec<Datum>, Vec<Datum>)> = projected
@@ -18957,7 +18950,14 @@ fn project_rows_ordered_with_memory(
     // source expressions still work, but output ordinals/labels evaluate the
     // corresponding projection expression for each source row.
     let Some(plan) = distinct_on else {
-        let mut keyed = key_source_rows(&order_keys, out_exprs, scope, kept, ctx)?;
+        let mut keyed = key_source_rows(
+            &order_keys,
+            out_exprs,
+            scope,
+            kept,
+            ctx,
+            statement_memory,
+        )?;
         if !order_keys.is_empty() {
             keyed.sort_by(|a, b| order_cmp(&a.0, &b.0, &s.order_by));
         }
@@ -18972,7 +18972,14 @@ fn project_rows_ordered_with_memory(
         .iter()
         .map(|item| SelectOrderKey::SourceExpr(item.expr.clone()))
         .collect();
-    let mut keyed = key_source_rows(&dedup_keys, out_exprs, scope, kept, ctx)?;
+    let mut keyed = key_source_rows(
+        &dedup_keys,
+        out_exprs,
+        scope,
+        kept,
+        ctx,
+        statement_memory,
+    )?;
     if !dedup_keys.is_empty() {
         // A stable sort is load-bearing for DISTINCT ON without an ORDER BY:
         // PostgreSQL keeps the first row of each key group in input order.
@@ -18983,7 +18990,14 @@ fn project_rows_ordered_with_memory(
     // PostgreSQL puts a Sort above the Unique when the two differ. The sort is
     // stable, so it is a no-op when the dedup ordering already satisfies it.
     let rows = survivors.into_iter().map(|(_, row)| row).collect();
-    let mut keyed = key_source_rows(&order_keys, out_exprs, scope, rows, ctx)?;
+    let mut keyed = key_source_rows(
+        &order_keys,
+        out_exprs,
+        scope,
+        rows,
+        ctx,
+        statement_memory,
+    )?;
     if !order_keys.is_empty() {
         keyed.sort_by(|a, b| order_cmp(&a.0, &b.0, &s.order_by));
     }
@@ -19000,6 +19014,7 @@ fn key_source_rows(
     scope: &Scope,
     rows: Vec<Vec<Datum>>,
     ctx: &crate::clock::EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<KeyedRows, ExecError> {
     if keys.is_empty() {
         return Ok(rows.into_iter().map(|row| (Vec::new(), row)).collect());
@@ -19012,21 +19027,15 @@ fn key_source_rows(
         })
         .collect::<Result<_, _>>()?;
     let mut keyed: KeyedRows = Vec::with_capacity(rows.len());
-    let mut keyed_bytes = 0usize;
     for row in rows {
         let mut values = Vec::with_capacity(keys.len());
         for key in &keys {
             values.push(crate::eval::eval(key.expr(), scope, &row, ctx)?);
         }
-        let bytes = crate::scanner::datum_row_bytes(&values)
-            .saturating_add(crate::scanner::datum_row_bytes(&row));
-        if crate::scanner::exceeds_query_memory(
-            keyed_bytes.saturating_add(bytes),
-            crate::scanner::BLOCKING_QUERY_MEMORY,
-        ) {
-            return Err(crate::scanner::memory_budget_exceeded());
-        }
-        keyed_bytes += bytes;
+        statement_memory.charge(
+            crate::scanner::datum_row_bytes(&values)
+                .saturating_add(crate::scanner::datum_row_bytes(&row)),
+        )?;
         keyed.push((values, row));
     }
     Ok(keyed)
@@ -19192,12 +19201,12 @@ fn keep_first_per_distinct_on_group(
     Ok(out)
 }
 
-fn ensure_blocking_rows_fit(rows: &[Vec<Datum>]) -> Result<(), ExecError> {
-    let bytes = rows.iter().fold(0usize, |bytes, row| {
-        bytes.saturating_add(crate::scanner::datum_row_bytes(row))
-    });
-    if crate::scanner::exceeds_query_memory(bytes, crate::scanner::BLOCKING_QUERY_MEMORY) {
-        return Err(crate::scanner::memory_budget_exceeded());
+fn ensure_blocking_rows_fit(
+    rows: &[Vec<Datum>],
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<(), ExecError> {
+    for row in rows {
+        statement_memory.charge_row(row)?;
     }
     Ok(())
 }
@@ -22583,6 +22592,85 @@ mod tests {
             },
             other => panic!("expected select, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ordered_rows_use_the_callers_statement_memory() {
+        use assert2::assert;
+
+        let select = parsed_select("SELECT a FROM t ORDER BY a");
+        let scope = order_scope();
+        let (fields, out_exprs, _) =
+            super::resolve_projection(&select.projection, &scope).expect("projection");
+        let statement_memory = crate::scanner::StatementMemory::new(crabka_units::bytes(1));
+
+        let error = super::project_rows_ordered_with_memory(
+            &select,
+            &scope,
+            &fields,
+            &out_exprs,
+            vec![vec![crabka_pgtypes::Datum::Int4(1)]],
+            &crate::clock::EvalCtx::test_default(),
+            &statement_memory,
+        )
+        .expect_err("sort keys must use the supplied statement limit")
+        .into_pg();
+
+        assert!(error.code == "53200");
+    }
+
+    #[test]
+    fn distinct_rows_use_the_callers_statement_memory() {
+        use assert2::assert;
+
+        let select = parsed_select("SELECT DISTINCT a FROM t");
+        let scope = order_scope();
+        let (fields, out_exprs, _) =
+            super::resolve_projection(&select.projection, &scope).expect("projection");
+        let statement_memory = crate::scanner::StatementMemory::new(crabka_units::bytes(1));
+
+        let error = super::project_rows_ordered_with_memory(
+            &select,
+            &scope,
+            &fields,
+            &out_exprs,
+            vec![vec![crabka_pgtypes::Datum::Int4(1)]],
+            &crate::clock::EvalCtx::test_default(),
+            &statement_memory,
+        )
+        .expect_err("DISTINCT rows must use the supplied statement limit")
+        .into_pg();
+
+        assert!(error.code == "53200");
+    }
+
+    #[test]
+    fn distinct_rows_are_deduplicated_and_ordered() {
+        use assert2::assert;
+        use crabka_pgtypes::Datum;
+
+        let select = parsed_select("SELECT DISTINCT a FROM t ORDER BY a");
+        let scope = order_scope();
+        let (fields, out_exprs, _) =
+            super::resolve_projection(&select.projection, &scope).expect("projection");
+        let statement_memory = crate::scanner::StatementMemory::new(crabka_units::bytes(1024));
+
+        let rows = super::project_rows_ordered_with_memory(
+            &select,
+            &scope,
+            &fields,
+            &out_exprs,
+            vec![
+                vec![Datum::Int4(2), Datum::Int4(0)],
+                vec![Datum::Int4(1), Datum::Int4(0)],
+                vec![Datum::Int4(2), Datum::Int4(0)],
+            ],
+            &crate::clock::EvalCtx::test_default(),
+            &statement_memory,
+        )
+        .expect("distinct query");
+
+        assert!(rows == vec![vec![Datum::Int4(1)], vec![Datum::Int4(2)]]);
     }
 
     #[test]
