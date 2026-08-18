@@ -84,7 +84,9 @@ pub(crate) fn execute_ddl(
         } => crate::trigger::drop_event(kv, name, *if_exists),
         // P2: SQL routines. Definition, lifecycle and catalog storage live in
         // `routine`; only the DDL routing is here.
-        Statement::CreateRoutine(routine) => crate::routine::create(kv, routine, fctx.current_user),
+        Statement::CreateRoutine(routine) => {
+            crate::routine::create(kv, fctx.resolution, routine, fctx.current_user)
+        }
         Statement::DropRoutine {
             object,
             if_exists,

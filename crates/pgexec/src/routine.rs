@@ -462,11 +462,17 @@ pub(crate) fn resolve_routine_type(
     ty: &crabka_pgparser::ast::RoutineType,
     quoted: bool,
 ) -> Result<RoutineType, ExecError> {
-    resolve_type(kv, ty, quoted)
+    resolve_type(
+        kv,
+        crate::relname::ResolutionScope::default_scope(),
+        ty,
+        quoted,
+    )
 }
 
 fn resolve_type(
     kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     ty: &crabka_pgparser::ast::RoutineType,
     quoted: bool,
 ) -> Result<RoutineType, ExecError> {
@@ -477,14 +483,20 @@ fn resolve_type(
     if KNOWN_TYPE_NAMES.contains(&lowered.as_str()) {
         return Ok(RoutineType::named(lowered));
     }
-    // A relation name is that relation's composite type. A routine signature
-    // carries no resolution scope of its own, so the composite type it can name
-    // is the one `public` holds — the schema an unqualified name resolves to
-    // under the default search path.
-    let base =
-        crabka_pgcatalog::RelationName::public(lowered.strip_suffix("[]").unwrap_or(&lowered));
-    if crabka_pgcatalog::get_table(kv, &base).is_ok()
-        || crabka_pgcatalog::get_view(kv, &base).is_ok()
+    // A relation name is that relation's composite type. It follows the same
+    // session search path as the routine statement, including `pg_temp`.
+    let base = lowered.strip_suffix("[]").unwrap_or(&lowered);
+    let relation =
+        crate::relname::parse_written_relation(resolution, base).and_then(|written| {
+            crate::relname::resolve_relation(
+                kv,
+                resolution,
+                &written.reference,
+                crate::relname::SchemaDisposition::Reference,
+            )
+        })?;
+    if crabka_pgcatalog::get_table(kv, &relation).is_ok()
+        || crabka_pgcatalog::get_view(kv, &relation).is_ok()
     {
         return Ok(RoutineType::named(lowered));
     }
@@ -674,7 +686,12 @@ fn body_parts(
 }
 
 /// Build the catalog record a `CREATE … FUNCTION`/`PROCEDURE` defines.
-fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<Routine, ExecError> {
+fn build_routine(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    stmt: &CreateRoutineStmt,
+    owner: &str,
+) -> Result<Routine, ExecError> {
     let kind = object_kind(stmt.object).expect("CREATE ROUTINE is not PostgreSQL syntax");
     let options = Options::collect(&stmt.options)?;
     let body = options
@@ -708,20 +725,25 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
         params.push(RoutineParam {
             name: arg.name.clone(),
             mode: catalog_mode(arg.mode),
-            ty: resolve_type(kv, &arg.ty, false)?,
+            ty: resolve_type(kv, resolution, &arg.ty, false)?,
             default: arg.default.clone(),
         });
     }
     let result = match &stmt.returns {
         RoutineReturn::Unspecified => RoutineResult::Unspecified,
         RoutineReturn::Type { ty, setof } => RoutineResult::Type {
-            ty: resolve_type(kv, ty, true)?,
+            ty: resolve_type(kv, resolution, ty, true)?,
             setof: *setof,
         },
         RoutineReturn::Table(columns) => RoutineResult::Table(
             columns
                 .iter()
-                .map(|column| Ok((column.name.clone(), resolve_type(kv, &column.ty, true)?)))
+                .map(|column| {
+                    Ok((
+                        column.name.clone(),
+                        resolve_type(kv, resolution, &column.ty, true)?,
+                    ))
+                })
                 .collect::<Result<Vec<_>, ExecError>>()?,
         ),
     };
@@ -830,10 +852,11 @@ fn catalog_mode(mode: RoutineArgMode) -> ParamMode {
 /// `CREATE [OR REPLACE] { FUNCTION | PROCEDURE }`.
 pub(crate) fn create(
     kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     stmt: &CreateRoutineStmt,
     owner: &str,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
-    let routine = build_routine(kv, stmt, owner)?;
+    let routine = build_routine(kv, resolution, stmt, owner)?;
     let identity = routine.identity();
     if let Some(existing) = get_routine(kv, &identity)? {
         if !stmt.or_replace {
@@ -1091,7 +1114,15 @@ fn spelled_signature(routine: &Routine) -> String {
 fn signature_type_names(kv: &dyn Kv, args: &[RoutineArg]) -> Result<Vec<String>, ExecError> {
     args.iter()
         .filter(|arg| arg.mode.is_input())
-        .map(|arg| Ok(resolve_type(kv, &arg.ty, false)?.name))
+        .map(|arg| {
+            Ok(resolve_type(
+                kv,
+                crate::relname::ResolutionScope::default_scope(),
+                &arg.ty,
+                false,
+            )?
+            .name)
+        })
         .collect()
 }
 
@@ -4098,6 +4129,7 @@ mod tests {
     use assert2::assert;
     use crabka_pgkv::MemKv;
     use crabka_pgparser::ast::Statement;
+    use crabka_pgwire::engine::{Engine, Session};
 
     use super::*;
 
@@ -4224,7 +4256,12 @@ mod tests {
         let [Statement::CreateRoutine(stmt)] = statements.as_slice() else {
             panic!("{sql} is not a routine definition");
         };
-        let (result, ops) = create(kv, stmt, "crab")?;
+        let (result, ops) = create(
+            kv,
+            &crate::relname::ResolutionScope::default_scope(),
+            stmt,
+            "crab",
+        )?;
         kv.write_batch(&ops).expect("write");
         match result {
             QueryResult::Command { tag } => Ok(tag),
@@ -4248,6 +4285,25 @@ mod tests {
         )
         .expect("add2");
         kv
+    }
+
+    #[tokio::test]
+    async fn routine_composite_results_follow_the_session_search_path() {
+        let mut session = crate::SqlEngine::new().connect();
+        session
+            .simple_query("CREATE TEMP TABLE foo (id int)")
+            .await
+            .expect("temporary relation");
+        let result = session
+            .simple_query(
+                "CREATE FUNCTION foo_rows() RETURNS SETOF foo \
+                 AS $$ SELECT * FROM foo $$ LANGUAGE sql",
+            )
+            .await
+            .expect("temporary composite result");
+        assert!(
+            matches!(result.as_slice(), [QueryResult::Command { tag }] if tag == "CREATE FUNCTION")
+        );
     }
 
     #[test]
