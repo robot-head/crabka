@@ -443,6 +443,9 @@ fn is_nested_loop_source(
                     !references_column
                 })
         }
+        TableExpr::Derived { .. } => {
+            matches!(plan_subquery_input(read_ctx, source), Ok(Some(_)))
+        }
         TableExpr::Join {
             left,
             right,
@@ -473,7 +476,9 @@ fn nested_loop_function_count(source: &TableExpr) -> usize {
 
 fn collect_nested_loop_sources(source: &TableExpr, sources: &mut Vec<TableExpr>) {
     match source {
-        TableExpr::Table { .. } | TableExpr::Function { .. } => sources.push(source.clone()),
+        TableExpr::Table { .. } | TableExpr::Function { .. } | TableExpr::Derived { .. } => {
+            sources.push(source.clone());
+        }
         TableExpr::Join { left, right, .. } => {
             collect_nested_loop_sources(left, sources);
             collect_nested_loop_sources(right, sources);
@@ -511,6 +516,18 @@ fn plan_nested_loop_source(
                 PlanNode::FunctionScan
             },
         }),
+        TableExpr::Derived { .. } => {
+            plan_subquery_input(read_ctx, source)
+                .ok()
+                .flatten()
+                .map(|input| Plan {
+                    target_list: Vec::new(),
+                    quals: Vec::new(),
+                    node: PlanNode::SubqueryScan {
+                        input: Box::new(input),
+                    },
+                })
+        }
         TableExpr::Join {
             left,
             right,
@@ -539,6 +556,7 @@ fn execute_nested_loop_plan(
         PlanNode::SeqScan { .. }
         | PlanNode::FunctionScan
         | PlanNode::TableFunctionScan
+        | PlanNode::SubqueryScan { .. }
         | PlanNode::CteScan => {
             let source = sources
                 .next()
@@ -551,6 +569,9 @@ fn execute_nested_loop_plan(
                 PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source: source.clone() }.execute(state),
                 PlanNode::FunctionScan | PlanNode::TableFunctionScan => {
                     FunctionScanExecutor { read_ctx, source: source.clone() }.execute(state)
+                }
+                PlanNode::SubqueryScan { .. } => {
+                    SubqueryScanExecutor { read_ctx, source: source.clone() }.execute(state)
                 }
                 PlanNode::CteScan => CteScanExecutor { read_ctx, source: source.clone() }.execute(state),
                 _ => unreachable!("nested-loop leaf was matched above"),
@@ -1274,7 +1295,6 @@ fn plan_subquery_scan(
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if *lateral
-        || subquery.with.is_some()
         || !subquery.order_by.is_empty()
         || subquery.limit.is_some()
         || subquery.offset.is_some()
@@ -1296,25 +1316,8 @@ fn plan_subquery_scan(
     {
         return Ok(None);
     }
-    let inner_plan = match &subquery.body {
-        crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
-            if let Some(ResultPlan { plan, .. }) = plan_result(inner)? {
-                plan
-            } else {
-                let Some(SeqScanPlan { plan, .. }) = plan_seq_scan(read_ctx, inner)? else {
-                    return Ok(None);
-                };
-                plan
-            }
-        }
-        crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(_)) => {
-            Plan {
-                target_list: Vec::new(),
-                quals: Vec::new(),
-                node: PlanNode::ValuesScan,
-            }
-        }
-        _ => return Ok(None),
+    let Some(inner_plan) = plan_subquery_input(read_ctx, source)? else {
+        return Ok(None);
     };
     let scope = crate::exec::build_from_schema_of_select(
         read_ctx.catalog_kv,
@@ -1490,6 +1493,44 @@ fn plan_subquery_scan(
         project_set: project_set.then(|| select.clone()),
         window: None,
     }))
+}
+
+fn plan_subquery_input(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    source: &TableExpr,
+) -> Result<Option<Plan>, ExecError> {
+    let TableExpr::Derived {
+        subquery, lateral, ..
+    } = source
+    else {
+        return Ok(None);
+    };
+    if *lateral
+        || subquery.with.is_some()
+        || !subquery.order_by.is_empty()
+        || subquery.limit.is_some()
+        || subquery.offset.is_some()
+        || subquery.locking.is_some()
+    {
+        return Ok(None);
+    }
+    match &subquery.body {
+        crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
+            if let Some(ResultPlan { plan, .. }) = plan_result(inner)? {
+                Ok(Some(plan))
+            } else {
+                Ok(plan_seq_scan(read_ctx, inner)?.map(|planned| planned.plan))
+            }
+        }
+        crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(_)) => {
+            Ok(Some(Plan {
+                target_list: Vec::new(),
+                quals: Vec::new(),
+                node: PlanNode::ValuesScan,
+            }))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[cfg(test)]

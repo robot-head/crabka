@@ -17017,6 +17017,43 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of(
+                "SELECT a, n FROM seq_scan_test, (VALUES (1), (2)) AS derived(n) \
+                 WHERE a = 1 ORDER BY n",
+            ),
+        )
+        .expect("NestedLoop SubqueryScan values plan executes")
+        .expect("stored table and derived values source use NestedLoop");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT l.a FROM seq_scan_test AS l, (SELECT a FROM seq_scan_third) AS derived \
+                 WHERE l.a = 1",
+            ),
+        )
+        .expect("NestedLoop SubqueryScan select plan executes")
+        .expect("stored table and derived select source use NestedLoop");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
+        for sql in [
+            "SELECT a FROM seq_scan_test, LATERAL (VALUES (1)) AS derived(n)",
+            "SELECT a FROM seq_scan_test, (SELECT a FROM seq_scan_third ORDER BY a) AS derived",
+        ] {
+            assert!(
+                crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
+                    .expect(sql)
+                    .is_none(),
+                "{sql} remains on the legacy path"
+            );
+        }
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT l.a FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1"),
         )
         .expect("NestedLoop plan executes")
