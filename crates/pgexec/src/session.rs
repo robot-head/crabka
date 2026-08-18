@@ -16982,8 +16982,6 @@ mod tests {
             "SELECT a, row_number() OVER () FROM seq_scan_test ORDER BY 1",
             "SELECT a, row_number() OVER () FROM seq_scan_test LIMIT 1",
             "SELECT a, row_number() OVER () FROM seq_scan_test OFFSET 1",
-            "SELECT DISTINCT a, generate_series(1, 2) FROM seq_scan_test",
-            "SELECT a, generate_series(1, 2) FROM seq_scan_test OFFSET 1",
         ] {
             assert!(
                 crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
@@ -17028,6 +17026,34 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT a, generate_series(1, 2) FROM seq_scan_test \
+                 ORDER BY a DESC, 2 DESC LIMIT 3",
+            ),
+        )
+        .expect("ProjectSet tail plan executes")
+        .expect("stored table ProjectSet tail uses ProjectSet");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(1)],
+            ]
+        );
+        for sql in [
+            "SELECT count(*), generate_series(1, 2) FROM seq_scan_test",
+            "SELECT DISTINCT ON (a) a, generate_series(1, 2) FROM seq_scan_test",
+        ] {
+            assert!(
+                crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
+                    .expect("unsupported ProjectSet shape falls back")
+                    .is_none(),
+                "{sql}"
+            );
+        }
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT a FROM (SELECT a FROM seq_scan_test ORDER BY a DESC LIMIT 2) AS derived",
             ),
         )
@@ -17038,6 +17064,23 @@ mod tests {
             vec![
                 vec![crabka_pgtypes::Datum::Int4(2)],
                 vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT grouping(l.a), count(*) FROM seq_scan_test AS l, seq_scan_third AS r \
+                 GROUP BY ROLLUP(l.a)",
+            ),
+        )
+        .expect("nested grouping-set Aggregate plan executes")
+        .expect("nested grouping set uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(0), crabka_pgtypes::Datum::Int8(1)],
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
+                vec![crabka_pgtypes::Datum::Int4(0), crabka_pgtypes::Datum::Int8(2)],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -18052,10 +18095,6 @@ mod tests {
             "SELECT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
             "SELECT l.a, row_number() OVER () FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1",
             "SELECT count(*), generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r",
-            "SELECT DISTINCT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r",
-            "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r ORDER BY 1",
-            "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r LIMIT 1",
-            "SELECT l.a, generate_series(1, 2) FROM seq_scan_test AS l, seq_scan_third AS r OFFSET 1",
             "SELECT n FROM (SELECT 1 AS n ORDER BY n) AS derived",
             "SELECT n FROM (SELECT 1 AS n OFFSET 0) AS derived",
             "SELECT n FROM (SELECT 1 AS n FOR UPDATE) AS derived",
