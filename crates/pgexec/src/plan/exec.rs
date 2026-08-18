@@ -46,19 +46,34 @@ pub(crate) fn try_execute_seq_scan(
         source,
         fields,
         tys,
+        limit,
+        offset,
     }) = plan_seq_scan(read_ctx, select)?
     else {
         return Ok(None);
     };
     let mut state = PlanState::new(plan, Scope::empty());
-    FilterExecutor {
-        read_ctx,
-        source,
-        fields,
-        tys,
+    if matches!(state.plan.node, PlanNode::Limit { .. }) {
+        LimitExecutor {
+            read_ctx,
+            source,
+            fields,
+            tys,
+            limit,
+            offset,
+        }
+        .execute(&mut state)
+        .map(Some)
+    } else {
+        FilterExecutor {
+            read_ctx,
+            source,
+            fields,
+            tys,
+        }
+        .execute(&mut state)
+        .map(Some)
     }
-    .execute(&mut state)
-    .map(Some)
 }
 
 /// Execute a `VALUES` query through its `ValuesScan` node, including the query
@@ -145,6 +160,8 @@ struct SeqScanPlan {
     source: TableExpr,
     fields: Vec<crabka_pgwire::engine::FieldDescription>,
     tys: Vec<crabka_pgtypes::ColumnType>,
+    limit: Option<crabka_pgparser::ast::Expr>,
+    offset: Option<crabka_pgparser::ast::Expr>,
 }
 
 fn plan_seq_scan(
@@ -157,8 +174,6 @@ fn plan_seq_scan(
     if !crate::exec::is_direct_stored_base_table(read_ctx, source)
         || !matches!(select.distinct, DistinctClause::All)
         || !select.order_by.is_empty()
-        || select.limit.is_some()
-        || select.offset.is_some()
         || select.with_ties
         || !select.group_by.is_empty()
         || select.grouping.is_some()
@@ -208,18 +223,31 @@ fn plan_seq_scan(
         quals: Vec::new(),
         node: PlanNode::SeqScan { scanrelid: 1 },
     };
-    let plan = Plan {
+    let filter = Plan {
         target_list,
         quals,
         node: PlanNode::Filter {
             input: Box::new(scan),
         },
     };
+    let plan = if select.limit.is_some() || select.offset.is_some() {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Limit {
+                input: Box::new(filter),
+            },
+        }
+    } else {
+        filter
+    };
     Ok(Some(SeqScanPlan {
         plan,
         source: source.clone(),
         fields,
         tys,
+        limit: select.limit.clone(),
+        offset: select.offset.clone(),
     }))
 }
 
@@ -370,6 +398,66 @@ fn execute_filter_rows(
         scope: exec::projected_scope(fields, tys),
         rows: exec::project_rows(&exprs, &state.scope, &kept, ctx)?,
     })
+}
+
+struct LimitExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+    fields: Vec<crabka_pgwire::engine::FieldDescription>,
+    tys: Vec<crabka_pgtypes::ColumnType>,
+    limit: Option<crabka_pgparser::ast::Expr>,
+    offset: Option<crabka_pgparser::ast::Expr>,
+}
+
+impl Executor for LimitExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        let PlanNode::Limit { input } = &state.plan.node else {
+            return Err(ExecError::Unsupported(
+                "LimitExecutor received a non-Limit plan".into(),
+            ));
+        };
+        crate::session::check_query_canceled()?;
+        let mut child = PlanState::new((**input).clone(), Scope::empty());
+        let relation = FilterExecutor {
+            read_ctx: self.read_ctx,
+            source: self.source.clone(),
+            fields: self.fields.clone(),
+            tys: self.tys.clone(),
+        }
+        .execute(&mut child)?;
+        let offset = crate::exec::eval_row_count(
+            self.offset.as_ref(),
+            crate::exec::RowCountClause::Offset,
+            self.read_ctx.eval_ctx,
+        )?;
+        let limit = crate::exec::eval_row_count(
+            self.limit.as_ref(),
+            crate::exec::RowCountClause::Limit,
+            self.read_ctx.eval_ctx,
+        )?;
+        state.begin_loop();
+        Ok(limit_relation_rows(state, relation, offset, limit))
+    }
+}
+
+fn limit_relation_rows(
+    state: &mut PlanState,
+    mut relation: Relation,
+    offset: Option<i64>,
+    limit: Option<i64>,
+) -> Relation {
+    let offset = offset
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let limit = limit
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(usize::MAX);
+    relation.rows = relation.rows.into_iter().skip(offset).take(limit).collect();
+    state.scope = relation.scope.clone();
+    for _ in &relation.rows {
+        state.emit_row();
+    }
+    relation
 }
 
 struct ValuesExecutor<'a, 'b> {
@@ -559,5 +647,38 @@ mod tests {
 
         assert_eq!(relation.rows, vec![vec![Datum::Int4(2)]]);
         assert_eq!((state.nloops, state.ntuples, state.rows_removed), (1, 1, 1));
+    }
+
+    #[test]
+    fn limit_node_applies_offset_and_limit_after_its_input() {
+        let plan = Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Limit {
+                input: Box::new(Plan {
+                    target_list: Vec::new(),
+                    quals: Vec::new(),
+                    node: PlanNode::Result,
+                }),
+            },
+        };
+        let mut state = PlanState::new(plan, Scope::empty());
+        state.begin_loop();
+        let relation = limit_relation_rows(
+            &mut state,
+            Relation {
+                scope: Scope::empty(),
+                rows: vec![
+                    vec![Datum::Int4(1)],
+                    vec![Datum::Int4(2)],
+                    vec![Datum::Int4(3)],
+                ],
+            },
+            Some(1),
+            Some(1),
+        );
+
+        assert_eq!(relation.rows, vec![vec![Datum::Int4(2)]]);
+        assert_eq!((state.nloops, state.ntuples, state.rows_removed), (1, 1, 0));
     }
 }
