@@ -19,7 +19,10 @@
 //! `replace`, `concat`; math `abs`, `mod`; null/conditional `coalesce`,
 //! `nullif`, `greatest`, `least`. `||` is a binary operator handled in `eval`.
 
-use std::cmp::Ordering;
+use std::{
+    cmp::Ordering,
+    time::{Duration, Instant},
+};
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
 use crabka_pgtypes::{
@@ -118,6 +121,8 @@ enum ScalarFunc {
     PgNumaAvailable,
     /// `interval_hash(interval)`: hash the canonical 30-day-month span.
     IntervalHash,
+    /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
+    PgSleep,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -244,6 +249,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "binary_coercible" => ScalarFunc::BinaryCoercible,
         "pg_numa_available" => ScalarFunc::PgNumaAvailable,
         "interval_hash" => ScalarFunc::IntervalHash,
+        "pg_sleep" => ScalarFunc::PgSleep,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -899,6 +905,11 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
         ScalarFunc::Pi => {
             require_arity(fc, n == 0)?;
             Ok(ColumnType::Float8)
+        }
+        ScalarFunc::PgSleep => {
+            require_arity(fc, n == 1)?;
+            require_numeric(&args[0], scope)?;
+            Ok(crate::routine::VOID_RESULT_TYPE)
         }
         // `float4send(real)` is `real`'s binary output function, and the wire
         // format is what it returns: four big-endian IEEE 754 bytes. The suite
@@ -1952,6 +1963,11 @@ fn eval_eager(
         ScalarFunc::Pi => {
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Float8(std::f64::consts::PI))
+        }
+        ScalarFunc::PgSleep => {
+            require_arity(fc, vals.len() == 1)?;
+            sleep_for(as_f64(&vals[0])?)?;
+            Ok(crate::routine::void_result_value())
         }
         ScalarFunc::Float4Send => {
             require_arity(fc, vals.len() == 1)?;
@@ -3092,6 +3108,20 @@ fn as_f64(d: &Datum) -> Result<f64, ExecError> {
         Datum::Numeric(d) => crabka_pgtypes::numeric::to_f64(d),
         other => return Err(type_error("function", other)),
     })
+}
+
+/// Sleep in short increments so PostgreSQL's query-cancel flag interrupts a
+/// long `pg_sleep`, just as its latch-based implementation does.
+fn sleep_for(seconds: f64) -> Result<(), ExecError> {
+    let started = Instant::now();
+    loop {
+        crate::session::check_query_canceled()?;
+        let remaining = seconds - started.elapsed().as_secs_f64();
+        if remaining.is_nan() || remaining <= 0.0 {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs_f64(remaining.min(0.01)));
+    }
 }
 
 /// Build a domain error carrying its PostgreSQL SQLSTATE.
@@ -4492,5 +4522,30 @@ mod tests {
             assert!(ev(sql) == Datum::Int4(expected), "{sql}");
         }
         assert!(err_code("interval_hash(1)", None) == "42883");
+    }
+
+    #[test]
+    fn pg_sleep_waits_and_observes_query_cancellation() {
+        let started = Instant::now();
+        assert_eq!(ev("pg_sleep(0.02)"), Datum::Text(String::new()));
+        assert!(started.elapsed() >= Duration::from_millis(10));
+        assert_eq!(
+            crate::eval::infer_type(&pexpr("pg_sleep(0.02)").expect("parse"), &Scope::empty())
+                .expect("type"),
+            crate::routine::VOID_RESULT_TYPE
+        );
+
+        let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let error = crate::session::with_query_cancel_runtime(Some(canceled), || {
+            let ctx = crate::clock::EvalCtx::test_default();
+            crate::eval::eval(
+                &pexpr("pg_sleep(1)").expect("parse"),
+                &Scope::empty(),
+                &[],
+                &ctx,
+            )
+            .expect_err("cancelled sleep")
+        });
+        assert_eq!(error.into_pg().code, "57014");
     }
 }
