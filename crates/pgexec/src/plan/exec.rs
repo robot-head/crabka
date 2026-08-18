@@ -73,7 +73,6 @@ fn try_execute_nested_loop(
             .sum::<usize>()
             > 1
         || matches!(select.distinct, DistinctClause::On(_))
-        || select.with_ties
         || select.grouping.is_some()
         || (window
             && (aggregate
@@ -407,7 +406,15 @@ impl NestedLoopTail<'_, '_> {
                 self.read_ctx.eval_ctx,
             )?;
             state.begin_loop();
-            Ok(limit_relation_rows(state, relation, offset, limit))
+            Ok(limit_relation_rows_with_ties(
+                state,
+                relation,
+                offset,
+                limit,
+                self.select.with_ties,
+                self.order_by,
+                self.sort_positions,
+            ))
         }
         _ => Err(ExecError::Unsupported(
             "NestedLoop tail received an unsupported plan node".into(),
@@ -691,6 +698,7 @@ fn execute_seq_scan_plan(
         offset,
         order_by,
         sort_positions,
+        with_ties,
         aggregate,
         project_set,
         window,
@@ -732,6 +740,7 @@ fn execute_seq_scan_plan(
             offset,
             order_by,
             sort_positions,
+            with_ties,
         }
         .execute(state)
     } else {
@@ -824,6 +833,7 @@ struct SeqScanPlan {
     offset: Option<crabka_pgparser::ast::Expr>,
     order_by: Vec<crabka_pgparser::ast::OrderItem>,
     sort_positions: Vec<usize>,
+    with_ties: bool,
     aggregate: Option<SelectStmt>,
     project_set: Option<SelectStmt>,
     window: Option<SelectStmt>,
@@ -864,9 +874,6 @@ fn plan_seq_scan(
         return Ok(None);
     }
     if !aggregate && matches!(select.distinct, DistinctClause::On(_)) {
-        return Ok(None);
-    }
-    if select.with_ties {
         return Ok(None);
     }
     if !aggregate && !select.group_by.is_empty() {
@@ -961,6 +968,7 @@ fn plan_seq_scan(
             sort_positions: Vec::new(),
             aggregate: None,
             project_set: None,
+            with_ties: false,
             window: Some(select.clone()),
         }));
     }
@@ -1084,6 +1092,7 @@ fn plan_seq_scan(
         sort_positions,
         aggregate: needs_aggregate_node(select).then(|| select.clone()),
         project_set: crate::srf::exprs_contain_srf(&exprs).then(|| select.clone()),
+        with_ties: select.with_ties,
         window: None,
     }))
 }
@@ -1215,6 +1224,7 @@ fn plan_function_scan(
             sort_positions: Vec::new(),
             aggregate: None,
             project_set: None,
+            with_ties: false,
             window: Some(select.clone()),
         }));
     }
@@ -1340,6 +1350,7 @@ fn plan_function_scan(
         sort_positions,
         aggregate: aggregate.then(|| select.clone()),
         project_set: project_set.then(|| select.clone()),
+        with_ties: select.with_ties,
         window: None,
     }))
 }
@@ -1440,6 +1451,7 @@ fn plan_subquery_scan(
             sort_positions: Vec::new(),
             aggregate: None,
             project_set: None,
+            with_ties: false,
             window: Some(select.clone()),
         }));
     }
@@ -1563,6 +1575,7 @@ fn plan_subquery_scan(
         sort_positions,
         aggregate: aggregate.then(|| select.clone()),
         project_set: project_set.then(|| select.clone()),
+        with_ties: select.with_ties,
         window: None,
     }))
 }
@@ -1693,6 +1706,7 @@ fn plan_cte_scan(
             sort_positions: Vec::new(),
             aggregate: None,
             project_set: None,
+            with_ties: false,
             window: Some(select.clone()),
         }));
     }
@@ -1814,6 +1828,7 @@ fn plan_cte_scan(
         sort_positions,
         aggregate: aggregate.then(|| select.clone()),
         project_set: project_set.then(|| select.clone()),
+        with_ties: select.with_ties,
         window: None,
     }))
 }
@@ -1938,6 +1953,7 @@ fn plan_named_tuplestore_scan(
             sort_positions: Vec::new(),
             aggregate: None,
             project_set: None,
+            with_ties: false,
             window: Some(select.clone()),
         }));
     }
@@ -2059,6 +2075,7 @@ fn plan_named_tuplestore_scan(
         sort_positions,
         aggregate: aggregate.then(|| select.clone()),
         project_set: project_set.then(|| select.clone()),
+        with_ties: select.with_ties,
         window: None,
     }))
 }
@@ -2785,6 +2802,7 @@ struct LimitExecutor<'a, 'b> {
     offset: Option<crabka_pgparser::ast::Expr>,
     order_by: Vec<crabka_pgparser::ast::OrderItem>,
     sort_positions: Vec<usize>,
+    with_ties: bool,
 }
 
 impl Executor for LimitExecutor<'_, '_> {
@@ -2816,7 +2834,15 @@ impl Executor for LimitExecutor<'_, '_> {
             self.read_ctx.eval_ctx,
         )?;
         state.begin_loop();
-        Ok(limit_relation_rows(state, relation, offset, limit))
+        Ok(limit_relation_rows_with_ties(
+            state,
+            relation,
+            offset,
+            limit,
+            self.with_ties,
+            &self.order_by,
+            &self.sort_positions,
+        ))
     }
 }
 
@@ -2988,6 +3014,42 @@ fn limit_relation_rows(
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(usize::MAX);
     relation.rows = relation.rows.into_iter().skip(offset).take(limit).collect();
+    state.scope = relation.scope.clone();
+    for _ in &relation.rows {
+        state.emit_row();
+    }
+    relation
+}
+
+fn limit_relation_rows_with_ties(
+    state: &mut PlanState,
+    mut relation: Relation,
+    offset: Option<i64>,
+    limit: Option<i64>,
+    with_ties: bool,
+    order_by: &[crabka_pgparser::ast::OrderItem],
+    sort_positions: &[usize],
+) -> Relation {
+    if !with_ties {
+        return limit_relation_rows(state, relation, offset, limit);
+    }
+    let keyed = relation
+        .rows
+        .into_iter()
+        .map(|row| {
+            let keys = sort_positions.iter().map(|&index| row[index].clone()).collect();
+            (keys, row)
+        })
+        .collect();
+    relation.rows = crate::exec::apply_row_window(
+        keyed,
+        crate::exec::RowWindow {
+            offset,
+            limit,
+            with_ties,
+        },
+        order_by,
+    );
     state.scope = relation.scope.clone();
     for _ in &relation.rows {
         state.emit_row();
