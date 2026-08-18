@@ -29,13 +29,7 @@ pub(crate) fn query_to_relation_with_ctes(
             s.locking = q.locking.clone();
             crate::exec::select_to_relation_with_ctes(&query_ctx, &s)
         }
-        SetExpr::Query(QueryBody::Values(v)) => {
-            let mut rel = crate::values::values_to_relation_with_ctes(&query_ctx, v)?;
-            let order_by = crate::subquery::resolve_order_items(&query_ctx, &q.order_by)?;
-            let window = crate::exec::query_row_window(&query_ctx, q)?;
-            crate::values::apply_query_order(&mut rel, &order_by, window, ctx.eval_ctx)?;
-            Ok(rel)
-        }
+        SetExpr::Query(QueryBody::Values(v)) => crate::plan::exec::execute_values(&query_ctx, q, v),
         SetExpr::Query(QueryBody::Nested(nested)) => {
             if q.locking.is_some() {
                 return Err(ExecError::Unsupported(

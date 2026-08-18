@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use crabka_pgparser::ast::{DistinctClause, SelectStmt};
+use crabka_pgparser::ast::{DistinctClause, QueryExpr, SelectStmt, ValuesStmt};
 
 use crate::{
     bind::{BoundExpr, bind_optional},
@@ -31,6 +31,22 @@ pub(crate) fn try_execute_result(
     ResultExecutor { ctx, fields, tys }
         .execute(&mut state)
         .map(Some)
+}
+
+/// Execute a `VALUES` query through its `ValuesScan` node, including the query
+/// expression's ORDER BY/OFFSET/LIMIT tail.
+pub(crate) fn execute_values(
+    ctx: &crate::subquery::SubCtx<'_>,
+    query: &QueryExpr,
+    values: &ValuesStmt,
+) -> Result<Relation, ExecError> {
+    let plan = Plan {
+        target_list: Vec::new(),
+        quals: Vec::new(),
+        node: PlanNode::ValuesScan,
+    };
+    let mut state = PlanState::new(plan, Scope::empty());
+    ValuesExecutor { ctx, query, values }.execute(&mut state)
 }
 
 struct ResultPlan {
@@ -137,6 +153,32 @@ impl Executor for ResultExecutor<'_> {
             scope: exec::projected_scope(&self.fields, &self.tys),
             rows: exec::project_rows(&exprs, &state.scope, &[row], self.ctx)?,
         })
+    }
+}
+
+struct ValuesExecutor<'a, 'b> {
+    ctx: &'a crate::subquery::SubCtx<'b>,
+    query: &'a QueryExpr,
+    values: &'a ValuesStmt,
+}
+
+impl Executor for ValuesExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        if !matches!(state.plan.node, PlanNode::ValuesScan) {
+            return Err(ExecError::Unsupported(
+                "ValuesExecutor received a non-ValuesScan plan".into(),
+            ));
+        }
+        state.begin_loop();
+        let mut relation = crate::values::values_to_relation_with_ctes(self.ctx, self.values)?;
+        let order_by = crate::subquery::resolve_order_items(self.ctx, &self.query.order_by)?;
+        let window = crate::exec::query_row_window(self.ctx, self.query)?;
+        crate::values::apply_query_order(&mut relation, &order_by, window, self.ctx.eval_ctx)?;
+        state.scope = relation.scope.clone();
+        for _ in &relation.rows {
+            state.emit_row();
+        }
+        Ok(relation)
     }
 }
 
