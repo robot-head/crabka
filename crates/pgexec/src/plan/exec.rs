@@ -204,6 +204,9 @@ fn plan_seq_scan(
     let [source] = select.from.as_slice() else {
         return Ok(None);
     };
+    if matches!(source, TableExpr::Function { .. }) {
+        return plan_function_scan(read_ctx, select, source);
+    }
     if !crate::exec::is_direct_stored_base_table(read_ctx, source) {
         return Ok(None);
     }
@@ -444,6 +447,74 @@ fn plan_seq_scan(
     }))
 }
 
+fn plan_function_scan(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+    source: &TableExpr,
+) -> Result<Option<SeqScanPlan>, ExecError> {
+    let TableExpr::Function {
+        functions, lateral, ..
+    } = source
+    else {
+        return Ok(None);
+    };
+    if *lateral
+        || crate::routine::expands_as_table(read_ctx.catalog_kv, functions)
+        || !matches!(select.distinct, DistinctClause::All)
+        || !select.order_by.is_empty()
+        || select.limit.is_some()
+        || select.offset.is_some()
+        || crate::grouping::is_grouping_query(select)
+        || crate::window::has_window_calls(select)
+    {
+        return Ok(None);
+    }
+    let scope = crate::exec::build_from_schema_of_select(
+        read_ctx.catalog_kv,
+        read_ctx.fctx.resolution,
+        select,
+        read_ctx.ctes,
+    )?
+    .scope;
+    let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
+    if crate::srf::exprs_contain_srf(&exprs) {
+        return Ok(None);
+    }
+    let plan = Plan {
+        target_list: bind_target_list(&exprs, &fields, &scope)?,
+        quals: bind_optional(select.filter.as_ref(), &scope)?
+            .into_iter()
+            .map(|clause| RestrictInfo {
+                clause,
+                is_pushed_down: false,
+                security_level: 0,
+                leakproof: true,
+                required_relids: BTreeSet::from([1]),
+            })
+            .collect(),
+        node: PlanNode::Filter {
+            input: Box::new(Plan {
+                target_list: Vec::new(),
+                quals: Vec::new(),
+                node: PlanNode::FunctionScan,
+            }),
+        },
+    };
+    Ok(Some(SeqScanPlan {
+        plan,
+        source: source.clone(),
+        fields,
+        tys,
+        limit: None,
+        offset: None,
+        order_by: Vec::new(),
+        sort_positions: Vec::new(),
+        aggregate: None,
+        project_set: None,
+        window: None,
+    }))
+}
+
 fn needs_aggregate_node(select: &SelectStmt) -> bool {
     !select.group_by.is_empty()
         || select.projection.iter().any(|item| {
@@ -559,6 +630,50 @@ impl Executor for SeqScanExecutor<'_, '_> {
     }
 }
 
+struct FunctionScanExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+}
+
+impl Executor for FunctionScanExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        if !matches!(state.plan.node, PlanNode::FunctionScan) {
+            return Err(ExecError::Unsupported(
+                "FunctionScanExecutor received a non-FunctionScan plan".into(),
+            ));
+        }
+        crate::session::check_query_canceled()?;
+        let TableExpr::Function {
+            functions,
+            with_ordinality,
+            rows_from,
+            alias,
+            column_aliases,
+            ..
+        } = &self.source
+        else {
+            return Err(ExecError::Unsupported(
+                "FunctionScanExecutor received a non-function source".into(),
+            ));
+        };
+        state.begin_loop();
+        let relation = crate::srf::from_item_with_memory(
+            functions,
+            *with_ordinality,
+            *rows_from,
+            alias.as_deref(),
+            column_aliases,
+            self.read_ctx.eval_ctx,
+            &self.read_ctx.statement_memory,
+        )?;
+        state.scope = relation.scope.clone();
+        for _ in &relation.rows {
+            state.emit_row();
+        }
+        Ok(relation)
+    }
+}
+
 struct FilterExecutor<'a, 'b> {
     read_ctx: &'a crate::subquery::SubCtx<'b>,
     source: TableExpr,
@@ -591,7 +706,15 @@ fn execute_filter_input(
     };
     crate::session::check_query_canceled()?;
     let mut child = PlanState::new((**input).clone(), Scope::empty());
-    let relation = SeqScanExecutor { read_ctx, source }.execute(&mut child)?;
+    let relation = match child.plan.node {
+        PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source }.execute(&mut child)?,
+        PlanNode::FunctionScan => FunctionScanExecutor { read_ctx, source }.execute(&mut child)?,
+        _ => {
+            return Err(ExecError::Unsupported(
+                "FilterExecutor input was neither SeqScan nor FunctionScan".into(),
+            ));
+        }
+    };
     state.begin_loop();
     filter_relation_rows(state, relation, read_ctx.eval_ctx)
 }

@@ -16749,7 +16749,10 @@ mod tests {
         let mut session = engine.connect();
         session
             .simple_query(
-                "CREATE TABLE seq_scan_test (a int); INSERT INTO seq_scan_test VALUES (1), (2), (2)",
+                "CREATE TABLE seq_scan_test (a int); \
+                 INSERT INTO seq_scan_test VALUES (1), (2), (2); \
+                 CREATE FUNCTION planned_table_function() RETURNS TABLE (n int) \
+                 LANGUAGE sql AS 'SELECT 1'",
             )
             .await
             .expect("seed table");
@@ -16878,6 +16881,37 @@ mod tests {
                 ],
             ]
         );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT n FROM generate_series(1, 3) AS g(n) WHERE n > 1"),
+        )
+        .expect("FunctionScan plan executes")
+        .expect("FROM SRF uses FunctionScan");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(3)],
+            ]
+        );
+        for sql in [
+            "SELECT n FROM LATERAL generate_series(1, 3) AS g(n)",
+            "SELECT DISTINCT n FROM generate_series(1, 3) AS g(n)",
+            "SELECT n FROM generate_series(1, 3) AS g(n) ORDER BY n",
+            "SELECT n FROM generate_series(1, 3) AS g(n) LIMIT 1",
+            "SELECT n FROM planned_table_function()",
+            "SELECT count(*) FROM generate_series(1, 3) AS g(n)",
+            "SELECT 1 FROM generate_series(1, 3) AS g(n) HAVING count(*) > 0",
+            "SELECT grouping(n) FROM generate_series(1, 3) AS g(n)",
+            "SELECT row_number() OVER () FROM generate_series(1, 3) AS g(n)",
+        ] {
+            assert!(
+                crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
+                    .expect(sql)
+                    .is_none(),
+                "{sql} belongs to a later FunctionScan plan shape"
+            );
+        }
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of("SELECT count(*) FROM seq_scan_test"),
