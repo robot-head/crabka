@@ -16924,10 +16924,30 @@ mod tests {
                 ],
             ]
         );
-        for sql in [
-            "SELECT a FROM seq_scan_test HAVING true",
-            "SELECT row_number() OVER () FROM seq_scan_test",
-        ] {
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT a, row_number() OVER (ORDER BY a) FROM seq_scan_test"),
+        )
+        .expect("WindowAgg plan executes")
+        .expect("stored-table window uses WindowAgg");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(1),
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(2),
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(3),
+                ],
+            ]
+        );
+        for sql in ["SELECT a FROM seq_scan_test HAVING true"] {
             let select = select_of(sql);
             assert!(
                 crate::plan::exec::try_execute_seq_scan(&read_ctx, &select)

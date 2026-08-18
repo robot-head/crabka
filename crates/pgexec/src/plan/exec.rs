@@ -54,6 +54,7 @@ pub(crate) fn try_execute_seq_scan(
         sort_positions,
         aggregate,
         project_set,
+        window,
     }) = plan_seq_scan(read_ctx, select)?
     else {
         return Ok(None);
@@ -75,6 +76,14 @@ pub(crate) fn try_execute_seq_scan(
             source,
             fields,
             tys,
+            select,
+        }
+        .execute(&mut state)
+        .map(Some)
+    } else if let Some(select) = window {
+        WindowAggExecutor {
+            read_ctx,
+            source,
             select,
         }
         .execute(&mut state)
@@ -185,6 +194,7 @@ struct SeqScanPlan {
     sort_positions: Vec<usize>,
     aggregate: Option<SelectStmt>,
     project_set: Option<SelectStmt>,
+    window: Option<SelectStmt>,
 }
 
 fn plan_seq_scan(
@@ -231,7 +241,15 @@ fn plan_seq_scan(
     {
         return Ok(None);
     }
-    if crate::window::has_window_calls(select) {
+    let window = crate::window::has_window_calls(select);
+    if window
+        && (aggregate
+            || crate::srf::projection_contains_srf(&select.projection)
+            || !matches!(select.distinct, DistinctClause::All)
+            || !select.order_by.is_empty()
+            || select.limit.is_some()
+            || select.offset.is_some())
+    {
         return Ok(None);
     }
 
@@ -259,6 +277,49 @@ fn plan_seq_scan(
         read_ctx.ctes,
     )?
     .scope;
+    if window {
+        let quals = bind_optional(select.filter.as_ref(), &scope)?
+            .into_iter()
+            .map(|clause| RestrictInfo {
+                clause,
+                is_pushed_down: false,
+                security_level: 0,
+                leakproof: true,
+                required_relids: BTreeSet::from([1]),
+            })
+            .collect();
+        let scan = Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::SeqScan { scanrelid: 1 },
+        };
+        let filter = Plan {
+            target_list: Vec::new(),
+            quals,
+            node: PlanNode::Filter {
+                input: Box::new(scan),
+            },
+        };
+        return Ok(Some(SeqScanPlan {
+            plan: Plan {
+                target_list: Vec::new(),
+                quals: Vec::new(),
+                node: PlanNode::WindowAgg {
+                    input: Box::new(filter),
+                },
+            },
+            source: source.clone(),
+            fields: Vec::new(),
+            tys: Vec::new(),
+            limit: None,
+            offset: None,
+            order_by: Vec::new(),
+            sort_positions: Vec::new(),
+            aggregate: None,
+            project_set: None,
+            window: Some(select.clone()),
+        }));
+    }
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
     let project_set = crate::srf::exprs_contain_srf(&exprs);
     if project_set
@@ -379,6 +440,7 @@ fn plan_seq_scan(
         sort_positions,
         aggregate: needs_aggregate_node(select).then(|| select.clone()),
         project_set: crate::srf::exprs_contain_srf(&exprs).then(|| select.clone()),
+        window: None,
     }))
 }
 
@@ -660,6 +722,40 @@ impl Executor for ProjectSetExecutor<'_, '_> {
             &self.read_ctx.statement_memory,
         )?;
         state.scope = exec::projected_scope(&self.fields, &self.tys);
+        for _ in &rows {
+            state.emit_row();
+        }
+        Ok(Relation {
+            scope: state.scope.clone(),
+            rows,
+        })
+    }
+}
+
+struct WindowAggExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+    select: SelectStmt,
+}
+
+impl Executor for WindowAggExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        let PlanNode::WindowAgg { input } = &state.plan.node else {
+            return Err(ExecError::Unsupported(
+                "WindowAggExecutor received a non-WindowAgg plan".into(),
+            ));
+        };
+        crate::session::check_query_canceled()?;
+        let mut child = PlanState::new((**input).clone(), Scope::empty());
+        let relation = execute_filter_input(&mut child, self.read_ctx, self.source.clone())?;
+        state.begin_loop();
+        let (fields, tys, rows) = crate::window::execute(
+            &self.select,
+            &relation.scope,
+            relation.rows,
+            self.read_ctx.eval_ctx,
+        )?;
+        state.scope = exec::projected_scope(&fields, &tys);
         for _ in &rows {
             state.emit_row();
         }
