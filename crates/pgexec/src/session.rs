@@ -17741,6 +17741,22 @@ mod tests {
         assert!(input.target_list.is_empty(), "Filter leaves projection to ProjectSet");
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
+            &select_of(
+                "SELECT n, generate_series(1, 2) FROM planned_cte \
+                 ORDER BY n DESC, 2 DESC LIMIT 2",
+            ),
+        )
+        .expect("CteScan ProjectSet tail plan executes")
+        .expect("CTE ProjectSet owns ordering and limit");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int4(1)],
+            ]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
             &select_of("SELECT count(*) FROM planned_cte WHERE n > 1"),
         )
         .expect("CteScan Aggregate plan executes")
@@ -18172,10 +18188,6 @@ mod tests {
             "SELECT n, row_number() OVER () FROM planned_cte LIMIT 1",
             "SELECT row_number() OVER () FROM planned_cte OFFSET 1",
             "SELECT count(*), generate_series(1, 2) FROM planned_cte",
-            "SELECT DISTINCT n, generate_series(1, 2) FROM planned_cte",
-            "SELECT n, generate_series(1, 2) FROM planned_cte ORDER BY 1",
-            "SELECT n, generate_series(1, 2) FROM planned_cte LIMIT 1",
-            "SELECT n, generate_series(1, 2) FROM planned_cte OFFSET 1",
             "SELECT grouping(n) FROM planned_transition",
             "SELECT n, row_number() OVER () FROM planned_transition ORDER BY 1",
             "SELECT row_number() OVER () FROM planned_transition OFFSET 1",
