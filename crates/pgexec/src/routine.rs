@@ -1954,6 +1954,74 @@ pub(crate) fn plpgsql_scalar_result_type(
     })
 }
 
+/// Resolve the one column a set-returning PL/pgSQL call produces in a select
+/// list. The table-function path owns multi-column results; a select list has
+/// one expression slot for this call.
+pub(crate) fn plpgsql_set_result_type(
+    call: &FuncCall,
+    scope: &crate::scope::Scope,
+) -> Option<Result<ColumnType, ExecError>> {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return None;
+    };
+    SCALAR_RUNTIME.with(|runtime| {
+        let runtime = runtime.borrow();
+        let runtime = runtime.as_ref()?;
+        if !is_user_routine(runtime.catalog.as_ref(), &call.name) {
+            return None;
+        }
+        let result = (|| {
+            let given = crate::eval::static_arg_types(args, scope)?;
+            let routine =
+                resolve_call(runtime.catalog.as_ref(), &call.name, &given)?.ok_or_else(|| {
+                    undefined_routine(format!("function {} does not exist", call.name))
+                })?;
+            if routine.language != "plpgsql" || !declared_returns_set(&routine) {
+                return Err(undefined_routine(format!(
+                    "function {} does not exist",
+                    call.name
+                )));
+            }
+            if routine.kind != RoutineKind::Function {
+                return Err(wrong_routine_kind(format!(
+                    "{} is a procedure\nHINT:  To call a procedure, use CALL.",
+                    spelled_signature(&routine)
+                )));
+            }
+            single_set_result_column(&routine, &given)
+                .map(|(_, ty)| ty)
+                .ok_or_else(|| {
+                    ExecError::Unsupported(format!(
+                        "set-returning function {} has no single select-list result",
+                        routine.identity()
+                    ))
+                })
+        })();
+        Some(result)
+    })
+}
+
+/// Whether the current statement runtime resolves `call` to a set-returning
+/// PL/pgSQL function. This cheap predicate selects ProjectSet; the typed
+/// resolver above returns the user-facing error.
+pub(crate) fn is_plpgsql_set_runtime(call: &FuncCall) -> bool {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return false;
+    };
+    SCALAR_RUNTIME.with(|runtime| {
+        let runtime = runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            return false;
+        };
+        let given = best_effort_arg_types(args);
+        resolve_call(runtime.catalog.as_ref(), &call.name, &given).is_ok_and(|routine| {
+            routine.is_some_and(|routine| {
+                routine.language == "plpgsql" && declared_returns_set(&routine)
+            })
+        })
+    })
+}
+
 pub(crate) fn is_plpgsql_scalar_runtime(call: &FuncCall, scope: &crate::scope::Scope) -> bool {
     let FuncArgs::Exprs(args) = &call.args else {
         return false;
@@ -2103,6 +2171,104 @@ pub(crate) fn eval_plpgsql_scalar_with(
             match called_scalar_result_type(&routine, &given) {
                 Some(ty) => crate::plpgsql::cast_value(&value, ty, ctx),
                 None => Ok(value),
+            }
+        })();
+        Some(result)
+    })
+}
+
+/// Expand one set-returning PL/pgSQL call in a select list.
+pub(crate) fn eval_plpgsql_set_function(
+    call: &FuncCall,
+    scope: &crate::scope::Scope,
+    row: &[Datum],
+    ctx: &crate::clock::EvalCtx,
+) -> Option<Result<Vec<Datum>, ExecError>> {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return None;
+    };
+    SCALAR_RUNTIME.with(|runtime| {
+        let runtime = runtime.borrow();
+        let runtime = runtime.as_ref()?.clone();
+        if !is_user_routine(runtime.catalog.as_ref(), &call.name) {
+            return None;
+        }
+        let result = (|| {
+            if call.distinct || call.filter.is_some() {
+                return Err(ExecError::Syntax(format!(
+                    "FILTER or DISTINCT is not allowed for function {}",
+                    call.name
+                )));
+            }
+            let mut values = args
+                .iter()
+                .map(|arg| crate::eval::eval(arg, scope, row, ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            let given = crate::eval::value_arg_types(args, &values);
+            let BoundRoutineCall {
+                routine,
+                args: bound_args,
+            } = bind_call(runtime.catalog.as_ref(), &call.name, args, &given)?.ok_or_else(
+                || undefined_routine(format!("function {} does not exist", call.name)),
+            )?;
+            if routine.language != "plpgsql" || !declared_returns_set(&routine) {
+                return Err(undefined_routine(format!(
+                    "function {} does not exist",
+                    call.name
+                )));
+            }
+            if routine.kind != RoutineKind::Function {
+                return Err(wrong_routine_kind(format!(
+                    "{} is a procedure\nHINT:  To call a procedure, use CALL.",
+                    spelled_signature(&routine)
+                )));
+            }
+            let column = single_set_result_column(&routine, &given).ok_or_else(|| {
+                ExecError::Unsupported(format!(
+                    "set-returning function {} has no single select-list result",
+                    routine.identity()
+                ))
+            })?;
+            for default in &bound_args[values.len()..] {
+                values.push(crate::eval::eval(default, scope, row, ctx)?);
+            }
+            let params = routine
+                .input_params()
+                .map(|param| param.ty.column)
+                .collect::<Vec<_>>();
+            crate::eval::coerce_unknown_args(&bound_args, &mut values, &params, ctx)?;
+            if routine.strict && values.iter().any(Datum::is_null) {
+                return Ok(Vec::new());
+            }
+            let requests = runtime.requests.ok_or_else(|| {
+                ExecError::Unsupported("PL/pgSQL table function requires a session executor".into())
+            })?;
+            let (reply, response) = std::sync::mpsc::channel();
+            requests
+                .try_send(ScalarFunctionRequest {
+                    routine,
+                    values,
+                    kind: FunctionRequestKind::Table(vec![column]),
+                    reply,
+                })
+                .map_err(|_| {
+                    ExecError::ObjectNotInPrerequisiteState(
+                        "PL/pgSQL function executor stopped".into(),
+                    )
+                })?;
+            match response.recv().map_err(|_| {
+                ExecError::ObjectNotInPrerequisiteState("PL/pgSQL function executor stopped".into())
+            })?? {
+                FunctionRequestResult::Scalar(value) => Ok(vec![value]),
+                FunctionRequestResult::Table(rows) => rows
+                    .into_iter()
+                    .map(|row| match row.as_slice() {
+                        [value] => Ok(value.clone()),
+                        _ => Err(ExecError::ObjectNotInPrerequisiteState(
+                            "PL/pgSQL function executor returned the wrong table width".into(),
+                        )),
+                    })
+                    .collect(),
             }
         })();
         Some(result)
@@ -2750,6 +2916,31 @@ fn resolved_scalar_result_type(routine: &Routine, given: &[ArgType]) -> Option<C
         };
         resolved_polymorphic_type(routine, given, name)
     })
+}
+
+/// The one select-list column a set-returning routine can provide.
+fn single_set_result_column(routine: &Routine, given: &[ArgType]) -> Option<(String, ColumnType)> {
+    match &routine.result {
+        RoutineResult::Type { ty, setof: true } => {
+            resolved_polymorphic_type(routine, given, &ty.name)
+                .or(ty.column)
+                .map(|ty| (routine.name.clone(), ty))
+        }
+        RoutineResult::Table(columns) if columns.len() == 1 => columns
+            .first()
+            .and_then(|(name, ty)| ty.column.map(|ty| (name.clone(), ty))),
+        RoutineResult::Unspecified if routine.output_params().count() == 1 => {
+            routine.output_params().next().and_then(|param| {
+                param.ty.column.map(|ty| {
+                    (
+                        param.name.clone().unwrap_or_else(|| routine.name.clone()),
+                        ty,
+                    )
+                })
+            })
+        }
+        _ => None,
+    }
 }
 
 fn resolved_polymorphic_type(
@@ -4057,6 +4248,61 @@ mod tests {
         )
         .expect("add2");
         kv
+    }
+
+    #[test]
+    fn a_plpgsql_set_function_expands_as_one_select_list_column() {
+        let kv = std::sync::Arc::new(MemKv::default());
+        define(
+            kv.as_ref(),
+            "CREATE FUNCTION set_result() RETURNS SETOF int LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN NEXT 1; RETURN NEXT 2; END $$",
+        )
+        .expect("definition");
+        let catalog: std::sync::Arc<dyn Kv> = kv;
+        let call = FuncCall {
+            sql_syntax: false,
+            name: "set_result".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(Vec::new()),
+            order_by: Vec::new(),
+            filter: None,
+        };
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::channel::<ScalarFunctionRequest>(1);
+        let worker = std::thread::spawn(move || {
+            let request = request_rx.blocking_recv().expect("table request");
+            assert!(matches!(
+                request.kind,
+                FunctionRequestKind::Table(columns)
+                    if columns == vec![("set_result".into(), ColumnType::Int4)]
+            ));
+            request
+                .reply
+                .send(Ok(FunctionRequestResult::Table(vec![
+                    vec![Datum::Int4(1)],
+                    vec![Datum::Int4(2)],
+                ])))
+                .expect("reply");
+        });
+        let rows = with_scalar_runtime(&catalog, Some(request_tx), || {
+            assert!(
+                plpgsql_set_result_type(&call, &crate::scope::Scope::empty())
+                    .expect("user routine")
+                    .expect("type")
+                    == ColumnType::Int4
+            );
+            assert!(is_plpgsql_set_runtime(&call));
+            eval_plpgsql_set_function(
+                &call,
+                &crate::scope::Scope::empty(),
+                &[],
+                &crate::clock::EvalCtx::test_default(),
+            )
+            .expect("user routine")
+            .expect("rows")
+        });
+        assert!(rows == vec![Datum::Int4(1), Datum::Int4(2)]);
+        assert!(worker.join().is_ok());
     }
 
     fn sqlstate(error: &ExecError) -> String {

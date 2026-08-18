@@ -2,7 +2,7 @@ use assert2::assert;
 use crabka_pgparser::parser::parse_expr_for_test as pexpr;
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
 
-use crate::{clock::EvalCtx, scope::Scope};
+use crate::{clock::EvalCtx, regexp_fn::compile_pattern, scope::Scope};
 
 /// Evaluate a FROM-less expression and render it the way the wire would.
 ///
@@ -81,6 +81,40 @@ fn regexp_replace_handles_flags_start_and_occurrence() {
         message("regexp_replace('abc', 'b', 'x', 0)") == "invalid value for parameter \"start\": 0"
     );
     assert!(sqlstate("regexp_replace('abc', 'b', 'x', 1, -1)") == "22023");
+}
+
+#[test]
+fn are_word_boundaries_and_absolute_anchors_translate_to_regex_assertions() {
+    assert!(
+        compile_pattern("regexp_like()", false, r"\mbar\M", "")
+            .expect("ARE word boundaries")
+            .is_match("a bar!")
+    );
+    assert!(
+        !compile_pattern("regexp_like()", false, r"\mbar\M", "")
+            .expect("ARE word boundaries")
+            .is_match("foobar")
+    );
+    assert!(
+        compile_pattern("regexp_like()", false, r"\ybar\y", "")
+            .expect("ARE word boundary")
+            .is_match("a bar!")
+    );
+    assert!(
+        compile_pattern("regexp_like()", false, r"a\Yb", "")
+            .expect("ARE non-boundary")
+            .is_match("ab")
+    );
+    assert!(
+        compile_pattern("regexp_like()", false, r"\Aword\Z", "")
+            .expect("ARE absolute anchors")
+            .is_match("word")
+    );
+    assert!(
+        !compile_pattern("regexp_like()", false, r"\Aword\Z", "")
+            .expect("ARE absolute anchors")
+            .is_match("word\n")
+    );
 }
 
 #[test]

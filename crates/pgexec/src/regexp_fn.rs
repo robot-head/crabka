@@ -505,7 +505,7 @@ pub(crate) fn compile_pattern(
     let source = if literal {
         regex::escape(pattern)
     } else {
-        pattern.to_string()
+        translate_are_anchors(pattern)
     };
     RegexBuilder::new(&source)
         .case_insensitive(case_insensitive)
@@ -517,6 +517,49 @@ pub(crate) fn compile_pattern(
             sqlstate: "2201B",
             message: format!("invalid regular expression: {}", one_line_reason(&error)),
         })
+}
+
+/// Translate the ARE zero-width spelling that `regex` does not accept.
+///
+/// PostgreSQL spells start/end of a word as `\\m`/`\\M`, a word boundary as
+/// `\\y`, its negation as `\\Y`, and absolute end as `\\Z`. The installed regex
+/// engine has equivalent assertions, including directional word boundaries.
+fn translate_are_anchors(pattern: &str) -> String {
+    let mut translated = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    let mut in_class = false;
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let Some(next) = chars.next() else {
+                translated.push(ch);
+                break;
+            };
+            if in_class {
+                translated.push(ch);
+                translated.push(next);
+                continue;
+            }
+            match next {
+                'm' => translated.push_str(r"\b{start}"),
+                'M' => translated.push_str(r"\b{end}"),
+                'y' => translated.push_str(r"\b"),
+                'Y' => translated.push_str(r"\B"),
+                'Z' => translated.push_str(r"\z"),
+                _ => {
+                    translated.push(ch);
+                    translated.push(next);
+                }
+            }
+            continue;
+        }
+        match ch {
+            '[' => in_class = true,
+            ']' => in_class = false,
+            _ => {}
+        }
+        translated.push(ch);
+    }
+    translated
 }
 
 /// The one-line reason inside a `regex` crate compile error.

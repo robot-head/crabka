@@ -41,7 +41,8 @@
 use std::borrow::Cow;
 
 use crabka_pgparser::ast::{
-    ArraySubscript, Expr, FuncArgs, SelectItem, SelectStmt, TableFuncCall, TableFuncColumnDef,
+    ArraySubscript, Expr, FuncArgs, FuncCall, SelectItem, SelectStmt, TableFuncCall,
+    TableFuncColumnDef,
 };
 use crabka_pgtypes::{
     ArrayValue, ColumnType, Datum, ElemType, RecordValue, TypeError, numeric::NumericValue,
@@ -1452,7 +1453,7 @@ pub(crate) fn order_by_contains_srf(order_by: &[crabka_pgparser::ast::OrderItem]
 
 fn expr_contains_srf(expr: &Expr) -> bool {
     if let Expr::Func(fc) = expr
-        && is_set_returning(&fc.name)
+        && (is_set_returning(&fc.name) || crate::routine::is_plpgsql_set_runtime(fc))
     {
         return true;
     }
@@ -1542,9 +1543,18 @@ struct ProjectSet {
     scope: Scope,
 }
 
-struct SrfCall {
-    plan: SrfPlan,
-    args: Vec<Expr>,
+enum SrfCall {
+    Builtin { plan: SrfPlan, args: Vec<Expr> },
+    PlPgSql { call: FuncCall, ty: ColumnType },
+}
+
+impl SrfCall {
+    fn projected_type(&self) -> ColumnType {
+        match self {
+            Self::Builtin { plan, .. } => projected_type(plan),
+            Self::PlPgSql { ty, .. } => *ty,
+        }
+    }
 }
 
 /// Rewrite `out_exprs` so every SRF call becomes a reference to a synthetic
@@ -1565,7 +1575,7 @@ fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
             exposure: Exposure::Output,
             qualifier: Some(SRF_QUALIFIER.to_string()),
             name: index.to_string(),
-            ty: projected_type(&call.plan),
+            ty: call.projected_type(),
         });
     }
     Ok(ProjectSet {
@@ -1576,9 +1586,14 @@ fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
 }
 
 fn rewrite_expr(expr: &mut Expr, scope: &Scope, calls: &mut Vec<SrfCall>) -> Result<(), ExecError> {
-    if let Expr::Func(fc) = expr
-        && is_set_returning(&fc.name)
-    {
+    if let Expr::Func(fc) = expr {
+        let plpgsql_type = crate::routine::plpgsql_set_result_type(fc, scope).transpose()?;
+        if !is_set_returning(&fc.name) && plpgsql_type.is_none() {
+            for child in children_mut(expr) {
+                rewrite_expr(child, scope, calls)?;
+            }
+            return Ok(());
+        }
         let FuncArgs::Exprs(args) = &fc.args else {
             return Err(undefined_function(&fc.name, &[]));
         };
@@ -1591,16 +1606,25 @@ fn rewrite_expr(expr: &mut Expr, scope: &Scope, calls: &mut Vec<SrfCall>) -> Res
         }
         // A select-list call has no FROM item to hang a column-definition list
         // on, so a record-returning one has no row type at all.
-        let plan = plan(&fc.name, args, CallSite::Projection, scope)?;
-        if plan.record.is_none() && plan.columns.len() != 1 {
-            return Err(ExecError::Unsupported(format!(
-                "set-returning function {} with multiple output columns is only supported in FROM",
-                plan.name
-            )));
-        }
         let index = calls.len();
-        let args = args.clone();
-        calls.push(SrfCall { plan, args });
+        if let Some(ty) = plpgsql_type {
+            calls.push(SrfCall::PlPgSql {
+                call: fc.clone(),
+                ty,
+            });
+        } else {
+            let plan = plan(&fc.name, args, CallSite::Projection, scope)?;
+            if plan.record.is_none() && plan.columns.len() != 1 {
+                return Err(ExecError::Unsupported(format!(
+                    "set-returning function {} with multiple output columns is only supported in FROM",
+                    plan.name
+                )));
+            }
+            calls.push(SrfCall::Builtin {
+                plan,
+                args: args.clone(),
+            });
+        }
         *expr = Expr::Column {
             table: Some(SRF_QUALIFIER.to_string()),
             name: index.to_string(),
@@ -1847,13 +1871,25 @@ fn expand_row(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut values: Vec<Vec<Datum>> = Vec::with_capacity(set.calls.len());
     for call in &set.calls {
-        let mut vals = call
-            .args
-            .iter()
-            .map(|arg| crate::eval::eval(arg, scope, row, ctx))
-            .collect::<Result<Vec<_>, _>>()?;
-        let produced = rows(&call.plan, &call.args, &mut vals, ctx)?;
-        values.push(collapse_projection(&call.plan, produced));
+        match call {
+            SrfCall::Builtin { plan, args } => {
+                let mut vals = args
+                    .iter()
+                    .map(|arg| crate::eval::eval(arg, scope, row, ctx))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let produced = rows(plan, args, &mut vals, ctx)?;
+                values.push(collapse_projection(plan, produced));
+            }
+            SrfCall::PlPgSql { call, .. } => {
+                let produced = crate::routine::eval_plpgsql_set_function(call, scope, row, ctx)
+                    .ok_or_else(|| {
+                    ExecError::ObjectNotInPrerequisiteState(
+                        "PL/pgSQL set function runtime disappeared".into(),
+                    )
+                })??;
+                values.push(produced);
+            }
+        }
     }
     let count = values.iter().map(Vec::len).max().unwrap_or(0);
     let mut out = Vec::with_capacity(count);
@@ -3462,6 +3498,21 @@ mod tests {
                     vec![None, Some("4".into())],
                 ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_plpgsql_set_function_expands_in_the_select_list() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        query(
+            &mut s,
+            "CREATE FUNCTION select_list_set() RETURNS SETOF int LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN NEXT 1; RETURN NEXT 2; END $$",
+        )
+        .await;
+        let result = query(&mut s, "SELECT select_list_set()").await;
+        assert!(shape(&result).0 == vec!["select_list_set"]);
+        assert!(column_of(&result) == vec![Some("1".into()), Some("2".into())]);
     }
 
     #[tokio::test]
