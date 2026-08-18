@@ -16831,20 +16831,24 @@ mod tests {
             select
         };
         for (sql, expected) in [
-            ("SELECT a FROM seq_scan_test LIMIT 1", 1),
-            ("SELECT a FROM seq_scan_test OFFSET 1", 2),
+            ("SELECT a FROM seq_scan_test LIMIT 1", vec![1]),
+            ("SELECT a FROM seq_scan_test OFFSET 1", vec![2]),
+            ("SELECT a FROM seq_scan_test ORDER BY a DESC", vec![2, 1]),
+            ("SELECT a FROM seq_scan_test ORDER BY a DESC LIMIT 1", vec![2]),
         ] {
             let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
                 .expect(sql)
                 .expect("stored-table shape uses Limit");
             assert_eq!(
                 relation.rows,
-                vec![vec![crabka_pgtypes::Datum::Int4(expected)]]
+                expected
+                    .into_iter()
+                    .map(|value| vec![crabka_pgtypes::Datum::Int4(value)])
+                    .collect::<Vec<_>>()
             );
         }
         for sql in [
             "SELECT DISTINCT a FROM seq_scan_test",
-            "SELECT a FROM seq_scan_test ORDER BY a",
             "SELECT count(*) FROM seq_scan_test",
             "SELECT a FROM seq_scan_test GROUP BY a",
             "SELECT row_number() OVER () FROM seq_scan_test",

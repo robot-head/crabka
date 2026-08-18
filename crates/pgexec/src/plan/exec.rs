@@ -48,6 +48,8 @@ pub(crate) fn try_execute_seq_scan(
         tys,
         limit,
         offset,
+        order_by,
+        sort_positions,
     }) = plan_seq_scan(read_ctx, select)?
     else {
         return Ok(None);
@@ -61,17 +63,21 @@ pub(crate) fn try_execute_seq_scan(
             tys,
             limit,
             offset,
+            order_by,
+            sort_positions,
         }
         .execute(&mut state)
         .map(Some)
     } else {
-        FilterExecutor {
+        execute_seq_scan_input(
+            &mut state,
             read_ctx,
             source,
             fields,
             tys,
-        }
-        .execute(&mut state)
+            order_by,
+            sort_positions,
+        )
         .map(Some)
     }
 }
@@ -162,6 +168,8 @@ struct SeqScanPlan {
     tys: Vec<crabka_pgtypes::ColumnType>,
     limit: Option<crabka_pgparser::ast::Expr>,
     offset: Option<crabka_pgparser::ast::Expr>,
+    order_by: Vec<crabka_pgparser::ast::OrderItem>,
+    sort_positions: Vec<usize>,
 }
 
 fn plan_seq_scan(
@@ -173,7 +181,6 @@ fn plan_seq_scan(
     };
     if !crate::exec::is_direct_stored_base_table(read_ctx, source)
         || !matches!(select.distinct, DistinctClause::All)
-        || !select.order_by.is_empty()
         || select.with_ties
         || !select.group_by.is_empty()
         || select.grouping.is_some()
@@ -218,6 +225,16 @@ fn plan_seq_scan(
             required_relids: BTreeSet::from([1]),
         })
         .collect();
+    let order_keys =
+        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
+    let mut sort_positions = Vec::with_capacity(order_keys.len());
+    for key in order_keys {
+        let exec::SelectOrderKey::Output(index) = key else {
+            return Ok(None);
+        };
+        crate::eval::require_ordering_operator(tys[index])?;
+        sort_positions.push(index);
+    }
     let scan = Plan {
         target_list: Vec::new(),
         quals: Vec::new(),
@@ -230,16 +247,27 @@ fn plan_seq_scan(
             input: Box::new(scan),
         },
     };
+    let sort = if select.order_by.is_empty() {
+        filter
+    } else {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Sort {
+                input: Box::new(filter),
+            },
+        }
+    };
     let plan = if select.limit.is_some() || select.offset.is_some() {
         Plan {
             target_list: Vec::new(),
             quals: Vec::new(),
             node: PlanNode::Limit {
-                input: Box::new(filter),
+                input: Box::new(sort),
             },
         }
     } else {
-        filter
+        sort
     };
     Ok(Some(SeqScanPlan {
         plan,
@@ -248,6 +276,8 @@ fn plan_seq_scan(
         tys,
         limit: select.limit.clone(),
         offset: select.offset.clone(),
+        order_by: select.order_by.clone(),
+        sort_positions,
     }))
 }
 
@@ -407,6 +437,8 @@ struct LimitExecutor<'a, 'b> {
     tys: Vec<crabka_pgtypes::ColumnType>,
     limit: Option<crabka_pgparser::ast::Expr>,
     offset: Option<crabka_pgparser::ast::Expr>,
+    order_by: Vec<crabka_pgparser::ast::OrderItem>,
+    sort_positions: Vec<usize>,
 }
 
 impl Executor for LimitExecutor<'_, '_> {
@@ -418,13 +450,15 @@ impl Executor for LimitExecutor<'_, '_> {
         };
         crate::session::check_query_canceled()?;
         let mut child = PlanState::new((**input).clone(), Scope::empty());
-        let relation = FilterExecutor {
-            read_ctx: self.read_ctx,
-            source: self.source.clone(),
-            fields: self.fields.clone(),
-            tys: self.tys.clone(),
-        }
-        .execute(&mut child)?;
+        let relation = execute_seq_scan_input(
+            &mut child,
+            self.read_ctx,
+            self.source.clone(),
+            self.fields.clone(),
+            self.tys.clone(),
+            self.order_by.clone(),
+            self.sort_positions.clone(),
+        )?;
         let offset = crate::exec::eval_row_count(
             self.offset.as_ref(),
             crate::exec::RowCountClause::Offset,
@@ -438,6 +472,101 @@ impl Executor for LimitExecutor<'_, '_> {
         state.begin_loop();
         Ok(limit_relation_rows(state, relation, offset, limit))
     }
+}
+
+fn execute_seq_scan_input(
+    state: &mut PlanState,
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    source: TableExpr,
+    fields: Vec<crabka_pgwire::engine::FieldDescription>,
+    tys: Vec<crabka_pgtypes::ColumnType>,
+    order_by: Vec<crabka_pgparser::ast::OrderItem>,
+    sort_positions: Vec<usize>,
+) -> Result<Relation, ExecError> {
+    match &state.plan.node {
+        PlanNode::Filter { .. } => FilterExecutor {
+            read_ctx,
+            source,
+            fields,
+            tys,
+        }
+        .execute(state),
+        PlanNode::Sort { .. } => SortExecutor {
+            read_ctx,
+            source,
+            fields,
+            tys,
+            order_by,
+            sort_positions,
+        }
+        .execute(state),
+        _ => Err(ExecError::Unsupported(
+            "single-table plan input was neither Filter nor Sort".into(),
+        )),
+    }
+}
+
+struct SortExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+    fields: Vec<crabka_pgwire::engine::FieldDescription>,
+    tys: Vec<crabka_pgtypes::ColumnType>,
+    order_by: Vec<crabka_pgparser::ast::OrderItem>,
+    sort_positions: Vec<usize>,
+}
+
+impl Executor for SortExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        let PlanNode::Sort { input } = &state.plan.node else {
+            return Err(ExecError::Unsupported(
+                "SortExecutor received a non-Sort plan".into(),
+            ));
+        };
+        crate::session::check_query_canceled()?;
+        let mut child = PlanState::new((**input).clone(), Scope::empty());
+        let relation = execute_seq_scan_input(
+            &mut child,
+            self.read_ctx,
+            self.source.clone(),
+            self.fields.clone(),
+            self.tys.clone(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        state.begin_loop();
+        sort_relation_rows(
+            state,
+            relation,
+            &self.order_by,
+            &self.sort_positions,
+            &self.read_ctx.statement_memory,
+        )
+    }
+}
+
+fn sort_relation_rows(
+    state: &mut PlanState,
+    mut relation: Relation,
+    order_by: &[crabka_pgparser::ast::OrderItem],
+    positions: &[usize],
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<Relation, ExecError> {
+    let reservation = statement_memory.reserve();
+    let mut keyed = Vec::with_capacity(relation.rows.len());
+    for row in relation.rows {
+        let keys: Vec<_> = positions.iter().map(|&index| row[index].clone()).collect();
+        reservation
+            .memory()
+            .charge(crate::scanner::datum_row_bytes(&keys))?;
+        keyed.push((keys, row));
+    }
+    keyed.sort_by(|left, right| exec::order_cmp(&left.0, &right.0, order_by));
+    relation.rows = keyed.into_iter().map(|(_, row)| row).collect();
+    state.scope = relation.scope.clone();
+    for _ in &relation.rows {
+        state.emit_row();
+    }
+    Ok(relation)
 }
 
 fn limit_relation_rows(
