@@ -548,7 +548,7 @@ fn execute_seq_scan_input(
         }
         .execute(state),
         _ => Err(ExecError::Unsupported(
-            "single-table plan input was neither Filter nor Sort".into(),
+            "single-table plan input was neither Filter, Unique, nor Sort".into(),
         )),
     }
 }
@@ -588,16 +588,22 @@ impl Executor for UniqueExecutor<'_, '_> {
             Vec::new(),
         )?;
         state.begin_loop();
-        Ok(unique_relation_rows(state, relation))
+        unique_relation_rows(state, relation, &self.read_ctx.statement_memory)
     }
 }
 
-fn unique_relation_rows(state: &mut PlanState, mut relation: Relation) -> Relation {
-    let reservation = std::mem::take(&mut relation.rows);
-    let mut seen = std::collections::HashSet::with_capacity(reservation.len());
-    let mut rows = Vec::with_capacity(reservation.len());
-    for row in reservation {
+fn unique_relation_rows(
+    state: &mut PlanState,
+    mut relation: Relation,
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<Relation, ExecError> {
+    let input = std::mem::take(&mut relation.rows);
+    let reservation = statement_memory.reserve();
+    let mut seen = std::collections::HashSet::with_capacity(input.len());
+    let mut rows = Vec::with_capacity(input.len());
+    for row in input {
         if seen.insert(row.clone()) {
+            reservation.memory().charge_row(&row)?;
             state.emit_row();
             rows.push(row);
         } else {
@@ -606,7 +612,7 @@ fn unique_relation_rows(state: &mut PlanState, mut relation: Relation) -> Relati
     }
     relation.rows = rows;
     state.scope = relation.scope.clone();
-    relation
+    Ok(relation)
 }
 
 impl Executor for SortExecutor<'_, '_> {
@@ -926,5 +932,35 @@ mod tests {
 
         assert_eq!(relation.rows, vec![vec![Datum::Int4(2)]]);
         assert_eq!((state.nloops, state.ntuples, state.rows_removed), (1, 1, 0));
+    }
+
+    #[test]
+    fn unique_node_charges_its_retained_keys() {
+        let plan = Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Unique {
+                input: Box::new(Plan {
+                    target_list: Vec::new(),
+                    quals: Vec::new(),
+                    node: PlanNode::Result,
+                }),
+            },
+        };
+        let mut state = PlanState::new(plan, Scope::empty());
+        state.begin_loop();
+
+        let error = unique_relation_rows(
+            &mut state,
+            Relation {
+                scope: Scope::empty(),
+                rows: vec![vec![Datum::Int4(1)]],
+            },
+            &crate::scanner::StatementMemory::new(crabka_units::bytes(0)),
+        )
+        .expect_err("retained distinct rows must respect statement memory")
+        .into_pg();
+
+        assert_eq!(error.code, "53200");
     }
 }
