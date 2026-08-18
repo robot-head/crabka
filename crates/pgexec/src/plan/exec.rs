@@ -53,6 +53,7 @@ pub(crate) fn try_execute_seq_scan(
         order_by,
         sort_positions,
         aggregate,
+        project_set,
     }) = plan_seq_scan(read_ctx, select)?
     else {
         return Ok(None);
@@ -60,6 +61,16 @@ pub(crate) fn try_execute_seq_scan(
     let mut state = PlanState::new(plan, Scope::empty());
     if let Some(select) = aggregate {
         AggregateExecutor {
+            read_ctx,
+            source,
+            fields,
+            tys,
+            select,
+        }
+        .execute(&mut state)
+        .map(Some)
+    } else if let Some(select) = project_set {
+        ProjectSetExecutor {
             read_ctx,
             source,
             fields,
@@ -173,6 +184,7 @@ struct SeqScanPlan {
     order_by: Vec<crabka_pgparser::ast::OrderItem>,
     sort_positions: Vec<usize>,
     aggregate: Option<SelectStmt>,
+    project_set: Option<SelectStmt>,
 }
 
 fn plan_seq_scan(
@@ -248,7 +260,14 @@ fn plan_seq_scan(
     )?
     .scope;
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
-    if crate::srf::exprs_contain_srf(&exprs) {
+    let project_set = crate::srf::exprs_contain_srf(&exprs);
+    if project_set
+        && (aggregate
+            || !matches!(select.distinct, DistinctClause::All)
+            || !select.order_by.is_empty()
+            || select.limit.is_some()
+            || select.offset.is_some())
+    {
         return Ok(None);
     }
     let target_list = bind_target_list(&exprs, &fields, &scope)?;
@@ -284,7 +303,7 @@ fn plan_seq_scan(
         node: PlanNode::SeqScan { scanrelid: 1 },
     };
     let filter = Plan {
-        target_list: if aggregate {
+        target_list: if aggregate || project_set {
             Vec::new()
         } else {
             target_list.clone()
@@ -296,7 +315,7 @@ fn plan_seq_scan(
     };
     let aggregate = if aggregate {
         Plan {
-            target_list,
+            target_list: target_list.clone(),
             quals: Vec::new(),
             node: PlanNode::Aggregate {
                 input: Box::new(filter),
@@ -305,16 +324,27 @@ fn plan_seq_scan(
     } else {
         filter
     };
-    let unique = if distinct {
+    let project_set = if project_set {
         Plan {
-            target_list: Vec::new(),
+            target_list: target_list.clone(),
             quals: Vec::new(),
-            node: PlanNode::Unique {
+            node: PlanNode::ProjectSet {
                 input: Box::new(aggregate),
             },
         }
     } else {
         aggregate
+    };
+    let unique = if distinct {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Unique {
+                input: Box::new(project_set),
+            },
+        }
+    } else {
+        project_set
     };
     let sort = if select.order_by.is_empty() {
         unique
@@ -348,6 +378,7 @@ fn plan_seq_scan(
         order_by: select.order_by.clone(),
         sort_positions,
         aggregate: needs_aggregate_node(select).then(|| select.clone()),
+        project_set: crate::srf::exprs_contain_srf(&exprs).then(|| select.clone()),
     }))
 }
 
@@ -584,6 +615,46 @@ impl Executor for AggregateExecutor<'_, '_> {
         let rows = crate::agg::aggregate_rows_with_memory(
             &self.select,
             &relation.scope,
+            relation.rows,
+            self.read_ctx.eval_ctx,
+            &self.read_ctx.statement_memory,
+        )?;
+        state.scope = exec::projected_scope(&self.fields, &self.tys);
+        for _ in &rows {
+            state.emit_row();
+        }
+        Ok(Relation {
+            scope: state.scope.clone(),
+            rows,
+        })
+    }
+}
+
+struct ProjectSetExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+    fields: Vec<crabka_pgwire::engine::FieldDescription>,
+    tys: Vec<crabka_pgtypes::ColumnType>,
+    select: SelectStmt,
+}
+
+impl Executor for ProjectSetExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        let PlanNode::ProjectSet { input } = &state.plan.node else {
+            return Err(ExecError::Unsupported(
+                "ProjectSetExecutor received a non-ProjectSet plan".into(),
+            ));
+        };
+        crate::session::check_query_canceled()?;
+        let mut child = PlanState::new((**input).clone(), Scope::empty());
+        let relation = execute_filter_input(&mut child, self.read_ctx, self.source.clone())?;
+        let (_, exprs, _) = exec::resolve_projection(&self.select.projection, &relation.scope)?;
+        state.begin_loop();
+        let rows = crate::srf::project_rows_ordered_with_memory(
+            &self.select,
+            &relation.scope,
+            &self.fields,
+            &exprs,
             relation.rows,
             self.read_ctx.eval_ctx,
             &self.read_ctx.statement_memory,

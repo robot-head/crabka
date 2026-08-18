@@ -16905,6 +16905,25 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(2)],
             ]
         );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of("SELECT a, generate_series(1, 2) FROM seq_scan_test WHERE a = 1"),
+        )
+        .expect("ProjectSet plan executes")
+        .expect("stored-table SRF uses ProjectSet");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(1),
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2),
+                ],
+            ]
+        );
         for sql in [
             "SELECT a FROM seq_scan_test HAVING true",
             "SELECT row_number() OVER () FROM seq_scan_test",
