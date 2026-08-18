@@ -4305,6 +4305,124 @@ mod tests {
         assert!(worker.join().is_ok());
     }
 
+    #[test]
+    fn set_functions_require_plpgsql_and_reject_distinct() {
+        let kv = std::sync::Arc::new(MemKv::default());
+        define(
+            kv.as_ref(),
+            "CREATE FUNCTION sql_set() RETURNS SETOF int LANGUAGE sql AS 'SELECT 1'",
+        )
+        .expect("definition");
+        define(
+            kv.as_ref(),
+            "CREATE FUNCTION plpgsql_set() RETURNS SETOF int LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN NEXT 1; END $$",
+        )
+        .expect("definition");
+        let catalog: std::sync::Arc<dyn crabka_pgkv::Kv> = kv;
+        let call = |name: &str, distinct| FuncCall {
+            sql_syntax: false,
+            name: name.into(),
+            distinct,
+            args: FuncArgs::Exprs(Vec::new()),
+            order_by: Vec::new(),
+            filter: None,
+        };
+
+        with_scalar_runtime(&catalog, None, || {
+            let sql_call = call("sql_set", false);
+            let error = plpgsql_set_result_type(&sql_call, &crate::scope::Scope::empty())
+                .expect("user routine")
+                .expect_err("SQL function is not a PL/pgSQL ProjectSet call");
+            assert!(sqlstate(&error) == "42883");
+            let error = eval_plpgsql_set_function(
+                &sql_call,
+                &crate::scope::Scope::empty(),
+                &[],
+                &crate::clock::EvalCtx::test_default(),
+            )
+            .expect("user routine")
+            .expect_err("SQL function is not a PL/pgSQL ProjectSet call");
+            assert!(sqlstate(&error) == "42883");
+
+            let distinct_call = call("plpgsql_set", true);
+            let error = eval_plpgsql_set_function(
+                &distinct_call,
+                &crate::scope::Scope::empty(),
+                &[],
+                &crate::clock::EvalCtx::test_default(),
+            )
+            .expect("user routine")
+            .expect_err("DISTINCT is rejected before dispatch");
+            assert!(
+                error.into_pg().message
+                    == "FILTER or DISTINCT is not allowed for function plpgsql_set"
+            );
+        });
+    }
+
+    #[test]
+    fn strict_set_functions_only_short_circuit_for_null_arguments() {
+        let kv = std::sync::Arc::new(MemKv::default());
+        define(
+            kv.as_ref(),
+            "CREATE FUNCTION strict_set(a int) RETURNS SETOF int LANGUAGE plpgsql STRICT AS \
+             $$ BEGIN RETURN NEXT a; END $$",
+        )
+        .expect("definition");
+        let catalog: std::sync::Arc<dyn crabka_pgkv::Kv> = kv;
+        let call = FuncCall {
+            sql_syntax: false,
+            name: "strict_set".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(vec![Expr::Const {
+                value: Datum::Int4(1),
+                ty: ColumnType::Int4,
+            }]),
+            order_by: Vec::new(),
+            filter: None,
+        };
+        let error = with_scalar_runtime(&catalog, None, || {
+            eval_plpgsql_set_function(
+                &call,
+                &crate::scope::Scope::empty(),
+                &[],
+                &crate::clock::EvalCtx::test_default(),
+            )
+            .expect("user routine")
+            .expect_err("a non-NULL strict call reaches the session executor")
+        });
+        assert!(error.into_pg().message == "PL/pgSQL table function requires a session executor");
+    }
+
+    #[test]
+    fn select_list_set_results_require_exactly_one_declared_column() {
+        let one_table = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION one_table() RETURNS TABLE(a int) LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN NEXT 1; END $$",
+        );
+        let two_table = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION two_table() RETURNS TABLE(a int, b text) LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN QUERY SELECT 1, 'x'; END $$",
+        );
+        let one_output = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION one_output(OUT a int) LANGUAGE plpgsql AS $$ BEGIN a := 1; END $$",
+        );
+        let two_output = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION two_output(OUT a int, OUT b text) LANGUAGE plpgsql AS \
+             $$ BEGIN a := 1; b := 'x'; END $$",
+        );
+
+        assert!(single_set_result_column(&one_table, &[]) == Some(("a".into(), ColumnType::Int4)));
+        assert!(single_set_result_column(&two_table, &[]).is_none());
+        assert!(single_set_result_column(&one_output, &[]) == Some(("a".into(), ColumnType::Int4)));
+        assert!(single_set_result_column(&two_output, &[]).is_none());
+    }
+
     fn sqlstate(error: &ExecError) -> String {
         error.clone().into_pg().code
     }

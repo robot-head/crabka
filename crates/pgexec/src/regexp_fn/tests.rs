@@ -118,6 +118,14 @@ fn are_word_boundaries_and_absolute_anchors_translate_to_regex_assertions() {
 }
 
 #[test]
+fn are_anchor_escapes_stay_literal_inside_character_classes() {
+    assert_eq!(
+        super::translate_are_anchors(r"[\m\M\y\Y\Z]\m"),
+        r"[\m\M\y\Y\Z]\b{start}"
+    );
+}
+
+#[test]
 fn regexp_count_counts_non_overlapping_matches() {
     let cases = [
         ("regexp_count('aaa', 'a')", "3"),

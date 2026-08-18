@@ -2467,6 +2467,16 @@ mod tests {
         assert!(error.code == "53200");
     }
 
+    #[test]
+    fn expansion_rows_charge_statement_memory() {
+        let statement_memory = crate::scanner::StatementMemory::new(crabka_units::bytes(1));
+        let error = ensure_expansion_fits(&[vec![Datum::Int4(1)]], &statement_memory)
+            .expect_err("expansion rows must consume the statement budget")
+            .into_pg();
+
+        assert!(error.code == "53200");
+    }
+
     fn single_column(name: &str, args: &[Expr]) -> Result<Vec<Datum>, ExecError> {
         Ok(call(name, args)?
             .into_iter()
