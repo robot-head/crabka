@@ -863,17 +863,6 @@ fn plan_seq_scan(
         return Ok(None);
     }
     let aggregate = needs_aggregate_node(select);
-    if aggregate
-        && (matches!(
-            select.distinct,
-            DistinctClause::On(_) | DistinctClause::Distinct
-        ) || !select.order_by.is_empty()
-            || select.limit.is_some()
-            || select.offset.is_some()
-            || select.grouping.is_some())
-    {
-        return Ok(None);
-    }
     if !aggregate && matches!(select.distinct, DistinctClause::On(_)) {
         return Ok(None);
     }
@@ -999,16 +988,6 @@ fn plan_seq_scan(
             required_relids: BTreeSet::from([1]),
         })
         .collect();
-    let order_keys =
-        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
-    let mut sort_positions = Vec::with_capacity(order_keys.len());
-    for key in order_keys {
-        let exec::SelectOrderKey::Output(index) = key else {
-            return Ok(None);
-        };
-        crate::eval::require_ordering_operator(tys[index])?;
-        sort_positions.push(index);
-    }
     let scan = Plan {
         target_list: Vec::new(),
         quals: Vec::new(),
@@ -1024,27 +1003,48 @@ fn plan_seq_scan(
             input: Box::new(scan),
         },
     };
-    let aggregate_plan = if aggregate {
-        Plan {
-            target_list: target_list.clone(),
-            quals: Vec::new(),
-            node: PlanNode::Aggregate {
-                input: Box::new(filter),
+    if aggregate {
+        return Ok(Some(SeqScanPlan {
+            plan: Plan {
+                target_list,
+                quals: Vec::new(),
+                node: PlanNode::Aggregate {
+                    input: Box::new(filter),
+                },
             },
-        }
-    } else {
-        filter
-    };
+            source: source.clone(),
+            fields,
+            tys,
+            limit: select.limit.clone(),
+            offset: select.offset.clone(),
+            order_by: select.order_by.clone(),
+            sort_positions: Vec::new(),
+            with_ties: select.with_ties,
+            aggregate: Some(select.clone()),
+            project_set: None,
+            window: None,
+        }));
+    }
+    let order_keys =
+        exec::resolve_select_order_keys(&select.order_by, &scope, &fields, &exprs, false)?;
+    let mut sort_positions = Vec::with_capacity(order_keys.len());
+    for key in order_keys {
+        let exec::SelectOrderKey::Output(index) = key else {
+            return Ok(None);
+        };
+        crate::eval::require_ordering_operator(tys[index])?;
+        sort_positions.push(index);
+    }
     let project_set_plan = if project_set {
         Plan {
             target_list: target_list.clone(),
             quals: Vec::new(),
             node: PlanNode::ProjectSet {
-                input: Box::new(aggregate_plan),
+                input: Box::new(filter),
             },
         }
     } else {
-        aggregate_plan
+        filter
     };
     let unique = if distinct {
         Plan {
@@ -1088,7 +1088,7 @@ fn plan_seq_scan(
         offset: select.offset.clone(),
         order_by: select.order_by.clone(),
         sort_positions,
-        aggregate: needs_aggregate_node(select).then(|| select.clone()),
+        aggregate: None,
         project_set: crate::srf::exprs_contain_srf(&exprs).then(|| select.clone()),
         with_ties: select.with_ties,
         window: None,
@@ -2702,7 +2702,7 @@ impl Executor for AggregateExecutor<'_, '_> {
         let mut child = PlanState::new((**input).clone(), Scope::empty());
         let relation = execute_filter_input(&mut child, self.read_ctx, self.source.clone())?;
         state.begin_loop();
-        let rows = crate::agg::aggregate_rows_with_memory(
+        let rows = crate::grouping::aggregate_rows_with_memory(
             &self.select,
             &relation.scope,
             relation.rows,

@@ -16904,7 +16904,6 @@ mod tests {
             ]
         );
         for sql in [
-            "SELECT count(*) FROM seq_scan_test LIMIT 1",
             "SELECT generate_series(1, 2), row_number() OVER () FROM seq_scan_test",
             "SELECT DISTINCT a, row_number() OVER () FROM seq_scan_test",
             "SELECT a, row_number() OVER () FROM seq_scan_test ORDER BY 1",
@@ -16920,6 +16919,39 @@ mod tests {
                 "{sql}"
             );
         }
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT a, count(*) AS n FROM seq_scan_test \
+                 GROUP BY a ORDER BY n DESC LIMIT 1",
+            ),
+        )
+        .expect("aggregate tail plan executes")
+        .expect("stored table aggregate tail uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(2),
+                crabka_pgtypes::Datum::Int8(2),
+            ]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT a, count(*) FROM seq_scan_test \
+                 GROUP BY ROLLUP (a) ORDER BY a NULLS LAST",
+            ),
+        )
+        .expect("grouping-set Aggregate plan executes")
+        .expect("stored table grouping set uses Aggregate");
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
+                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
+                vec![crabka_pgtypes::Datum::Null, crabka_pgtypes::Datum::Int8(3)],
+            ]
+        );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
