@@ -910,9 +910,9 @@ pub(crate) fn render_with_rows(
 ) -> Vec<String> {
     match options.format {
         ExplainFormat::Text => render_text(node, options, actual_rows),
-        ExplainFormat::Json => vec![render_json(node)],
-        ExplainFormat::Yaml => vec![render_yaml(node)],
-        ExplainFormat::Xml => vec![render_xml(node)],
+        ExplainFormat::Json => vec![render_json(node, options, actual_rows)],
+        ExplainFormat::Yaml => vec![render_yaml(node, options, actual_rows)],
+        ExplainFormat::Xml => vec![render_xml(node, options, actual_rows)],
     }
 }
 
@@ -942,12 +942,7 @@ fn render_text_node(
     if options.costs {
         headline.push_str(" (cost=0.00..0.00 rows=0 width=0)");
     }
-    if options.analyze {
-        let actual = node.actual.unwrap_or(PlanActual {
-            rows: u64::try_from(if root { actual_rows } else { 0 }).expect("row count fits u64"),
-            loops: 1,
-            rows_removed: 0,
-        });
+    if let Some(actual) = explain_actual(node, options, actual_rows, root) {
         if actual.loops == 0 {
             headline.push_str(" (never executed)");
         } else {
@@ -975,13 +970,13 @@ fn render_text_node(
     }
 }
 
-fn render_json(node: &PlanNode) -> String {
+fn render_json(node: &PlanNode, options: &ExplainOptions, actual_rows: usize) -> String {
     let mut lines = vec![
         "[".to_string(),
         "  {".to_string(),
         "    \"Plan\": {".to_string(),
     ];
-    json_node(node, 6, &mut lines);
+    json_node(node, options, actual_rows, true, 6, &mut lines);
     lines.push("    }".to_string());
     lines.push("  }".to_string());
     lines.push("]".to_string());
@@ -989,7 +984,14 @@ fn render_json(node: &PlanNode) -> String {
 }
 
 /// Emit one plan node's JSON body (without its enclosing braces) at `indent`.
-fn json_node(node: &PlanNode, indent: usize, lines: &mut Vec<String>) {
+fn json_node(
+    node: &PlanNode,
+    options: &ExplainOptions,
+    actual_rows: usize,
+    root: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
     let pad = " ".repeat(indent);
     let mut fields = vec![
         format!("{pad}\"Node Type\": \"{}\"", json_escape(&node.node_type)),
@@ -1005,6 +1007,16 @@ fn json_node(node: &PlanNode, indent: usize, lines: &mut Vec<String>) {
         fields.push(format!("{pad}\"Alias\": \"{}\"", json_escape(&alias)));
     }
     fields.push(format!("{pad}\"Disabled\": false"));
+    if let Some(actual) = explain_actual(node, options, actual_rows, root) {
+        fields.push(format!("{pad}\"Actual Rows\": {}", actual.rows));
+        fields.push(format!("{pad}\"Actual Loops\": {}", actual.loops));
+        if actual.rows_removed > 0 {
+            fields.push(format!(
+                "{pad}\"Rows Removed by Filter\": {}",
+                actual.rows_removed
+            ));
+        }
+    }
     for (key, value) in &node.details {
         fields.push(format!(
             "{pad}\"{}\": \"{}\"",
@@ -1027,7 +1039,7 @@ fn json_node(node: &PlanNode, indent: usize, lines: &mut Vec<String>) {
     let child_last = node.children.len() - 1;
     for (index, child) in node.children.iter().enumerate() {
         lines.push(format!("{pad}  {{"));
-        json_node(child, indent + 4, lines);
+        json_node(child, options, actual_rows, false, indent + 4, lines);
         lines.push(format!(
             "{pad}  }}{}",
             if index == child_last { "" } else { "," }
@@ -1040,13 +1052,20 @@ fn json_escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn render_yaml(node: &PlanNode) -> String {
+fn render_yaml(node: &PlanNode, options: &ExplainOptions, actual_rows: usize) -> String {
     let mut lines = vec!["- Plan:".to_string()];
-    yaml_node(node, 4, &mut lines);
+    yaml_node(node, options, actual_rows, true, 4, &mut lines);
     lines.join("\n")
 }
 
-fn yaml_node(node: &PlanNode, indent: usize, lines: &mut Vec<String>) {
+fn yaml_node(
+    node: &PlanNode,
+    options: &ExplainOptions,
+    actual_rows: usize,
+    root: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
     let pad = " ".repeat(indent);
     lines.push(format!("{pad}Node Type: \"{}\"", node.node_type));
     lines.push(format!("{pad}Parallel Aware: false"));
@@ -1057,29 +1076,43 @@ fn yaml_node(node: &PlanNode, indent: usize, lines: &mut Vec<String>) {
         lines.push(format!("{pad}Alias: \"{alias}\""));
     }
     lines.push(format!("{pad}Disabled: false"));
+    if let Some(actual) = explain_actual(node, options, actual_rows, root) {
+        lines.push(format!("{pad}Actual Rows: {}", actual.rows));
+        lines.push(format!("{pad}Actual Loops: {}", actual.loops));
+        if actual.rows_removed > 0 {
+            lines.push(format!("{pad}Rows Removed by Filter: {}", actual.rows_removed));
+        }
+    }
     for (key, value) in &node.details {
         lines.push(format!("{pad}{key}: \"{value}\""));
     }
     if !node.children.is_empty() {
         lines.push(format!("{pad}Plans:"));
         for child in &node.children {
-            yaml_node(child, indent + 4, lines);
+            yaml_node(child, options, actual_rows, false, indent + 4, lines);
         }
     }
 }
 
-fn render_xml(node: &PlanNode) -> String {
+fn render_xml(node: &PlanNode, options: &ExplainOptions, actual_rows: usize) -> String {
     let mut lines = vec![
         "<explain xmlns=\"http://www.postgresql.org/2009/explain\">".to_string(),
         "  <Query>".to_string(),
     ];
-    xml_node(node, 4, &mut lines);
+    xml_node(node, options, actual_rows, true, 4, &mut lines);
     lines.push("  </Query>".to_string());
     lines.push("</explain>".to_string());
     lines.join("\n")
 }
 
-fn xml_node(node: &PlanNode, indent: usize, lines: &mut Vec<String>) {
+fn xml_node(
+    node: &PlanNode,
+    options: &ExplainOptions,
+    actual_rows: usize,
+    root: bool,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
     let pad = " ".repeat(indent);
     lines.push(format!("{pad}<Plan>"));
     let inner = " ".repeat(indent + 2);
@@ -1098,6 +1131,16 @@ fn xml_node(node: &PlanNode, indent: usize, lines: &mut Vec<String>) {
         lines.push(format!("{inner}<Alias>{}</Alias>", xml_escape(&alias)));
     }
     lines.push(format!("{inner}<Disabled>false</Disabled>"));
+    if let Some(actual) = explain_actual(node, options, actual_rows, root) {
+        lines.push(format!("{inner}<Actual-Rows>{}</Actual-Rows>", actual.rows));
+        lines.push(format!("{inner}<Actual-Loops>{}</Actual-Loops>", actual.loops));
+        if actual.rows_removed > 0 {
+            lines.push(format!(
+                "{inner}<Rows-Removed-by-Filter>{}</Rows-Removed-by-Filter>",
+                actual.rows_removed
+            ));
+        }
+    }
     for (key, value) in &node.details {
         let tag = key.replace(' ', "-");
         lines.push(format!(
@@ -1109,7 +1152,7 @@ fn xml_node(node: &PlanNode, indent: usize, lines: &mut Vec<String>) {
     if !node.children.is_empty() {
         lines.push(format!("{inner}<Plans>"));
         for child in &node.children {
-            xml_node(child, indent + 4, lines);
+            xml_node(child, options, actual_rows, false, indent + 4, lines);
         }
         lines.push(format!("{inner}</Plans>"));
     }
@@ -1120,6 +1163,22 @@ fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+fn explain_actual(
+    node: &PlanNode,
+    options: &ExplainOptions,
+    actual_rows: usize,
+    root: bool,
+) -> Option<PlanActual> {
+    options.analyze.then(|| {
+        node.actual.unwrap_or(PlanActual {
+            rows: u64::try_from(if root { actual_rows } else { 0 })
+                .expect("row count fits u64"),
+            loops: 1,
+            rows_removed: 0,
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1218,6 +1277,38 @@ mod tests {
                     "  ->  Seq Scan (actual rows=3.00 loops=1)",
                 ]
         );
+
+        let runtime = plan_runtime_state(&state);
+        let json = render_with_rows(
+            &runtime,
+            &ExplainOptions {
+                format: ExplainFormat::Json,
+                ..options.clone()
+            },
+            0,
+        );
+        assert!(json[0].contains("\"Actual Rows\": 2"));
+        assert!(json[0].contains("\"Rows Removed by Filter\": 1"));
+
+        let yaml = render_with_rows(
+            &runtime,
+            &ExplainOptions {
+                format: ExplainFormat::Yaml,
+                ..options.clone()
+            },
+            0,
+        );
+        assert!(yaml[0].contains("Actual Loops: 1"));
+
+        let xml = render_with_rows(
+            &runtime,
+            &ExplainOptions {
+                format: ExplainFormat::Xml,
+                ..options
+            },
+            0,
+        );
+        assert!(xml[0].contains("<Actual-Rows>2</Actual-Rows>"));
     }
 
     #[test]
