@@ -56,6 +56,10 @@ enum DtFunc {
     IsFinite,
     /// `date_bin(stride, source, origin)`: snap `source` to a stride grid.
     DateBin,
+    /// `date_add(timestamptz, interval [, zone])`.
+    DateAdd,
+    /// `date_subtract(timestamptz, interval [, zone])`.
+    DateSubtract,
 }
 
 /// Classify a lowercased function name. The lexer lowercases unquoted idents.
@@ -76,6 +80,8 @@ fn datetime_func(name: &str) -> Option<DtFunc> {
         "timezone" => DtFunc::Timezone,
         "isfinite" => DtFunc::IsFinite,
         "date_bin" => DtFunc::DateBin,
+        "date_add" => DtFunc::DateAdd,
+        "date_subtract" => DtFunc::DateSubtract,
         _ => return None,
     })
 }
@@ -190,6 +196,10 @@ pub(crate) fn datetime_func_result_type(
         DtFunc::DateBin => {
             require_arity(fc, n == 3)?;
             crate::eval::infer_type(&args[1], scope)?
+        }
+        DtFunc::DateAdd | DtFunc::DateSubtract => {
+            require_arity(fc, n == 2 || n == 3)?;
+            ColumnType::Timestamptz
         }
     })
 }
@@ -328,6 +338,33 @@ pub(crate) fn eval_datetime(
                     value: v.clone(),
                 })
             })?))
+        }
+        // ---- date_add / date_subtract ----
+        DtFunc::DateAdd | DtFunc::DateSubtract => {
+            require_arity(fc, args.len() == 2 || args.len() == 3)?;
+            let value = eval_child(&args[0])?;
+            let interval = eval_child(&args[1])?;
+            let zone = args.get(2).map(&mut eval_child).transpose()?;
+            if value.is_null() || interval.is_null() || zone.as_ref().is_some_and(Datum::is_null) {
+                return Ok(Datum::Null);
+            }
+            let (Datum::Timestamptz(value), Datum::Interval(interval)) = (&value, &interval)
+            else {
+                return Err(undefined_function(&fc.name));
+            };
+            let tz = match zone.as_ref() {
+                Some(Datum::Text(_)) => zone_arg(zone.as_ref().expect("zone is present"))?,
+                Some(other) => return Err(type_error(&fc.name, other)),
+                None => ctx.time_zone.clone(),
+            };
+            let interval = match f {
+                DtFunc::DateAdd => *interval,
+                DtFunc::DateSubtract => crabka_pgtypes::datetime::neg_interval(*interval)?,
+                _ => unreachable!("only date_add and date_subtract reach this arm"),
+            };
+            Ok(Datum::Timestamptz(
+                crabka_pgtypes::datetime::timestamptz_plus_interval(*value, interval, &tz)?,
+            ))
         }
         // ---- date_trunc ----
         DtFunc::DateTrunc => {
@@ -1753,6 +1790,55 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn date_add_and_subtract_follow_the_selected_calendar_zone() {
+        let ctx = ctx_at("2024-01-15T12:00:00Z");
+        for (sql, expected) in [
+            (
+                "date_add(timestamptz '2022-10-30 00:00:00+01', interval '1 day')",
+                "2022-10-30T23:00:00Z",
+            ),
+            (
+                "date_add(timestamptz '2021-10-31 00:00:00+02', interval '1 day', 'Europe/Warsaw')",
+                "2021-10-31T23:00:00Z",
+            ),
+            (
+                "date_subtract(timestamptz '2022-10-30 00:00:00+01', interval '1 day')",
+                "2022-10-28T23:00:00Z",
+            ),
+            (
+                "date_subtract(timestamptz '2021-10-31 00:00:00+02', interval '1 day', 'Europe/Warsaw')",
+                "2021-10-29T22:00:00Z",
+            ),
+        ] {
+            assert_eq!(
+                ev(sql, &ctx),
+                Datum::Timestamptz(expected.parse().expect("instant")),
+                "{sql}"
+            );
+            assert_eq!(
+                crate::eval::infer_type(
+                    &crabka_pgparser::parser::parse_expr_for_test(sql).expect("parse"),
+                    &Scope::empty(),
+                )
+                .expect("type"),
+                ColumnType::Timestamptz,
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            ev("date_add(NULL::timestamptz, interval '1 day')", &ctx),
+            Datum::Null
+        );
+        assert_eq!(
+            ev(
+                "date_add(timestamptz '2024-01-15 12:00:00+00', interval '1 day', NULL::text)",
+                &ctx,
+            ),
+            Datum::Null
+        );
     }
 
     #[test]
