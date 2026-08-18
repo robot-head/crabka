@@ -16756,10 +16756,21 @@ mod tests {
                  CREATE FUNCTION planned_table_function() RETURNS TABLE (n int) \
                  LANGUAGE sql AS 'SELECT 1'; \
                  CREATE FUNCTION planned_values_function() RETURNS TABLE (n int) \
-                 LANGUAGE sql AS 'VALUES (1), (2)'",
+                 LANGUAGE sql AS 'VALUES (1), (2)'; \
+                 CREATE FUNCTION planned_plpgsql_function() RETURNS TABLE (n int) \
+                 LANGUAGE plpgsql AS $$ BEGIN RETURN NEXT 1; END $$",
             )
             .await
             .expect("seed table");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT n FROM planned_plpgsql_function()")
+                    .await
+                    .expect("PL/pgSQL table function executes through TableFunctionScan"),
+            ),
+            "1"
+        );
 
         let statements = crabka_pgparser::parse("SELECT a FROM seq_scan_test WHERE a > 1")
             .expect("query parses");
@@ -17380,6 +17391,21 @@ mod tests {
         .expect("TableFunctionScan Values plan executes")
         .expect("values table function source uses TableFunctionScan");
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
+        let plpgsql_function_select = select_of("SELECT n FROM planned_plpgsql_function()");
+        let planned = crate::plan::exec::function_scan_plan_for_test(
+            &read_ctx,
+            &plpgsql_function_select,
+            &plpgsql_function_select.from[0],
+        )
+        .expect("PL/pgSQL TableFunctionScan plans")
+        .expect("PL/pgSQL table function uses TableFunctionScan");
+        let crate::plan::query::PlanNode::Filter { input } = &planned.node else {
+            panic!("PL/pgSQL table function should plan a Filter");
+        };
+        assert!(
+            matches!(input.node, crate::plan::query::PlanNode::TableFunctionScan),
+            "PL/pgSQL table function should plan a TableFunctionScan"
+        );
         for (sql, expected) in [
             ("SELECT a FROM seq_scan_test LIMIT 1", vec![1]),
             ("SELECT a FROM seq_scan_test OFFSET 1", vec![2, 2]),

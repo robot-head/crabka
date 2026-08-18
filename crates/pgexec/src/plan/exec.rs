@@ -947,6 +947,7 @@ fn plan_function_scan(
     let TableExpr::Function {
         functions,
         lateral,
+        with_ordinality,
         alias,
         column_aliases,
         ..
@@ -977,24 +978,40 @@ fn plan_function_scan(
     }
     let table_function = crate::routine::expands_as_table(read_ctx.catalog_kv, functions);
     let scope = if table_function {
-        let (query, names) = crate::routine::table_function_expansion(read_ctx.catalog_kv, &functions[0])?;
-        let scope = match &query.body {
-            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
-                let Some(ResultPlan { fields, tys, .. }) = plan_result(inner)? else {
-                    return Ok(None);
-                };
-                exec::projected_scope(&fields, &tys)
-            }
-            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(values)) => {
-                crate::values::values_to_relation_with_ctes(read_ctx, values)?.scope
-            }
-            _ => return Ok(None),
-        };
-        crate::values::requalify_derived(
-            Relation { scope, rows: Vec::new() },
-            alias.as_deref().unwrap_or(&functions[0].name),
-            &column_aliases.clone().or(Some(names)),
-        )?.scope
+        if let Some((_, columns)) =
+            crate::routine::plpgsql_table_function_schema(read_ctx.catalog_kv, &functions[0])?
+        {
+            crate::srf::user_function_relation(
+                &functions[0].name,
+                columns,
+                Vec::new(),
+                *with_ordinality,
+                alias.as_deref(),
+                column_aliases,
+                functions[0].column_defs.as_deref(),
+            )?
+            .scope
+        } else {
+            let (query, names) =
+                crate::routine::table_function_expansion(read_ctx.catalog_kv, &functions[0])?;
+            let scope = match &query.body {
+                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
+                    let Some(ResultPlan { fields, tys, .. }) = plan_result(inner)? else {
+                        return Ok(None);
+                    };
+                    exec::projected_scope(&fields, &tys)
+                }
+                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(values)) => {
+                    crate::values::values_to_relation_with_ctes(read_ctx, values)?.scope
+                }
+                _ => return Ok(None),
+            };
+            crate::values::requalify_derived(
+                Relation { scope, rows: Vec::new() },
+                alias.as_deref().unwrap_or(&functions[0].name),
+                &column_aliases.clone().or(Some(names)),
+            )?.scope
+        }
     } else {
         crate::exec::build_from_schema_of_select(
             read_ctx.catalog_kv,
@@ -2027,58 +2044,74 @@ impl Executor for FunctionScanExecutor<'_, '_> {
         };
         state.begin_loop();
         let relation = if matches!(state.plan.node, PlanNode::TableFunctionScan) {
-            if *with_ordinality {
-                return Err(ExecError::Unsupported(
-                    "WITH ORDINALITY over a user-defined function is not supported".into(),
-                ));
-            }
-            let (query, names) =
-                crate::routine::table_function_expansion(self.read_ctx.catalog_kv, &functions[0])?;
-            let inner = match &query.body {
-                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
-                    select,
-                )) => {
-                    let Some(ResultPlan { plan, fields, tys }) = plan_result(select)? else {
-                        return Err(ExecError::Unsupported(
-                            "TableFunctionScan requires a Result function body".into(),
-                        ));
-                    };
-                    let mut child = PlanState::new(plan.clone(), Scope::empty());
-                    ResultExecutor {
-                        ctx: self.read_ctx.eval_ctx,
-                        fields,
-                        tys,
-                    }
-                    .execute(&mut child)?
-                }
-                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(
-                    values,
-                )) => {
-                    let plan = Plan {
-                        target_list: Vec::new(),
-                        quals: Vec::new(),
-                        node: PlanNode::ValuesScan,
-                    };
-                    let mut child = PlanState::new(plan.clone(), Scope::empty());
-                    ValuesExecutor {
-                        ctx: self.read_ctx,
-                        query: &query,
-                        values,
-                    }
-                    .execute(&mut child)?
-                }
-                _ => {
+            if let Some((columns, rows)) =
+                crate::routine::eval_plpgsql_table_function(&functions[0], self.read_ctx.eval_ctx)?
+            {
+                crate::srf::user_function_relation(
+                    &functions[0].name,
+                    columns,
+                    rows,
+                    *with_ordinality,
+                    alias.as_deref(),
+                    column_aliases,
+                    functions[0].column_defs.as_deref(),
+                )?
+            } else {
+                if *with_ordinality {
                     return Err(ExecError::Unsupported(
-                        "TableFunctionScan requires a simple query body".into(),
+                        "WITH ORDINALITY over a user-defined function is not supported".into(),
                     ));
                 }
-            };
-            let columns = column_aliases.clone().or(Some(names));
-            crate::values::requalify_derived(
-                inner,
-                alias.as_deref().unwrap_or(&functions[0].name),
-                &columns,
-            )?
+                let (query, names) = crate::routine::table_function_expansion(
+                    self.read_ctx.catalog_kv,
+                    &functions[0],
+                )?;
+                let inner = match &query.body {
+                    crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
+                        select,
+                    )) => {
+                        let Some(ResultPlan { plan, fields, tys }) = plan_result(select)? else {
+                            return Err(ExecError::Unsupported(
+                                "TableFunctionScan requires a Result function body".into(),
+                            ));
+                        };
+                        let mut child = PlanState::new(plan.clone(), Scope::empty());
+                        ResultExecutor {
+                            ctx: self.read_ctx.eval_ctx,
+                            fields,
+                            tys,
+                        }
+                        .execute(&mut child)?
+                    }
+                    crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(
+                        values,
+                    )) => {
+                        let plan = Plan {
+                            target_list: Vec::new(),
+                            quals: Vec::new(),
+                            node: PlanNode::ValuesScan,
+                        };
+                        let mut child = PlanState::new(plan.clone(), Scope::empty());
+                        ValuesExecutor {
+                            ctx: self.read_ctx,
+                            query: &query,
+                            values,
+                        }
+                        .execute(&mut child)?
+                    }
+                    _ => {
+                        return Err(ExecError::Unsupported(
+                            "TableFunctionScan requires a simple query body".into(),
+                        ));
+                    }
+                };
+                let columns = column_aliases.clone().or(Some(names));
+                crate::values::requalify_derived(
+                    inner,
+                    alias.as_deref().unwrap_or(&functions[0].name),
+                    &columns,
+                )?
+            }
         } else {
             crate::srf::from_item_with_memory(
                 functions,
