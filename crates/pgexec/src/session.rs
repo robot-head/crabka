@@ -17031,6 +17031,30 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
+                "SELECT v FROM JSON_TABLE(jsonb '[1,2]', '$[*]' COLUMNS (v int PATH '$')) \
+                 WHERE v > 1",
+            ),
+        )
+        .expect("TableFunctionScan JSON_TABLE plan executes")
+        .expect("non-correlated JSON_TABLE uses TableFunctionScan");
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
+                "SELECT a, v FROM seq_scan_test, \
+                 JSON_TABLE(jsonb '[1,2]', '$[*]' COLUMNS (v int PATH '$')) \
+                 WHERE a = 1 AND v > 1",
+            ),
+        )
+        .expect("NestedLoop JSON_TABLE plan executes")
+        .expect("stored table and JSON_TABLE source use NestedLoop");
+        assert_eq!(
+            relation.rows,
+            vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)]]
+        );
+        let relation = crate::plan::exec::try_execute_seq_scan(
+            &read_ctx,
+            &select_of(
                 "SELECT a, n FROM seq_scan_test, (VALUES (1), (2)) AS derived(n) \
                  WHERE a = 1 ORDER BY n",
             ),

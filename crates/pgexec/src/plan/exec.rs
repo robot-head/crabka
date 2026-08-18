@@ -458,6 +458,15 @@ fn is_nested_loop_source(
         TableExpr::Derived { .. } => {
             matches!(plan_subquery_input(read_ctx, source), Ok(Some(_)))
         }
+        TableExpr::JsonTable(table) => {
+            !table.lateral && table.exprs().into_iter().all(|expr| {
+                let mut references_column = false;
+                crate::grouping::visit_expr(expr, &mut |node| {
+                    references_column |= matches!(node, crabka_pgparser::ast::Expr::Column { .. });
+                });
+                !references_column
+            })
+        }
         TableExpr::Join {
             left,
             right,
@@ -472,13 +481,12 @@ fn is_nested_loop_source(
                         if crate::agg::contains_aggregate(expr)
                 )
         }
-        _ => false,
     }
 }
 
 fn nested_loop_function_count(source: &TableExpr) -> usize {
     match source {
-        TableExpr::Function { .. } => 1,
+        TableExpr::Function { .. } | TableExpr::JsonTable(_) => 1,
         TableExpr::Join { left, right, .. } => {
             nested_loop_function_count(left) + nested_loop_function_count(right)
         }
@@ -488,14 +496,16 @@ fn nested_loop_function_count(source: &TableExpr) -> usize {
 
 fn collect_nested_loop_sources(source: &TableExpr, sources: &mut Vec<TableExpr>) {
     match source {
-        TableExpr::Table { .. } | TableExpr::Function { .. } | TableExpr::Derived { .. } => {
+        TableExpr::Table { .. }
+        | TableExpr::Function { .. }
+        | TableExpr::Derived { .. }
+        | TableExpr::JsonTable(_) => {
             sources.push(source.clone());
         }
         TableExpr::Join { left, right, .. } => {
             collect_nested_loop_sources(left, sources);
             collect_nested_loop_sources(right, sources);
         }
-        _ => unreachable!("nested loop sources were validated before planning"),
     }
 }
 
@@ -543,6 +553,11 @@ fn plan_nested_loop_source(
                 PlanNode::FunctionScan
             },
         }),
+        TableExpr::JsonTable(_) => Some(Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::TableFunctionScan,
+        }),
         TableExpr::Derived { .. } => {
             plan_subquery_input(read_ctx, source)
                 .ok()
@@ -570,7 +585,6 @@ fn plan_nested_loop_source(
                 constraint: constraint.clone(),
             },
         }),
-        _ => None,
     }
 }
 
@@ -797,7 +811,7 @@ fn plan_seq_scan(
     let [source] = select.from.as_slice() else {
         return Ok(None);
     };
-    if matches!(source, TableExpr::Function { .. }) {
+    if matches!(source, TableExpr::Function { .. } | TableExpr::JsonTable(_)) {
         return plan_function_scan(read_ctx, select, source);
     }
     if matches!(source, TableExpr::Derived { .. }) {
@@ -1054,20 +1068,17 @@ fn plan_function_scan(
     select: &SelectStmt,
     source: &TableExpr,
 ) -> Result<Option<SeqScanPlan>, ExecError> {
-    let TableExpr::Function {
-        functions,
-        lateral,
-        with_ordinality,
-        alias,
-        column_aliases,
-        ..
-    } = source
-    else {
-        return Ok(None);
+    let (table_function, lateral) = match source {
+        TableExpr::Function { functions, lateral, .. } => (
+            crate::routine::expands_as_table(read_ctx.catalog_kv, functions),
+            *lateral,
+        ),
+        TableExpr::JsonTable(table) => (true, table.lateral),
+        _ => return Ok(None),
     };
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
-    if *lateral
+    if lateral
         || matches!(select.distinct, DistinctClause::On(_))
         || (!aggregate && crate::grouping::is_grouping_query(select))
         || (window
@@ -1086,8 +1097,15 @@ fn plan_function_scan(
     {
         return Ok(None);
     }
-    let table_function = crate::routine::expands_as_table(read_ctx.catalog_kv, functions);
-    let scope = if table_function {
+    let scope = if let TableExpr::Function {
+        functions,
+        with_ordinality,
+        alias,
+        column_aliases,
+        ..
+    } = source
+        && table_function
+    {
         if let Some((_, columns)) =
             crate::routine::plpgsql_table_function_schema(read_ctx.catalog_kv, &functions[0])?
         {
@@ -2159,6 +2177,20 @@ impl Executor for FunctionScanExecutor<'_, '_> {
             ));
         }
         crate::session::check_query_canceled()?;
+        if let TableExpr::JsonTable(table) = &self.source {
+            if !matches!(state.plan.node, PlanNode::TableFunctionScan) {
+                return Err(ExecError::Unsupported(
+                    "JSON_TABLE requires a TableFunctionScan plan".into(),
+                ));
+            }
+            state.begin_loop();
+            let relation = crate::jsontable::from_item(table, self.read_ctx.eval_ctx)?;
+            state.scope = relation.scope.clone();
+            for _ in &relation.rows {
+                state.emit_row();
+            }
+            return Ok(relation);
+        }
         let TableExpr::Function {
             functions,
             with_ordinality,
