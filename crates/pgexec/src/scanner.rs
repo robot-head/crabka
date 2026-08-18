@@ -2695,7 +2695,7 @@ mod streaming_aggregate_tests {
         let rows = int_rows(2500);
         let whole_table_bytes = rows
             .iter()
-            .map(|row| std::mem::size_of::<ScannedRow>() + super::datum_row_bytes(&row.row))
+            .map(|row| super::datum_row_bytes(&row.row))
             .sum::<usize>();
         // A budget the whole table exceeds but a single 1024-row page does not:
         // the streaming fold must succeed exactly where whole-table collection fails.
