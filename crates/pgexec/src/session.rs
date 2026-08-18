@@ -16749,7 +16749,7 @@ mod tests {
         let mut session = engine.connect();
         session
             .simple_query(
-                "CREATE TABLE seq_scan_test (a int); INSERT INTO seq_scan_test VALUES (1), (2)",
+                "CREATE TABLE seq_scan_test (a int); INSERT INTO seq_scan_test VALUES (1), (2), (2)",
             )
             .await
             .expect("seed table");
@@ -16807,7 +16807,13 @@ mod tests {
         let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &select)
             .expect("plan executes")
             .expect("stored-table shape uses SeqScan");
-        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(2)]]);
+        assert_eq!(
+            relation.rows,
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(2)],
+                vec![crabka_pgtypes::Datum::Int4(2)],
+            ]
+        );
 
         let select_of = |sql: &str| {
             let statements = crabka_pgparser::parse(sql).expect(sql);
@@ -16830,10 +16836,15 @@ mod tests {
         };
         for (sql, expected) in [
             ("SELECT a FROM seq_scan_test LIMIT 1", vec![1]),
-            ("SELECT a FROM seq_scan_test OFFSET 1", vec![2]),
-            ("SELECT a FROM seq_scan_test ORDER BY a DESC", vec![2, 1]),
+            ("SELECT a FROM seq_scan_test OFFSET 1", vec![2, 2]),
+            ("SELECT DISTINCT a FROM seq_scan_test", vec![1, 2]),
+            ("SELECT a FROM seq_scan_test ORDER BY a DESC", vec![2, 2, 1]),
             (
                 "SELECT a FROM seq_scan_test ORDER BY a DESC LIMIT 1",
+                vec![2],
+            ),
+            (
+                "SELECT DISTINCT a FROM seq_scan_test ORDER BY a DESC LIMIT 1",
                 vec![2],
             ),
         ] {
@@ -16849,7 +16860,6 @@ mod tests {
             );
         }
         for sql in [
-            "SELECT DISTINCT a FROM seq_scan_test",
             "SELECT count(*) FROM seq_scan_test",
             "SELECT a FROM seq_scan_test GROUP BY a",
             "SELECT a FROM seq_scan_test HAVING true",

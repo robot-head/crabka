@@ -171,7 +171,7 @@ fn plan_seq_scan(
     if !crate::exec::is_direct_stored_base_table(read_ctx, source) {
         return Ok(None);
     }
-    if !matches!(select.distinct, DistinctClause::All) {
+    if matches!(select.distinct, DistinctClause::On(_)) {
         return Ok(None);
     }
     if select.with_ties {
@@ -219,6 +219,12 @@ fn plan_seq_scan(
         return Ok(None);
     }
     let target_list = bind_target_list(&exprs, &fields, &scope)?;
+    let distinct = matches!(select.distinct, DistinctClause::Distinct);
+    if distinct {
+        for ty in &tys {
+            crate::eval::require_equality_operator(*ty)?;
+        }
+    }
     let quals = bind_optional(select.filter.as_ref(), &scope)?
         .into_iter()
         .map(|clause| RestrictInfo {
@@ -251,14 +257,25 @@ fn plan_seq_scan(
             input: Box::new(scan),
         },
     };
-    let sort = if select.order_by.is_empty() {
+    let unique = if distinct {
+        Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Unique {
+                input: Box::new(filter),
+            },
+        }
+    } else {
         filter
+    };
+    let sort = if select.order_by.is_empty() {
+        unique
     } else {
         Plan {
             target_list: Vec::new(),
             quals: Vec::new(),
             node: PlanNode::Sort {
-                input: Box::new(filter),
+                input: Box::new(unique),
             },
         }
     };
@@ -523,6 +540,13 @@ fn execute_seq_scan_input(
             sort_positions,
         }
         .execute(state),
+        PlanNode::Unique { .. } => UniqueExecutor {
+            read_ctx,
+            source,
+            fields,
+            tys,
+        }
+        .execute(state),
         _ => Err(ExecError::Unsupported(
             "single-table plan input was neither Filter nor Sort".into(),
         )),
@@ -536,6 +560,53 @@ struct SortExecutor<'a, 'b> {
     tys: Vec<crabka_pgtypes::ColumnType>,
     order_by: Vec<crabka_pgparser::ast::OrderItem>,
     sort_positions: Vec<usize>,
+}
+
+struct UniqueExecutor<'a, 'b> {
+    read_ctx: &'a crate::subquery::SubCtx<'b>,
+    source: TableExpr,
+    fields: Vec<crabka_pgwire::engine::FieldDescription>,
+    tys: Vec<crabka_pgtypes::ColumnType>,
+}
+
+impl Executor for UniqueExecutor<'_, '_> {
+    fn execute(&mut self, state: &mut PlanState) -> Result<Relation, ExecError> {
+        let PlanNode::Unique { input } = &state.plan.node else {
+            return Err(ExecError::Unsupported(
+                "UniqueExecutor received a non-Unique plan".into(),
+            ));
+        };
+        crate::session::check_query_canceled()?;
+        let mut child = PlanState::new((**input).clone(), Scope::empty());
+        let relation = execute_seq_scan_input(
+            &mut child,
+            self.read_ctx,
+            self.source.clone(),
+            self.fields.clone(),
+            self.tys.clone(),
+            Vec::new(),
+            Vec::new(),
+        )?;
+        state.begin_loop();
+        Ok(unique_relation_rows(state, relation))
+    }
+}
+
+fn unique_relation_rows(state: &mut PlanState, mut relation: Relation) -> Relation {
+    let reservation = std::mem::take(&mut relation.rows);
+    let mut seen = std::collections::HashSet::with_capacity(reservation.len());
+    let mut rows = Vec::with_capacity(reservation.len());
+    for row in reservation {
+        if seen.insert(row.clone()) {
+            state.emit_row();
+            rows.push(row);
+        } else {
+            state.remove_row();
+        }
+    }
+    relation.rows = rows;
+    state.scope = relation.scope.clone();
+    relation
 }
 
 impl Executor for SortExecutor<'_, '_> {
