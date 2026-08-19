@@ -122,17 +122,94 @@ async fn oid_casts_parse_evaluate_and_describe_as_oid() {
     assert!(type_oids == vec![26, 26, 26, 26, 26]);
 }
 
-/// `pg_range` exists with zero rows, and a direct `count(*)` over it works.
-///
-/// None of the built-in scalar types are range types.
+/// The six built-in range types have their exact `pg_range` rows, including
+/// their multirange companions and support functions.
 #[tokio::test]
-async fn pg_range_is_empty() {
+async fn pg_range_describes_builtin_ranges() {
     let engine = SqlEngine::new();
-    let result = run(&engine, "SELECT * FROM pg_catalog.pg_range").await;
-    assert!(rows(&result).is_empty());
+    let result = run(
+        &engine,
+        "SELECT rngtypid, rngsubtype, rngmultitypid, rngsubopc, rngcanonical, rngsubdiff \
+         FROM pg_catalog.pg_range ORDER BY rngtypid",
+    )
+    .await;
+    assert!(
+        (0..rows(&result).len())
+            .map(|i| row_text(&result, i))
+            .collect::<Vec<_>>()
+            == vec![
+                vec![
+                    Some("3904".into()),
+                    Some("23".into()),
+                    Some("4451".into()),
+                    Some("1978".into()),
+                    Some("int4range_canonical".into()),
+                    Some("int4range_subdiff".into()),
+                ],
+                vec![
+                    Some("3906".into()),
+                    Some("1700".into()),
+                    Some("4532".into()),
+                    Some("3125".into()),
+                    Some("-".into()),
+                    Some("numrange_subdiff".into()),
+                ],
+                vec![
+                    Some("3908".into()),
+                    Some("1114".into()),
+                    Some("4533".into()),
+                    Some("3128".into()),
+                    Some("-".into()),
+                    Some("tsrange_subdiff".into()),
+                ],
+                vec![
+                    Some("3910".into()),
+                    Some("1184".into()),
+                    Some("4534".into()),
+                    Some("3127".into()),
+                    Some("-".into()),
+                    Some("tstzrange_subdiff".into()),
+                ],
+                vec![
+                    Some("3912".into()),
+                    Some("1082".into()),
+                    Some("4535".into()),
+                    Some("3122".into()),
+                    Some("daterange_canonical".into()),
+                    Some("daterange_subdiff".into()),
+                ],
+                vec![
+                    Some("3926".into()),
+                    Some("20".into()),
+                    Some("4536".into()),
+                    Some("3124".into()),
+                    Some("int8range_canonical".into()),
+                    Some("int8range_subdiff".into()),
+                ],
+            ]
+    );
+}
 
-    let counted = run(&engine, "SELECT count(*) FROM pg_range").await;
-    assert!(row_text(&counted, 0) == vec![Some("0".into())]);
+#[tokio::test]
+async fn pg_range_uses_oid_and_regproc_column_types_on_the_wire() {
+    let engine = SqlEngine::new();
+    let result = run(
+        &engine,
+        "SELECT rngtypid, rngsubtype, rngmultitypid, rngcollation, rngsubopc, \
+                rngcanonical, rngsubdiff \
+         FROM pg_catalog.pg_range WHERE rngtypid = 3904",
+    )
+    .await;
+    let QueryResult::Rows { fields, .. } = result else {
+        panic!("pg_range query should return rows");
+    };
+    assert!(
+        fields
+            .iter()
+            .map(|field| field.type_oid)
+            .collect::<Vec<_>>()
+            == vec![26, 26, 26, 26, 26, 24, 24]
+    );
 }
 
 /// Regression: `SELECT count(*)` directly over a virtual catalog relation used

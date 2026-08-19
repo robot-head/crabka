@@ -1923,21 +1923,71 @@ pub(crate) fn user_type_rows(
 }
 
 pub(crate) fn pg_range_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
-    Ok(crabka_pgcatalog::list_user_types(catalog_kv)?
-        .into_iter()
-        .filter_map(|ty| {
-            let range = ty.range()?;
-            Some(vec![
-                int(i32::try_from(ty.oid).unwrap_or(0)),
-                int(i32::try_from(range.subtype.oid()).unwrap_or(0)),
-                int(i32::try_from(ty.oid + 3).unwrap_or(0)),
-                int(0),
-                int(0),
-                Datum::Null,
-                Datum::Null,
-            ])
-        })
-        .collect())
+    let proc_oids = builtin_proc_oids()?;
+    let routine = |name: &str| {
+        proc_oids
+            .get(name)
+            .map_or_else(absent_regproc, |oid| regproc(*oid, name))
+    };
+    let mut rows = [
+        (
+            3904,
+            23,
+            4451,
+            1978,
+            Some("int4range_canonical"),
+            "int4range_subdiff",
+        ),
+        (3906, 1700, 4532, 3125, None, "numrange_subdiff"),
+        (3908, 1114, 4533, 3128, None, "tsrange_subdiff"),
+        (3910, 1184, 4534, 3127, None, "tstzrange_subdiff"),
+        (
+            3912,
+            1082,
+            4535,
+            3122,
+            Some("daterange_canonical"),
+            "daterange_subdiff",
+        ),
+        (
+            3926,
+            20,
+            4536,
+            3124,
+            Some("int8range_canonical"),
+            "int8range_subdiff",
+        ),
+    ]
+    .into_iter()
+    .map(|(range, subtype, multirange, subopc, canonical, subdiff)| {
+        vec![
+            oid(range),
+            oid(subtype),
+            oid(multirange),
+            oid(0),
+            oid(subopc),
+            canonical.map_or_else(absent_regproc, routine),
+            routine(subdiff),
+        ]
+    })
+    .collect::<Vec<_>>();
+    rows.extend(
+        crabka_pgcatalog::list_user_types(catalog_kv)?
+            .into_iter()
+            .filter_map(|ty| {
+                let range = ty.range()?;
+                Some(vec![
+                    oid(i32::try_from(ty.oid).unwrap_or(0)),
+                    oid(i32::try_from(range.subtype.oid()).unwrap_or(0)),
+                    oid(i32::try_from(ty.oid + 3).unwrap_or(0)),
+                    oid(0),
+                    oid(0),
+                    absent_regproc(),
+                    absent_regproc(),
+                ])
+            }),
+    );
+    Ok(rows)
 }
 
 /// The `pg_type.typcategory` of a built-in type, for the domain rows that

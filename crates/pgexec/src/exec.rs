@@ -18484,17 +18484,15 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("dicttemplate", Int4),
             ("dictinitoption", Text),
         ]),
-        // PostgreSQL 18 column set, in catalog order. The oid-valued columns
-        // use Int4 like every other synthesized catalog oid; the two regproc
-        // columns use Text (regproc renders as a function name).
+        // PostgreSQL 18 column set, in catalog order.
         "pg_range" => cols(&[
-            ("rngtypid", Int4),
-            ("rngsubtype", Int4),
-            ("rngmultitypid", Int4),
-            ("rngcollation", Int4),
-            ("rngsubopc", Int4),
-            ("rngcanonical", Text),
-            ("rngsubdiff", Text),
+            ("rngtypid", ColumnType::Oid),
+            ("rngsubtype", ColumnType::Oid),
+            ("rngmultitypid", ColumnType::Oid),
+            ("rngcollation", ColumnType::Oid),
+            ("rngsubopc", ColumnType::Oid),
+            ("rngcanonical", ColumnType::Regproc),
+            ("rngsubdiff", ColumnType::Regproc),
         ]),
         // PostgreSQL 18.4's column set, in catalog order. `\d <table>` reads
         // indisclustered/indisvalid/indisreplident by name and joins
