@@ -3292,6 +3292,30 @@ pub(crate) fn plpgsql_table_function_schema(
             spelled_signature(&routine)
         )));
     }
+    let output_params = || {
+        routine
+            .output_params()
+            .enumerate()
+            .map(|(index, param)| {
+                param.ty.column.map(|ty| {
+                    (
+                        param
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| format!("column{}", index + 1)),
+                        ty,
+                    )
+                })
+                .ok_or_else(|| {
+                    ExecError::Unsupported(format!(
+                        "function {} returns unsupported type {}",
+                        routine.identity(),
+                        param.ty.name
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
     let columns = match &routine.result {
         RoutineResult::Table(columns) => columns
             .iter()
@@ -3305,31 +3329,12 @@ pub(crate) fn plpgsql_table_function_schema(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?,
-        RoutineResult::Unspecified => routine
-            .output_params()
-            .enumerate()
-            .map(|(index, param)| {
-                param
-                    .ty
-                    .column
-                    .map(|ty| {
-                        (
-                            param
-                                .name
-                                .clone()
-                                .unwrap_or_else(|| format!("column{}", index + 1)),
-                            ty,
-                        )
-                    })
-                    .ok_or_else(|| {
-                        ExecError::Unsupported(format!(
-                            "function {} returns unsupported type {}",
-                            routine.identity(),
-                            param.ty.name
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        RoutineResult::Unspecified => output_params()?,
+        RoutineResult::Type { ty, .. }
+            if is_record_type(ty) && routine.output_params().next().is_some() =>
+        {
+            output_params()?
+        }
         RoutineResult::Type { ty, .. } if is_record_type(ty) => call
             .column_defs
             .as_ref()

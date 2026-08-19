@@ -678,6 +678,16 @@ async fn out_functions_form_from_rows_and_set_functions_can_return_no_rows() {
         BEGIN
           RETURN;
         END
+        $$;
+        CREATE FUNCTION pl_out_rows(limit_value int4, OUT doubled int4, OUT label text)
+        RETURNS SETOF record LANGUAGE plpgsql AS $$
+        BEGIN
+          FOR value IN 1..limit_value LOOP
+            doubled := value * 2;
+            label := 'row';
+            RETURN NEXT;
+          END LOOP;
+        END
         $$
         ",
     )
@@ -695,6 +705,10 @@ async fn out_functions_form_from_rows_and_set_functions_can_return_no_rows() {
         query(&mut session, "SELECT * FROM pl_no_rows()")
             .await
             .is_empty()
+    );
+    assert!(
+        query(&mut session, "SELECT * FROM pl_out_rows(2)").await
+            == vec![row(&["2", "row"]), row(&["4", "row"])]
     );
 }
 
