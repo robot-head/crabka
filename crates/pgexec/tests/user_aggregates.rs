@@ -131,6 +131,18 @@ async fn int4_sum_transition_defines_a_user_aggregate() {
 }
 
 #[tokio::test]
+async fn int4larger_transition_defines_a_user_aggregate() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_int4_max (int4) (SFUNC = int4larger, STYPE = int4)",
+    )
+    .await;
+
+    assert!(grid(&engine, "SELECT builtin_int4_max(f1) FROM t").await == vec![some(&["3"])]);
+}
+
+#[tokio::test]
 async fn float8_accumulator_and_finalizer_define_a_user_average() {
     let engine = fixture().await;
     run(

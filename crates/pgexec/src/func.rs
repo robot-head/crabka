@@ -50,6 +50,7 @@ enum ScalarFunc {
     TypedAdd(ColumnType),
     Int8Inc,
     Int4Sum,
+    Int4Larger,
     Int4AvgAccum,
     Int8Avg,
     Float8Accum,
@@ -176,6 +177,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "float8pl" => ScalarFunc::TypedAdd(ColumnType::Float8),
         "int8inc" => ScalarFunc::Int8Inc,
         "int4_sum" => ScalarFunc::Int4Sum,
+        "int4larger" => ScalarFunc::Int4Larger,
         "int4_avg_accum" => ScalarFunc::Int4AvgAccum,
         "int8_avg" => ScalarFunc::Int8Avg,
         "float8_accum" => ScalarFunc::Float8Accum,
@@ -811,6 +813,17 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 && crate::eval::infer_type(&args[1], scope)? == ColumnType::Int4
             {
                 Ok(ColumnType::Int8)
+            } else {
+                Err(undefined_function_spelled(&fc.name, args, scope))
+            }
+        }
+        ScalarFunc::Int4Larger => {
+            require_arity(fc, n == 2)?;
+            if args
+                .iter()
+                .all(|arg| crate::eval::infer_type(arg, scope) == Ok(ColumnType::Int4))
+            {
+                Ok(ColumnType::Int4)
             } else {
                 Err(undefined_function_spelled(&fc.name, args, scope))
             }
@@ -1976,6 +1989,13 @@ fn eval_eager(
                 (Some(state), None) => Ok(Datum::Int8(state)),
                 (Some(state), Some(value)) => Ok(Datum::Int8(state.wrapping_add(value))),
             }
+        }
+        ScalarFunc::Int4Larger => {
+            require_arity(fc, vals.len() == 2)?;
+            let (Datum::Int4(left), Datum::Int4(right)) = (&vals[0], &vals[1]) else {
+                return Err(undefined_function(&fc.name));
+            };
+            Ok(Datum::Int4((*left).max(*right)))
         }
         ScalarFunc::Int4AvgAccum => {
             require_arity(fc, vals.len() == 2)?;
@@ -4227,6 +4247,18 @@ mod tests {
         assert_eq!(err_code("int4_sum(7::int8)", None), "42883");
         assert_eq!(err_code("int4_sum(7, 2)", None), "42883");
         assert_eq!(err_code("int4_sum(7::int8, 2::int8)", None), "42883");
+        assert_eq!(ev("int4larger(2, 7)"), Datum::Int4(7));
+        assert_eq!(ev("int4larger(7, 2)"), Datum::Int4(7));
+        assert_eq!(ev("int4larger(NULL::int4, 2)"), Datum::Null);
+        assert_eq!(
+            crate::eval::infer_type(
+                &pexpr("int4larger(2, 7)").expect("parse"),
+                &Scope::empty(),
+            )
+            .expect("int4larger signature"),
+            ColumnType::Int4
+        );
+        assert_eq!(err_code("int4larger(2)", None), "42883");
         assert_eq!(
             err_code("int4_avg_accum(ARRAY[0::int8, 0::int8])", None),
             "42883"
