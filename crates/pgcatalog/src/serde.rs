@@ -330,6 +330,10 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Int4 => out.push(type_tag::INT4),
         ColumnType::Int8 => out.push(type_tag::INT8),
         ColumnType::Text => out.push(type_tag::TEXT),
+        ColumnType::Refcursor => {
+            out.push(type_tag::USER);
+            out.extend_from_slice(&crabka_pgtypes::oids::REFCURSOR.to_be_bytes());
+        }
         ColumnType::Varchar(limit) => write_optional_u16_type(out, type_tag::VARCHAR, limit),
         ColumnType::Char(limit) => write_optional_u16_type(out, type_tag::BPCHAR, limit),
         ColumnType::Float4 => out.push(type_tag::FLOAT4),
@@ -575,6 +579,8 @@ fn read_type_with(
             let oid = u32::from_be_bytes(raw.try_into().expect("4 bytes fit u32"));
             if oid == crabka_pgtypes::oids::RECORD {
                 ColumnType::Record(None)
+            } else if oid == crabka_pgtypes::oids::REFCURSOR {
+                ColumnType::Refcursor
             } else if let Some(builtin) = crabka_pgtypes::ColumnType::builtin_range(oid)
                 .or_else(|| crabka_pgtypes::ColumnType::builtin_multirange(oid))
             {

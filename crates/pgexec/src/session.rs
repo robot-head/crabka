@@ -12828,7 +12828,7 @@ pub(crate) fn decode_binary_value(
             [1] => Ok(Datum::Bool(true)),
             _ => Err(malformed_binary_parameter()),
         },
-        ColumnType::Text => {
+        ColumnType::Text | ColumnType::Refcursor => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
             Ok(Datum::Text(text.to_string()))
         }

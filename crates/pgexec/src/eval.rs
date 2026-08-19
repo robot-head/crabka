@@ -236,6 +236,9 @@ pub(crate) fn cast_value_in_at(
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
     now: jiff::Timestamp,
 ) -> Result<Datum, ExecError> {
+    if target == ColumnType::Refcursor {
+        return cast_value_in_at(value, ColumnType::Text, style, now);
+    }
     let base = target.temporal_base().map_or(target, |(base, _)| base);
     if let Datum::Text(text) = value {
         let parsed = match base {
@@ -296,6 +299,9 @@ pub(crate) fn cast_assign_value_in_at(
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
     now: jiff::Timestamp,
 ) -> Result<Datum, ExecError> {
+    if target == ColumnType::Refcursor {
+        return cast_assign_value_in_at(value, ColumnType::Text, style, now);
+    }
     let base = target.temporal_base().map_or(target, |(base, _)| base);
     if matches!(value, Datum::Text(_))
         && matches!(
@@ -5752,6 +5758,24 @@ mod tests {
             ),
             Ok(Datum::Array(_))
         ));
+    }
+
+    #[test]
+    fn refcursor_uses_texts_input_and_assignment_representation() {
+        let zone = jiff::tz::TimeZone::UTC;
+        let style = crabka_pgtypes::encoding::OutputStyle::with_zone(&zone);
+        for cast in [cast_value_in_at, cast_assign_value_in_at] {
+            assert!(
+                cast(
+                    &Datum::Text("cursor_name".into()),
+                    ColumnType::Refcursor,
+                    style,
+                    jiff::Timestamp::UNIX_EPOCH,
+                )
+                .expect("refcursor text input")
+                    == Datum::Text("cursor_name".into())
+            );
+        }
     }
 
     /// The static-type pass runs before any row is produced, so it is what

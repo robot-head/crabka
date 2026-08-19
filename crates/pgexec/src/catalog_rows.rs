@@ -1512,6 +1512,7 @@ pub(crate) fn attribute_storage(ty: ColumnType) -> &'static str {
         C::Numeric(_) | C::Inet | C::Cidr => "m",
         // Varlena: compressible and toastable.
         C::Text
+        | C::Refcursor
         | C::Varchar(_)
         | C::Char(_)
         | C::Bytea

@@ -24,6 +24,10 @@ pub mod oids {
     pub const INT2: u32 = 21;
     pub const INT4: u32 = 23;
     pub const TEXT: u32 = 25;
+    /// PostgreSQL `refcursor`: a cursor name with `text`'s physical storage.
+    pub const REFCURSOR: u32 = 1790;
+    /// `refcursor[]`.
+    pub const REFCURSORARRAY: u32 = 2201;
     /// PostgreSQL `oid` — object identifier, an **unsigned** 4-byte integer.
     pub const OID: u32 = 26;
     /// `oid[]`.
@@ -423,6 +427,7 @@ impl ElemType {
             // the array encoder can name here either.
             | ColumnType::PgSnapshot
             | ColumnType::TxidSnapshot
+            | ColumnType::Refcursor
             | ColumnType::Money
             | ColumnType::Bit(_)
             | ColumnType::VarBit(_)
@@ -733,6 +738,9 @@ pub enum ColumnType {
     Int4,
     Int8,
     Text,
+    /// PostgreSQL `refcursor` (OID 1790): a cursor name with `text` values
+    /// but a distinct catalog and wire identity.
+    Refcursor,
     Varchar(Option<u16>),
     Char(Option<u16>),
     /// PostgreSQL `"char"` (OID 18) — the ad-hoc single-**byte** type, spelled
@@ -1013,6 +1021,7 @@ impl ColumnType {
             // resolve consistently with them. RowDescription therefore reports
             // text (25), not name (19), and the 63-byte truncation is not applied.
             "text" | "name" => Some(ColumnType::Text),
+            "refcursor" => Some(ColumnType::Refcursor),
             "varchar" | "character varying" => Some(ColumnType::Varchar(None)),
             // `bpchar` is PostgreSQL's own internal name for the blank-padded
             // character type, and it is accepted as a type name: `'ab'::bpchar`
@@ -1118,6 +1127,7 @@ impl ColumnType {
         for _ in 0..MAX_DOMAIN_DEPTH {
             match ty {
                 ColumnType::Domain(domain) => ty = *domain.base,
+                ColumnType::Refcursor => return ColumnType::Text,
                 other => return other,
             }
         }
@@ -1148,6 +1158,7 @@ impl ColumnType {
             ColumnType::Int8 => oids::INT8,
             ColumnType::Int4 => oids::INT4,
             ColumnType::Text => oids::TEXT,
+            ColumnType::Refcursor => oids::REFCURSOR,
             ColumnType::Varchar(_) => oids::VARCHAR,
             ColumnType::Char(_) => oids::BPCHAR,
             ColumnType::InternalChar => oids::CHAR,
@@ -1221,6 +1232,7 @@ impl ColumnType {
             ColumnType::Int8 => "bigint",
             ColumnType::Int4 => "integer",
             ColumnType::Text => "text",
+            ColumnType::Refcursor => "refcursor",
             ColumnType::Varchar(_) => "character varying",
             ColumnType::Char(_) => "character",
             // `format_type` special-cases OID 18 and prints the quotes, because
@@ -1296,7 +1308,7 @@ impl ColumnType {
             ColumnType::Int2 => 2,
             ColumnType::Int8 => 8,
             ColumnType::Int4 => 4,
-            ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_) => -1,
+            ColumnType::Text | ColumnType::Refcursor | ColumnType::Varchar(_) | ColumnType::Char(_) => -1,
             // The whole point of `"char"`: one byte, pass-by-value, no varlena
             // header. `character(1)` above is -1.
             ColumnType::InternalChar => 1,

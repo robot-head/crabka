@@ -354,6 +354,33 @@ async fn pg_type_exposes_cstring_and_refcursor_with_their_arrays() {
                 Some("t".into())
             ]]
     );
+    let result = s
+        .simple_query("SELECT 'cursor_name'::refcursor")
+        .await
+        .expect("refcursor input succeeds");
+    let QueryResult::Rows { fields, .. } = &result[0] else {
+        panic!("refcursor query should return rows");
+    };
+    assert!(fields[0].type_oid == 1790);
+    s.simple_query("CREATE TABLE refcursor_catalog (value refcursor)")
+        .await
+        .expect("refcursor column succeeds");
+    s.simple_query("INSERT INTO refcursor_catalog VALUES ('cursor_name'::refcursor)")
+        .await
+        .expect("refcursor assignment succeeds");
+    assert!(
+        rows(
+            &mut s,
+            "SELECT atttypid FROM pg_attribute \
+             WHERE attrelid = 'refcursor_catalog'::regclass AND attname = 'value'",
+        )
+        .await
+            == vec![vec![Some("1790".into())]]
+    );
+    assert!(
+        rows(&mut s, "SELECT value FROM refcursor_catalog").await
+            == vec![vec![Some("cursor_name".into())]]
+    );
 }
 
 /// `type_sanity` uses this regress-library helper to keep `PostgreSQL`'s
