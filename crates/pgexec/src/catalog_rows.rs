@@ -1618,6 +1618,10 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
                     typbasetype: 0,
                     typcollation: builtin_type_collation_oid(ty.oid),
                     domain_base: None,
+                    range_align: match ty.name {
+                        "tsrange" | "tstzrange" | "int8range" => Some("d"),
+                        _ => None,
+                    },
                 },
                 &proc_oids,
             )
@@ -1657,16 +1661,17 @@ struct PgTypeRow<'a> {
     typbasetype: i32,
     typcollation: i32,
     domain_base: Option<&'a str>,
+    range_align: Option<&'a str>,
 }
 
 fn pg_type_row(row: PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> Vec<Datum> {
     let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
-    let typalign = match row.len {
+    let typalign = row.range_align.unwrap_or(match row.len {
         1 => "c",
         2 => "s",
         8 => "d",
         _ => "i",
-    };
+    });
     let typstorage = if row.len < 0 { "x" } else { "p" };
     let routines = pg_type_routines(&row, proc_oids);
     vec![
@@ -1797,7 +1802,11 @@ fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [
         io("send"),
         named(row.name, "typmodin"),
         named(row.name, "typmodout"),
-        absent_regproc(),
+        if row.typtype == "r" {
+            routine("range_typanalyze")
+        } else {
+            absent_regproc()
+        },
     ]
 }
 
@@ -1894,6 +1903,10 @@ pub(crate) fn user_type_rows(
                     usertype::UserTypeBody::Domain(domain) => builtin_type_name(domain.base.oid()),
                     _ => None,
                 },
+                range_align: ty.range().map(|range| match range.subtype.type_size() {
+                    8 => "d",
+                    _ => "i",
+                }),
             },
             proc_oids,
         ));
@@ -1914,6 +1927,7 @@ pub(crate) fn user_type_rows(
                     typbasetype: 0,
                     typcollation: 0,
                     domain_base: None,
+                    range_align: None,
                 },
                 proc_oids,
             ));
@@ -3867,6 +3881,7 @@ mod tests {
                 typbasetype: 0,
                 typcollation: 0,
                 domain_base: None,
+                range_align: None,
             },
             &BTreeMap::new(),
         );

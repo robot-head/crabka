@@ -236,7 +236,7 @@ async fn pg_type_links_array_and_range_io_routines() {
                     Some("range_out".into()),
                     Some("range_recv".into()),
                     Some("range_send".into()),
-                    Some("-".into()),
+                    Some("range_typanalyze".into()),
                 ],
             ]
     );
@@ -379,6 +379,43 @@ async fn pg_type_distinguishes_range_and_multirange_rows() {
                     Some("m".into())
                 ],
                 vec![Some("int4range".into()), Some("R".into()), Some("r".into())],
+            ]
+    );
+}
+
+#[tokio::test]
+async fn pg_type_range_rows_use_postgresqls_analyze_routine_and_alignment() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typalign, typanalyze \
+             FROM pg_type \
+             WHERE typname IN ('int4range', 'tsrange', 'tstzrange', 'int8range') \
+             ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("int4range".into()),
+                    Some("i".into()),
+                    Some("range_typanalyze".into()),
+                ],
+                vec![
+                    Some("int8range".into()),
+                    Some("d".into()),
+                    Some("range_typanalyze".into()),
+                ],
+                vec![
+                    Some("tsrange".into()),
+                    Some("d".into()),
+                    Some("range_typanalyze".into()),
+                ],
+                vec![
+                    Some("tstzrange".into()),
+                    Some("d".into()),
+                    Some("range_typanalyze".into()),
+                ],
             ]
     );
 }
