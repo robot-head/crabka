@@ -135,6 +135,38 @@ async fn a_sql_scalar_routine_rejects_multiple_final_rows() {
     assert!(error.code == "21000", "{}", error.code);
 }
 
+#[tokio::test]
+async fn a_sql_set_function_expands_in_a_select_list() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION numbers(int) RETURNS SETOF int LANGUAGE sql \
+         AS 'SELECT n FROM generate_series(1, $1) AS n'",
+    )
+    .await;
+
+    let QueryResult::Rows { rows, .. } = s
+        .simple_query("SELECT numbers(3)")
+        .await
+        .expect("set function")
+        .remove(0)
+    else {
+        panic!("expected rows");
+    };
+    assert!(rows.len() == 3);
+    assert!(
+        rows[0][0].as_ref().is_some_and(|cell| cell.text.as_ref() == b"1"),
+        "{rows:?}"
+    );
+    assert!(
+        rows[2][0].as_ref().is_some_and(|cell| cell.text.as_ref() == b"3"),
+        "{rows:?}"
+    );
+}
+
 /// Parameters inside a FROM-clause function are substituted before its query
 /// is evaluated.
 #[tokio::test]

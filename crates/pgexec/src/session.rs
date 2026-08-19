@@ -8166,14 +8166,24 @@ impl SqlSession {
                                 ),
                             ),
                             crate::routine::FunctionRequestKind::Table(columns) => {
-                                Box::pin(crate::plpgsql::execute_table_function(
-                                    self,
-                                    &request.routine,
-                                    &request.values,
-                                    columns,
-                                ))
-                                .await
-                                .map(crate::routine::FunctionRequestResult::Table)
+                                let result = if request.routine.language == "sql" {
+                                    crate::plpgsql::execute_sql_table_function(
+                                        self,
+                                        &request.routine,
+                                        &request.values,
+                                        columns,
+                                    )
+                                    .await
+                                } else {
+                                    crate::plpgsql::execute_table_function(
+                                        self,
+                                        &request.routine,
+                                        &request.values,
+                                        columns,
+                                    )
+                                    .await
+                                };
+                                result.map(crate::routine::FunctionRequestResult::Table)
                             }
                             crate::routine::FunctionRequestKind::Trigger(invocation) => {
                                 self.trigger_depth = self.trigger_depth.saturating_add(1);

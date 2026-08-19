@@ -2030,7 +2030,9 @@ pub(crate) fn plpgsql_set_result_type(
                 resolve_call(runtime.catalog.as_ref(), &call.name, &given)?.ok_or_else(|| {
                     undefined_routine(format!("function {} does not exist", call.name))
                 })?;
-            if routine.language != "plpgsql" || !declared_returns_set(&routine) {
+            if !matches!(routine.language.as_str(), "plpgsql" | "sql")
+                || !declared_returns_set(&routine)
+            {
                 return Err(undefined_routine(format!(
                     "function {} does not exist",
                     call.name
@@ -2070,7 +2072,8 @@ pub(crate) fn is_plpgsql_set_runtime(call: &FuncCall) -> bool {
         let given = best_effort_arg_types(args);
         resolve_call(runtime.catalog.as_ref(), &call.name, &given).is_ok_and(|routine| {
             routine.is_some_and(|routine| {
-                routine.language == "plpgsql" && declared_returns_set(&routine)
+                matches!(routine.language.as_str(), "plpgsql" | "sql")
+                    && declared_returns_set(&routine)
             })
         })
     })
@@ -2268,7 +2271,9 @@ pub(crate) fn eval_plpgsql_set_function(
             } = bind_call(runtime.catalog.as_ref(), &call.name, args, &given)?.ok_or_else(
                 || undefined_routine(format!("function {} does not exist", call.name)),
             )?;
-            if routine.language != "plpgsql" || !declared_returns_set(&routine) {
+            if !matches!(routine.language.as_str(), "plpgsql" | "sql")
+                || !declared_returns_set(&routine)
+            {
                 return Err(undefined_routine(format!(
                     "function {} does not exist",
                     call.name
@@ -4440,7 +4445,7 @@ mod tests {
     }
 
     #[test]
-    fn set_functions_require_plpgsql_and_reject_distinct() {
+    fn set_functions_use_the_scalar_runtime_and_reject_distinct() {
         let kv = std::sync::Arc::new(MemKv::default());
         define(
             kv.as_ref(),
@@ -4465,10 +4470,12 @@ mod tests {
 
         with_scalar_runtime(&catalog, None, || {
             let sql_call = call("sql_set", false);
-            let error = plpgsql_set_result_type(&sql_call, &crate::scope::Scope::empty())
+            assert!(
+                plpgsql_set_result_type(&sql_call, &crate::scope::Scope::empty())
                 .expect("user routine")
-                .expect_err("SQL function is not a PL/pgSQL ProjectSet call");
-            assert!(sqlstate(&error) == "42883");
+                .expect("SQL set function type")
+                    == ColumnType::Int4
+            );
             let error = eval_plpgsql_set_function(
                 &sql_call,
                 &crate::scope::Scope::empty(),
@@ -4476,8 +4483,8 @@ mod tests {
                 &crate::clock::EvalCtx::test_default(),
             )
             .expect("user routine")
-            .expect_err("SQL function is not a PL/pgSQL ProjectSet call");
-            assert!(sqlstate(&error) == "42883");
+            .expect_err("SQL set function needs a session executor");
+            assert!(error.into_pg().message == "PL/pgSQL table function requires a session executor");
 
             let distinct_call = call("plpgsql_set", true);
             let error = eval_plpgsql_set_function(

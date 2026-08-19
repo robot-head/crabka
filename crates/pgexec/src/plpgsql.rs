@@ -505,6 +505,62 @@ pub(crate) async fn execute_table_function(
     Ok(collector.rows)
 }
 
+pub(crate) async fn execute_sql_table_function(
+    session: &mut SqlSession,
+    routine: &Routine,
+    values: &[Datum],
+    columns: Vec<(String, ColumnType)>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let ctx = session.plpgsql_eval_context();
+    let (frame, output_slot) = bind_scalar_parameters(routine, values, &ctx)?;
+    let interpreter = Interpreter {
+        session,
+        frames: vec![frame],
+        allow_transaction_control: false,
+        savepoint_serial: 0,
+        active_error: None,
+        exception_depth: 0,
+        cursor_declarations: HashMap::new(),
+        last_row_count: 0,
+        output_slot,
+        set_results: None,
+        context: format!("SQL function {}", routine.identity()),
+        variable_conflict: PlPgSqlVariableConflict::UseVariable,
+        routine_oid: routine.oid,
+    };
+    let mut final_result = None;
+    for statement in crate::routine::parse_body(routine)? {
+        let statement = interpreter.bind_statement(&statement)?;
+        final_result = Some(Box::pin(interpreter.session.run_one(&statement)).await?);
+    }
+    let QueryResult::Rows { fields, rows, .. } = final_result.ok_or_else(|| {
+        ExecError::Syntax("SQL function body must contain a final query or DML RETURNING statement".into())
+    })? else {
+        return Err(ExecError::Syntax(
+            "SQL function body must contain a final query or DML RETURNING statement".into(),
+        ));
+    };
+    if fields.len() != columns.len() {
+        return Err(ExecError::TypeMismatch(
+            "SQL function result has the wrong number of columns".into(),
+        ));
+    }
+    rows.into_iter()
+        .map(|row| {
+            if row.len() != fields.len() {
+                return Err(ExecError::ObjectNotInPrerequisiteState(
+                    "SQL function executor returned the wrong table width".into(),
+                ));
+            }
+            fields
+                .iter()
+                .zip(row)
+                .map(|(field, value)| interpreter.session.plpgsql_decode_cell(field, value.as_ref()))
+                .collect()
+        })
+        .collect()
+}
+
 /// Execute the expression and control subset of a scalar PL/pgSQL function from
 /// the synchronous row evaluator. SQL-bearing bodies keep using the session
 /// interpreter, because they cannot borrow an async session from scalar eval.
