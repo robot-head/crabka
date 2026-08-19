@@ -1448,6 +1448,7 @@ impl Parser {
                             | Keyword::Case
                             | Keyword::Cast
                             | Keyword::CurrentUser
+                            | Keyword::User
                             | Keyword::Left
                             | Keyword::Right
                     )
@@ -1611,7 +1612,11 @@ impl Parser {
             }
             Token::Keyword(Keyword::Case) => self.case_expr(),
             Token::Keyword(Keyword::Cast) => self.cast_expr(),
-            Token::Keyword(Keyword::CurrentUser) => {
+            // `USER` is PostgreSQL's spelling alias for `CURRENT_USER` in
+            // expression position. Keep both spellings on the existing
+            // current-user function path so evaluation and view deparsing stay
+            // identical.
+            Token::Keyword(Keyword::CurrentUser | Keyword::User) => {
                 self.bump();
                 Ok(Expr::Func(crate::ast::FuncCall {
                     sql_syntax: false,
@@ -17945,6 +17950,71 @@ mod tests {
         assert!(parse_expr_for_test("left + 1").is_err());
         // And `LEFT JOIN` still parses as a join (keyword role preserved).
         assert!(parse("SELECT * FROM a LEFT JOIN b ON a.id = b.id").is_ok());
+    }
+
+    #[test]
+    fn user_is_current_user_in_expression_position() {
+        use crate::ast::{FuncArgs, FuncCall};
+
+        let expected = Expr::Func(FuncCall {
+            sql_syntax: false,
+            name: "current_user".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(vec![]),
+            order_by: vec![],
+            filter: None,
+        });
+        for sql in ["CURRENT_USER", "USER"] {
+            assert_eq!(parse_expr_for_test(sql).expect("parse current user"), expected);
+        }
+        assert!(parse("SELECT USER AS role_name").is_ok());
+    }
+
+    #[test]
+    fn exists_without_a_subquery_remains_a_column_name() {
+        use crate::ast::BinaryOp;
+
+        assert_eq!(
+            parse_expr_for_test("exists + 1").expect("parse EXISTS column"),
+            Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Column {
+                    table: None,
+                    name: "exists".into(),
+                }),
+                right: Box::new(Expr::IntLiteral("1".into())),
+            }
+        );
+        assert!(parse("SELECT EXISTS (SELECT 1)").is_ok());
+    }
+
+    #[test]
+    fn sql_json_constructor_dispatches_before_generic_function_calls() {
+        assert!(matches!(
+            parse("SELECT JSON_OBJECT('key': 1)"),
+            Ok(statements) if statements.len() == 1
+        ));
+    }
+
+    #[test]
+    fn alter_constraint_inherit_preserves_the_written_property() {
+        use crate::ast::{AlterConstraintSpec, AlterTableAction};
+
+        let Statement::AlterTable { actions, .. } =
+            one("ALTER TABLE items ALTER CONSTRAINT item_check INHERIT")
+        else {
+            panic!("expected ALTER TABLE");
+        };
+        assert_eq!(
+            actions,
+            vec![AlterTableAction::AlterConstraint {
+                name: "item_check".into(),
+                spec: AlterConstraintSpec {
+                    inherit: Some(true),
+                    ..AlterConstraintSpec::default()
+                },
+            }]
+        );
     }
 
     #[test]
