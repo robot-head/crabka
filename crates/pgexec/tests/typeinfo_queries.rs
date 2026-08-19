@@ -304,6 +304,29 @@ async fn whole_row_references_describe_the_relation_rowtype() {
         assert!(fields.len() == 1, "{sql}");
         assert!(fields[0].type_oid == rowtype, "{sql}");
     }
+    let QueryResult::Rows { fields, .. } =
+        run(&engine, "SELECT (whole_row_type).id FROM whole_row_type").await
+    else {
+        panic!("expected rows");
+    };
+    assert!(fields[0].type_oid == 23);
+    run(&engine, "CREATE TABLE whole_row_type_text (id text)").await;
+    let QueryResult::Rows { fields, .. } = run(
+        &engine,
+        "SELECT (a).id FROM whole_row_type_text AS b JOIN whole_row_type AS a ON true",
+    )
+    .await
+    else {
+        panic!("expected rows");
+    };
+    assert!(fields[0].type_oid == 23);
+    assert!(
+        engine
+            .connect()
+            .simple_query("SELECT (whole_row_type).tableoid FROM whole_row_type")
+            .await
+            .is_err()
+    );
 
     run(
         &engine,

@@ -4498,6 +4498,13 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // composite has to be a known one for the attribute to have a type at
         // all, which is exactly PostgreSQL's rule.
         Expr::FieldSelect { base, field } => {
+            if let Expr::Column { table: None, name } = &**base
+                && let Err(error) = scope.resolve(None, name)
+                && let Some(qualifier) = whole_row_reference(None, name, &error)
+                && let Some(ty) = scope.whole_row_field_type(qualifier, field)
+            {
+                return Ok(ty);
+            }
             let base_type = infer_type(base, scope)?;
             field_type(base_type, field)
         }

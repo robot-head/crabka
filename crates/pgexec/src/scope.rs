@@ -1338,6 +1338,19 @@ impl Scope {
             .map(|_| ColumnType::Record(self.row_types.get(qualifier).copied()))
     }
 
+    /// The declared type of one field in a relation's whole-row value.  Unlike
+    /// a user composite, a relation's fields live in this scope rather than in
+    /// the process-wide user-type registry.
+    pub(crate) fn whole_row_field_type(&self, qualifier: &str, field: &str) -> Option<ColumnType> {
+        self.whole_row(qualifier)?;
+        self.columns.iter().find_map(|column| {
+            (column.qualifier.as_deref() == Some(qualifier)
+                && column.exposure != Exposure::SystemColumn
+                && column.name == field)
+                .then_some(column.ty)
+        })
+    }
+
     /// The flat index of `qualifier`'s liveness marker, when an outer join above
     /// it added one. See [`LIVE_QUALIFIER`].
     ///
