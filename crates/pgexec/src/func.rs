@@ -49,6 +49,8 @@ enum ScalarFunc {
     Mod,
     TypedAdd(ColumnType),
     Int8Inc,
+    Int4AvgAccum,
+    Int8Avg,
     Float8Accum,
     Float8Avg,
     BoolCompare {
@@ -172,6 +174,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "float4pl" => ScalarFunc::TypedAdd(ColumnType::Float4),
         "float8pl" => ScalarFunc::TypedAdd(ColumnType::Float8),
         "int8inc" => ScalarFunc::Int8Inc,
+        "int4_avg_accum" => ScalarFunc::Int4AvgAccum,
+        "int8_avg" => ScalarFunc::Int8Avg,
         "float8_accum" => ScalarFunc::Float8Accum,
         "float8_avg" => ScalarFunc::Float8Avg,
         "booleq" => ScalarFunc::BoolCompare { equal: true },
@@ -795,6 +799,24 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             require_arity(fc, n == 1)?;
             if crate::eval::infer_type(&args[0], scope)? == ColumnType::Int8 {
                 Ok(ColumnType::Int8)
+            } else {
+                Err(undefined_function_spelled(&fc.name, args, scope))
+            }
+        }
+        ScalarFunc::Int4AvgAccum => {
+            require_arity(fc, n == 2)?;
+            if crate::eval::infer_type(&args[0], scope)? == ColumnType::Array(ElemType::Int8)
+                && crate::eval::infer_type(&args[1], scope)? == ColumnType::Int4
+            {
+                Ok(ColumnType::Array(ElemType::Int8))
+            } else {
+                Err(undefined_function_spelled(&fc.name, args, scope))
+            }
+        }
+        ScalarFunc::Int8Avg => {
+            require_arity(fc, n == 1)?;
+            if crate::eval::infer_type(&args[0], scope)? == ColumnType::Array(ElemType::Int8) {
+                Ok(ColumnType::Numeric(None))
             } else {
                 Err(undefined_function_spelled(&fc.name, args, scope))
             }
@@ -1922,8 +1944,62 @@ fn eval_eager(
             require_arity(fc, vals.len() == 1)?;
             Ok(ops::add(&vals[0], &Datum::Int8(1))?)
         }
+        ScalarFunc::Int4AvgAccum => {
+            require_arity(fc, vals.len() == 2)?;
+            if vals.iter().any(Datum::is_null) {
+                return Ok(Datum::Null);
+            }
+            let Datum::Array(state) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            if state.elem != ElemType::Int8 || state.elems.len() != 2 {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "22023",
+                    message: "int4_avg_accum: expected 2-element int8 array".into(),
+                });
+            }
+            let Datum::Int4(value) = vals[1] else {
+                return Err(type_error(&fc.name, &vals[1]));
+            };
+            let [Datum::Int8(count), Datum::Int8(sum)] = state.elems.as_slice() else {
+                unreachable!("validated int4 average state");
+            };
+            Ok(Datum::Array(crabka_pgtypes::ArrayValue::new(
+                ElemType::Int8,
+                vec![Datum::Int8(count + 1), Datum::Int8(sum + i64::from(value))],
+            )))
+        }
+        ScalarFunc::Int8Avg => {
+            require_arity(fc, vals.len() == 1)?;
+            if vals[0].is_null() {
+                return Ok(Datum::Null);
+            }
+            let Datum::Array(state) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            if state.elem != ElemType::Int8 || state.elems.len() != 2 {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "22023",
+                    message: "int8_avg: expected 2-element int8 array".into(),
+                });
+            }
+            let [Datum::Int8(count), Datum::Int8(sum)] = state.elems.as_slice() else {
+                unreachable!("validated int8 average state");
+            };
+            if *count == 0 {
+                Ok(Datum::Null)
+            } else {
+                Ok(ops::div(
+                    &Datum::Numeric(crabka_pgtypes::numeric::NumericValue::from(*sum)),
+                    &Datum::Numeric(crabka_pgtypes::numeric::NumericValue::from(*count)),
+                )?)
+            }
+        }
         ScalarFunc::Float8Accum => {
             require_arity(fc, vals.len() == 2)?;
+            if vals.iter().any(Datum::is_null) {
+                return Ok(Datum::Null);
+            }
             let Datum::Array(state) = &vals[0] else {
                 return Err(type_error(&fc.name, &vals[0]));
             };
@@ -1952,6 +2028,9 @@ fn eval_eager(
         }
         ScalarFunc::Float8Avg => {
             require_arity(fc, vals.len() == 1)?;
+            if vals[0].is_null() {
+                return Ok(Datum::Null);
+            }
             let Datum::Array(state) = &vals[0] else {
                 return Err(type_error(&fc.name, &vals[0]));
             };
@@ -4082,6 +4161,38 @@ mod tests {
         );
         assert!(ev("float8_avg(ARRAY[3::float8, 6::float8, 14::float8])") == Datum::Float8(2.0));
         assert!(ev("float8_avg(ARRAY[0::float8, 0::float8, 0::float8])") == Datum::Null);
+        assert!(ev("float8_accum(NULL::float8[], 2::float8)") == Datum::Null);
+        assert!(ev("float8_avg(NULL::float8[])") == Datum::Null);
+        assert!(
+            ev("int4_avg_accum(ARRAY[0::int8, 0::int8], 2)")
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Int8,
+                    vec![Datum::Int8(1), Datum::Int8(2)],
+                ))
+        );
+        assert!(
+            ev("int8_avg(ARRAY[3::int8, 6::int8])")
+                == Datum::Numeric(crabka_pgtypes::numeric::parse("2").expect("numeric"))
+        );
+        assert!(ev("int4_avg_accum(NULL::int8[], 2)") == Datum::Null);
+        assert!(ev("int8_avg(NULL::int8[])") == Datum::Null);
+        assert_eq!(
+            err_code("int4_avg_accum(ARRAY[0::int8, 0::int8])", None),
+            "42883"
+        );
+        assert_eq!(
+            err_code("int4_avg_accum(ARRAY[0, 0], 2)", None),
+            "42883"
+        );
+        assert_eq!(
+            err_code("int4_avg_accum(ARRAY[0::int8, 0::int8], 2::int8)", None),
+            "42883"
+        );
+        assert_eq!(
+            err_code("int4_avg_accum(ARRAY[0::int8], 2)", None),
+            "22023"
+        );
+        assert_eq!(err_code("int8_avg(ARRAY[0::int8])", None), "22023");
         assert_eq!(
             err_code("float8_accum(ARRAY[0::float8, 0::float8, 0::float8])", None),
             "42883"

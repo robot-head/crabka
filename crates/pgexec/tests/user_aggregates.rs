@@ -135,6 +135,22 @@ async fn float8_accumulator_and_finalizer_define_a_user_average() {
 }
 
 #[tokio::test]
+async fn int4_accumulator_and_finalizer_define_a_user_average() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_int4_avg (int4) (SFUNC = int4_avg_accum, \
+         STYPE = int8[], FINALFUNC = int8_avg, INITCOND = '{0,0}')",
+    )
+    .await;
+
+    assert!(
+        grid(&engine, "SELECT builtin_int4_avg(f1) FROM t").await
+            == vec![some(&["2.0000000000000000"])]
+    );
+}
+
+#[tokio::test]
 async fn a_zero_argument_aggregate_is_called_with_a_star() {
     let engine = fixture().await;
     run(
