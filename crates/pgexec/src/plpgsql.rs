@@ -214,19 +214,26 @@ async fn execute_call_body(
     if routine.language == "sql" {
         let allow_transaction_control =
             allow_transaction_control && !routine.security_definer && routine.config.is_empty();
-        let statements =
-            crate::routine::expand_procedure_call(session.plpgsql_catalog(), name, &bound.args)?;
+        let frame = bind_parameters(session, &routine, &bound.args).await?;
+        let interpreter = Interpreter {
+            session,
+            frames: vec![frame],
+            allow_transaction_control,
+            savepoint_serial: 0,
+            active_error: None,
+            exception_depth: 0,
+            cursor_declarations: HashMap::new(),
+            last_row_count: 0,
+            output_slot: None,
+            set_results: None,
+            context: format!("SQL procedure {}", routine.identity()),
+            variable_conflict: PlPgSqlVariableConflict::UseVariable,
+            routine_oid: routine.oid,
+        };
+        let statements = crate::routine::parse_body(&routine)?;
         for statement in statements {
+            let statement = interpreter.bind_statement(&statement)?;
             match &statement {
-                Statement::Call { name, args } => {
-                    Box::pin(execute_call_with_transaction_control(
-                        session,
-                        name,
-                        args,
-                        allow_transaction_control,
-                    ))
-                    .await?;
-                }
                 Statement::Commit { .. } | Statement::Rollback { .. }
                     if !allow_transaction_control =>
                 {
@@ -235,7 +242,7 @@ async fn execute_call_body(
                     ));
                 }
                 _ => {
-                    Box::pin(session.run_one(&statement)).await?;
+                    Box::pin(interpreter.session.run_one(&statement)).await?;
                 }
             }
         }

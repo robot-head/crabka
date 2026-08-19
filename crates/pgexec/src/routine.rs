@@ -3422,51 +3422,6 @@ pub(crate) fn eval_plpgsql_table_function(
     })
 }
 
-/// The statements a `CALL` of a SQL procedure runs, with the call's arguments
-/// substituted for the procedure's parameters.
-pub(crate) fn expand_procedure_call(
-    kv: &dyn Kv,
-    name: &str,
-    args: &[Expr],
-) -> Result<Vec<Statement>, ExecError> {
-    let given = crate::eval::static_arg_types(args, &crate::scope::Scope::empty())?;
-    let BoundRoutineCall { routine, args } =
-        bind_call(kv, name, args, &given)?.ok_or_else(|| {
-            undefined_routine(format!(
-                "procedure {name}({}) does not exist",
-                given
-                    .iter()
-                    .copied()
-                    .map(spelled_arg_type)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-        })?;
-    if routine.kind != RoutineKind::Procedure {
-        return Err(wrong_routine_kind(format!(
-            "{} is not a procedure\nHINT:  To call a function, use SELECT.",
-            spelled_signature(&routine)
-        )));
-    }
-    callable(&routine)?;
-    let binding = Binding {
-        routine: &routine,
-        uses: std::cell::RefCell::new(vec![0; args.len()]),
-        args,
-    };
-    parse_body(&routine)?
-        .iter()
-        .map(|statement| match statement {
-            Statement::Query(query) => Ok(Statement::Query(substitute_in_query(&binding, query)?)),
-            other if routine.params.is_empty() => Ok(other.clone()),
-            _ => Err(uncallable(
-                &routine,
-                "only query statements in a procedure body can take the call's arguments",
-            )),
-        })
-        .collect()
-}
-
 /// `DO`, refused for every language, with the reason `PostgreSQL` gives when
 /// it has one.
 pub(crate) fn do_block(language: &str) -> ExecError {
@@ -5744,38 +5699,6 @@ mod tests {
                 .message
                 .contains("p(integer) is a procedure")
         );
-    }
-
-    #[test]
-    fn calling_a_function_with_call_is_42809() {
-        let kv = seeded();
-        let error = expand_procedure_call(
-            &kv,
-            "add2",
-            &[Expr::IntLiteral("1".into()), Expr::IntLiteral("2".into())],
-        )
-        .expect_err("a function is not callable");
-        assert!(sqlstate(&error) == "42809");
-        assert!(
-            error
-                .into_pg()
-                .message
-                .contains("add2(integer, integer) is not a procedure")
-        );
-    }
-
-    #[test]
-    fn a_procedure_body_expands_with_the_calls_arguments() {
-        let kv = MemKv::default();
-        define(
-            &kv,
-            "CREATE PROCEDURE p(x int) LANGUAGE sql AS $$ SELECT x + 1 $$",
-        )
-        .expect("procedure");
-        let expanded =
-            expand_procedure_call(&kv, "p", &[Expr::IntLiteral("1".into())]).expect("expands");
-        assert!(expanded.len() == 1);
-        assert!(expanded == crabka_pgparser::parse("SELECT 1 + 1").expect("the substituted body"));
     }
 
     #[test]

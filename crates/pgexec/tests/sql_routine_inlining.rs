@@ -185,6 +185,77 @@ async fn a_sql_routine_returns_a_declared_rowtype() {
     assert!(scalar(&mut s, "SELECT (make_pair(4)).b").await == Some("value".to_string()));
 }
 
+#[tokio::test]
+async fn a_sql_procedure_binds_its_arguments_once() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE SEQUENCE s; \
+         CREATE TABLE audit (v int); \
+         CREATE PROCEDURE record_value(value int) LANGUAGE sql \
+         AS 'INSERT INTO audit VALUES (value); INSERT INTO audit VALUES (value + 1)'",
+    )
+    .await;
+
+    run(&mut s, "CALL record_value(nextval('s')::int)").await;
+    assert!(scalar(&mut s, "SELECT sum(v) FROM audit").await == Some("3".to_string()));
+    assert!(scalar(&mut s, "SELECT nextval('s')::int").await == Some("2".to_string()));
+}
+
+#[tokio::test]
+async fn a_sql_procedure_dispatches_nested_calls() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE TABLE audit (v int); \
+         CREATE PROCEDURE record_child(value int) LANGUAGE sql \
+         AS 'INSERT INTO audit VALUES (value)'; \
+         CREATE PROCEDURE record_parent(value int) LANGUAGE sql \
+         AS 'CALL record_child(value)'",
+    )
+    .await;
+
+    run(&mut s, "CALL record_parent(7)").await;
+    assert!(scalar(&mut s, "SELECT v FROM audit").await == Some("7".to_string()));
+}
+
+#[tokio::test]
+async fn sql_procedure_transaction_control_obeys_routine_restrictions() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE PROCEDURE sql_commit() LANGUAGE sql AS 'COMMIT'; \
+         CREATE PROCEDURE sql_child_commit() LANGUAGE sql AS 'COMMIT'; \
+         CREATE PROCEDURE sql_security_commit() LANGUAGE sql SECURITY DEFINER AS 'COMMIT'; \
+         CREATE PROCEDURE sql_config_commit() LANGUAGE sql SET work_mem = '64MB' AS 'COMMIT'; \
+         CREATE PROCEDURE sql_security_child_commit() LANGUAGE sql SECURITY DEFINER \
+         AS 'CALL sql_child_commit()'",
+    )
+    .await;
+
+    run(&mut s, "CALL sql_commit()").await;
+    for name in [
+        "sql_security_commit",
+        "sql_config_commit",
+        "sql_security_child_commit",
+    ] {
+        let error = s
+            .simple_query(&format!("CALL {name}()"))
+            .await
+            .expect_err("restricted procedure must reject COMMIT");
+        assert!(error.code == "25001", "{name}: {error:?}");
+    }
+}
+
 /// Parameters inside a FROM-clause function are substituted before its query
 /// is evaluated.
 #[tokio::test]
