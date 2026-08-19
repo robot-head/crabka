@@ -131,6 +131,19 @@ async fn any_value_returns_a_non_null_input_without_comparison() {
 }
 
 #[tokio::test]
+async fn aggregate_transition_support_functions_are_callable() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    let row = client
+        .query_one("SELECT int4pl(4, 5), int8inc(9::int8)", &[])
+        .await
+        .expect("aggregate support functions");
+    assert!(row.get::<_, i32>(0) == 9);
+    assert!(row.get::<_, i64>(1) == 10);
+}
+
+#[tokio::test]
 async fn overloaded_plpgsql_wrapper_resolves_aggregate_argument_from_input_scope() {
     let client = connect(spawn().await).await;
     client

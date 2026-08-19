@@ -47,6 +47,8 @@ enum ScalarFunc {
     Concat,
     Abs,
     Mod,
+    Int4Add,
+    Int8Inc,
     BoolCompare {
         equal: bool,
     },
@@ -162,6 +164,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "concat" => ScalarFunc::Concat,
         "abs" => ScalarFunc::Abs,
         "mod" => ScalarFunc::Mod,
+        "int4pl" => ScalarFunc::Int4Add,
+        "int8inc" => ScalarFunc::Int8Inc,
         "booleq" => ScalarFunc::BoolCompare { equal: true },
         "boolne" => ScalarFunc::BoolCompare { equal: false },
         "coalesce" => ScalarFunc::Coalesce,
@@ -765,6 +769,23 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 Ok(ColumnType::Numeric(None))
             } else {
                 Ok(promote(lt, rt))
+            }
+        }
+        ScalarFunc::Int4Add => {
+            require_arity(fc, n == 2)?;
+            for arg in args {
+                if crate::eval::infer_type(arg, scope)? != ColumnType::Int4 {
+                    return Err(undefined_function_spelled(&fc.name, args, scope));
+                }
+            }
+            Ok(ColumnType::Int4)
+        }
+        ScalarFunc::Int8Inc => {
+            require_arity(fc, n == 1)?;
+            if crate::eval::infer_type(&args[0], scope)? == ColumnType::Int8 {
+                Ok(ColumnType::Int8)
+            } else {
+                Err(undefined_function_spelled(&fc.name, args, scope))
             }
         }
         ScalarFunc::BoolCompare { .. } => {
@@ -1863,6 +1884,14 @@ fn eval_eager(
         ScalarFunc::Mod => {
             require_arity(fc, vals.len() == 2)?;
             Ok(ops::rem(&vals[0], &vals[1])?)
+        }
+        ScalarFunc::Int4Add => {
+            require_arity(fc, vals.len() == 2)?;
+            Ok(ops::add(&vals[0], &vals[1])?)
+        }
+        ScalarFunc::Int8Inc => {
+            require_arity(fc, vals.len() == 1)?;
+            Ok(ops::add(&vals[0], &Datum::Int8(1))?)
         }
         ScalarFunc::Floor | ScalarFunc::Ceil | ScalarFunc::Sign => {
             require_arity(fc, vals.len() == 1)?;
