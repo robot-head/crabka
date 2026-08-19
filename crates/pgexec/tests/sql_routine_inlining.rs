@@ -256,6 +256,45 @@ async fn sql_procedure_transaction_control_obeys_routine_restrictions() {
     }
 }
 
+#[tokio::test]
+async fn replacing_a_routine_reports_the_drop_hint_in_diagnostics() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION replace_me(value int) RETURNS int LANGUAGE sql AS 'SELECT value'",
+    )
+    .await;
+
+    for (sql, message) in [
+        (
+            "CREATE OR REPLACE FUNCTION replace_me(value int) RETURNS text LANGUAGE sql AS 'SELECT value::text'",
+            "cannot change return type of existing function",
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION replace_me(renamed int) RETURNS int LANGUAGE sql AS 'SELECT renamed'",
+            "cannot change name of input parameter \"value\"",
+        ),
+        (
+            "CREATE OR REPLACE PROCEDURE replace_me(value int) LANGUAGE sql AS 'SELECT value'",
+            "cannot change routine kind",
+        ),
+    ] {
+        let error = s.simple_query(sql).await.expect_err("replacement must fail");
+        assert!(error.message == message, "{error:?}");
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.hint.as_deref())
+                == Some("Use DROP FUNCTION replace_me(integer) first."),
+            "{error:?}"
+        );
+    }
+}
+
 /// Parameters inside a FROM-clause function are substituted before its query
 /// is evaluated.
 #[tokio::test]

@@ -906,13 +906,18 @@ fn check_replaceable(existing: &Routine, replacement: &Routine) -> Result<(), Ex
         existing.identity()
     );
     if existing.kind != replacement.kind {
-        return Err(wrong_routine_kind(format!(
-            "cannot change routine kind\n{hint}"
-        )));
+        return Err(ExecError::Remote(
+            crabka_pgwire::error::PgError::error("42809", "cannot change routine kind")
+                .with_hint(hint),
+        ));
     }
     if existing.result != replacement.result {
-        return Err(invalid_definition(
-            "cannot change return type of existing function",
+        return Err(ExecError::Remote(
+            crabka_pgwire::error::PgError::error(
+                "42P13",
+                "cannot change return type of existing function",
+            )
+            .with_hint(hint),
         ));
     }
     for (before, after) in existing
@@ -922,9 +927,13 @@ fn check_replaceable(existing: &Routine, replacement: &Routine) -> Result<(), Ex
     {
         let _ = after;
         if let Some(name) = &before.name {
-            return Err(invalid_definition(format!(
-                "cannot change name of input parameter \"{name}\""
-            )));
+            return Err(ExecError::Remote(
+                crabka_pgwire::error::PgError::error(
+                    "42P13",
+                    format!("cannot change name of input parameter \"{name}\""),
+                )
+                .with_hint(hint),
+            ));
         }
     }
     Ok(())
