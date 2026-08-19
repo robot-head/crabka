@@ -1,14 +1,4 @@
-//! The two ways Gres can differ when it inlines a `LANGUAGE sql` routine.
-//!
-//! Gres reaches a SQL routine only when it inlines the final query of the
-//! routine into the calling query. That is faithful for the shapes
-//! `PostgreSQL` itself inlines. It is wrong in two specific ways that Gres has
-//! to refuse rather than answer:
-//!
-//! - a body with several statements would run only its last statement, and
-//!   would silently drop the writes that the earlier ones do;
-//! - an argument substituted at several parameter references would be evaluated
-//!   once per reference rather than once per call.
+//! `LANGUAGE sql` routines execute their body through the owning session.
 
 use crabka_pgexec::{SqlEngine, SqlSession};
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
@@ -32,12 +22,9 @@ async fn scalar(s: &mut SqlSession, sql: &str) -> Option<String> {
     }
 }
 
-/// Gres refuses a multi-statement body.
-///
-/// If it ran only the last statement, it would return the right answer but
-/// drop the earlier writes.
+/// Every statement runs, and the final one supplies the scalar result.
 #[tokio::test]
-async fn a_sql_body_with_several_statements_is_refused_rather_than_partly_run() {
+async fn a_sql_body_runs_every_statement_and_returns_its_final_result() {
     use assert2::assert;
 
     let engine = SqlEngine::new();
@@ -50,59 +37,102 @@ async fn a_sql_body_with_several_statements_is_refused_rather_than_partly_run() 
     )
     .await;
 
-    let error = s.simple_query("SELECT f(7)").await.expect_err("refused");
-    assert!(error.code == "0A000", "{}", error.code);
-    assert!(
-        error.message.contains("several statements"),
-        "{}",
-        error.message
-    );
-    // Nothing ran: the refusal happens before the final query is inlined, so the
-    // write the body would have performed did not happen either way.
-    assert!(scalar(&mut s, "SELECT count(*) FROM audit").await == Some("0".to_string()));
+    assert!(scalar(&mut s, "SELECT f(7)").await == Some("7".to_string()));
+    assert!(scalar(&mut s, "SELECT count(*) FROM audit").await == Some("1".to_string()));
 }
 
-/// Gres refuses an argument that may not be constant when the body uses it
-/// more than once.
-///
-/// The cases where a duplicate use cannot change the answer still run.
+/// A routine argument evaluates exactly once, even when the body reads it twice.
 #[tokio::test]
-async fn an_argument_used_twice_is_refused_only_when_duplicating_it_could_matter() {
+async fn a_sql_routine_binds_a_volatile_argument_once() {
     use assert2::assert;
 
     let engine = SqlEngine::new();
     let mut s = engine.connect();
     run(&mut s, "CREATE SEQUENCE s").await;
-    run(&mut s, "CREATE TABLE t (a int)").await;
-    run(&mut s, "INSERT INTO t VALUES (4)").await;
     run(
         &mut s,
         "CREATE FUNCTION twice(int) RETURNS int LANGUAGE sql AS 'SELECT $1 + $1'",
     )
     .await;
+    assert!(scalar(&mut s, "SELECT twice(nextval('s')::int)").await == Some("2".to_string()));
+    assert!(scalar(&mut s, "SELECT nextval('s')::int").await == Some("2".to_string()));
+}
+
+#[tokio::test]
+async fn a_sql_routine_binds_named_and_unused_arguments() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
     run(
         &mut s,
-        "CREATE FUNCTION once(int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 1'",
+        "CREATE FUNCTION named(left_arg int, ignored int, right_arg int) RETURNS int \
+         LANGUAGE sql AS 'SELECT left_arg + right_arg'",
     )
     .await;
 
-    // A call that would consume two sequence values is refused.
-    let error = s
-        .simple_query("SELECT twice(nextval('s')::int)")
-        .await
-        .expect_err("a volatile argument used twice is refused");
-    assert!(error.code == "0A000", "{}", error.code);
-    assert!(
-        error.message.contains("more than once"),
-        "{}",
-        error.message
-    );
+    assert!(scalar(&mut s, "SELECT named(3, 0, 4)").await == Some("7".to_string()));
+}
 
-    // A literal and a column reference are free to duplicate.
-    assert!(scalar(&mut s, "SELECT twice(3)").await == Some("6".to_string()));
-    assert!(scalar(&mut s, "SELECT twice(a) FROM t").await == Some("8".to_string()));
-    // And one reference is fine however volatile the argument is.
-    assert!(scalar(&mut s, "SELECT once(nextval('s')::int)").await == Some("2".to_string()));
+#[tokio::test]
+async fn a_sql_routine_reads_relations_with_a_row_varying_argument() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE TABLE lookup (k int PRIMARY KEY, v int); \
+         CREATE TABLE input_rows (k int); \
+         INSERT INTO lookup VALUES (1, 10), (2, 20); \
+         INSERT INTO input_rows VALUES (1), (2)",
+    )
+    .await;
+    run(
+        &mut s,
+        "CREATE FUNCTION lookup_value(input int) RETURNS int LANGUAGE sql \
+         AS 'SELECT v FROM lookup WHERE k = input'",
+    )
+    .await;
+
+    assert!(scalar(&mut s, "SELECT sum(lookup_value(k)) FROM input_rows").await == Some("30".to_string()));
+}
+
+#[tokio::test]
+async fn a_sql_routine_returns_final_dml_returning() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(&mut s, "CREATE TABLE audit (v int)").await;
+    run(
+        &mut s,
+        "CREATE FUNCTION record(int) RETURNS int LANGUAGE sql \
+         AS 'INSERT INTO audit VALUES ($1) RETURNING v'",
+    )
+    .await;
+
+    assert!(scalar(&mut s, "SELECT record(8)").await == Some("8".to_string()));
+}
+
+#[tokio::test]
+async fn a_sql_scalar_routine_rejects_multiple_final_rows() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION too_many() RETURNS int LANGUAGE sql \
+         AS 'SELECT 1 UNION ALL SELECT 2'",
+    )
+    .await;
+
+    let error = s
+        .simple_query("SELECT too_many()")
+        .await
+        .expect_err("multiple result rows must fail");
+    assert!(error.code == "21000", "{}", error.code);
 }
 
 /// Parameters inside a FROM-clause function are substituted before its query

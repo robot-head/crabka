@@ -301,6 +301,58 @@ pub(crate) async fn execute_scalar_function(
     }
 }
 
+pub(crate) async fn execute_sql_scalar_function(
+    session: &mut SqlSession,
+    routine: &Routine,
+    values: &[Datum],
+) -> Result<Datum, ExecError> {
+    let ctx = session.plpgsql_eval_context();
+    let (frame, output_slot) = bind_scalar_parameters(routine, values, &ctx)?;
+    let interpreter = Interpreter {
+        session,
+        frames: vec![frame],
+        allow_transaction_control: false,
+        savepoint_serial: 0,
+        active_error: None,
+        exception_depth: 0,
+        cursor_declarations: HashMap::new(),
+        last_row_count: 0,
+        output_slot,
+        set_results: None,
+        context: format!("SQL function {}", routine.identity()),
+        variable_conflict: PlPgSqlVariableConflict::UseVariable,
+        routine_oid: routine.oid,
+    };
+    let statements = crate::routine::parse_body(routine)?;
+    let mut final_result = None;
+    for statement in statements {
+        let statement = interpreter.bind_statement(&statement)?;
+        final_result = Some(Box::pin(interpreter.session.run_one(&statement)).await?);
+    }
+    if crate::routine::declared_returns_void(routine) {
+        return Ok(crate::routine::void_result_value());
+    }
+    let QueryResult::Rows { fields, rows, .. } = final_result.ok_or_else(|| {
+        ExecError::Syntax("SQL function body must contain a final query or DML RETURNING statement".into())
+    })? else {
+        return Err(ExecError::Syntax(
+            "SQL function body must contain a final query or DML RETURNING statement".into(),
+        ));
+    };
+    let Some(row) = rows.first() else {
+        return Ok(Datum::Null);
+    };
+    if rows.len() > 1 {
+        return Err(ExecError::CardinalityViolation);
+    }
+    match (fields.as_slice(), row.as_slice()) {
+        ([field], [value]) => interpreter.session.plpgsql_decode_cell(field, value.as_ref()),
+        _ => Err(ExecError::TypeMismatch(
+            "SQL function result must have exactly one column".into(),
+        )),
+    }
+}
+
 pub(crate) async fn execute_trigger_function(
     session: &mut SqlSession,
     routine: &Routine,

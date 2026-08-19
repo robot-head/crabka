@@ -8142,13 +8142,22 @@ impl SqlSession {
                                 ),
                             ),
                             crate::routine::FunctionRequestKind::Scalar => {
-                                Box::pin(crate::plpgsql::execute_scalar_function(
-                                    self,
-                                    &request.routine,
-                                    &request.values,
-                                ))
-                                .await
-                                .map(crate::routine::FunctionRequestResult::Scalar)
+                                let result = if request.routine.language == "sql" {
+                                    crate::plpgsql::execute_sql_scalar_function(
+                                        self,
+                                        &request.routine,
+                                        &request.values,
+                                    )
+                                    .await
+                                } else {
+                                    crate::plpgsql::execute_scalar_function(
+                                        self,
+                                        &request.routine,
+                                        &request.values,
+                                    )
+                                    .await
+                                };
+                                result.map(crate::routine::FunctionRequestResult::Scalar)
                             }
                             crate::routine::FunctionRequestKind::Table(_) if trigger_only => Err(
                                 ExecError::Unsupported(

@@ -1891,19 +1891,21 @@ pub(crate) fn inline_scalar(kv: &dyn Kv, call: &FuncCall) -> Result<Option<Expr>
         return Ok(None);
     }
     let given = best_effort_arg_types(args);
-    // PL/pgSQL and the pinned regression-C adapters are executed by the scalar
-    // runtime rather than inlined. Keeping the call node intact is what lets
-    // their arguments vary with each input row.
+    // Procedural and SQL-language routines execute through the scalar runtime
+    // rather than inlining. Keeping the call node intact evaluates its
+    // arguments once for each input row before the body receives their values.
     match resolve_call(kv, &call.name, &given) {
         Ok(Some(routine))
-            if routine.language == "plpgsql" || regression_c_adapter(&routine).is_some() =>
+            if routine.kind == RoutineKind::Function
+                && (matches!(routine.language.as_str(), "plpgsql" | "sql")
+                    || regression_c_adapter(&routine).is_some()) =>
         {
             return Ok(None);
         }
         Err(_)
             if routines_named(kv, &call.name)?
                 .iter()
-                .all(|routine| routine.language == "plpgsql") =>
+                .all(|routine| matches!(routine.language.as_str(), "plpgsql" | "sql")) =>
         {
             return Ok(None);
         }
@@ -1931,7 +1933,8 @@ pub(crate) fn plpgsql_declared_call_type(
     let given = best_effort_arg_types(args);
     let routine = match resolve_call(kv, &call.name, &given) {
         Ok(Some(routine))
-            if routine.language == "plpgsql" || regression_c_adapter(&routine).is_some() =>
+            if matches!(routine.language.as_str(), "plpgsql" | "sql")
+                || regression_c_adapter(&routine).is_some() =>
         {
             routine
         }
@@ -1985,13 +1988,13 @@ pub(crate) fn plpgsql_scalar_result_type(
                 )));
             };
             let adapter = regression_c_adapter(&routine);
-            if routine.language != "plpgsql" && adapter.is_none() {
+            if !matches!(routine.language.as_str(), "plpgsql" | "sql") && adapter.is_none() {
                 return Err(undefined_routine(format!(
                     "function {} does not exist",
                     call.name
                 )));
             }
-            if routine.language == "plpgsql" {
+            if matches!(routine.language.as_str(), "plpgsql" | "sql") {
                 validate_plpgsql_scalar(&routine)?;
             }
             called_scalar_result_type(&routine, &given).ok_or_else(|| {
@@ -2087,7 +2090,8 @@ pub(crate) fn is_plpgsql_scalar_runtime(call: &FuncCall, scope: &crate::scope::S
         };
         resolve_call(runtime.catalog.as_ref(), &call.name, &given).is_ok_and(|routine| {
             routine.is_some_and(|routine| {
-                routine.language == "plpgsql" || regression_c_adapter(&routine).is_some()
+                matches!(routine.language.as_str(), "plpgsql" | "sql")
+                    || regression_c_adapter(&routine).is_some()
             })
         })
     })
@@ -2158,13 +2162,13 @@ pub(crate) fn eval_plpgsql_scalar_with(
                 )));
             };
             let adapter = regression_c_adapter(&routine);
-            if routine.language != "plpgsql" && adapter.is_none() {
+            if !matches!(routine.language.as_str(), "plpgsql" | "sql") && adapter.is_none() {
                 return Err(undefined_routine(format!(
                     "function {} does not exist",
                     call.name
                 )));
             }
-            if routine.language == "plpgsql" {
+            if matches!(routine.language.as_str(), "plpgsql" | "sql") {
                 validate_plpgsql_scalar(&routine)?;
             }
             for default in &bound_args[values.len()..] {
@@ -2182,10 +2186,12 @@ pub(crate) fn eval_plpgsql_scalar_with(
                 return eval_regression_c_adapter(adapter, &values);
             }
             let _guard = enter_plpgsql_call()?;
-            let value = if crate::plpgsql::scalar_function_requires_session(
-                runtime.catalog.as_ref(),
-                &routine,
-            )? {
+            let value = if routine.language == "sql"
+                || crate::plpgsql::scalar_function_requires_session(
+                    runtime.catalog.as_ref(),
+                    &routine,
+                )?
+            {
                 let requests = runtime.requests.ok_or_else(|| {
                     ExecError::Unsupported(
                         "SQL-bearing PL/pgSQL function requires a session executor".into(),
@@ -5114,7 +5120,11 @@ mod tests {
             order_by: Vec::new(),
             filter: None,
         };
-        let inlined = inline_scalar(&kv, &call)
+        let inlined = inline_scalar_call(
+            &kv,
+            &call,
+            &[ArgType::Known(ColumnType::Int4), ArgType::Known(ColumnType::Int4)],
+        )
             .expect("inlines")
             .expect("a routine");
         // `SELECT $1 + $2` with the call's arguments substituted, cast to the
@@ -5148,7 +5158,7 @@ mod tests {
             order_by: Vec::new(),
             filter: None,
         };
-        let inlined = inline_scalar(&kv, &call)
+        let inlined = inline_scalar_call(&kv, &call, &[ArgType::Known(ColumnType::Int4)])
             .expect("inlines")
             .expect("a routine");
         assert!(
