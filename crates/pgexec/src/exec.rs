@@ -33,7 +33,7 @@ use crate::{
         JoinSnapshot, JoinTableInterval, PredicatePushdown, ProjectionPushdown, RowInterval,
         ScanRequest, ScannedRow,
     },
-    scope::{ColumnBinding, Exposure, Scope},
+    scope::{ColumnBinding, Exposure, POSITION_QUALIFIER, Scope},
     timestamp_txn::{PrimaryTxnDecision, ReadTimestamp, TimestampTransactionId, TimestampWrite},
 };
 
@@ -4195,7 +4195,7 @@ async fn execute_view_dml(
                 sample: None,
             };
             let target_rows =
-                build_from(&read, std::slice::from_ref(&target_expr), None, None, None)?.rows;
+                build_from(&read, std::slice::from_ref(&target_expr), None, None, None, None)?.rows;
             // `None`: a view's rows come out of its own query and carry no
             // storage identity, so the target offers no system column.
             let source = DmlSource::build(write_ctx, ctes, &view, qualifier, from, None)?;
@@ -4274,7 +4274,7 @@ async fn execute_view_dml(
                 sample: None,
             };
             let target_rows =
-                build_from(&read, std::slice::from_ref(&target_expr), None, None, None)?.rows;
+                build_from(&read, std::slice::from_ref(&target_expr), None, None, None, None)?.rows;
             // `None`, for the reason the view `UPDATE` above passes it.
             let source = DmlSource::build(write_ctx, ctes, &view, qualifier, using, None)?;
             let bound_filter = source.bind_filter(filter.as_ref())?;
@@ -5101,7 +5101,7 @@ impl DmlSource {
         } else {
             OuterReference::Target
         };
-        let rel = build_from(&read, from, None, None, None)
+        let rel = build_from(&read, from, None, None, None, None)
             .map_err(|error| explain_outer_reference(error, &scope, kind))?;
         scope.columns.extend(rel.scope.columns);
         stamp.extend_scope(&mut scope, qualifier);
@@ -6068,7 +6068,7 @@ async fn execute_merge(
                 columns: None,
                 sample: None,
             };
-            build_from(&read, std::slice::from_ref(&te), None, None, None)?
+            build_from(&read, std::slice::from_ref(&te), None, None, None, None)?
         }
         MergeSource::Query {
             query,
@@ -11562,6 +11562,7 @@ fn build_from(
     bounds: Option<&ScanBounds>,
     scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
     filter: Option<&Expr>,
+    pruned_columns: Option<&[ColumnBinding]>,
 ) -> Result<Relation, ExecError> {
     let mut iter = from.iter();
     let first = iter
@@ -11576,7 +11577,10 @@ fn build_from(
         &crabka_pgparser::ast::JoinConstraint::None,
         &Scope::empty(),
     )?;
-    let mut acc = build_table_expr(read_ctx, first, bounds, scan_plan, filter)?;
+    let mut acc = prune_relation_columns(
+        build_table_expr(read_ctx, first, bounds, scan_plan, filter)?,
+        pruned_columns,
+    );
     for te in iter {
         // A comma-FROM (multiple tables) is a cross join — no single-table
         // pushdown applies, so subsequent items always scan in full.
@@ -11587,9 +11591,100 @@ fn build_from(
             crabka_pgparser::ast::JoinKind::Cross,
             &crabka_pgparser::ast::JoinConstraint::None,
             filter,
+            pruned_columns,
         )?;
     }
     Ok(acc)
+}
+
+fn prune_relation_columns(
+    mut relation: Relation,
+    pruned_columns: Option<&[ColumnBinding]>,
+) -> Relation {
+    let Some(pruned_columns) = pruned_columns else {
+        return relation;
+    };
+    for row in &mut relation.rows {
+        for (column, datum) in relation.scope.columns.iter().zip(row) {
+            if !pruned_columns.contains(column) {
+                *datum = Datum::Null;
+            }
+        }
+    }
+    relation
+}
+
+/// Columns a simple FROM list must retain after its joins have materialized.
+///
+/// The legacy executor builds virtual catalogs as full rows before joining them.
+/// Retaining just the columns the query reads keeps those joins within the
+/// statement budget, without changing the relation's visible shape.
+fn live_from_columns(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+) -> Option<Vec<ColumnBinding>> {
+    use crabka_pgparser::ast::TableExpr;
+
+    if !select.order_by.is_empty()
+        || matches!(
+            select.distinct,
+            crabka_pgparser::ast::DistinctClause::On(_)
+        )
+        || crate::grouping::is_grouping_query(select)
+        || crate::window::has_window_calls(select)
+        || crate::srf::projection_contains_srf(&select.projection)
+        || !select.from.iter().all(|item| {
+            matches!(
+                item,
+                TableExpr::Table {
+                    columns: None,
+                    sample: None,
+                    ..
+                }
+            )
+        })
+    {
+        return None;
+    }
+
+    let scope = build_from_schema_of_select_with_context(
+        read_ctx.catalog_kv,
+        read_ctx.fctx.resolution,
+        select,
+        read_ctx.ctes,
+        read_ctx.eval_ctx,
+    )
+    .ok()?
+    .scope;
+    let (_, mut expressions, _) = resolve_projection(&select.projection, &scope).ok()?;
+    if let Some(filter) = &select.filter {
+        expressions.push(filter.clone());
+    }
+    let expressions = crate::bind::bind_all(&expressions, &scope).ok()?;
+    let mut positions = BTreeSet::new();
+    for expression in expressions {
+        let mut positional = true;
+        crate::grouping::visit_expr(expression.expr(), &mut |node| {
+            if let Expr::Column { table, name } = node {
+                match table.as_deref().filter(|table| *table == POSITION_QUALIFIER) {
+                    Some(_) => match name.parse::<usize>() {
+                        Ok(position) => {
+                            positions.insert(position);
+                        }
+                        Err(_) => positional = false,
+                    },
+                    None => positional = false,
+                }
+            }
+        });
+        if !positional {
+            return None;
+        }
+    }
+    positions
+        .into_iter()
+        .map(|position| scope.columns.get(position).cloned())
+        .collect()
 }
 
 /// The relationship between a reference that failed to resolve and the scope one
@@ -11734,6 +11829,7 @@ fn append_from_item(
     kind: crabka_pgparser::ast::JoinKind,
     constraint: &crabka_pgparser::ast::JoinConstraint,
     filter: Option<&Expr>,
+    pruned_columns: Option<&[ColumnBinding]>,
 ) -> Result<Relation, ExecError> {
     reject_from_clause_aggregates(read_ctx, te, constraint, &acc.scope)?;
     if !is_lateral_item(te, &acc.scope) {
@@ -11750,6 +11846,7 @@ fn append_from_item(
                 explain_outer_reference(error, &acc.scope, OuterReference::Sibling)
             }
         })?;
+        next = prune_relation_columns(next, pruned_columns);
         if let Some(filter) = filter {
             push_local_where(&mut acc, &mut next, kind, filter, read_ctx.eval_ctx)?;
         }
@@ -16095,7 +16192,7 @@ fn build_table_expr(
             let l = build_table_expr(read_ctx, left, None, None, nested_filter)?;
             // A lateral right side sees the left side's columns, so it is rebuilt
             // per left row instead of materialized once.
-            append_from_item(read_ctx, l, right, *kind, constraint, filter)
+            append_from_item(read_ctx, l, right, *kind, constraint, filter, None)
         }
         TableExpr::Derived {
             subquery,
@@ -17603,7 +17700,7 @@ pub(crate) fn select_to_relation_with_ctes(
         // dropped, and only the `WHERE` goes unevaluated. Nothing below has a
         // second path for the empty input: an input relation that simply *is*
         // empty already takes this one.
-        let mut relation = build_from(read_ctx, &s.from, None, None, None)?;
+        let mut relation = build_from(read_ctx, &s.from, None, None, None, None)?;
         relation.rows.clear();
         relation
     } else {
@@ -17632,12 +17729,16 @@ pub(crate) fn select_to_relation_with_ctes(
             }
         }
         let scan_plan = single_table_scan_plan(read_ctx, s)?;
+        let live_columns = (!correlated)
+            .then(|| live_from_columns(read_ctx, s))
+            .flatten();
         build_from(
             read_ctx,
             &s.from,
             pushed.as_ref(),
             scan_plan.as_ref(),
             s.filter.as_ref(),
+            live_columns.as_deref(),
         )?
     };
     let mut binder = correlated.then(|| {
@@ -20123,6 +20224,38 @@ mod tests {
             let expr = crabka_pgparser::parser::parse_expr_for_test(sql).expect("parse");
             assert2::assert!(super::leakproof_predicate(&expr) == *expected, "{sql}");
         }
+    }
+
+    #[test]
+    fn pruning_a_relation_keeps_its_visible_shape() {
+        let live = ColumnBinding {
+            exposure: Exposure::Output,
+            qualifier: Some("v".into()),
+            name: "live".into(),
+            ty: crabka_pgtypes::ColumnType::Int4,
+        };
+        let dead = ColumnBinding {
+            exposure: Exposure::Output,
+            qualifier: Some("v".into()),
+            name: "dead".into(),
+            ty: crabka_pgtypes::ColumnType::Text,
+        };
+        let relation = super::Relation {
+            scope: Scope {
+                columns: vec![live.clone(), dead],
+            },
+            rows: vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Text("unused".into()),
+            ]],
+        };
+
+        let pruned = super::prune_relation_columns(relation, Some(&[live]));
+
+        assert2::assert!(
+            pruned.rows == vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Null]]
+        );
+        assert2::assert!(pruned.scope.width() == 2);
     }
 
     use crabka_pgcatalog::RelationName;
