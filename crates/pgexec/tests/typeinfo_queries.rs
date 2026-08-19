@@ -327,6 +327,21 @@ async fn whole_row_references_describe_the_relation_rowtype() {
             .await
             .is_err()
     );
+    run(
+        &engine,
+        "CREATE FUNCTION whole_row_argument(value whole_row_type) RETURNS int4 \
+         LANGUAGE sql RETURN 1",
+    )
+    .await;
+    let result = run(
+        &engine,
+        "SELECT p.proargtypes[0] = c.reltype \
+         FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_class c ON c.relname = 'whole_row_type' \
+         WHERE p.proname = 'whole_row_argument'",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("t".into())]);
 
     run(
         &engine,

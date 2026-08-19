@@ -3678,9 +3678,9 @@ pub(crate) fn user_pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
             );
         let arg_type_oids: Vec<Datum> = inputs
             .iter()
-            .map(|param| Datum::Int4(type_oid(&param.ty)))
-            .collect();
-        let all_types: Vec<Datum> = catalog_all_types(&routine);
+            .map(|param| Ok(Datum::Int4(catalog_type_oid(kv, &param.ty)?)))
+            .collect::<Result<_, ExecError>>()?;
+        let all_types = catalog_all_types(kv, &routine)?;
         let all_modes: Vec<Datum> = catalog_all_modes(&routine);
         let mut arg_names: Vec<Datum> = routine
             .params
@@ -3711,7 +3711,7 @@ pub(crate) fn user_pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
             Datum::Text(routine.parallel.to_string()),
             Datum::Int2(i16::try_from(inputs.len()).unwrap_or(0)),
             Datum::Int2(i16::try_from(routine.default_count()).unwrap_or(0)),
-            Datum::Int4(return_type_oid(&routine)),
+            Datum::Int4(catalog_return_type_oid(kv, &routine)?),
             Datum::OidVector(ArrayValue::with_dims(
                 ElemType::Int4,
                 arg_type_oids,
@@ -3946,16 +3946,21 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
 }
 
 /// `pg_proc.proallargtypes` — every parameter's type, in declaration order.
-fn catalog_all_types(routine: &Routine) -> Vec<Datum> {
+fn catalog_all_types(kv: &dyn Kv, routine: &Routine) -> Result<Vec<Datum>, ExecError> {
     let mut out: Vec<Datum> = routine
         .params
         .iter()
-        .map(|param| Datum::Int4(type_oid(&param.ty)))
-        .collect();
+        .map(|param| Ok(Datum::Int4(catalog_type_oid(kv, &param.ty)?)))
+        .collect::<Result<_, ExecError>>()?;
     if let RoutineResult::Table(columns) = &routine.result {
-        out.extend(columns.iter().map(|(_, ty)| Datum::Int4(type_oid(ty))));
+        out.extend(
+            columns
+                .iter()
+                .map(|(_, ty)| Ok(Datum::Int4(catalog_type_oid(kv, ty)?)))
+                .collect::<Result<Vec<_>, ExecError>>()?,
+        );
     }
-    out
+    Ok(out)
 }
 
 /// `pg_proc.proargmodes`: `t` for a `RETURNS TABLE` column, as `PostgreSQL`
@@ -4113,11 +4118,43 @@ fn named_type_oid(name: &str) -> i32 {
 /// A routine's `pg_proc.proargtypes` — the input parameters' type oids, in
 /// declaration order. The same list [`user_pg_proc_rows`] publishes, so a
 /// caller comparing signatures against `pg_proc` reads the same values.
-pub(crate) fn routine_arg_type_oids(routine: &Routine) -> Vec<i32> {
+pub(crate) fn routine_arg_type_oids(
+    kv: &dyn Kv,
+    routine: &Routine,
+) -> Result<Vec<i32>, ExecError> {
     routine
         .input_params()
-        .map(|param| type_oid(&param.ty))
+        .map(|param| catalog_type_oid(kv, &param.ty))
         .collect()
+}
+
+/// A signature type OID from this database's catalog.  Relation types get the
+/// OID of their catalog-owned composite (or its array companion), while the
+/// static table remains the source for PostgreSQL's built-ins.
+fn catalog_type_oid(kv: &dyn Kv, ty: &RoutineType) -> Result<i32, ExecError> {
+    if ty.column.is_some() {
+        return Ok(type_oid(ty));
+    }
+    let array = ty.name.ends_with("[]");
+    let base = ty.name.strip_suffix("[]").unwrap_or(&ty.name);
+    if let oid @ 1.. = named_type_oid(base) {
+        return Ok(oid);
+    }
+    let resolution = crate::relname::ResolutionScope::default_scope();
+    let Ok(written) = crate::relname::parse_written_relation(resolution, base) else {
+        return Ok(0);
+    };
+    let Ok(relation) = crate::relname::resolve_relation(
+        kv,
+        resolution,
+        &written.reference,
+        crate::relname::SchemaDisposition::Reference,
+    ) else {
+        return Ok(0);
+    };
+    Ok(crate::catalog_rel::relation_rowtype_oids(kv)?
+        .get(&relation)
+        .map_or(0, |(rowtype, array_type)| if array { *array_type } else { *rowtype }))
 }
 
 /// A signature type's `pg_type.oid`; `0` for a relation's composite type.
@@ -4129,16 +4166,16 @@ fn type_oid(ty: &RoutineType) -> i32 {
 }
 
 /// `pg_proc.prorettype`.
-fn return_type_oid(routine: &Routine) -> i32 {
+fn catalog_return_type_oid(kv: &dyn Kv, routine: &Routine) -> Result<i32, ExecError> {
     match &routine.result {
-        RoutineResult::Type { ty, .. } => type_oid(ty),
-        RoutineResult::Table(_) => 2249,
+        RoutineResult::Type { ty, .. } => catalog_type_oid(kv, ty),
+        RoutineResult::Table(_) => Ok(2249),
         RoutineResult::Unspecified => {
             let outputs: Vec<&RoutineParam> = routine.output_params().collect();
             match outputs.as_slice() {
-                [] => 2278,
-                [only] => type_oid(&only.ty),
-                _ => 2249,
+                [] => Ok(2278),
+                [only] => catalog_type_oid(kv, &only.ty),
+                _ => Ok(2249),
             }
         }
     }

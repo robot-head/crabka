@@ -422,16 +422,18 @@ fn locate_function(kv: &dyn Kv, oid: i32) -> Result<Option<Located>, ExecError> 
             },
         }));
     }
-    Ok(crabka_pgcatalog::routine::list_routines(kv)?
+    let routine = crabka_pgcatalog::routine::list_routines(kv)?
         .into_iter()
-        .find(|routine| i32::try_from(routine.oid) == Ok(oid))
-        .map(|routine| Located {
+        .find(|routine| i32::try_from(routine.oid) == Ok(oid));
+    routine.map(|routine| {
+        Ok::<_, ExecError>(Located {
             schema: crabka_pgcatalog::PUBLIC_SCHEMA.to_string(),
             key: ShadowKey::Signature {
                 name: routine.name.clone(),
-                args: crate::routine::routine_arg_type_oids(&routine),
+                args: crate::routine::routine_arg_type_oids(kv, &routine)?,
             },
-        }))
+        })
+    }).transpose()
 }
 
 /// Is a routine of this exact signature declared in `schema`?
@@ -445,9 +447,12 @@ fn function_occupied(kv: &dyn Kv, schema: &str, key: &ShadowKey) -> Result<bool,
     if schema != crabka_pgcatalog::PUBLIC_SCHEMA {
         return Ok(false);
     }
-    Ok(crabka_pgcatalog::routine::routines_named(kv, name)?
-        .iter()
-        .any(|routine| crate::routine::routine_arg_type_oids(routine) == *args))
+    for routine in crabka_pgcatalog::routine::routines_named(kv, name)? {
+        if crate::routine::routine_arg_type_oids(kv, &routine)? == *args {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// `pg_opclass`: the built-in fixture is `pg_catalog`; a `CREATE OPERATOR
