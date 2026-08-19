@@ -82,7 +82,7 @@ async fn a_sql_routine_binds_named_and_unused_arguments() {
     assert!(scalar(&mut s, "SELECT named(3, 0, 4)").await == Some("7".to_string()));
 }
 
-/// A scalar built-in in FROM is a one-row FunctionScan, not an undefined SRF.
+/// A scalar built-in in FROM is a one-row `FunctionScan`, not an undefined SRF.
 #[tokio::test]
 async fn a_scalar_builtin_scans_as_one_row_from_item() {
     use assert2::assert;
@@ -327,6 +327,18 @@ async fn a_sql_table_function_participates_in_rows_from() {
          AS $$ BEGIN RETURN QUERY SELECT n FROM generate_series(1, limit_value) AS n; END $$",
     )
     .await;
+    run(
+        &mut s,
+        "CREATE FUNCTION rows_from_record(int) RETURNS SETOF record LANGUAGE sql \
+         AS 'SELECT n, ''value''::text FROM generate_series(1, $1) AS n'",
+    )
+    .await;
+    run(
+        &mut s,
+        "CREATE VIEW rows_from_view AS \
+         SELECT n FROM rows_from_plpgsql(2) AS emitted(n)",
+    )
+    .await;
 
     assert!(
         scalar(
@@ -363,6 +375,44 @@ async fn a_sql_table_function_participates_in_rows_from() {
         )
         .await
             == Some("1:20,null:21".to_string())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "SELECT string_agg(coalesce(a::text, 'null') || ':' || b::text || ':' || o::text, ',' ORDER BY o) \
+             FROM ROWS FROM (rows_from_sql(2), generate_series(10, 12)) WITH ORDINALITY AS t(a, b, o)",
+        )
+        .await
+            == Some("1:10:1,2:11:2,null:12:3".to_string())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "SELECT string_agg(coalesce(a::text, 'null') || ':' || coalesce(label, 'null') || ':' || b::text || ':' || o::text, ',' ORDER BY o) \
+             FROM ROWS FROM (rows_from_record(1) AS (a int, label text), generate_series(30, 32)) \
+             WITH ORDINALITY AS t(a, label, b, o)",
+        )
+        .await
+            == Some("1:value:30:1,null:null:31:2,null:null:32:3".to_string())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "SELECT string_agg((left_side.n * 10 + right_side.n)::text, ',' ORDER BY left_side.n) \
+             FROM (SELECT n FROM rows_from_sql(2) AS emitted(n)) AS left_side \
+             JOIN rows_from_view AS right_side ON left_side.n = right_side.n",
+        )
+        .await
+            == Some("11,22".to_string())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "SELECT string_agg(emitted::text, ',' ORDER BY n) \
+             FROM rows_from_sql(2) AS emitted(n)",
+        )
+        .await
+            == Some("(1),(2)".to_string())
     );
 }
 
