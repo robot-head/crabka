@@ -493,9 +493,12 @@ fn to_char(value: &Datum, template: &str, ctx: &EvalCtx, name: &str) -> Result<D
             datetime::format_datetime(template, &fields).map_err(map_type)?
         }
         Datum::Timestamptz(ts) => {
-            let dt = ctx.time_zone.to_datetime(*ts);
-            let off = ctx.time_zone.to_offset(*ts).seconds();
-            let fields = datetime::DateTimeFields::from_civil(dt, Some(off));
+            let zone = ctx.time_zone.to_offset_info(*ts);
+            let fields = datetime::DateTimeFields::from_civil(
+                zone.offset().to_datetime(*ts),
+                Some(zone.offset().seconds()),
+            )
+            .with_tz_name(Some(zone.abbreviation().to_string()));
             datetime::format_datetime(template, &fields).map_err(map_type)?
         }
         Datum::Interval(iv) => datetime::format_interval(*iv, template).map_err(map_type)?,
@@ -902,6 +905,55 @@ mod tests {
         assert_eq!(ev("to_char(485, '999')"), Datum::Text(" 485".into()));
         assert_eq!(ty("to_char(485, '999')"), ColumnType::Text);
         assert_eq!(ty("to_char(now(), 'YYYY')"), ColumnType::Text);
+    }
+
+    #[test]
+    fn to_char_returns_null_for_infinite_temporal_values() {
+        let ctx = EvalCtx::test_default();
+        for value in [
+            Datum::Date(crabka_pgtypes::datetime::DATE_INFINITY),
+            Datum::Timestamp(crabka_pgtypes::datetime::TIMESTAMP_INFINITY),
+            Datum::Timestamptz(jiff::Timestamp::MAX),
+            Datum::Interval(crabka_pgtypes::datetime::Interval::INFINITY),
+        ] {
+            assert_eq!(
+                super::to_char(&value, "YYYY", &ctx, "to_char").expect("to_char"),
+                Datum::Null
+            );
+        }
+        assert_eq!(
+            super::to_char(
+                &Datum::Timestamp(jiff::civil::datetime(2024, 1, 1, 0, 0, 0, 0)),
+                "YYYY",
+                &ctx,
+                "to_char"
+            )
+            .expect("to_char"),
+            Datum::Text("2024".into())
+        );
+    }
+
+    #[test]
+    fn to_char_uses_the_session_zone_abbreviation() {
+        let instant = |text: &str| text.parse::<jiff::Timestamp>().expect("instant");
+        let mut ctx = EvalCtx::test_default();
+        for (zone, at, expected) in [
+            ("America/Los_Angeles", "2012-12-12T20:00:00Z", "PST pst"),
+            ("America/Los_Angeles", "1800-01-01T00:00:00Z", "LMT lmt"),
+            ("America/Montevideo", "1912-01-01T03:30:00Z", "MMT mmt"),
+            ("Europe/Moscow", "2012-01-01T00:00:00Z", "MSK msk"),
+            ("-1.5", "2012-12-12T00:00:00Z", "-01:30 -01:30"),
+            ("+2", "2012-12-12T00:00:00Z", "+02 +02"),
+        ] {
+            ctx.time_zone = crabka_pgtypes::datetime::resolve_guc_time_zone(zone)
+                .unwrap_or_else(|| panic!("{zone} resolves"));
+            assert_eq!(
+                super::to_char(&Datum::Timestamptz(instant(at)), "TZ tz", &ctx, "to_char")
+                    .expect("to_char"),
+                Datum::Text(expected.into()),
+                "{zone} at {at}"
+            );
+        }
     }
 
     #[test]

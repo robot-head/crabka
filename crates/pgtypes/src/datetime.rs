@@ -3521,10 +3521,10 @@ pub fn interval_from_binary(b: &[u8]) -> Result<Interval, TypeError> {
 // ---------------------------------------------------------------------------
 
 /// Pre-extracted civil fields for the `to_char` date/time engine. The executor
-/// fills this from a `Datum`; a `timestamptz` supplies `tz_offset_secs`, a plain
-/// `timestamp`/`date`/`time` leaves it `None` (so TZ patterns render empty, the
-/// PostgreSQL behavior).
-#[derive(Debug, Clone, Copy)]
+/// fills this from a `Datum`; a `timestamptz` supplies its offset and zone
+/// abbreviation, while a plain `timestamp`/`date`/`time` leaves both absent (so
+/// TZ patterns render empty, the PostgreSQL behavior).
+#[derive(Debug, Clone)]
 pub struct DateTimeFields {
     pub year: i32,
     pub month: u32,         // 1..=12
@@ -3541,6 +3541,7 @@ pub struct DateTimeFields {
     pub week_of_year: u32,  // (doy-1)/7 + 1    (PG `WW`)
     pub week_of_month: u32, // (day-1)/7 + 1    (PG `W`)
     pub tz_offset_secs: Option<i32>,
+    pub tz_name: Option<String>,
 }
 
 impl DateTimeFields {
@@ -3570,7 +3571,15 @@ impl DateTimeFields {
             week_of_year: (doy - 1) / 7 + 1,
             week_of_month: (day - 1) / 7 + 1,
             tz_offset_secs,
+            tz_name: None,
         }
+    }
+
+    /// Attach the session-zone label used by the `TZ` format token.
+    #[must_use]
+    pub fn with_tz_name(mut self, name: Option<String>) -> Self {
+        self.tz_name = name;
+        self
     }
 
     /// Build the field struct for a bare `time`, whose date patterns render
@@ -3618,6 +3627,9 @@ trait FieldSource {
     fn week_of_year(&self) -> i64;
     fn week_of_month(&self) -> i64;
     fn tz_offset_secs(&self) -> Option<i32>;
+    fn tz_name(&self) -> Option<&str> {
+        None
+    }
 
     /// The year `to_char` PRINTS. PostgreSQL never prints a negative year for a
     /// date/time: the astronomical year `0` is `1 BC` and prints as `1`, so a
@@ -3709,6 +3721,9 @@ impl FieldSource for DateTimeFields {
     }
     fn tz_offset_secs(&self) -> Option<i32> {
         self.tz_offset_secs
+    }
+    fn tz_name(&self) -> Option<&str> {
+        self.tz_name.as_deref()
     }
     // For a datetime, `month`/`dow` are in range, so the default index maps are
     // exact (`month - 1 == month.rem_euclid(12)` for 1..=12, etc.); we override
@@ -4359,9 +4374,19 @@ fn match_pattern(
         return Ok(Some((2, s, None)));
     }
     if matches_at(chars, i, "TZ") || matches_at(chars, i, "tz") {
-        let s = match f.tz_offset_secs() {
-            Some(secs) => offset_hh(secs),
-            None => String::new(),
+        let lower = matches_at(chars, i, "tz");
+        let s = match (f.tz_name(), f.tz_offset_secs()) {
+            (Some(name), _) if lower => name.to_ascii_lowercase(),
+            (Some(name), _) => name.to_string(),
+            (None, Some(secs)) => {
+                let mins = (secs.unsigned_abs() % 3600) / 60;
+                if mins == 0 {
+                    offset_hh(secs)
+                } else {
+                    format!("{}:{mins:02}", offset_hh(secs))
+                }
+            }
+            (None, None) => String::new(),
         };
         return Ok(Some((2, s, None)));
     }
@@ -6621,7 +6646,10 @@ mod format_tests {
         assert_eq!(format_datetime("OF", &f).expect("of"), "+05:30");
         assert_eq!(format_datetime("TZH", &f).expect("tzh"), "+05");
         assert_eq!(format_datetime("TZM", &f).expect("tzm"), "30");
-        assert_eq!(format_datetime("TZ", &f).expect("tz"), "+05");
+        assert_eq!(format_datetime("TZ", &f).expect("tz"), "+05:30");
+        let named = f.with_tz_name(Some("PST".into()));
+        assert_eq!(format_datetime("TZ", &named).expect("named tz"), "PST");
+        assert_eq!(format_datetime("tz", &named).expect("named tz"), "pst");
     }
 
     // -----------------------------------------------------------------------
