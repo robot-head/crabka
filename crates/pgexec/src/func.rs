@@ -52,6 +52,7 @@ enum ScalarFunc {
     Int8Inc,
     Int4Sum,
     Int4Larger,
+    ArrayLarger,
     Int4AvgAccum,
     Int8Avg,
     Float8Accum,
@@ -183,6 +184,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "int8inc" => ScalarFunc::Int8Inc,
         "int4_sum" => ScalarFunc::Int4Sum,
         "int4larger" => ScalarFunc::Int4Larger,
+        "array_larger" => ScalarFunc::ArrayLarger,
         "int4_avg_accum" => ScalarFunc::Int4AvgAccum,
         "int8_avg" => ScalarFunc::Int8Avg,
         "float8_accum" => ScalarFunc::Float8Accum,
@@ -840,6 +842,16 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 .all(|arg| crate::eval::infer_type(arg, scope) == Ok(ColumnType::Int4))
             {
                 Ok(ColumnType::Int4)
+            } else {
+                Err(undefined_function_spelled(&fc.name, args, scope))
+            }
+        }
+        ScalarFunc::ArrayLarger => {
+            require_arity(fc, n == 2)?;
+            let left = crate::eval::infer_type(&args[0], scope)?;
+            let right = crate::eval::infer_type(&args[1], scope)?;
+            if left == right && matches!(left, ColumnType::Array(_)) {
+                Ok(left)
             } else {
                 Err(undefined_function_spelled(&fc.name, args, scope))
             }
@@ -2025,6 +2037,20 @@ fn eval_eager(
                 return Err(undefined_function(&fc.name));
             };
             Ok(Datum::Int4((*left).max(*right)))
+        }
+        ScalarFunc::ArrayLarger => {
+            require_arity(fc, vals.len() == 2)?;
+            let (Datum::Array(left), Datum::Array(right)) = (&vals[0], &vals[1]) else {
+                return Err(undefined_function(&fc.name));
+            };
+            if left.elem != right.elem {
+                return Err(undefined_function(&fc.name));
+            }
+            match ops::compare(&vals[0], &vals[1])? {
+                Some(std::cmp::Ordering::Less) => Ok(vals[1].clone()),
+                Some(_) => Ok(vals[0].clone()),
+                None => unreachable!("strict functions receive non-null values"),
+            }
         }
         ScalarFunc::BoolState { and } => {
             require_arity(fc, vals.len() == 2)?;
@@ -4331,6 +4357,43 @@ mod tests {
         assert!(
             crate::eval::infer_type(
                 &pexpr("float8mi(5::float8)").expect("parse"),
+                &Scope::empty(),
+            )
+            .is_err()
+        );
+        assert!(
+            ev("array_larger(ARRAY[1, 2], ARRAY[1, 3])")
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Int4(3)],
+                ))
+        );
+        assert!(
+            ev("array_larger(ARRAY[1, 2], ARRAY[1, 2])")
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Int4(2)],
+                ))
+        );
+        assert_eq!(ev("array_larger(NULL::int4[], ARRAY[1])"), Datum::Null);
+        assert_eq!(
+            crate::eval::infer_type(
+                &pexpr("array_larger(ARRAY[1], ARRAY[2])").expect("parse"),
+                &Scope::empty(),
+            )
+            .expect("array_larger signature"),
+            ColumnType::Array(ElemType::Int4)
+        );
+        assert!(
+            crate::eval::infer_type(
+                &pexpr("array_larger(ARRAY[1])").expect("parse"),
+                &Scope::empty(),
+            )
+            .is_err()
+        );
+        assert!(
+            crate::eval::infer_type(
+                &pexpr("array_larger(ARRAY[1], ARRAY['a'])").expect("parse"),
                 &Scope::empty(),
             )
             .is_err()

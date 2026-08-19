@@ -183,6 +183,21 @@ async fn float8mi_transition_defines_a_user_aggregate() {
 }
 
 #[tokio::test]
+async fn array_larger_transition_defines_a_user_aggregate() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_array_max (int4[]) (SFUNC = array_larger, STYPE = int4[])",
+    )
+    .await;
+
+    assert!(
+        grid(&engine, "SELECT builtin_array_max(ARRAY[f1]) FROM t").await
+            == vec![some(&["{3}"])]
+    );
+}
+
+#[tokio::test]
 async fn float8_accumulator_and_finalizer_define_a_user_average() {
     let engine = fixture().await;
     run(
@@ -290,6 +305,10 @@ async fn a_definition_is_refused_the_way_postgresql_refuses_it() {
         (
             "CREATE AGGREGATE bad (int4) (SFUNC = nosuchfn, STYPE = int4)",
             "function nosuchfn(integer, integer) does not exist",
+        ),
+        (
+            "CREATE AGGREGATE bad (int4) (SFUNC = array_larger, STYPE = int4)",
+            "function array_larger(integer, integer) does not exist",
         ),
     ];
     for (sql, expected) in cases {

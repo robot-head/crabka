@@ -431,16 +431,9 @@ fn builtin_support(
     if !crate::func::is_scalar(name) {
         return Ok(None);
     }
-    let Some(wanted) = wanted
-        .iter()
-        .map(|ty| ty.column.map(|column| Datum::Int4(column.oid() as i32)))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return Ok(None);
-    };
     let Some(row) = crate::routine::builtin_pg_proc_rows()?.into_iter().find(|row| {
         row.get(1) == Some(&Datum::Text(name.to_string()))
-            && matches!(row.get(19), Some(Datum::OidVector(args)) if args.elems == wanted)
+            && matches!(row.get(19), Some(Datum::OidVector(args)) if builtin_support_args_match(&args.elems, wanted))
     })
     else {
         return Ok(None);
@@ -450,7 +443,13 @@ fn builtin_support(
     else {
         return Err(ExecError::Unsupported("built-in pg_proc fixture is corrupt".into()));
     };
-    let result = crate::exec::column_type_from_oid(*result_oid as u32)?;
+    let Datum::OidVector(args) = row
+        .get(19)
+        .expect("matched built-in support function has argument metadata")
+    else {
+        unreachable!("matched built-in support function has oidvector arguments")
+    };
+    let result = builtin_support_result_type(*result_oid as u32, &args.elems, wanted)?;
     Ok(Some(SupportRoutine::Builtin {
         result: RoutineResult::Type {
             ty: RoutineType::builtin(result),
@@ -458,6 +457,60 @@ fn builtin_support(
         },
         strict: *strict,
     }))
+}
+
+/// `pg_proc` records polymorphic support parameters as pseudo-type OIDs. Match
+/// those against the concrete state and input types that an aggregate
+/// definition supplies, while retaining exact OID matching for all other
+/// built-ins.
+fn builtin_support_args_match(declared: &[Datum], wanted: &[RoutineType]) -> bool {
+    if declared.len() != wanted.len() {
+        return false;
+    }
+    let mut array_type = None;
+    declared.iter().zip(wanted).all(|(declared, wanted)| {
+        let Datum::Int4(declared) = declared else {
+            return false;
+        };
+        match *declared as u32 {
+            2277 => {
+                let Some(column @ ColumnType::Array(_)) = wanted.column else {
+                    return false;
+                };
+                match array_type {
+                    Some(bound) => bound == column,
+                    None => {
+                        array_type = Some(column);
+                        true
+                    }
+                }
+            }
+            _ => wanted.column.is_some_and(|column| column.oid() == *declared as u32),
+        }
+    })
+}
+
+/// Resolve an aggregate support function's declared result pseudo-type from
+/// the concrete argument that bound it. `array_larger(anyarray, anyarray)` is
+/// the first such support function; this also keeps the lookup rule aligned
+/// with `pg_proc` for later `anyarray` support functions.
+fn builtin_support_result_type(
+    result_oid: u32,
+    declared: &[Datum],
+    wanted: &[RoutineType],
+) -> Result<ColumnType, ExecError> {
+    if result_oid == 2277 {
+        return declared
+            .iter()
+            .zip(wanted)
+            .find_map(|(declared, wanted)| {
+                matches!(declared, Datum::Int4(2277)).then_some(wanted.column).flatten()
+            })
+            .ok_or_else(|| {
+                ExecError::Unsupported("unbound anyarray built-in support result".into())
+            });
+    }
+    crate::exec::column_type_from_oid(result_oid)
 }
 
 /// Does a parameter declared `declared` accept an aggregate support argument of
