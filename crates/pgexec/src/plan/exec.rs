@@ -697,6 +697,7 @@ fn execute_nested_loop_plan(
             let constraint = constraint.clone();
             let outer = (**outer).clone();
             let inner = (**inner).clone();
+            let materialization = read_ctx.statement_memory.reserve();
             let outer_relation = state.execute_child(outer, |child| {
                 execute_nested_loop_plan(child, read_ctx, sources, filter)
             })?;
@@ -723,6 +724,12 @@ fn execute_nested_loop_plan(
                 read_ctx.eval_ctx,
                 read_ctx.join_policy(),
             )?;
+            let bytes = relation
+                .rows
+                .iter()
+                .map(|row| crate::scanner::datum_row_bytes(row))
+                .sum();
+            materialization.replace_with(bytes)?;
             state.scope = relation.scope.clone();
             for _ in &relation.rows {
                 state.emit_row();
@@ -3435,16 +3442,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn comma_join_applies_available_where_conjuncts_before_materializing() {
+    async fn comma_join_pushes_predicates_and_reclaims_dead_intermediates() {
         use assert2::assert;
         use crabka_pgwire::engine::{Engine, QueryResult, Session};
 
         let engine = crate::SqlEngine::new_with_policy(crate::RuntimePolicy {
-            blocking_query_memory: crabka_units::bytes(64 * 1024),
+            blocking_query_memory: crabka_units::bytes(96 * 1024),
             ..Default::default()
         })
         .expect("policy");
-        let values = (1..=64)
+        let values = (1..=128)
             .map(|id| format!("({id})"))
             .collect::<Vec<_>>()
             .join(",");
@@ -3470,6 +3477,6 @@ mod tests {
         let [Some(cell)] = row.as_slice() else {
             panic!("expected one count cell");
         };
-        assert!(cell.text.as_ref() == b"64");
+        assert!(cell.text.as_ref() == b"128");
     }
 }
