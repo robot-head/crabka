@@ -334,35 +334,56 @@ fn same_multirange_type(a: &MultirangeValue, b: &MultirangeValue) -> Result<(), 
 }
 
 fn parts(input: &str) -> Option<Vec<&str>> {
-    if input.trim().is_empty() {
-        return Some(Vec::new());
-    }
     let mut out = Vec::new();
-    let mut start = 0;
-    let mut quote = false;
-    let mut escape = false;
-    let mut depth = 0_u8;
-    for (index, byte) in input.bytes().enumerate() {
-        if escape {
-            escape = false;
-        } else if byte == b'\\' {
-            escape = true;
-        } else if byte == b'"' {
-            quote = !quote;
-        } else if !quote && matches!(byte, b'[' | b'(') {
-            depth = depth.checked_add(1)?;
-        } else if !quote && matches!(byte, b']' | b')') {
-            depth = depth.checked_sub(1)?;
-        } else if !quote && depth == 0 && byte == b',' {
-            out.push(input[start..index].trim());
-            start = index + 1;
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    let mut requires_part = false;
+    loop {
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
         }
+        if index == bytes.len() {
+            return if requires_part { None } else { Some(out) };
+        }
+        let start = index;
+        if matches!(bytes[index], b'[' | b'(') {
+            let mut quote = false;
+            let mut escape = false;
+            index += 1;
+            loop {
+                let byte = *bytes.get(index)?;
+                index += 1;
+                if escape {
+                    escape = false;
+                } else if byte == b'\\' {
+                    escape = true;
+                } else if byte == b'"' {
+                    quote = !quote;
+                } else if !quote && matches!(byte, b']' | b')') {
+                    break;
+                }
+            }
+        } else if input[index..].starts_with("empty") {
+            index += "empty".len();
+            while bytes.get(index).is_some_and(|byte| *byte != b',') {
+                index += 1;
+            }
+        } else {
+            return None;
+        }
+        out.push(input[start..index].trim());
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if index == bytes.len() {
+            return Some(out);
+        }
+        if bytes[index] != b',' {
+            return None;
+        }
+        index += 1;
+        requires_part = true;
     }
-    if quote || escape || depth != 0 {
-        return None;
-    }
-    out.push(input[start..].trim());
-    Some(out)
 }
 
 fn malformed(input: &str) -> TypeError {
@@ -419,5 +440,47 @@ mod tests {
             render(&difference(&left, &right).expect("difference")),
             "{[1,3),[12,15)}"
         );
+    }
+
+    #[test]
+    fn input_accepts_open_delimiters_inside_text_bounds() {
+        let ty = MultirangeRef {
+            oid: 0,
+            name: "textmultirange",
+            range: crate::usertype::RangeRef {
+                oid: 0,
+                name: "textrange",
+                subtype: &ColumnType::Text,
+            },
+        };
+        for input in [
+            "{((,z)}",
+            "{([,z)}",
+            "{(!,()}",
+            "{(!,[)}",
+            "{(\\\\,a)}",
+            "{(\")\",a)}",
+        ] {
+            assert_eq!(
+                parse(input, ty, &jiff::tz::TimeZone::UTC)
+                    .expect(input)
+                    .ranges
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn input_splits_components_and_rejects_bad_separators() {
+        assert_eq!(parts(""), Some(vec![]));
+        assert_eq!(parts("empty  , empty"), Some(vec!["empty", "empty"]));
+        assert_eq!(
+            parts("[1,2) , [4,5)"),
+            Some(vec!["[1,2)", "[4,5)"])
+        );
+        for input in ["[1,2),", "[1,2) junk", "[1,2"] {
+            assert_eq!(parts(input), None, "{input}");
+        }
     }
 }
