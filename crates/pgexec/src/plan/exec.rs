@@ -2054,6 +2054,7 @@ fn plan_named_tuplestore_scan(
                 ty,
             })
             .collect(),
+        ..Default::default()
     };
     let scope = if let Some(columns) = columns {
         crate::values::requalify_derived(
@@ -2726,6 +2727,7 @@ impl Executor for NamedTuplestoreScanExecutor<'_, '_> {
                         ty,
                     })
                     .collect(),
+                ..Default::default()
             },
             rows: transition.rows,
         };
@@ -3430,6 +3432,7 @@ mod tests {
                 name: "a".into(),
                 ty: ColumnType::Int4,
             }],
+            ..Default::default()
         };
         let projection = Expr::Column {
             table: Some("t".into()),

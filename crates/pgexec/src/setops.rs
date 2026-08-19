@@ -238,6 +238,7 @@ pub(crate) fn set_expr_relation(
                 ty: output_type(c),
             })
             .collect(),
+        ..Default::default()
     };
     Ok(crate::join::Relation { scope, rows })
 }
@@ -260,6 +261,7 @@ pub(crate) fn set_expr_to_relation(
                 ty: output_type(c),
             })
             .collect(),
+        ..Default::default()
     };
     for item in order_by {
         let ty = if let Some(index) = crate::sql92::output_position(

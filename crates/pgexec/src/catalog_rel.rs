@@ -25,7 +25,7 @@ use crabka_pgcatalog::{
     MatchType, ReferentialAction, RelationName, Table,
 };
 use crabka_pgkv::Kv;
-use crabka_pgtypes::{ColumnType, Datum, ElemType};
+use crabka_pgtypes::{ColumnType, Datum, ElemType, usertype::{UserTypeRef, intern}};
 
 use crate::error::ExecError;
 
@@ -472,6 +472,40 @@ pub(crate) fn relation_rowtype_oids(
         .into_iter()
         .filter_map(|(name, ty)| arrays.get(&name).copied().map(|array| (name, (ty, array))))
         .collect())
+}
+
+/// The composite type a relation owns for whole-row references.
+pub(crate) fn relation_rowtype(
+    kv: &dyn Kv,
+    relation: &RelationName,
+) -> Result<Option<UserTypeRef>, ExecError> {
+    let Some((oid, _)) = relation_rowtype_oids(kv)?.get(relation).copied() else {
+        return Ok(None);
+    };
+    Ok(Some(UserTypeRef {
+        oid: u32::try_from(oid).expect("relation row type oids are positive"),
+        name: intern(&relation.to_string()),
+    }))
+}
+
+/// A relation composite type by its `pg_type.oid`.
+pub(crate) fn relation_rowtype_by_oid(
+    kv: &dyn Kv,
+    oid: u32,
+) -> Result<Option<UserTypeRef>, ExecError> {
+    let Ok(oid) = i32::try_from(oid) else {
+        return Ok(None);
+    };
+    let Some((relation, _)) = relation_rowtype_oids(kv)?
+        .into_iter()
+        .find(|(_, (rowtype, _))| *rowtype == oid)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(UserTypeRef {
+        oid: u32::try_from(oid).expect("relation row type oids are positive"),
+        name: intern(&relation.to_string()),
+    }))
 }
 
 /// Role oids, keyed by role name.
@@ -3695,6 +3729,31 @@ mod tests {
         let second = banded_oids(1_000, &["a".to_string(), "b".to_string(), "c".to_string()]);
         assert!(first["a"] == second["a"]);
         assert!(first["b"] == second["b"]);
+    }
+
+    #[test]
+    fn relation_rowtype_reverse_lookup_returns_only_its_relation() {
+        let kv = MemKv::default();
+        let relation = RelationName::public("rowtype_lookup");
+        crabka_pgcatalog::create_table(
+            &kv,
+            &relation,
+            vec![Column::new("id", ColumnType::Int4)],
+        )
+        .expect("create table");
+        let rowtype = relation_rowtype(&kv, &relation)
+            .expect("rowtype lookup")
+            .expect("rowtype exists");
+        assert!(
+            relation_rowtype_by_oid(&kv, rowtype.oid)
+                .expect("reverse lookup")
+                == Some(rowtype)
+        );
+        assert!(
+            relation_rowtype_by_oid(&kv, rowtype.oid + 1)
+                .expect("reverse lookup")
+                .is_none()
+        );
     }
 
     /// Two relations of the same name in different schemas are two objects, so

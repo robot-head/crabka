@@ -5103,7 +5103,7 @@ impl DmlSource {
         };
         let rel = build_from(&read, from, None, None, None, None)
             .map_err(|error| explain_outer_reference(error, &scope, kind))?;
-        scope.columns.extend(rel.scope.columns);
+        scope.extend(&rel.scope);
         stamp.extend_scope(&mut scope, qualifier);
         Ok(Self {
             scope,
@@ -5762,6 +5762,7 @@ impl ReturningSpec {
                     ty: *ty,
                 })
                 .collect(),
+            ..Default::default()
         };
         Ok(WriteOutcome {
             tag,
@@ -6082,7 +6083,7 @@ async fn execute_merge(
     let source_width = source_rel.scope.width();
     let mut scope = Scope::single(&t, qualifier);
     let target_width = scope.width();
-    scope.columns.extend(source_rel.scope.columns.clone());
+    scope.extend(&source_rel.scope);
     let spec = ReturningSpec::new(&t, qualifier, returning.as_ref(), Some(&scope), true)?;
 
     // MERGE reaches rows through its own join, so `SELECT` policies decide
@@ -11858,7 +11859,7 @@ fn append_from_item(
                     && immutable_row_predicate(filter)
                     && {
                         let mut scope = acc.scope.clone();
-                        scope.columns.extend(next.scope.columns.iter().cloned());
+                        scope.extend(&next.scope);
                         crate::eval::check_predicate_resolves(filter, &scope).is_ok()
                     }
             })
@@ -13199,12 +13200,12 @@ impl BindPass<'_, '_> {
         if self.referenced.is_none() {
             self.referenced = Some(qualifier.clone());
         }
-        // The relation's composite type is not registered in `pg_type` here, so
-        // a whole row carries the anonymous `record` — the same type
-        // `eval::infer_type` reports for one it resolves in place.
         *expr = Expr::Const {
             value,
-            ty: ColumnType::Record(None),
+            ty: self
+                .outer
+                .whole_row_type(qualifier)
+                .unwrap_or(ColumnType::Record(None)),
         };
     }
 }
@@ -15318,7 +15319,7 @@ fn replace_subqueries_with_typed_nulls(
         if fields.len() != 1 {
             return Err(ExecError::SubqueryColumns);
         }
-        column_type_from_oid(fields[0].type_oid)
+        column_type_from_catalog_oid(read_ctx.catalog_kv, fields[0].type_oid)
     };
     match expr {
         Expr::ScalarSubquery(query) => Ok(Expr::Const {
@@ -15539,7 +15540,7 @@ fn scan_stored_relation(
     if reach.spans_partitions() && crate::partition::is_partitioned(catalog_kv, &t.name)? {
         return partitioned_scan(read_ctx, t, qualifier, permit);
     }
-    let mut scope = Scope::single(t, qualifier);
+    let mut scope = relation_scope(catalog_kv, t, qualifier)?;
     // The hidden columns this scan carries and the values they take, decided
     // once for the scope and for every row of it together. The relation's oid
     // is resolved here, before the rows: it is a catalog fact about the
@@ -15967,6 +15968,7 @@ fn build_base_table(
                         ty,
                     })
                     .collect(),
+                ..Default::default()
             },
             rows: transition.rows,
         });
@@ -16020,7 +16022,12 @@ fn build_base_table(
             let body_ctx = role_ctx.with_resolution(&body_scope);
             let relation = crate::query::query_to_relation(&body_ctx, query)?;
             let qualifier = alias.as_deref().unwrap_or(&view.name.name);
-            return requalify_view_relation(relation, &view, qualifier);
+            return requalify_view_relation(
+                relation,
+                &view,
+                qualifier,
+                crate::catalog_rel::relation_rowtype(catalog_kv, &view.name)?,
+            );
         }
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
         Err(error) => return Err(error.into()),
@@ -16584,10 +16591,12 @@ fn try_distributed_inner_equi_join(
         &regclass_columns,
         &mut rows,
     )?;
-    let mut scope = Scope::single(left_table, left_qualifier);
-    scope
-        .columns
-        .extend(Scope::single(right_table, right_qualifier).columns);
+    let mut scope = relation_scope(read_ctx.catalog_kv, left_table, left_qualifier)?;
+    scope.extend(&relation_scope(
+        read_ctx.catalog_kv,
+        right_table,
+        right_qualifier,
+    )?);
     Ok(Some(Relation { scope, rows }))
 }
 
@@ -16796,6 +16805,7 @@ fn try_execute_partial_aggregate_pushdown(
                 ty: *ty,
             })
             .collect(),
+        ..Default::default()
     };
     Ok(Some(Relation {
         scope: out_scope,
@@ -17019,6 +17029,7 @@ fn try_execute_local_streaming_aggregate(
                 ty: *ty,
             })
             .collect(),
+        ..Default::default()
     };
     Ok(Some(Relation {
         scope: out_scope,
@@ -18002,31 +18013,40 @@ fn build_table_expr_schema_with_ctes(
                                 ty,
                             })
                             .collect(),
+                        ..Default::default()
                     },
                     rows: Vec::new(),
                 });
             }
             let name =
                 &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
-            if let Some(rel) = virtual_catalog_relation_schema(name, alias.as_deref(), refs) {
+            if let Some(rel) =
+                virtual_catalog_relation_schema(catalog_kv, name, alias.as_deref(), refs)?
+            {
                 return Ok(rel);
             }
             match crabka_pgcatalog::get_view(catalog_kv, name) {
                 Ok(view) => {
                     let qualifier = alias.as_deref().unwrap_or(&view.name.name);
+                    let mut scope = Scope {
+                        columns: view
+                            .columns
+                            .iter()
+                            .map(|column| ColumnBinding {
+                                exposure: Exposure::Output,
+                                qualifier: Some(qualifier.to_string()),
+                                name: column.name.clone(),
+                                ty: column.ty,
+                            })
+                            .collect(),
+                        ..Default::default()
+                    };
+                    scope.replace_row_type(
+                        qualifier,
+                        crate::catalog_rel::relation_rowtype(catalog_kv, &view.name)?,
+                    );
                     return Ok(Relation {
-                        scope: Scope {
-                            columns: view
-                                .columns
-                                .iter()
-                                .map(|column| ColumnBinding {
-                                    exposure: Exposure::Output,
-                                    qualifier: Some(qualifier.to_string()),
-                                    name: column.name.clone(),
-                                    ty: column.ty,
-                                })
-                                .collect(),
-                        },
+                        scope,
                         rows: Vec::new(),
                     });
                 }
@@ -18042,7 +18062,7 @@ fn build_table_expr_schema_with_ctes(
             // v` the 42703 `PostgreSQL` raises rather than a column of nulls. A
             // virtual catalog relation returns above WITH its `ctid`, because
             // the engine numbers the rows it projects.
-            let mut scope = Scope::single(&t, qualifier);
+            let mut scope = relation_scope(catalog_kv, &t, qualifier)?;
             crate::scope::SystemColumns::of(refs, &t).extend_scope(&mut scope, qualifier);
             Ok(Relation {
                 scope,
@@ -18091,7 +18111,10 @@ fn build_table_expr_schema_with_ctes(
                 })
                 .collect::<Result<_, ExecError>>()?;
             let inner = Relation {
-                scope: Scope { columns: bindings },
+                scope: Scope {
+                    columns: bindings,
+                    ..Default::default()
+                },
                 rows: Vec::new(),
             };
             crate::values::requalify_derived(inner, alias, columns)
@@ -18134,6 +18157,7 @@ fn requalify_view_relation(
     mut relation: Relation,
     view: &crabka_pgcatalog::View,
     qualifier: &str,
+    row_type: Option<crabka_pgtypes::usertype::UserTypeRef>,
 ) -> Result<Relation, ExecError> {
     if relation.scope.width() != view.columns.len() {
         return Err(ExecError::Unsupported(
@@ -18145,6 +18169,7 @@ fn requalify_view_relation(
         binding.name.clone_from(&column.name);
         binding.ty = column.ty;
     }
+    relation.scope.replace_row_type(qualifier, row_type);
     Ok(relation)
 }
 
@@ -18219,7 +18244,7 @@ fn virtual_catalog_relation(
         return Ok(None);
     };
     let described = virtual_catalog_table(table);
-    let (scope, system) = virtual_catalog_scope(&described, name, alias, refs);
+    let (scope, system) = virtual_catalog_scope(catalog_kv, &described, name, alias, refs)?;
     let rows = virtual_catalog_rows(catalog_kv, table, ctx)?;
     let rows = if system.ctid {
         rows.into_iter()
@@ -18236,16 +18261,32 @@ fn virtual_catalog_relation(
 }
 
 fn virtual_catalog_relation_schema(
+    catalog_kv: &dyn Kv,
     name: &crabka_pgcatalog::RelationName,
     alias: Option<&str>,
     refs: Option<&crate::scope::StatementRefs>,
-) -> Option<Relation> {
-    let described = virtual_catalog_table(virtual_table(&virtual_lookup_key(name))?);
-    let (scope, _) = virtual_catalog_scope(&described, name, alias, refs);
-    Some(Relation {
+) -> Result<Option<Relation>, ExecError> {
+    let Some(table) = virtual_table(&virtual_lookup_key(name)) else {
+        return Ok(None);
+    };
+    let described = virtual_catalog_table(table);
+    let (scope, _) = virtual_catalog_scope(catalog_kv, &described, name, alias, refs)?;
+    Ok(Some(Relation {
         scope,
         rows: Vec::new(),
-    })
+    }))
+}
+
+fn relation_scope(
+    catalog_kv: &dyn Kv,
+    table: &Table,
+    qualifier: &str,
+) -> Result<Scope, ExecError> {
+    Ok(Scope::single_with_row_type(
+        table,
+        qualifier,
+        crate::catalog_rel::relation_rowtype(catalog_kv, &table.name)?,
+    ))
 }
 
 /// A synthesised relation's scope, and the system columns it carries.
@@ -18253,13 +18294,14 @@ fn virtual_catalog_relation_schema(
 /// Shared by the path that then fills in the rows and the schema-only path that
 /// does not, so the two cannot describe the same relation differently.
 fn virtual_catalog_scope(
+    catalog_kv: &dyn Kv,
     described: &Table,
     name: &crabka_pgcatalog::RelationName,
     alias: Option<&str>,
     refs: Option<&crate::scope::StatementRefs>,
-) -> (Scope, crate::scope::SystemColumns) {
+) -> Result<(Scope, crate::scope::SystemColumns), ExecError> {
     let qualifier = alias.unwrap_or(&name.name);
-    let mut scope = Scope::single(described, qualifier);
+    let mut scope = relation_scope(catalog_kv, described, qualifier)?;
     // `ctid` only: `tableoid` over a synthesised relation stays the 42703 it
     // was, because this slice changed the judgement for `ctid` alone.
     let system = crate::scope::SystemColumns {
@@ -18267,7 +18309,7 @@ fn virtual_catalog_scope(
         ctid: crate::scope::SystemColumns::of(refs, described).ctid,
     };
     system.extend_scope(&mut scope, qualifier);
-    (scope, system)
+    Ok((scope, system))
 }
 
 /// The ordinary local relation a single-item `FROM` names, or `None` when it is
@@ -19888,6 +19930,7 @@ pub(crate) fn projected_scope(fields: &[FieldDescription], tys: &[ColumnType]) -
                 ty: *ty,
             })
             .collect(),
+        ..Default::default()
     }
 }
 
@@ -20045,6 +20088,20 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
             .or_else(|| crabka_pgtypes::ElemType::from_array_oid(oid).map(ColumnType::Array))
             .ok_or_else(|| ExecError::Unsupported(format!("unknown query field type oid {oid}")))?,
     })
+}
+
+/// Resolve a query field type with the current catalog available for relation
+/// composite types, whose OIDs are assigned from the catalog's relation set.
+pub(crate) fn column_type_from_catalog_oid(
+    catalog_kv: &dyn Kv,
+    oid: u32,
+) -> Result<ColumnType, ExecError> {
+    match column_type_from_oid(oid) {
+        Ok(ty) => Ok(ty),
+        Err(error) => crate::catalog_rel::relation_rowtype_by_oid(catalog_kv, oid)?
+            .map(|rowtype| ColumnType::Record(Some(rowtype)))
+            .ok_or(error),
+    }
 }
 
 pub(crate) fn datum_to_cell(
@@ -20263,6 +20320,7 @@ mod tests {
         let relation = super::Relation {
             scope: Scope {
                 columns: vec![live.clone(), dead],
+                ..Default::default()
             },
             rows: vec![vec![
                 crabka_pgtypes::Datum::Int4(1),
@@ -22817,6 +22875,7 @@ mod tests {
                     ty: crabka_pgtypes::ColumnType::Int4,
                 },
             ],
+            ..Default::default()
         }
     }
 

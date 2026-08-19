@@ -133,6 +133,7 @@ pub(crate) fn requalify_derived(
     for col in &mut rel.scope.columns {
         col.qualifier = Some(alias.to_string());
     }
+    rel.scope.retain_row_type(alias);
     Ok(rel)
 }
 
@@ -149,6 +150,7 @@ fn scope_from_schema(schema: &ValuesSchema, qualifier: Option<&str>) -> Scope {
                 ty: *ty,
             })
             .collect(),
+        ..Default::default()
     }
 }
 

@@ -12,7 +12,8 @@ use crabka_pgparser::ast::{
     OnConflictAction, OnConflictTarget, QueryBody, QueryExpr, Returning, SelectItem, SelectStmt,
     SetExpr, Statement, TableExpr, WindowCall, WindowRef, WindowSpec, WithClause,
 };
-use crabka_pgtypes::{ColumnType, Datum, RecordValue};
+use crabka_pgtypes::{ColumnType, Datum, RecordValue, usertype::UserTypeRef};
+use std::collections::BTreeMap;
 
 use crate::error::ExecError;
 
@@ -1035,6 +1036,7 @@ impl StatementRefs {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Scope {
     pub(crate) columns: Vec<ColumnBinding>,
+    pub(crate) row_types: BTreeMap<String, UserTypeRef>,
 }
 
 impl Scope {
@@ -1043,6 +1045,7 @@ impl Scope {
     pub fn empty() -> Self {
         Self {
             columns: Vec::new(),
+            row_types: BTreeMap::new(),
         }
     }
 
@@ -1062,7 +1065,55 @@ impl Scope {
                     exposure: Exposure::Output,
                 })
                 .collect(),
+            row_types: BTreeMap::new(),
         }
+    }
+
+    /// A base relation scope with the composite type its whole-row references
+    /// report on the wire.
+    pub(crate) fn single_with_row_type(
+        table: &Table,
+        qualifier: &str,
+        row_type: Option<UserTypeRef>,
+    ) -> Self {
+        let mut scope = Self::single(table, qualifier);
+        if let Some(row_type) = row_type {
+            scope.set_row_type(qualifier, row_type);
+        }
+        scope
+    }
+
+    /// Associate a range-table qualifier with the composite type of its
+    /// relation. Derived relations deliberately leave this unset: they have
+    /// anonymous record values, not catalog-owned row types.
+    pub(crate) fn set_row_type(&mut self, qualifier: &str, row_type: UserTypeRef) {
+        self.row_types.insert(qualifier.to_string(), row_type);
+    }
+
+    /// Keep the row type that already belongs to `qualifier`, if any.  A table
+    /// column-alias list preserves its relation identity; a derived relation
+    /// has no matching input qualifier and remains anonymous.
+    pub(crate) fn retain_row_type(&mut self, qualifier: &str) {
+        let row_type = self.row_types.remove(qualifier);
+        self.row_types.clear();
+        if let Some(row_type) = row_type {
+            self.set_row_type(qualifier, row_type);
+        }
+    }
+
+    /// Replace all inherited range-table identities with one named relation.
+    pub(crate) fn replace_row_type(&mut self, qualifier: &str, row_type: Option<UserTypeRef>) {
+        self.row_types.clear();
+        if let Some(row_type) = row_type {
+            self.set_row_type(qualifier, row_type);
+        }
+    }
+
+    /// Append another relation's bindings and its whole-row identities.
+    pub(crate) fn extend(&mut self, other: &Self) {
+        self.columns.extend(other.columns.iter().cloned());
+        self.row_types
+            .extend(other.row_types.iter().map(|(qualifier, ty)| (qualifier.clone(), *ty)));
     }
 
     /// Append the hidden [`TABLEOID_COLUMN`] for `qualifier`, at the end of the
@@ -1279,6 +1330,14 @@ impl Scope {
         (!indices.is_empty()).then_some(indices)
     }
 
+    /// The static type of a whole-row reference. A derived relation and the
+    /// compatibility paths that do not know a catalog row type remain the
+    /// anonymous `record` pseudo-type.
+    pub(crate) fn whole_row_type(&self, qualifier: &str) -> Option<ColumnType> {
+        self.whole_row(qualifier)
+            .map(|_| ColumnType::Record(self.row_types.get(qualifier).copied()))
+    }
+
     /// The flat index of `qualifier`'s liveness marker, when an outer join above
     /// it added one. See [`LIVE_QUALIFIER`].
     ///
@@ -1295,8 +1354,8 @@ impl Scope {
     /// The composite value of a whole-row reference over one row of this scope.
     ///
     /// The field names are the relation's column names, which is what
-    /// `row_to_json(t)` and `(t).c` read; the type is the anonymous `record`,
-    /// because a relation's composite type is not registered here.
+    /// `row_to_json(t)` and `(t).c` read; a catalog relation carries its own
+    /// composite type and derived relations remain anonymous `record` values.
     ///
     /// A row an outer join invented for this side has no whole row to speak of,
     /// so the reference is NULL rather than a composite of NULLs — see
@@ -1347,7 +1406,11 @@ impl Scope {
             .iter()
             .map(|i| values[*i].clone())
             .collect::<Vec<_>>();
-        Some(Datum::Record(RecordValue::named(None, names, fields)))
+        Some(Datum::Record(RecordValue::named(
+            self.row_types.get(qualifier).copied(),
+            names,
+            fields,
+        )))
     }
 }
 
@@ -1422,6 +1485,7 @@ mod tests {
                 binding("excluded", "k", ColumnType::Int4),
                 binding("excluded", "v", ColumnType::Text),
             ],
+            row_types: BTreeMap::new(),
         };
         assert!(Scope::insert_conflict(&t) == expected);
     }
@@ -1495,6 +1559,7 @@ mod tests {
                     exposure: Exposure::SystemColumn,
                 },
             ],
+            row_types: BTreeMap::new(),
         };
         assert!(scope_with_tableoid("t", &[("a", ColumnType::Int4)]) == expected);
     }
@@ -1748,6 +1813,7 @@ mod tests {
                     exposure: Exposure::SystemColumn,
                 },
             ],
+            row_types: BTreeMap::new(),
         };
         assert!(s == expected);
         // Reachable both ways, and hidden from every expansion of the relation.

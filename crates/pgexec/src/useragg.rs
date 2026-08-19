@@ -623,6 +623,7 @@ fn synthetic_scope(types: &[ColumnType]) -> Scope {
                 ty: *ty,
             })
             .collect(),
+        ..Default::default()
     }
 }
 

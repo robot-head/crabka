@@ -1437,7 +1437,10 @@ fn qualify_columns(
         column.qualifier = Some(qualifier.clone());
     }
     Ok(Relation {
-        scope: Scope { columns },
+        scope: Scope {
+            columns,
+            ..Default::default()
+        },
         rows,
     })
 }

@@ -246,7 +246,10 @@ pub(crate) fn describe_cte_relation(
             .collect::<Result<Vec<_>, ExecError>>()?;
         return apply_cte_column_aliases(
             Relation {
-                scope: Scope { columns },
+                scope: Scope {
+                    columns,
+                    ..Default::default()
+                },
                 rows: Vec::new(),
             },
             &cte.name,
@@ -267,7 +270,10 @@ pub(crate) fn describe_cte_relation(
             })
             .collect::<Result<Vec<_>, ExecError>>()?;
         Ok(Relation {
-            scope: Scope { columns },
+            scope: Scope {
+                columns,
+                ..Default::default()
+            },
             rows: Vec::new(),
         })
     };

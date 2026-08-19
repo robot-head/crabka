@@ -16844,6 +16844,7 @@ mod tests {
                         name: "n".into(),
                         ty: crabka_pgtypes::ColumnType::Int4,
                     }],
+                    ..Default::default()
                 },
                 rows: vec![
                     vec![crabka_pgtypes::Datum::Int4(1)],

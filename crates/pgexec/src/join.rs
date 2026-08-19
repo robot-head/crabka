@@ -243,9 +243,7 @@ impl JoinCondition {
             }
         }
         let mut combined_scope = left.scope.clone();
-        combined_scope
-            .columns
-            .extend(right.scope.columns.iter().cloned());
+        combined_scope.extend(&right.scope);
         let join_cols = match constraint {
             JoinConstraint::Using(columns) => columns.clone(),
             JoinConstraint::Natural => natural_common_columns(&left.scope, &right.scope),
@@ -540,7 +538,7 @@ impl JoinIndex {
         blocking_query_memory: crabka_units::ByteSize,
     ) -> Result<Option<Self>, ExecError> {
         let mut combined = left.scope.clone();
-        combined.columns.extend(right.scope.columns.iter().cloned());
+        combined.extend(&right.scope);
         if let JoinConstraint::On(predicate) = constraint
             && matches!(
                 predicate,
@@ -662,7 +660,7 @@ fn equi_keys_for(
     constraint: &JoinConstraint,
 ) -> Result<Vec<(LeftKey, RightKey)>, ExecError> {
     let mut combined = left.scope.clone();
-    combined.columns.extend(right.scope.columns.iter().cloned());
+    combined.extend(&right.scope);
     match constraint {
         JoinConstraint::Using(columns) => columns
             .iter()
@@ -1288,7 +1286,9 @@ fn coalesce_join_columns(
     // column by `merged_width` and leaves the markers where they were, at the
     // end of both the scope and the row.
     columns.extend(markers);
-    let scope = Scope { columns };
+    let mut scope = left_scope.clone();
+    scope.extend(right_scope);
+    scope.columns = columns;
 
     let new_rows = rows
         .into_iter()
@@ -1349,6 +1349,7 @@ mod tests {
                     ty: ColumnType::Int4,
                 })
                 .collect(),
+            ..Default::default()
         };
         Relation {
             scope,
@@ -1650,6 +1651,7 @@ mod tests {
                 name: "value".into(),
                 ty: ColumnType::Text,
             }],
+            ..Default::default()
         };
         let wide = "x".repeat(5 * 1024 * 1024);
         let left = Relation {
@@ -1875,6 +1877,7 @@ mod tests {
                     name: "k".into(),
                     ty: ColumnType::Int4,
                 }],
+                ..Default::default()
             },
             rows: keys
                 .iter()
@@ -1955,6 +1958,7 @@ mod tests {
                     ty: ColumnType::Int4,
                 })
                 .collect(),
+            ..Default::default()
         };
         let left = Relation {
             scope: scope("a", &["x", "y"]),
@@ -2098,6 +2102,7 @@ mod tests {
                     ty: ColumnType::Text,
                 },
             ],
+            ..Default::default()
         };
         let rows = || {
             (0..80)
@@ -2267,6 +2272,7 @@ mod tests {
                         ty: ColumnType::Int4,
                     })
                     .collect(),
+                ..Default::default()
             },
             rows: (0..80)
                 .map(|i| vec![Datum::Int4(i), Datum::Int4(i)])
@@ -2288,6 +2294,7 @@ mod tests {
                         ty: ColumnType::Int8,
                     },
                 ],
+                ..Default::default()
             },
             rows: (0..80)
                 .map(|i| vec![Datum::Int4(i), Datum::Int8(i64::from(i))])
@@ -2465,6 +2472,7 @@ mod tests {
                     name: "k".into(),
                     ty: ColumnType::Int8,
                 }],
+                ..Default::default()
             },
             rows: (0..80i64).map(|i| vec![Datum::Int8(i)]).collect(),
         };
@@ -2498,6 +2506,7 @@ mod tests {
                     name: "k".into(),
                     ty: ColumnType::Tid,
                 }],
+                ..Default::default()
             },
             rows: tids.iter().map(|tid| vec![tid.clone()]).collect(),
         };
@@ -2533,6 +2542,7 @@ mod tests {
                         ty: ColumnType::OidVector,
                     },
                 ],
+                ..Default::default()
             },
             rows: (0..80)
                 .map(|i| {

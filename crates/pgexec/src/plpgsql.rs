@@ -3843,6 +3843,7 @@ impl SqlBinder<'_, '_> {
                     })
                 })
                 .collect::<Result<_, ExecError>>()?,
+            ..Default::default()
         })
     }
 
@@ -3894,7 +3895,10 @@ impl SqlBinder<'_, '_> {
                 }
             }
         }
-        crate::scope::Scope { columns }
+        crate::scope::Scope {
+            columns,
+            ..Default::default()
+        }
     }
 
     fn rewrite_window_spec(

@@ -4290,11 +4290,7 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             match scope.resolve(table.as_deref(), name) {
                 Ok(idx) => Ok(scope.ty_at(idx)),
                 Err(error) => whole_row_reference(table.as_deref(), name, &error)
-                    .filter(|q| scope.whole_row(q).is_some())
-                    // The relation's composite type is not registered in
-                    // `pg_type` here, so a whole row reports the anonymous
-                    // `record` rather than PostgreSQL's per-relation row type.
-                    .map(|_| ColumnType::Record(None))
+                    .and_then(|q| scope.whole_row_type(q))
                     .ok_or(error),
             }
         }

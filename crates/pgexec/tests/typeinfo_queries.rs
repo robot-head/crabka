@@ -274,6 +274,62 @@ async fn pg_class_and_pg_type_link_a_table_rowtype() {
     );
 }
 
+/// A relation name used as an expression has that relation's composite type,
+/// including when a correlated subquery substitutes the outer whole row.
+#[tokio::test]
+async fn whole_row_references_describe_the_relation_rowtype() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE whole_row_type (id int4)").await;
+    let rowtype = row_text(
+        &run(
+            &engine,
+            "SELECT reltype FROM pg_catalog.pg_class WHERE relname = 'whole_row_type'",
+        )
+        .await,
+        0,
+    )[0]
+        .as_deref()
+        .expect("row type oid")
+        .parse::<u32>()
+        .expect("valid oid");
+    for sql in [
+        "SELECT whole_row_type FROM whole_row_type",
+        "SELECT q FROM whole_row_type AS q",
+        "SELECT a FROM whole_row_type AS a JOIN whole_row_type AS b ON a.id = b.id",
+        "SELECT (SELECT whole_row_type) FROM whole_row_type",
+    ] {
+        let QueryResult::Rows { fields, .. } = run(&engine, sql).await else {
+            panic!("expected rows");
+        };
+        assert!(fields.len() == 1, "{sql}");
+        assert!(fields[0].type_oid == rowtype, "{sql}");
+    }
+
+    run(
+        &engine,
+        "CREATE VIEW whole_row_type_view AS SELECT id FROM whole_row_type",
+    )
+    .await;
+    let view_rowtype = row_text(
+        &run(
+            &engine,
+            "SELECT reltype FROM pg_catalog.pg_class WHERE relname = 'whole_row_type_view'",
+        )
+        .await,
+        0,
+    )[0]
+        .as_deref()
+        .expect("view row type oid")
+        .parse::<u32>()
+        .expect("valid oid");
+    let QueryResult::Rows { fields, .. } =
+        run(&engine, "SELECT whole_row_type_view FROM whole_row_type_view").await
+    else {
+        panic!("expected rows");
+    };
+    assert!(fields[0].type_oid == view_rowtype);
+}
+
 /// Array alignment follows its element type, including the fixed `int8` case.
 #[tokio::test]
 async fn pg_type_keeps_d_alignment_for_builtin_and_rowtype_arrays() {

@@ -473,7 +473,10 @@ fn augmented_scope(scope: &Scope, key_types: &[ColumnType]) -> Scope {
         name: SET_COLUMN.to_string(),
         ty: ColumnType::Int4,
     });
-    Scope { columns }
+    Scope {
+        columns,
+        ..Default::default()
+    }
 }
 
 /// One augmented row per (input row, grouping set) pair.

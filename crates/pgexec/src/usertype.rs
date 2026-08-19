@@ -1416,6 +1416,7 @@ fn value_scope(base: ColumnType) -> crate::scope::Scope {
             name: "value".to_string(),
             ty: base,
         }],
+        ..Default::default()
     }
 }
 
