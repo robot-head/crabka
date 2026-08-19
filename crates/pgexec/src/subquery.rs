@@ -450,6 +450,18 @@ pub(crate) fn resolve_expr_skipping(
                             .map(|a| resolve_expr_skipping(ctx, a, should_skip))
                             .collect::<Result<_, _>>()?,
                     ),
+                    FuncArgs::Named { positional, named } => FuncArgs::Named {
+                        positional: positional
+                            .iter()
+                            .map(|arg| resolve_expr_skipping(ctx, arg, should_skip))
+                            .collect::<Result<_, _>>()?,
+                        named: named
+                            .iter()
+                            .map(|(label, arg)| {
+                                Ok((label.clone(), resolve_expr_skipping(ctx, arg, should_skip)?))
+                            })
+                            .collect::<Result<_, ExecError>>()?,
+                    },
                 },
                 // An aggregate's sort keys resolve like its arguments — they
                 // may name the very columns this pass rewrites.
@@ -475,6 +487,7 @@ pub(crate) fn resolve_expr_skipping(
                     None => None,
                 },
             };
+            let call = crate::routine::normalize_named_call(ctx.catalog_kv, &call)?.unwrap_or(call);
             // P2: a call of a user-defined SQL function is inlined here, the one
             // point in the rewrite where the routine catalog is reachable.
             match crate::routine::inline_scalar(ctx.catalog_kv, &call)? {
@@ -917,6 +930,21 @@ fn resolve_types_in_call(
                     .map(|a| resolve_types_in_expr(catalog_kv, resolution, a, ctes))
                     .collect::<Result<_, _>>()?,
             ),
+            FuncArgs::Named { positional, named } => FuncArgs::Named {
+                positional: positional
+                    .iter()
+                    .map(|arg| resolve_types_in_expr(catalog_kv, resolution, arg, ctes))
+                    .collect::<Result<_, _>>()?,
+                named: named
+                    .iter()
+                    .map(|(label, arg)| {
+                        Ok((
+                            label.clone(),
+                            resolve_types_in_expr(catalog_kv, resolution, arg, ctes)?,
+                        ))
+                    })
+                    .collect::<Result<_, ExecError>>()?,
+            },
         },
         order_by: fc
             .order_by
@@ -936,6 +964,7 @@ fn resolve_types_in_call(
             None => None,
         },
     };
+    let call = crate::routine::normalize_named_call(catalog_kv, &call)?.unwrap_or(call);
     if let Some(ty) = crate::routine::plpgsql_declared_call_type(catalog_kv, &call)? {
         return Ok(Expr::Const {
             value: Datum::Null,

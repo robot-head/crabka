@@ -248,6 +248,7 @@ fn resolve_user(
     let args: &[Expr] = match &fc.args {
         FuncArgs::Star => &[],
         FuncArgs::Exprs(args) => args,
+        FuncArgs::Named { .. } => return Ok(None),
     };
     let given = args
         .iter()
@@ -264,6 +265,10 @@ pub(crate) fn contains_aggregate(e: &Expr) -> bool {
                 || match &fc.args {
                     FuncArgs::Star => false,
                     FuncArgs::Exprs(args) => args.iter().any(contains_aggregate),
+                    FuncArgs::Named { positional, named } => positional
+                        .iter()
+                        .chain(named.iter().map(|(_, arg)| arg))
+                        .any(contains_aggregate),
                 }
         }
         Expr::Unary { expr, .. } => contains_aggregate(expr),
@@ -629,6 +634,7 @@ fn validate_aggregate_order_by(fc: &FuncCall, scope: &Scope) -> Result<(), ExecE
     let args: &[Expr] = match &fc.args {
         FuncArgs::Star => &[],
         FuncArgs::Exprs(args) => args,
+        FuncArgs::Named { .. } => return Err(undefined_function(&fc.name)),
     };
     // An argument is resolved against the aggregate's parameter type; a sort key
     // is resolved on its own. So a literal with no type of its own — a bare
@@ -1050,6 +1056,10 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
             FuncArgs::Star => false,
             FuncArgs::Exprs(args) => args
                 .iter()
+                .all(|arg| collect_streamable_aggregate_calls(arg, calls)),
+            FuncArgs::Named { positional, named } => positional
+                .iter()
+                .chain(named.iter().map(|(_, arg)| arg))
                 .all(|arg| collect_streamable_aggregate_calls(arg, calls)),
         },
         Expr::IntLiteral(_)

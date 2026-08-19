@@ -1982,6 +1982,7 @@ impl Parser {
             };
             let mut args = Vec::new();
             let mut named: Vec<(String, Expr)> = Vec::new();
+            let mut saw_named = false;
             if *self.peek() != Token::RParen {
                 loop {
                     // `name := value` and `name => value` — a labeled argument.
@@ -1993,7 +1994,14 @@ impl Parser {
                             self.bump();
                         }
                         named.push((label, self.expr(0)?));
+                        saw_named = true;
                     } else {
+                        if saw_named {
+                            return Err(ParseError::new(
+                                "positional argument cannot follow named argument",
+                                self.peek_pos(),
+                            ));
+                        }
                         args.push(self.expr(0)?);
                     }
                     if self.eat_comma() {
@@ -2002,22 +2010,32 @@ impl Parser {
                     break;
                 }
             }
-            if !named.is_empty() {
-                // PostgreSQL requires every positional argument to precede the
-                // labeled ones.
-                args.extend(Self::positional_from_named(
+            let args = if named.is_empty() {
+                FuncArgs::Exprs(args)
+            } else if name == "make_interval" {
+                // Built-ins have no catalog parameter names here. Keep the one
+                // known builtin's existing parser lowering; user routines bind
+                // labels later, after their declarations are available.
+                let mut positional = args;
+                positional.extend(Self::positional_from_named(
                     &name,
-                    &args,
+                    &positional,
                     named,
                     self.peek_pos(),
                 )?);
-            }
+                FuncArgs::Exprs(positional)
+            } else {
+                FuncArgs::Named {
+                    positional: args,
+                    named,
+                }
+            };
             // The sort inside the parentheses is spelled exactly like a
             // query-level one, so it is parsed by the same routine and reaches
             // the executor as the same `OrderItem`s.
             let order_by = self.parse_order_by()?;
             self.expect(&Token::RParen)?;
-            (distinct, FuncArgs::Exprs(args), order_by)
+            (distinct, args, order_by)
         };
         let filter = self.opt_filter_clause()?;
         let over = self.opt_over_clause()?;
@@ -19253,7 +19271,7 @@ mod tests {
                 assert!(order_by.is_empty());
                 match args {
                     FuncArgs::Exprs(v) => assert_eq!(v.len(), 1),
-                    other @ FuncArgs::Star => panic!("expected Exprs, got {other:?}"),
+                    other => panic!("expected Exprs, got {other:?}"),
                 }
             }
             other => panic!("expected a Func projection, got {other:?}"),
@@ -24855,6 +24873,7 @@ mod q1_statement_completeness_tests {
         },
         command::CommandIdentity,
         parse, parse_with_command_identities,
+        parser::parse_expression,
     };
 
     fn one(sql: &str) -> Statement {
@@ -25309,6 +25328,8 @@ mod q1_statement_completeness_tests {
     /// the two spellings one meaning.
     #[test]
     fn a_named_argument_takes_either_separator() {
+        use crate::ast::{FuncArgs, FuncCall};
+
         assert!(
             one("SELECT make_interval(days => 3)") == one("SELECT make_interval(days := 3)"),
             "=> and := name the same argument"
@@ -25317,6 +25338,15 @@ mod q1_statement_completeness_tests {
             one("SELECT make_interval(3, mins => 4)") == one("SELECT make_interval(3, mins := 4)"),
             "a labeled argument may follow positional ones"
         );
+        let s = parse_expression("user_function(3, third => 4)").expect("expression");
+        assert!(matches!(
+            s,
+            Expr::Func(FuncCall {
+                args: FuncArgs::Named { positional, named },
+                ..
+            }) if positional.len() == 1 && matches!(named.as_slice(), [(label, Expr::IntLiteral(value))] if label == "third" && value == "4")
+        ));
+        assert!(parse("SELECT user_function(first => 1, 2)").is_err());
     }
 
     #[test]

@@ -873,6 +873,11 @@ impl StatementRefs {
                         self.add_expr(arg);
                     }
                 }
+                FuncArgs::Named { positional, named } => {
+                    for arg in positional.iter().chain(named.iter().map(|(_, arg)| arg)) {
+                        self.add_expr(arg);
+                    }
+                }
                 // `count(*)` reads no expression at all.
                 FuncArgs::Star => {}
             }

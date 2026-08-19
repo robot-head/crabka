@@ -651,6 +651,14 @@ fn deparse_plain_call(call: &crabka_pgparser::ast::FuncCall, qualify: bool) -> S
             .map(|arg| deparse_bare_with(arg, qualify))
             .collect::<Vec<_>>()
             .join(", "),
+        FuncArgs::Named { positional, named } => positional
+            .iter()
+            .map(|arg| deparse_bare_with(arg, qualify))
+            .chain(named.iter().map(|(label, arg)| {
+                format!("{label} => {}", deparse_bare_with(arg, qualify))
+            }))
+            .collect::<Vec<_>>()
+            .join(", "),
     };
     let order_by = if call.order_by.is_empty() {
         String::new()
@@ -736,6 +744,7 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
                     _ => deparse_plain_call(call, qualify),
                 },
                 FuncArgs::Star => deparse_plain_call(call, qualify),
+                FuncArgs::Named { .. } => deparse_plain_call(call, qualify),
             }
         }
         Expr::Func(call) => deparse_plain_call(call, qualify),

@@ -4112,11 +4112,16 @@ pub struct FuncCall {
 }
 
 /// SP27: a function call's argument list. `Star` is the `f(*)` form (only
-/// `count(*)` is meaningful); `Exprs` is a (possibly empty) positional list.
+/// `count(*)` is meaningful); `Exprs` is a (possibly empty) positional list;
+/// `Named` preserves labels until catalog-backed routine binding can order them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FuncArgs {
     Star,
     Exprs(Vec<Expr>),
+    Named {
+        positional: Vec<Expr>,
+        named: Vec<(String, Expr)>,
+    },
 }
 
 /// The scope qualifier that binds a `SELECT`'s window-function results during

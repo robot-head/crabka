@@ -1175,6 +1175,15 @@ pub(crate) fn resolve_call(
         .into_iter()
         .filter(|routine| !routine.is_aggregate())
         .collect();
+    resolve_candidates(name, candidates, given)
+}
+
+/// Apply ordinary overload resolution to a caller-selected candidate set.
+fn resolve_candidates(
+    name: &str,
+    candidates: Vec<Routine>,
+    given: &[ArgType],
+) -> Result<Option<Routine>, ExecError> {
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -1436,6 +1445,69 @@ pub(crate) fn bind_call(
     };
     let args = bound_args(&routine, args)?;
     Ok(Some(BoundRoutineCall { routine, args }))
+}
+
+/// Bind labeled call arguments while the routine catalog is available.
+///
+/// Parser-side code cannot know user routine parameter names.  This converts a
+/// labeled call into the positional form the existing execution paths use.
+pub(crate) fn normalize_named_call(
+    kv: &dyn Kv,
+    call: &FuncCall,
+) -> Result<Option<FuncCall>, ExecError> {
+    let FuncArgs::Named { positional, named } = &call.args else {
+        return Ok(None);
+    };
+    let candidates: Vec<Routine> = routines_named(kv, &call.name)?
+        .into_iter()
+        .filter(|routine| !routine.is_aggregate())
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut groups: Vec<(Vec<ArgType>, Vec<(Routine, Vec<Expr>)>)> = Vec::new();
+    for routine in candidates {
+        let Some(args) = bind_named_args(&routine, positional, named)? else {
+            continue;
+        };
+        let given = best_effort_arg_types(&args);
+        if let Some((_, routines)) = groups.iter_mut().find(|(types, _)| *types == given) {
+            routines.push((routine, args));
+        } else {
+            groups.push((given, vec![(routine, args)]));
+        }
+    }
+    let mut matches = Vec::new();
+    for (given, routines) in groups {
+        let candidates = routines
+            .iter()
+            .map(|(routine, _)| routine.clone())
+            .collect();
+        let Some(selected) = resolve_candidates(&call.name, candidates, &given)? else {
+            continue;
+        };
+        if let Some((_, args)) = routines
+            .into_iter()
+            .find(|(routine, _)| routine.identity() == selected.identity())
+        {
+            matches.push(args);
+        }
+    }
+    if matches.len() != 1 {
+        return Err(undefined_routine(format!(
+            "function {} does not exist",
+            call.name
+        )));
+    }
+    let args = matches.pop().expect("one matched routine");
+    Ok(Some(FuncCall {
+        sql_syntax: call.sql_syntax,
+        name: call.name.clone(),
+        distinct: call.distinct,
+        args: FuncArgs::Exprs(args),
+        order_by: call.order_by.clone(),
+        filter: call.filter.clone(),
+    }))
 }
 
 /// Resolve a procedure call whose argument list includes `OUT` placeholders.
@@ -2489,6 +2561,10 @@ fn unsafe_to_duplicate(arg: &Expr) -> bool {
         {
             match &call.args {
                 FuncArgs::Exprs(args) => args.iter().any(unsafe_to_duplicate),
+                FuncArgs::Named { positional, named } => positional
+                    .iter()
+                    .chain(named.iter().map(|(_, arg)| arg))
+                    .any(unsafe_to_duplicate),
                 FuncArgs::Star => true,
             }
         }
@@ -2611,6 +2687,53 @@ fn bound_args(routine: &Routine, args: &[Expr]) -> Result<Vec<Expr>, ExecError> 
     Ok(out)
 }
 
+/// Arrange positional and labeled arguments in the input parameter order.
+/// `None` means this overload cannot accept the supplied labels or arity.
+fn bind_named_args(
+    routine: &Routine,
+    positional: &[Expr],
+    named: &[(String, Expr)],
+) -> Result<Option<Vec<Expr>>, ExecError> {
+    let params: Vec<&RoutineParam> = routine.input_params().collect();
+    if positional.len() > params.len() {
+        return Ok(None);
+    }
+    let mut slots = positional.iter().cloned().map(Some).collect::<Vec<_>>();
+    slots.resize(params.len(), None);
+    for (label, value) in named {
+        let Some(index) = params
+            .iter()
+            .position(|param| param.name.as_deref() == Some(label))
+        else {
+            return Ok(None);
+        };
+        if slots[index].is_some() {
+            return Err(ExecError::Syntax(format!(
+                "argument \"{label}\" of {} specified more than once",
+                routine.name
+            )));
+        }
+        slots[index] = Some(value.clone());
+    }
+    slots
+        .into_iter()
+        .zip(params)
+        .map(|(arg, param)| match arg {
+            Some(arg) => Ok(arg),
+            None => param
+                .default
+                .as_deref()
+                .map(crabka_pgparser::parser::parse_expression)
+                .transpose()
+                .map_err(|error| ExecError::Syntax(error.message))?
+                .ok_or_else(|| {
+                    undefined_routine(format!("function {} does not exist", routine.name))
+                }),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 /// Substitute a routine's parameters into one of its body expressions.
 fn substitute(
     binding: &Binding,
@@ -2673,6 +2796,13 @@ fn substitute(
             args: match &call.args {
                 FuncArgs::Star => FuncArgs::Star,
                 FuncArgs::Exprs(args) => FuncArgs::Exprs(list(args)?),
+                FuncArgs::Named { positional, named } => FuncArgs::Named {
+                    positional: list(positional)?,
+                    named: named
+                        .iter()
+                        .map(|(label, arg)| Ok((label.clone(), sub(arg)?)))
+                        .collect::<Result<_, ExecError>>()?,
+                },
             },
             // A routine body may aggregate, so its sort keys and its FILTER are
             // substituted into like every other sub-expression. Dropping either

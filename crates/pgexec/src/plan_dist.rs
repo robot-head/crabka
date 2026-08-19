@@ -612,6 +612,7 @@ pub(crate) fn partial_aggregate_for_call(
                     .position(|column| column.name == *name)?,
             )
         }
+        FuncArgs::Named { .. } => return None,
     };
     let spec = PartialAggregateSpec::from_function(&call.name, column)?;
     if partial_aggregate_is_safe(table, &spec) {

@@ -159,6 +159,10 @@ fn contains_placeholder(expr: &Expr) -> bool {
         Expr::Func(call) => match &call.args {
             FuncArgs::Star => false,
             FuncArgs::Exprs(args) => args.iter().any(contains_placeholder),
+            FuncArgs::Named { positional, named } => positional
+                .iter()
+                .chain(named.iter().map(|(_, arg)| arg))
+                .any(contains_placeholder),
         },
         _ => false,
     }
@@ -229,6 +233,7 @@ impl PlannedCall {
         match &self.call.args {
             FuncArgs::Star => &[],
             FuncArgs::Exprs(args) => args,
+            FuncArgs::Named { .. } => &[],
         }
     }
 }
@@ -326,6 +331,12 @@ fn plan_call(
     let args = match &plain.args {
         FuncArgs::Star => &[][..],
         FuncArgs::Exprs(args) => args,
+        FuncArgs::Named { .. } => {
+            return Err(ExecError::UndefinedFunction(format!(
+                "function {}(...) does not exist",
+                plain.name
+            )));
+        }
     };
     let result_ty = match func {
         WindowFunc::Aggregate if !crate::agg::is_aggregate_name(&plain.name) => {
@@ -684,6 +695,7 @@ fn is_grouped(s: &SelectStmt, out_exprs: &[Expr], calls: &[WindowCall]) -> bool 
             let args = match &call.args {
                 FuncArgs::Star => &[][..],
                 FuncArgs::Exprs(args) => args,
+                FuncArgs::Named { .. } => return false,
             };
             args.iter().any(crate::agg::contains_aggregate)
                 || call
@@ -1020,6 +1032,16 @@ fn split_call(
                 .map(|arg| split(arg, leaves))
                 .collect::<Result<_, ExecError>>()?,
         ),
+        FuncArgs::Named { positional, named } => FuncArgs::Named {
+            positional: positional
+                .iter()
+                .map(|arg| split(arg, leaves))
+                .collect::<Result<_, ExecError>>()?,
+            named: named
+                .iter()
+                .map(|(label, arg)| Ok((label.clone(), split(arg, leaves)?)))
+                .collect::<Result<_, ExecError>>()?,
+        },
     };
     let over = WindowRef::Spec(Box::new(split_spec(&resolve_over(&call.over, windows)?, leaves)?));
     Ok(WindowCall {
@@ -1143,6 +1165,7 @@ fn evaluate_default_prefix_aggregate(
         FuncArgs::Star if is_count => None,
         FuncArgs::Exprs(args) => args.first(),
         FuncArgs::Star => return Ok(None),
+        FuncArgs::Named { .. } => return Ok(None),
     };
     let mut count = 0i64;
     let mut sum: Option<Datum> = None;

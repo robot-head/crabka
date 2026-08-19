@@ -1472,7 +1472,7 @@ fn type_name(d: &Datum) -> &'static str {
 fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
     match &fc.args {
         FuncArgs::Exprs(v) => Ok(v),
-        FuncArgs::Star => Err(undefined_function(&fc.name)),
+        FuncArgs::Star | FuncArgs::Named { .. } => Err(undefined_function(&fc.name)),
     }
 }
 

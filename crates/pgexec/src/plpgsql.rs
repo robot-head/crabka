@@ -3274,6 +3274,13 @@ fn rewrite_expr_with(
             args: match &call.args {
                 FuncArgs::Star => FuncArgs::Star,
                 FuncArgs::Exprs(args) => FuncArgs::Exprs(list(args)?),
+                FuncArgs::Named { positional, named } => FuncArgs::Named {
+                    positional: list(positional)?,
+                    named: named
+                        .iter()
+                        .map(|(label, arg)| Ok((label.clone(), one(arg)?)))
+                        .collect::<Result<_, ExecError>>()?,
+                },
             },
             // An aggregate's sort keys may name the very variables this rewrite
             // substitutes, so they travel through it like the arguments.

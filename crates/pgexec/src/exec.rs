@@ -5939,6 +5939,15 @@ fn rewrite_image_refs(expr: &Expr, aliases: &ImageAliases<'_>) -> Expr {
                 crabka_pgparser::ast::FuncArgs::Exprs(args) => {
                     crabka_pgparser::ast::FuncArgs::Exprs(recurse_all(args))
                 }
+                crabka_pgparser::ast::FuncArgs::Named { positional, named } => {
+                    crabka_pgparser::ast::FuncArgs::Named {
+                        positional: recurse_all(positional),
+                        named: named
+                            .iter()
+                            .map(|(label, arg)| (label.clone(), *recurse(arg)))
+                            .collect(),
+                    }
+                }
             },
             // An aggregate's own sort keys are ordinary expressions over the
             // same rows, so they are rewritten exactly like its arguments.

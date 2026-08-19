@@ -82,6 +82,40 @@ async fn a_sql_routine_binds_named_and_unused_arguments() {
     assert!(scalar(&mut s, "SELECT named(3, 0, 4)").await == Some("7".to_string()));
 }
 
+#[tokio::test]
+async fn a_sql_routine_accepts_named_and_default_arguments() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION named_defaults(a int, b int DEFAULT 5, c int DEFAULT 9) RETURNS int \
+         LANGUAGE sql AS 'SELECT a + b + c'",
+    )
+    .await;
+
+    assert!(scalar(&mut s, "SELECT named_defaults(c => 3, a := 1)").await == Some("9".to_string()));
+}
+
+#[tokio::test]
+async fn a_named_argument_selects_the_matching_overload() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION overloaded(value int) RETURNS text LANGUAGE sql AS 'SELECT ''int'''; \
+         CREATE FUNCTION overloaded(value text) RETURNS text LANGUAGE sql AS 'SELECT ''text'''",
+    )
+    .await;
+
+    assert!(scalar(&mut s, "SELECT overloaded(7)").await == Some("int".to_string()));
+    assert!(scalar(&mut s, "SELECT overloaded(value => 7)").await == Some("int".to_string()));
+    assert!(scalar(&mut s, "SELECT overloaded(value => 'x')").await == Some("text".to_string()));
+}
+
 /// A scalar built-in in FROM is a one-row `FunctionScan`, not an undefined SRF.
 #[tokio::test]
 async fn a_scalar_builtin_scans_as_one_row_from_item() {

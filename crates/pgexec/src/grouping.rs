@@ -711,7 +711,7 @@ fn grouping_args(e: &Expr) -> Option<&[Expr]> {
     }
     match &call.args {
         FuncArgs::Exprs(args) => Some(args),
-        FuncArgs::Star => None,
+        FuncArgs::Star | FuncArgs::Named { .. } => None,
     }
 }
 
@@ -953,6 +953,15 @@ pub(crate) fn rewrite(
             args: match args {
                 FuncArgs::Star => FuncArgs::Star,
                 FuncArgs::Exprs(args) => FuncArgs::Exprs(rewrite_all(args, fold, into_aggregates)?),
+                FuncArgs::Named { positional, named } => FuncArgs::Named {
+                    positional: rewrite_all(positional, fold, into_aggregates)?,
+                    named: named
+                        .iter()
+                        .map(|(label, arg)| {
+                            Ok((label.clone(), rewrite(arg, fold, into_aggregates)?))
+                        })
+                        .collect::<Result<_, ExecError>>()?,
+                },
             },
             // An aggregate's sort keys are ordinary expressions over the input
             // rows, so they take the same rewrite the arguments take — column
@@ -1122,6 +1131,10 @@ fn is_aggregate_call(call: &FuncCall) -> bool {
     match &call.args {
         FuncArgs::Star => true,
         FuncArgs::Exprs(args) => !args.iter().any(crate::agg::contains_aggregate),
+        FuncArgs::Named { positional, named } => !positional
+            .iter()
+            .chain(named.iter().map(|(_, arg)| arg))
+            .any(crate::agg::contains_aggregate),
     }
 }
 

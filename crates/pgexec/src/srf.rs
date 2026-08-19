@@ -1695,6 +1695,10 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         Expr::Binary { left, right, .. } => vec![left, right],
         Expr::Func(fc) => match &fc.args {
             FuncArgs::Exprs(args) => args.iter().collect(),
+            FuncArgs::Named { positional, named } => positional
+                .iter()
+                .chain(named.iter().map(|(_, arg)| arg))
+                .collect(),
             FuncArgs::Star => Vec::new(),
         },
         Expr::InList { expr, list, .. } => std::iter::once(&**expr).chain(list).collect(),
@@ -1861,6 +1865,10 @@ fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
         Expr::Binary { left, right, .. } => vec![left, right],
         Expr::Func(fc) => match &mut fc.args {
             FuncArgs::Exprs(args) => args.iter_mut().collect(),
+            FuncArgs::Named { positional, named } => positional
+                .iter_mut()
+                .chain(named.iter_mut().map(|(_, arg)| arg))
+                .collect(),
             FuncArgs::Star => Vec::new(),
         },
         Expr::InList { expr, list, .. } => std::iter::once(&mut **expr).chain(list).collect(),
