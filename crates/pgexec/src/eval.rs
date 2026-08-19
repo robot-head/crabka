@@ -209,7 +209,7 @@ pub(crate) fn cast_operand(
             arguments.dims.clone(),
         )));
     }
-    let cast = cast_value_in(value, ty, ctx.output_style())?;
+    let cast = cast_value_in_at(value, ty, ctx.output_style(), ctx.now)?;
     // A cast to a domain converts through the base type and then has to satisfy
     // the domain's own NOT NULL and CHECK constraints.
     crate::usertype::check_domain(ty, &cast, ctx)?;
@@ -223,6 +223,49 @@ pub(crate) fn cast_value_in(
     target: ColumnType,
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) -> Result<Datum, ExecError> {
+    cast_value_in_at(value, target, style, jiff::Timestamp::now())
+}
+
+/// [`cast_value_in`] with the transaction-stable reference instant used by
+/// temporal text input.
+pub(crate) fn cast_value_in_at(
+    value: &Datum,
+    target: ColumnType,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+    now: jiff::Timestamp,
+) -> Result<Datum, ExecError> {
+    let base = target.temporal_base().map_or(target, |(base, _)| base);
+    if let Datum::Text(text) = value {
+        let parsed = match base {
+            ColumnType::Date => Some(crabka_pgtypes::datetime::parse_date_in_at(
+                text,
+                style.date_order,
+                style.time_zone,
+                now,
+            )
+            .map(Datum::Date)?),
+            ColumnType::Timestamp => Some(crabka_pgtypes::datetime::parse_timestamp_in_at(
+                text,
+                style.date_order,
+                style.time_zone,
+                now,
+            )
+            .map(Datum::Timestamp)?),
+            ColumnType::Timestamptz => Some(
+                crabka_pgtypes::datetime::parse_timestamptz_in_at(
+                    text,
+                    style.date_order,
+                    style.time_zone,
+                    now,
+                )
+                .map(Datum::Timestamptz)?,
+            ),
+            _ => None,
+        };
+        if let Some(parsed) = parsed {
+            return crabka_pgtypes::cast::cast_in(&parsed, target, style).map_err(ExecError::from);
+        }
+    }
     match target.storage_type() {
         ColumnType::JsonPath => crate::jsonpath::cast_datum(value),
         ColumnType::Array(ElemType::JsonPath) => crate::jsonpath::cast_array_datum(value),
@@ -5603,6 +5646,57 @@ mod tests {
     fn ev_err(sql: &str) -> ExecError {
         let ctx = crate::clock::EvalCtx::test_default();
         eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx).expect_err("must fail")
+    }
+
+    #[test]
+    fn relative_temporal_literals_use_the_transaction_timestamp() {
+        let now: jiff::Timestamp = "2024-03-10T05:06:07Z".parse().expect("timestamp");
+        let mut ctx = crate::clock::EvalCtx::test_default();
+        ctx.now = now;
+        ctx.stmt_now = "2025-01-01T00:00:00Z".parse().expect("statement timestamp");
+        for (sql, expected) in [
+            (
+                "date 'today'",
+                Datum::Date(crabka_pgtypes::datetime::parse_date("2024-03-10").expect("date")),
+            ),
+            (
+                "timestamp 'now'",
+                Datum::Timestamp(
+                    crabka_pgtypes::datetime::parse_timestamp("2024-03-10 05:06:07")
+                        .expect("timestamp"),
+                ),
+            ),
+            ("timestamptz 'now'", Datum::Timestamptz(now)),
+        ] {
+            assert_eq!(
+                eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx).expect(sql),
+                expected,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_aware_cast_keeps_jsonpath_input_forms() {
+        let now = jiff::Timestamp::UNIX_EPOCH;
+        let zone = jiff::tz::TimeZone::UTC;
+        let style = crabka_pgtypes::encoding::OutputStyle::with_zone(&zone);
+        assert!(matches!(
+            cast_value_in_at(&Datum::Text("$.a".into()), ColumnType::JsonPath, style, now),
+            Ok(Datum::JsonPath(_))
+        ));
+        assert!(matches!(
+            cast_value_in_at(
+                &Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Text,
+                    vec![Datum::Text("$.a".into())],
+                )),
+                ColumnType::Array(ElemType::JsonPath),
+                style,
+                now,
+            ),
+            Ok(Datum::Array(_))
+        ));
     }
 
     /// The static-type pass runs before any row is produced, so it is what

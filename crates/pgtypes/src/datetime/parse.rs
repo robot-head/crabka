@@ -474,14 +474,28 @@ pub fn decode(
     mode: DecodeMode,
     tz: &TimeZone,
 ) -> Result<Decoded, DecodeError> {
+    decode_at(text, order, mode, tz, Timestamp::now())
+}
+
+/// [`decode`] with an explicit reference instant for relative spellings.
+///
+/// The executor supplies its transaction timestamp here, while standalone
+/// callers retain the system-clock behavior of [`decode`].
+pub fn decode_at(
+    text: &str,
+    order: DateOrder,
+    mode: DecodeMode,
+    tz: &TimeZone,
+    now: Timestamp,
+) -> Result<Decoded, DecodeError> {
     let fields = split_fields(text)?;
     let mut tm = Tm::default();
     let mut zone: Option<Zone> = None;
     let mut special: Option<Special> = None;
     let mut claimed = Claimed::default();
-    // Read lazily: a literal with no relative spelling in it must not pay for a
-    // clock read, and one with several must see a single consistent instant.
-    let mut wall: Option<Zoned> = None;
+    // The caller supplies one stable instant. It is only converted to the
+    // session zone if a relative spelling actually needs it.
+    let mut wall: Option<Zoned> = Some(now.to_zoned(tz.clone()));
     let mut is_bc = false;
     let mut meridiem: Option<bool> = None;
     let mut want_julian = false;

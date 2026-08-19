@@ -21,7 +21,7 @@ mod tzdb;
 
 pub use self::{
     parse::{
-        DateOrder, DecodeError, DecodeMode, Decoded, Parts, Special, Zone, decode,
+        DateOrder, DecodeError, DecodeMode, Decoded, Parts, Special, Zone, decode, decode_at,
         decode_numeric_time_zone, resolve_guc_time_zone, resolve_time_zone,
     },
     tzdb::zone_by_name,
@@ -1110,7 +1110,17 @@ pub fn parse_date(s: &str) -> Result<PgDate, TypeError> {
 
 /// [`parse_date`] with the session's `DateStyle` field order and zone.
 pub fn parse_date_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<PgDate, TypeError> {
-    match decode(s.trim(), order, DecodeMode::DateTime, tz)
+    parse_date_in_at(s, order, tz, clock_now())
+}
+
+/// [`parse_date_in`] with an explicit reference instant for relative words.
+pub fn parse_date_in_at(
+    s: &str,
+    order: DateOrder,
+    tz: &TimeZone,
+    now: Timestamp,
+) -> Result<PgDate, TypeError> {
+    match decode_at(s.trim(), order, DecodeMode::DateTime, tz, now)
         .map_err(|e| decode_error(e, "date", s))?
     {
         Decoded::Special(special) => Ok(special_to_date(special)),
@@ -1772,9 +1782,19 @@ pub fn parse_timestamp(s: &str) -> Result<DateTime, TypeError> {
 
 /// [`parse_timestamp`] with the session's `DateStyle` field order and zone.
 pub fn parse_timestamp_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<DateTime, TypeError> {
+    parse_timestamp_in_at(s, order, tz, clock_now())
+}
+
+/// [`parse_timestamp_in`] with an explicit reference instant for relative words.
+pub fn parse_timestamp_in_at(
+    s: &str,
+    order: DateOrder,
+    tz: &TimeZone,
+    now: Timestamp,
+) -> Result<DateTime, TypeError> {
     // `timestamp_in` names the type `timestamp`, as `time_in` names `time`.
     let type_name = "timestamp";
-    match decode(s.trim(), order, DecodeMode::DateTime, tz)
+    match decode_at(s.trim(), order, DecodeMode::DateTime, tz, now)
         .map_err(|e| decode_error(e, type_name, s))?
     {
         Decoded::Special(special) => Ok(special_to_datetime(special)),
@@ -1914,11 +1934,21 @@ pub fn parse_timestamptz_in(
     order: DateOrder,
     tz: &TimeZone,
 ) -> Result<Timestamp, TypeError> {
+    parse_timestamptz_in_at(s, order, tz, clock_now())
+}
+
+/// [`parse_timestamptz_in`] with an explicit reference instant for relative words.
+pub fn parse_timestamptz_in_at(
+    s: &str,
+    order: DateOrder,
+    tz: &TimeZone,
+    now: Timestamp,
+) -> Result<Timestamp, TypeError> {
     let type_name = "timestamp with time zone";
     let overflow = || TypeError::DatetimeFieldOverflow {
         value: s.to_string(),
     };
-    match decode(s.trim(), order, DecodeMode::DateTime, tz)
+    match decode_at(s.trim(), order, DecodeMode::DateTime, tz, now)
         .map_err(|e| decode_error(e, type_name, s))?
     {
         Decoded::Special(special) => match special {
