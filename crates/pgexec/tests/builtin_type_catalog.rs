@@ -800,6 +800,41 @@ async fn array_type_typmod_routines_match_their_elements() {
     );
 }
 
+/// The vector catalog types have their own I/O routines; only their
+/// subscripting handler is shared with ordinary arrays.
+#[tokio::test]
+async fn pg_type_links_vector_io_routines() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typsubscript, typinput, typoutput, typreceive, typsend, typanalyze \
+             FROM pg_type WHERE typname IN ('int2vector', 'oidvector') ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("int2vector".into()),
+                    Some("array_subscript_handler".into()),
+                    Some("int2vectorin".into()),
+                    Some("int2vectorout".into()),
+                    Some("int2vectorrecv".into()),
+                    Some("int2vectorsend".into()),
+                    Some("-".into()),
+                ],
+                vec![
+                    Some("oidvector".into()),
+                    Some("array_subscript_handler".into()),
+                    Some("oidvectorin".into()),
+                    Some("oidvectorout".into()),
+                    Some("oidvectorrecv".into()),
+                    Some("oidvectorsend".into()),
+                    Some("-".into()),
+                ],
+            ]
+    );
+}
+
 /// The physical fields are not decorative: type sanity uses them to decide
 /// whether a datum can be passed by value or must be stored out of line.
 #[tokio::test]

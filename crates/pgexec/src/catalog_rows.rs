@@ -1909,8 +1909,19 @@ fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [
             |oid| regproc(*oid, &plain),
         )
     };
-    let is_array = row.name.starts_with('_') || matches!(row.name, "int2vector" | "oidvector");
-    if is_array {
+    if matches!(row.name, "int2vector" | "oidvector") {
+        return [
+            routine("array_subscript_handler"),
+            named(row.name, "in"),
+            named(row.name, "out"),
+            named(row.name, "recv"),
+            named(row.name, "send"),
+            absent_regproc(),
+            absent_regproc(),
+            absent_regproc(),
+        ];
+    }
+    if row.name.starts_with('_') {
         let element_name = builtin_type_rows()
             .iter()
             .find(|type_row| type_row.oid == row.typelem)
