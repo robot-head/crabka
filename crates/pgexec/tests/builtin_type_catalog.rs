@@ -383,6 +383,104 @@ async fn pg_type_exposes_cstring_and_refcursor_with_their_arrays() {
     );
 }
 
+/// `aclitem` has text-shaped SQL input but remains a distinct catalog type;
+/// both it and its array row are required by the upstream type-sanity fixture.
+#[tokio::test]
+async fn pg_type_exposes_aclitem_with_its_array_and_wire_identity() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typlen, typcategory, typtype, typelem, typarray, \
+                    typinput, typoutput, typreceive, typsend, typalign, typstorage \
+             FROM pg_type WHERE typname IN ('aclitem', '_aclitem') ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("_aclitem".into()),
+                    Some("-1".into()),
+                    Some("A".into()),
+                    Some("b".into()),
+                    Some("1033".into()),
+                    Some("0".into()),
+                    Some("array_in".into()),
+                    Some("array_out".into()),
+                    Some("array_recv".into()),
+                    Some("array_send".into()),
+                    Some("d".into()),
+                    Some("x".into()),
+                ],
+                vec![
+                    Some("aclitem".into()),
+                    Some("16".into()),
+                    Some("U".into()),
+                    Some("b".into()),
+                    Some("0".into()),
+                    Some("1034".into()),
+                    Some("aclitemin".into()),
+                    Some("aclitemout".into()),
+                    Some("-".into()),
+                    Some("-".into()),
+                    Some("d".into()),
+                    Some("p".into()),
+                ],
+            ]
+    );
+    let result = s
+        .simple_query("SELECT 'regression=UC/regression'::aclitem")
+        .await
+        .expect("aclitem input succeeds");
+    let QueryResult::Rows { fields, .. } = &result[0] else {
+        panic!("aclitem query should return rows");
+    };
+    assert!(fields[0].type_oid == 1033);
+    s.simple_query("CREATE TABLE aclitem_catalog (value aclitem)")
+        .await
+        .expect("aclitem column succeeds");
+    s.simple_query("INSERT INTO aclitem_catalog VALUES ('regression=UC/regression'::aclitem)")
+        .await
+        .expect("aclitem assignment succeeds");
+    assert!(
+        rows(
+            &mut s,
+            "SELECT atttypid FROM pg_attribute \
+             WHERE attrelid = 'aclitem_catalog'::regclass AND attname = 'value'",
+        )
+        .await
+            == vec![vec![Some("1033".into())]]
+    );
+}
+
+/// Every `pg_type` array row is varlena. The catalog has several manual rows
+/// for element types that Crabka intentionally cannot construct yet, so this
+/// guards those rows as well as the generated `ElemType` array rows.
+#[tokio::test]
+async fn every_builtin_array_catalog_row_is_variable_length() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT count(*) FROM pg_type WHERE typcategory = 'A' AND typlen <> -1",
+        )
+        .await
+            == vec![vec![Some("0".into())]]
+    );
+}
+
+#[tokio::test]
+async fn every_builtin_range_catalog_row_is_variable_length() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT count(*) FROM pg_type WHERE typcategory = 'R' AND typlen <> -1",
+        )
+        .await
+            == vec![vec![Some("0".into())]]
+    );
+}
+
 /// `type_sanity` uses this regress-library helper to keep `PostgreSQL`'s
 /// hard-coded catalog-index set audited. Its result is the upstream predicate,
 /// not an approximation from Crabkas virtual index rows.

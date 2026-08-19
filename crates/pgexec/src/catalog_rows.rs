@@ -1512,6 +1512,7 @@ pub(crate) fn attribute_storage(ty: ColumnType) -> &'static str {
         C::Numeric(_) | C::Inet | C::Cidr => "m",
         // Varlena: compressible and toastable.
         C::Text
+        | C::Aclitem
         | C::Refcursor
         | C::Varchar(_)
         | C::Char(_)
@@ -1622,7 +1623,9 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
                     typcollation: builtin_type_collation_oid(ty.oid),
                     domain_base: None,
                     range_align: match ty.name {
-                        "tsrange" | "tstzrange" | "int8range" => Some("d"),
+                        "aclitem" | "_aclitem" | "tsrange" | "tstzrange" | "int8range" => {
+                            Some("d")
+                        }
                         _ => None,
                     },
                 },
@@ -3107,6 +3110,14 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             array: 1263,
         },
         BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::ACLITEM as i32,
+            name: "aclitem",
+            len: 16,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::ACLITEMARRAY as i32,
+        },
+        BuiltinTypeRow {
             oid: 1790,
             name: "refcursor",
             len: -1,
@@ -3552,6 +3563,14 @@ pub(crate) fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
     static ROWS: std::sync::LazyLock<Vec<BuiltinTypeRow>> = std::sync::LazyLock::new(|| {
         let mut rows = scalar_type_rows().to_vec();
         rows.extend([
+            BuiltinTypeRow {
+                oid: crabka_pgtypes::oids::ACLITEMARRAY as i32,
+                name: "_aclitem",
+                len: -1,
+                category: "A",
+                elem: crabka_pgtypes::oids::ACLITEM as i32,
+                array: 0,
+            },
             BuiltinTypeRow {
                 oid: 1263,
                 name: "_cstring",

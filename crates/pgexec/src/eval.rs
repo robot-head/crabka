@@ -236,7 +236,7 @@ pub(crate) fn cast_value_in_at(
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
     now: jiff::Timestamp,
 ) -> Result<Datum, ExecError> {
-    if target == ColumnType::Refcursor {
+    if matches!(target, ColumnType::Aclitem | ColumnType::Refcursor) {
         return cast_value_in_at(value, ColumnType::Text, style, now);
     }
     let base = target.temporal_base().map_or(target, |(base, _)| base);
@@ -299,7 +299,7 @@ pub(crate) fn cast_assign_value_in_at(
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
     now: jiff::Timestamp,
 ) -> Result<Datum, ExecError> {
-    if target == ColumnType::Refcursor {
+    if matches!(target, ColumnType::Aclitem | ColumnType::Refcursor) {
         return cast_assign_value_in_at(value, ColumnType::Text, style, now);
     }
     let base = target.temporal_base().map_or(target, |(base, _)| base);

@@ -10936,7 +10936,7 @@ pub(crate) fn coerce(
             .map(Datum::Int4)
             .map_err(|_| TypeError::Overflow)?,
         (Datum::Text(s), ColumnType::Text) => Datum::Text(s),
-        (Datum::Text(s), ColumnType::Refcursor) => Datum::Text(s),
+        (Datum::Text(s), ColumnType::Aclitem | ColumnType::Refcursor) => Datum::Text(s),
         (Datum::Text(s), ColumnType::Varchar(limit)) => Datum::Text(
             crabka_pgtypes::string::apply_varchar_typmod(&s, limit, Coercion::Assignment)?,
         ),
