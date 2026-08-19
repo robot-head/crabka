@@ -1507,7 +1507,8 @@ pub(crate) fn attribute_storage(ty: ColumnType) -> &'static str {
         | C::Regconfig
         | C::Regdictionary
         | C::Regrole
-        | C::Regcollation => "p",
+        | C::Regcollation
+        | C::Name => "p",
         // Compressible but kept in the main table before it is toasted out.
         C::Numeric(_) | C::Inet | C::Cidr => "m",
         // Varlena: compressible and toastable.
@@ -1564,13 +1565,12 @@ pub(crate) fn column_collation_oid(column: &Column) -> i32 {
 /// `attcollation`: the database default collation for a collatable type, 0 for
 /// everything else, the exact test `\d`'s collation column makes.
 pub(crate) fn text_collation_oid(ty: ColumnType) -> i32 {
-    if matches!(
-        ty,
-        ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_)
-    ) {
-        crate::catalog_rel::DEFAULT_COLLATION_OID
-    } else {
-        0
+    match ty {
+        ColumnType::Text | ColumnType::Name | ColumnType::Varchar(_) | ColumnType::Char(_) => {
+            crate::catalog_rel::DEFAULT_COLLATION_OID
+        }
+        ColumnType::Array(elem) => text_collation_oid(elem.column_type()),
+        _ => 0,
     }
 }
 
@@ -1581,8 +1581,13 @@ pub(crate) fn builtin_type_collation_oid(oid: i32) -> i32 {
     let collatable = matches!(
         u32::try_from(oid),
         Ok(crabka_pgtypes::oids::TEXT
+            | crabka_pgtypes::oids::NAME
             | crabka_pgtypes::oids::VARCHAR
-            | crabka_pgtypes::oids::BPCHAR)
+            | crabka_pgtypes::oids::BPCHAR
+            | crabka_pgtypes::oids::TEXTARRAY
+            | crabka_pgtypes::oids::NAMEARRAY
+            | crabka_pgtypes::oids::VARCHARARRAY
+            | crabka_pgtypes::oids::BPCHARARRAY)
     );
     if collatable {
         crate::catalog_rel::DEFAULT_COLLATION_OID
@@ -1623,6 +1628,7 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
                     typcollation: builtin_type_collation_oid(ty.oid),
                     domain_base: None,
                     range_align: match ty.name {
+                        "name" => Some("c"),
                         "aclitem" | "_aclitem" | "tsrange" | "tstzrange" | "int8range" => {
                             Some("d")
                         }
@@ -3247,6 +3253,14 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             array: crabka_pgtypes::oids::BYTEAARRAY as i32,
         },
         BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::NAME as i32,
+            name: "name",
+            len: 64,
+            category: "S",
+            elem: 0,
+            array: crabka_pgtypes::oids::NAMEARRAY as i32,
+        },
+        BuiltinTypeRow {
             oid: crabka_pgtypes::oids::INT2 as i32,
             name: "int2",
             len: 2,
@@ -3615,6 +3629,7 @@ pub(crate) fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
         ElemType::Int4 => "_int4",
         ElemType::Int8 => "_int8",
         ElemType::Text => "_text",
+        ElemType::Name => "_name",
         ElemType::Float8 => "_float8",
         ElemType::Numeric => "_numeric",
         ElemType::Date => "_date",
@@ -4089,5 +4104,26 @@ mod tests {
             &BTreeMap::new(),
         );
         assert!(row[23] == Datum::InternalChar(b'p'));
+    }
+
+    #[test]
+    fn name_uses_plain_storage_and_the_default_collation() {
+        assert_eq!(attribute_storage(ColumnType::Name), "p");
+        assert_eq!(
+            text_collation_oid(ColumnType::Name),
+            crate::catalog_rel::DEFAULT_COLLATION_OID
+        );
+        assert_eq!(
+            text_collation_oid(ColumnType::Array(crabka_pgtypes::ElemType::Name)),
+            crate::catalog_rel::DEFAULT_COLLATION_OID
+        );
+        assert_eq!(
+            builtin_type_collation_oid(crabka_pgtypes::oids::NAME as i32),
+            crate::catalog_rel::DEFAULT_COLLATION_OID
+        );
+        assert_eq!(
+            builtin_type_collation_oid(crabka_pgtypes::oids::NAMEARRAY as i32),
+            crate::catalog_rel::DEFAULT_COLLATION_OID
+        );
     }
 }

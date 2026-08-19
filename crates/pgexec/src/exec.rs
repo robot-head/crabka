@@ -10936,7 +10936,7 @@ pub(crate) fn coerce(
             .map(Datum::Int4)
             .map_err(|_| TypeError::Overflow)?,
         (Datum::Text(s), ColumnType::Text) => Datum::Text(s),
-        (Datum::Text(s), ColumnType::Aclitem | ColumnType::Refcursor) => Datum::Text(s),
+        (Datum::Text(s), ColumnType::Aclitem | ColumnType::Name | ColumnType::Refcursor) => Datum::Text(s),
         (Datum::Text(s), ColumnType::Varchar(limit)) => Datum::Text(
             crabka_pgtypes::string::apply_varchar_typmod(&s, limit, Coercion::Assignment)?,
         ),
@@ -19987,6 +19987,7 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::REGCOLLATION => ColumnType::Regcollation,
         crabka_pgtypes::oids::INT8 => ColumnType::Int8,
         crabka_pgtypes::oids::TEXT => ColumnType::Text,
+        crabka_pgtypes::oids::NAME => ColumnType::Name,
         crabka_pgtypes::oids::ACLITEM => ColumnType::Aclitem,
         crabka_pgtypes::oids::REFCURSOR => ColumnType::Refcursor,
         crabka_pgtypes::oids::VARCHAR => ColumnType::Varchar(None),
@@ -25590,6 +25591,7 @@ mod tests {
             // jsonb decomposes it. Each oid must map to its own.
             (oids::JSON, ColumnType::Json),
             (oids::JSONB, ColumnType::Jsonb),
+            (oids::NAME, ColumnType::Name),
             (oids::ACLITEM, ColumnType::Aclitem),
             (oids::REFCURSOR, ColumnType::Refcursor),
             (oids::BYTEA, ColumnType::Bytea),

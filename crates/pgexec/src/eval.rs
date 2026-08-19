@@ -236,7 +236,7 @@ pub(crate) fn cast_value_in_at(
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
     now: jiff::Timestamp,
 ) -> Result<Datum, ExecError> {
-    if matches!(target, ColumnType::Aclitem | ColumnType::Refcursor) {
+    if matches!(target, ColumnType::Aclitem | ColumnType::Name | ColumnType::Refcursor) {
         return cast_value_in_at(value, ColumnType::Text, style, now);
     }
     let base = target.temporal_base().map_or(target, |(base, _)| base);
@@ -299,7 +299,7 @@ pub(crate) fn cast_assign_value_in_at(
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
     now: jiff::Timestamp,
 ) -> Result<Datum, ExecError> {
-    if matches!(target, ColumnType::Aclitem | ColumnType::Refcursor) {
+    if matches!(target, ColumnType::Aclitem | ColumnType::Name | ColumnType::Refcursor) {
         return cast_assign_value_in_at(value, ColumnType::Text, style, now);
     }
     let base = target.temporal_base().map_or(target, |(base, _)| base);
@@ -626,7 +626,7 @@ fn eval_depth_inner(
             // `character` is not this cast — `bpchar(bpchar)` re-pads to the new
             // length — so those targets are excluded.
             let v = match ty {
-                ColumnType::Text | ColumnType::Varchar(_) => {
+                ColumnType::Text | ColumnType::Name | ColumnType::Varchar(_) => {
                     bpchar_to_text_value(expr, scope, &v)?.unwrap_or(v)
                 }
                 _ => v,
@@ -4182,7 +4182,7 @@ pub(crate) fn require_collatable(ty: ColumnType) -> Result<(), ExecError> {
 /// Whether a value of `ty` can carry a collation at all.
 fn is_collatable(ty: ColumnType) -> bool {
     match ty {
-        ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_) => true,
+        ColumnType::Text | ColumnType::Name | ColumnType::Varchar(_) | ColumnType::Char(_) => true,
         ColumnType::Domain(domain) => is_collatable(*domain.base),
         ColumnType::Array(elem) => is_collatable(elem.column_type()),
         _ => false,
@@ -5598,6 +5598,15 @@ fn numeric_result_type(lt: ColumnType, rt: ColumnType) -> ColumnType {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn name_is_collatable_and_trims_bpchar_padding_on_cast() {
+        use assert2::assert;
+
+        assert!(require_collatable(ColumnType::Name).is_ok());
+        assert!(require_collatable(ColumnType::Int4).is_err());
+        assert!(ev("'name '::char(5)::name", None, &[]) == Datum::Text("name".into()));
+    }
 
     /// PostgreSQL decides an empty `IN` list before it looks at the operand:
     /// `NULL IN (SELECT 1 WHERE false)` is `f`, not NULL, and `NOT IN` is `t`.

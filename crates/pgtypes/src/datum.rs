@@ -19,6 +19,10 @@ pub mod oids {
     pub const RECORDARRAY: u32 = 2287;
     /// SP40: `bytea`: variable-length binary string.
     pub const BYTEA: u32 = 17;
+    /// PostgreSQL `name`: a fixed-width catalog identifier.
+    pub const NAME: u32 = 19;
+    /// `name[]`.
+    pub const NAMEARRAY: u32 = 1003;
     pub const INT8: u32 = 20;
     /// PostgreSQL `smallint`: a 2-byte signed integer.
     pub const INT2: u32 = 21;
@@ -281,6 +285,7 @@ pub enum ElemType {
     Int4,
     Int8,
     Text,
+    Name,
     Float8,
     Numeric,
     Date,
@@ -310,11 +315,12 @@ impl ElemType {
     /// Every supported array element type, in `code()` order. The two
     /// length-modified entries stand for their whole family — `from_code`
     /// reconstructs the modifier, and neither the OID nor the name depends on it.
-    pub const ALL: [ElemType; 22] = [
+    pub const ALL: [ElemType; 23] = [
         ElemType::Bool,
         ElemType::Int4,
         ElemType::Int8,
         ElemType::Text,
+        ElemType::Name,
         ElemType::Float8,
         ElemType::Numeric,
         ElemType::Date,
@@ -343,6 +349,7 @@ impl ElemType {
             ElemType::Int4 => ColumnType::Int4,
             ElemType::Int8 => ColumnType::Int8,
             ElemType::Text => ColumnType::Text,
+            ElemType::Name => ColumnType::Name,
             ElemType::Float8 => ColumnType::Float8,
             ElemType::Numeric => ColumnType::Numeric(None),
             ElemType::Date => ColumnType::Date,
@@ -376,6 +383,7 @@ impl ElemType {
             ColumnType::Int4 => ElemType::Int4,
             ColumnType::Int8 => ElemType::Int8,
             ColumnType::Text => ElemType::Text,
+            ColumnType::Name => ElemType::Name,
             ColumnType::Float8 => ElemType::Float8,
             ColumnType::Numeric(_) => ElemType::Numeric,
             ColumnType::Date => ElemType::Date,
@@ -477,6 +485,7 @@ impl ElemType {
             ElemType::Int4 => oids::INT4ARRAY,
             ElemType::Int8 => oids::INT8ARRAY,
             ElemType::Text => oids::TEXTARRAY,
+            ElemType::Name => oids::NAMEARRAY,
             ElemType::Float8 => oids::FLOAT8ARRAY,
             ElemType::Numeric => oids::NUMERICARRAY,
             ElemType::Date => oids::DATEARRAY,
@@ -528,6 +537,7 @@ impl ElemType {
             ElemType::Int4 => "integer[]",
             ElemType::Int8 => "bigint[]",
             ElemType::Text => "text[]",
+            ElemType::Name => "name[]",
             ElemType::Float8 => "double precision[]",
             ElemType::Numeric => "numeric[]",
             ElemType::Date => "date[]",
@@ -606,6 +616,7 @@ impl ElemType {
             ElemType::JsonPath => 21,
             ElemType::Json => 22,
             ElemType::Xml => 23,
+            ElemType::Name => 24,
         }
     }
 
@@ -743,7 +754,7 @@ pub enum TemporalType {
 
 static CARDINAL_NUMBER_BASE: ColumnType = ColumnType::Int4;
 static CHARACTER_DATA_BASE: ColumnType = ColumnType::Varchar(None);
-static SQL_IDENTIFIER_BASE: ColumnType = ColumnType::Text;
+static SQL_IDENTIFIER_BASE: ColumnType = ColumnType::Name;
 static TIME_STAMP_BASE: ColumnType = ColumnType::Timestamptz;
 static YES_OR_NO_BASE: ColumnType = ColumnType::Varchar(None);
 
@@ -785,6 +796,9 @@ pub enum ColumnType {
     Int4,
     Int8,
     Text,
+    /// PostgreSQL `name` (OID 19): a distinct catalog and wire identity with
+    /// text values.
+    Name,
     /// PostgreSQL `aclitem` (OID 1033): a distinct catalog and wire identity
     /// with text's storage representation.
     Aclitem,
@@ -1091,12 +1105,8 @@ impl ColumnType {
             "pg_lsn" => Some(ColumnType::PgLsn),
             "pg_snapshot" => Some(ColumnType::PgSnapshot),
             "txid_snapshot" => Some(ColumnType::TxidSnapshot),
-            // `name` (OID 19) is a pragmatic alias for `text`, the same shape of
-            // divergence as `oid` → `int4` above: the catalog's name-valued
-            // columns are already Text, so `'x'::name` and a `name[]` column
-            // resolve consistently with them. RowDescription therefore reports
-            // text (25), not name (19), and the 63-byte truncation is not applied.
-            "text" | "name" => Some(ColumnType::Text),
+            "text" => Some(ColumnType::Text),
+            "name" => Some(ColumnType::Name),
             "aclitem" => Some(ColumnType::Aclitem),
             "refcursor" => Some(ColumnType::Refcursor),
             "varchar" | "character varying" => Some(ColumnType::Varchar(None)),
@@ -1204,7 +1214,9 @@ impl ColumnType {
         for _ in 0..MAX_DOMAIN_DEPTH {
             match ty {
                 ColumnType::Domain(domain) => ty = *domain.base,
-                ColumnType::Aclitem | ColumnType::Refcursor => return ColumnType::Text,
+                ColumnType::Aclitem | ColumnType::Name | ColumnType::Refcursor => {
+                    return ColumnType::Text;
+                }
                 other => return other,
             }
         }
@@ -1235,6 +1247,7 @@ impl ColumnType {
             ColumnType::Int8 => oids::INT8,
             ColumnType::Int4 => oids::INT4,
             ColumnType::Text => oids::TEXT,
+            ColumnType::Name => oids::NAME,
             ColumnType::Aclitem => oids::ACLITEM,
             ColumnType::Refcursor => oids::REFCURSOR,
             ColumnType::Varchar(_) => oids::VARCHAR,
@@ -1310,6 +1323,7 @@ impl ColumnType {
             ColumnType::Int8 => "bigint",
             ColumnType::Int4 => "integer",
             ColumnType::Text => "text",
+            ColumnType::Name => "name",
             ColumnType::Aclitem => "aclitem",
             ColumnType::Refcursor => "refcursor",
             ColumnType::Varchar(_) => "character varying",
@@ -1388,6 +1402,7 @@ impl ColumnType {
             ColumnType::Int8 => 8,
             ColumnType::Int4 => 4,
             ColumnType::Text | ColumnType::Refcursor | ColumnType::Varchar(_) | ColumnType::Char(_) => -1,
+            ColumnType::Name => 64,
             ColumnType::Aclitem => 16,
             // The whole point of `"char"`: one byte, pass-by-value, no varlena
             // header. `character(1)` above is -1.
@@ -1466,7 +1481,7 @@ impl ColumnType {
     pub fn is_string(self) -> bool {
         matches!(
             self,
-            ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_)
+            ColumnType::Text | ColumnType::Name | ColumnType::Varchar(_) | ColumnType::Char(_)
         )
     }
 
@@ -2402,6 +2417,7 @@ mod tests {
         for (written, expected) in [
             ("_int4", Some(ColumnType::Array(ElemType::Int4))),
             ("_text", Some(ColumnType::Array(ElemType::Text))),
+            ("_name", Some(ColumnType::Array(ElemType::Name))),
             ("_bool", Some(ColumnType::Array(ElemType::Bool))),
             ("_INT4", Some(ColumnType::Array(ElemType::Int4))),
             // Not an array of arrays, and not a type that does not exist.
@@ -2428,6 +2444,7 @@ mod tests {
         assert_eq!(ColumnType::from_sql_name("int8"), Some(ColumnType::Int8));
         assert_eq!(ColumnType::from_sql_name("bigint"), Some(ColumnType::Int8));
         assert_eq!(ColumnType::from_sql_name("text"), Some(ColumnType::Text));
+        assert_eq!(ColumnType::from_sql_name("name"), Some(ColumnType::Name));
         assert_eq!(
             ColumnType::from_sql_name("varbit"),
             Some(ColumnType::VarBit(None))
@@ -2593,6 +2610,7 @@ mod tests {
         assert_eq!(ColumnType::Int8.oid(), 20);
         assert_eq!(ColumnType::Int4.oid(), 23);
         assert_eq!(ColumnType::Text.oid(), 25);
+        assert_eq!(ColumnType::Name.oid(), 19);
         assert_eq!(ColumnType::Varchar(Some(12)).oid(), 1043);
         assert_eq!(ColumnType::Char(Some(2)).oid(), 1042);
     }
@@ -2686,6 +2704,7 @@ mod tests {
         assert_eq!(ColumnType::Int4.name(), "integer");
         assert_eq!(ColumnType::Int8.name(), "bigint");
         assert_eq!(ColumnType::Text.name(), "text");
+        assert_eq!(ColumnType::Name.name(), "name");
         assert_eq!(ColumnType::Varchar(Some(12)).name(), "character varying");
         assert_eq!(ColumnType::Char(Some(2)).name(), "character");
     }
@@ -2696,6 +2715,7 @@ mod tests {
         assert_eq!(ColumnType::Int4.type_size(), 4);
         assert_eq!(ColumnType::Int8.type_size(), 8);
         assert_eq!(ColumnType::Text.type_size(), -1); // variable-length
+        assert_eq!(ColumnType::Name.type_size(), 64);
         assert_eq!(ColumnType::Varchar(Some(12)).type_size(), -1);
         assert_eq!(ColumnType::Char(Some(2)).type_size(), -1);
         assert_eq!(ColumnType::Uuid.type_size(), 16);
@@ -2921,6 +2941,7 @@ mod tests {
         let expected: &[(ElemType, u32, u32, &str)] = &[
             (ElemType::Bool, 16, 1000, "boolean[]"),
             (ElemType::Bytea, 17, 1001, "bytea[]"),
+            (ElemType::Name, 19, 1003, "name[]"),
             (ElemType::Int8, 20, 1016, "bigint[]"),
             (ElemType::Int4, 23, 1007, "integer[]"),
             (ElemType::Text, 25, 1009, "text[]"),

@@ -330,6 +330,10 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Int4 => out.push(type_tag::INT4),
         ColumnType::Int8 => out.push(type_tag::INT8),
         ColumnType::Text => out.push(type_tag::TEXT),
+        ColumnType::Name => {
+            out.push(type_tag::USER);
+            out.extend_from_slice(&crabka_pgtypes::oids::NAME.to_be_bytes());
+        }
         ColumnType::Aclitem => {
             out.push(type_tag::USER);
             out.extend_from_slice(&crabka_pgtypes::oids::ACLITEM.to_be_bytes());
@@ -583,6 +587,8 @@ fn read_type_with(
             let oid = u32::from_be_bytes(raw.try_into().expect("4 bytes fit u32"));
             if oid == crabka_pgtypes::oids::RECORD {
                 ColumnType::Record(None)
+            } else if oid == crabka_pgtypes::oids::NAME {
+                ColumnType::Name
             } else if oid == crabka_pgtypes::oids::ACLITEM {
                 ColumnType::Aclitem
             } else if oid == crabka_pgtypes::oids::REFCURSOR {
@@ -2893,6 +2899,7 @@ mod tests {
             ColumnType::Int4,
             ColumnType::Int8,
             ColumnType::Text,
+            ColumnType::Name,
             ColumnType::Varchar(None),
             ColumnType::Varchar(Some(10)),
             ColumnType::Char(None),
@@ -2959,6 +2966,7 @@ mod tests {
             ColumnType::Int4,
             ColumnType::Int8,
             ColumnType::Text,
+            ColumnType::Name,
             ColumnType::Varchar(None),
             ColumnType::Char(None),
             ColumnType::Float4,

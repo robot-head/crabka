@@ -676,7 +676,7 @@ pub fn cast_in(
         (Datum::Int8(n), ColumnType::Bit(len)) => Ok(Datum::BitString(
             crate::bitstring::BitString::from_int(*n, len),
         )),
-        (Datum::Text(s), Text) => Ok(Datum::Text(s.clone())),
+        (Datum::Text(s), Text | ColumnType::Name) => Ok(Datum::Text(s.clone())),
         // The executor owns jsonpath parsing/canonicalization. Keeping only
         // identity here makes it impossible for a raw string to masquerade as
         // a validated jsonpath through a context-free type-layer call.
@@ -875,6 +875,7 @@ pub fn cast_in(
         // it prints the whole host address and always appends the netmask, so
         // `'192.168.1.226'::inet::text` is `192.168.1.226/32`.
         (Datum::Inet(value), Text) => Ok(Datum::Text(value.show())),
+        (d, ColumnType::Name) => Ok(Datum::Text(text_of(d, style))),
         (d, Text) => Ok(Datum::Text(text_of(d, style))),
         (d, ColumnType::Varchar(n)) => {
             crate::string::apply_varchar_typmod(&string_cast_input(d, style), n, Coercion::Explicit)
@@ -1908,6 +1909,34 @@ mod tests {
         ] {
             assert!(!assignment_cast_allowed(from, to), "{from:?} -> {to:?}");
         }
+    }
+
+    #[test]
+    fn name_casts_share_text_values_without_losing_type_identity() {
+        use assert2::assert;
+
+        let tz = utc();
+        assert!(cast_allowed(ColumnType::Text, ColumnType::Name));
+        assert!(assignment_cast_allowed(ColumnType::Text, ColumnType::Name));
+        assert!(
+            cast(&Datum::Text("catalog_name".into()), ColumnType::Name, &tz).expect("text to name")
+                == Datum::Text("catalog_name".into())
+        );
+        assert!(
+            cast(
+                &Datum::Array(crate::ArrayValue::new(
+                    crate::ElemType::Text,
+                    vec![Datum::Text("catalog_name".into())],
+                )),
+                ColumnType::Array(crate::ElemType::Name),
+                &tz,
+            )
+            .expect("text array to name array")
+                == Datum::Array(crate::ArrayValue::new(
+                    crate::ElemType::Name,
+                    vec![Datum::Text("catalog_name".into())],
+                ))
+        );
     }
 
     #[test]

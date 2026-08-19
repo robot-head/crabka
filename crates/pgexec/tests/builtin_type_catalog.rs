@@ -240,6 +240,28 @@ async fn pg_type_links_array_and_range_io_routines() {
                 ],
             ]
     );
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typalign, typstorage, typcollation \
+             FROM pg_type WHERE typname IN ('name', '_name') ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("_name".into()),
+                    Some("i".into()),
+                    Some("x".into()),
+                    Some("100".into()),
+                ],
+                vec![
+                    Some("name".into()),
+                    Some("c".into()),
+                    Some("p".into()),
+                    Some("100".into()),
+                ],
+            ]
+    );
 }
 
 #[tokio::test]
@@ -380,6 +402,50 @@ async fn pg_type_exposes_cstring_and_refcursor_with_their_arrays() {
     assert!(
         rows(&mut s, "SELECT value FROM refcursor_catalog").await
             == vec![vec![Some("cursor_name".into())]]
+    );
+}
+
+/// `name` uses text-shaped values but must keep its catalog identity; otherwise
+/// a CTAS containing both casts gets two columns named `text`.
+#[tokio::test]
+async fn name_is_distinct_from_text_in_catalog_rows_and_ctas() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typlen, typcategory, typelem, typarray \
+             FROM pg_type WHERE typname IN ('name', '_name') ORDER BY typname",
+        )
+        .await
+            == vec![
+                row("_name", -1, "A", 19, 0),
+                row("name", 64, "S", 0, 1003),
+            ]
+    );
+    let result = s
+        .simple_query("SELECT 'name'::name, 'text'::text, ARRAY['one', 'two']::name[]")
+        .await
+        .expect("name values and arrays succeed");
+    let QueryResult::Rows { fields, .. } = &result[0] else {
+        panic!("name query should return rows");
+    };
+    assert!(
+        fields.iter().map(|field| field.type_oid).collect::<Vec<_>>() == vec![19, 25, 1003]
+    );
+    s.simple_query("CREATE TABLE name_catalog AS SELECT 'name'::name, 'text'::text")
+        .await
+        .expect("name and text casts keep distinct CTAS labels");
+    assert!(
+        rows(
+            &mut s,
+            "SELECT attname, atttypid FROM pg_attribute \
+             WHERE attrelid = 'name_catalog'::regclass AND attnum > 0 ORDER BY attnum",
+        )
+        .await
+            == vec![
+                vec![Some("name".into()), Some("19".into())],
+                vec![Some("text".into()), Some("25".into())],
+            ]
     );
 }
 

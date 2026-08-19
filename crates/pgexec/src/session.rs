@@ -12721,6 +12721,7 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::INT2VECTOR) => Ok(Some(ColumnType::Int2Vector)),
         Some(crabka_pgtypes::oids::INT8) => Ok(Some(ColumnType::Int8)),
         Some(crabka_pgtypes::oids::TEXT) => Ok(Some(ColumnType::Text)),
+        Some(crabka_pgtypes::oids::NAME) => Ok(Some(ColumnType::Name)),
         Some(crabka_pgtypes::oids::VARCHAR) => Ok(Some(ColumnType::Varchar(None))),
         Some(crabka_pgtypes::oids::BPCHAR) => Ok(Some(ColumnType::Char(None))),
         Some(crabka_pgtypes::oids::BOOL) => Ok(Some(ColumnType::Bool)),
@@ -12828,7 +12829,7 @@ pub(crate) fn decode_binary_value(
             [1] => Ok(Datum::Bool(true)),
             _ => Err(malformed_binary_parameter()),
         },
-        ColumnType::Text | ColumnType::Aclitem | ColumnType::Refcursor => {
+        ColumnType::Text | ColumnType::Aclitem | ColumnType::Name | ColumnType::Refcursor => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
             Ok(Datum::Text(text.to_string()))
         }
@@ -22980,6 +22981,8 @@ mod notify_and_binary_parameter_tests {
             (oids::INT4ARRAY, ColumnType::Array(ElemType::Int4)),
             (oids::INT8ARRAY, ColumnType::Array(ElemType::Int8)),
             (oids::TEXTARRAY, ColumnType::Array(ElemType::Text)),
+            (oids::NAME, ColumnType::Name),
+            (oids::NAMEARRAY, ColumnType::Array(ElemType::Name)),
             (oids::BOOLARRAY, ColumnType::Array(ElemType::Bool)),
             (
                 oids::TIMESTAMPTZARRAY,
@@ -23028,6 +23031,14 @@ mod notify_and_binary_parameter_tests {
             let decoded = decode(&param(oids::JSONB, 1, &encoded), ColumnType::Jsonb);
             assert!(decoded.expect("decode") == value, "{text}");
         }
+    }
+
+    #[test]
+    fn name_binary_parameter_uses_the_text_wire_representation() {
+        let param = param(oids::NAME, 1, b"catalog_name");
+        assert!(param_column_type(&param).expect("name oid") == Some(ColumnType::Name));
+        let value = decode(&param, ColumnType::Name);
+        assert!(value.expect("decode") == Datum::Text("catalog_name".into()));
     }
 
     #[test]
