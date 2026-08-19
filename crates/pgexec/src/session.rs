@@ -3314,6 +3314,7 @@ impl SqlSession {
     }
 
     fn type_search_schemas(&self) -> Result<Vec<String>, ExecError> {
+        crate::catalog_rel::sync_relation_rowtypes(self.catalog_kv.as_ref())?;
         self.resolution_scope()
             .visible_schemas(self.catalog_kv.as_ref())
     }

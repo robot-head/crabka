@@ -25,7 +25,10 @@ use crabka_pgcatalog::{
     MatchType, ReferentialAction, RelationName, Table,
 };
 use crabka_pgkv::Kv;
-use crabka_pgtypes::{ColumnType, Datum, ElemType, usertype::{UserTypeRef, intern}};
+use crabka_pgtypes::{
+    ColumnType, Datum, ElemType,
+    usertype::{CompositeField, UserType, UserTypeBody, UserTypeRef, intern},
+};
 
 use crate::error::ExecError;
 
@@ -506,6 +509,63 @@ pub(crate) fn relation_rowtype_by_oid(
         oid: u32::try_from(oid).expect("relation row type oids are positive"),
         name: intern(&relation.to_string()),
     }))
+}
+
+/// Publish relation composites into the type registry used while parsing casts
+/// and SQL routine bodies.
+///
+/// Relation rows are catalog-owned types, unlike `CREATE TYPE` definitions, so
+/// rebuild them from the current relation schemas before parsing each statement.
+pub(crate) fn sync_relation_rowtypes(kv: &dyn Kv) -> Result<(), ExecError> {
+    let rowtype_oids = relation_rowtype_oids(kv)?;
+    let mut types = Vec::new();
+    for table in crabka_pgcatalog::list_tables(kv)? {
+        let Some((oid, _)) = rowtype_oids.get(&table.name) else {
+            continue;
+        };
+        types.push(relation_rowtype_definition(
+            &table.name,
+            *oid,
+            &table.columns,
+        ));
+    }
+    for view in crabka_pgcatalog::list_views(kv)? {
+        let Some((oid, _)) = rowtype_oids.get(&view.name) else {
+            continue;
+        };
+        types.push(relation_rowtype_definition(&view.name, *oid, &view.columns));
+    }
+
+    let active_oids = types.iter().map(|ty| ty.oid).collect::<std::collections::BTreeSet<_>>();
+    for registered in crabka_pgtypes::usertype::all() {
+        if (ROWTYPE_OID_BASE..ROWTYPE_OID_BASE + OID_BAND_WIDTH)
+            .contains(&(i32::try_from(registered.oid).unwrap_or_default()))
+            && !active_oids.contains(&registered.oid)
+        {
+            crabka_pgtypes::usertype::unregister_in(&registered.schema, &registered.name);
+        }
+    }
+    for ty in types {
+        crabka_pgtypes::usertype::replace(&ty);
+    }
+    Ok(())
+}
+
+fn relation_rowtype_definition(name: &RelationName, oid: i32, columns: &[Column]) -> UserType {
+    UserType {
+        oid: u32::try_from(oid).expect("relation row type oids are positive"),
+        schema: name.schema.clone(),
+        name: name.name.clone(),
+        body: UserTypeBody::Composite(
+            columns
+                .iter()
+                .map(|column| CompositeField {
+                    name: column.name.clone(),
+                    ty: column.ty,
+                })
+                .collect(),
+        ),
+    }
 }
 
 /// Role oids, keyed by role name.

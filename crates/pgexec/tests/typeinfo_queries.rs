@@ -42,7 +42,7 @@ async fn run(engine: &SqlEngine, sql: &str) -> QueryResult {
         .connect()
         .simple_query(sql)
         .await
-        .expect("query succeeds")
+        .unwrap_or_else(|error| panic!("{sql}: {error:?}"))
         .into_iter()
         .next()
         .expect("one result")
@@ -418,6 +418,14 @@ async fn whole_row_references_describe_the_relation_rowtype() {
     assert!(row_text(&result, 0) == vec![Some("9".into())]);
     run(
         &engine,
+        "CREATE FUNCTION whole_row_return(value int4) RETURNS whole_row_type \
+         LANGUAGE sql AS 'SELECT ROW($1)::whole_row_type'",
+    )
+    .await;
+    let result = run(&engine, "SELECT (whole_row_return(9)).id").await;
+    assert!(row_text(&result, 0) == vec![Some("9".into())]);
+    run(
+        &engine,
         "CREATE FUNCTION whole_row_out(IN value whole_row_type, OUT result int4) \
          LANGUAGE sql RETURN 1",
     )
@@ -459,6 +467,42 @@ async fn whole_row_references_describe_the_relation_rowtype() {
         panic!("expected rows");
     };
     assert!(fields[0].type_oid == view_rowtype);
+}
+
+/// Relation composite types are usable in casts and track later DDL.
+#[tokio::test]
+async fn relation_rowtype_casts_follow_the_catalog() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE relation_type_cast (first int4)").await;
+    let result = run(
+        &engine,
+        "SELECT (ROW(1)::relation_type_cast).first",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("1".into())]);
+
+    run(&engine, "ALTER TABLE relation_type_cast ADD COLUMN second text").await;
+    let result = run(
+        &engine,
+        "SELECT (ROW(1, 'x')::relation_type_cast).second",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("x".into())]);
+
+    run(&engine, "CREATE TYPE relation_type_unrelated AS (value int4)").await;
+    run(&engine, "DROP TABLE relation_type_cast").await;
+    let result = run(
+        &engine,
+        "SELECT (ROW(2)::relation_type_unrelated).value",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("2".into())]);
+    let error = engine
+        .connect()
+        .simple_query("SELECT ROW(1)::relation_type_cast")
+        .await
+        .expect_err("dropped row type is not resolvable");
+    assert!(error.code == "42704");
 }
 
 /// Array alignment follows its element type, including the fixed `int8` case.
