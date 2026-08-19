@@ -98,6 +98,27 @@ async fn a_monomorphic_aggregate_folds_every_row_and_groups() {
 }
 
 #[tokio::test]
+async fn a_builtin_transition_function_defines_a_user_aggregate() {
+    let engine = fixture().await;
+    run(&engine, "INSERT INTO t VALUES (NULL, 'd')").await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_sum (int4) (SFUNC = int4pl, STYPE = int4, INITCOND = '0')",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_count (*) (SFUNC = int8inc, STYPE = int8, INITCOND = '0')",
+    )
+    .await;
+
+    assert!(
+        grid(&engine, "SELECT builtin_sum(f1), builtin_count(*) FROM t").await
+            == vec![some(&["6", "4"])]
+    );
+}
+
+#[tokio::test]
 async fn a_zero_argument_aggregate_is_called_with_a_star() {
     let engine = fixture().await;
     run(
@@ -287,8 +308,14 @@ async fn an_aggregate_is_not_shadowed_by_a_same_named_function() {
         "CREATE FUNCTION acc(text, text) RETURNS int4 LANGUAGE sql AS 'select 1'",
     )
     .await;
-    assert!(grid(&engine, "SELECT acc(f1) FROM t").await == vec![some(&["6"])]);
-    assert!(grid(&engine, "SELECT acc('x', 'y')").await == vec![some(&["1"])]);
+    let aggregate = grid(&engine, "SELECT acc(f1) FROM t").await;
+    assert!(aggregate == vec![some(&["6"])]);
+    let function = grid(&engine, "SELECT acc('x', 'y')").await;
+    assert!(function == vec![some(&["1"])]);
+    let nested_function = grid(&engine, "SELECT max(acc('x', 'y')) FROM t").await;
+    assert!(nested_function == vec![some(&["1"])]);
+    let sibling_function = grid(&engine, "SELECT count(*), acc('x', 'y') FROM t").await;
+    assert!(sibling_function == vec![some(&["3", "1"])]);
 }
 
 /// The `Aggregate` plan node is decided by the executor's own resolver, so

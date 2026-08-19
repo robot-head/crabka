@@ -350,7 +350,7 @@ fn plan_call(
         }
     };
     let result_ty = match func {
-        WindowFunc::Aggregate if !crate::agg::is_aggregate_name(&plain.name) => {
+        WindowFunc::Aggregate if !crate::agg::is_aggregate_call(&plain) => {
             return Err(over_on_plain_function(&plain, scope));
         }
         WindowFunc::Aggregate => crate::agg::func_result_type(&plain, scope)?,

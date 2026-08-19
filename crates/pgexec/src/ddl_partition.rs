@@ -458,7 +458,7 @@ pub(crate) fn check_partition_bound_expr(expr: &Expr) -> Result<(), ExecError> {
                 "cannot use subquery in partition bound".into(),
             ));
         }
-        Expr::Func(call) if crate::agg::is_aggregate_name(&call.name) => {
+        Expr::Func(call) if crate::agg::is_aggregate_call(call) => {
             return Err(ExecError::Grouping(
                 "aggregate functions are not allowed in partition bound".into(),
             ));
@@ -469,6 +469,34 @@ pub(crate) fn check_partition_bound_expr(expr: &Expr) -> Result<(), ExecError> {
         check_partition_bound_expr(child)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+    use crabka_pgparser::ast::{FuncArgs, FuncCall};
+
+    use super::*;
+
+    fn call(name: &str) -> Expr {
+        Expr::Func(FuncCall {
+            sql_syntax: false,
+            name: name.into(),
+            distinct: false,
+            args: FuncArgs::Exprs(vec![Expr::IntLiteral("1".into())]),
+            order_by: Vec::new(),
+            filter: None,
+        })
+    }
+
+    #[test]
+    fn partition_bounds_reject_aggregates_but_keep_scalar_constants() {
+        assert!(check_partition_bound_expr(&call("sum")).is_err());
+        assert!(check_partition_bound_expr(&call("abs")).is_ok());
+        let subquery = crabka_pgparser::parser::parse_expression("(SELECT 1)")
+            .expect("scalar subquery expression");
+        assert!(check_partition_bound_expr(&subquery).is_err());
+    }
 }
 
 /// Apply every table-level `[CONSTRAINT n] NOT NULL <column>` a `CREATE TABLE`

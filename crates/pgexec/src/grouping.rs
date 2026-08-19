@@ -177,7 +177,7 @@ fn reads_no_input(e: &Expr) -> bool {
             | Expr::Exists(_)
             | Expr::InSubquery { .. }
             | Expr::Quantified { .. } => true,
-            Expr::Func(call) => crate::agg::is_aggregate_name(&call.name) || is_grouping_call(call),
+            Expr::Func(call) => crate::agg::is_aggregate_call(call) || is_grouping_call(call),
             _ => false,
         };
     });

@@ -277,7 +277,7 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
     let result = match &options.finalfunc {
         Some(finalfunc) => {
             let function = lookup(kv, finalfunc, std::slice::from_ref(&transtype))?;
-            function.result.clone()
+            function.result()
         }
         None => RoutineResult::Type {
             ty: transtype.clone(),
@@ -324,9 +324,29 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
 /// accept a pseudo-type argument, which is what makes
 /// `CREATE AGGREGATE … (BASETYPE = anyelement, SFUNC = tfnp)` fail against
 /// `tfnp(int[], int)`.
-fn lookup(kv: &dyn Kv, name: &str, wanted: &[RoutineType]) -> Result<Routine, ExecError> {
-    let candidates = routines_named(kv, name)?;
-    candidates
+enum SupportRoutine {
+    User(Routine),
+    Builtin { result: RoutineResult, strict: bool },
+}
+
+impl SupportRoutine {
+    fn result(&self) -> RoutineResult {
+        match self {
+            Self::User(routine) => routine.result.clone(),
+            Self::Builtin { result, .. } => result.clone(),
+        }
+    }
+
+    fn strict(&self) -> bool {
+        match self {
+            Self::User(routine) => routine.strict,
+            Self::Builtin { strict, .. } => *strict,
+        }
+    }
+}
+
+fn lookup(kv: &dyn Kv, name: &str, wanted: &[RoutineType]) -> Result<SupportRoutine, ExecError> {
+    let user = routines_named(kv, name)?
         .into_iter()
         .find(|candidate| {
             candidate.kind == RoutineKind::Function
@@ -335,17 +355,59 @@ fn lookup(kv: &dyn Kv, name: &str, wanted: &[RoutineType]) -> Result<Routine, Ex
                     .input_params()
                     .zip(wanted)
                     .all(|(param, want)| accepts(&param.ty, want))
-        })
-        .ok_or_else(|| {
-            undefined_aggregate(format!(
-                "function {name}({}) does not exist",
-                wanted
-                    .iter()
-                    .map(|ty| ty.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-        })
+        });
+    if let Some(routine) = user {
+        return Ok(SupportRoutine::User(routine));
+    }
+    if let Some(builtin) = builtin_support(name, wanted)? {
+        return Ok(builtin);
+    }
+    Err(undefined_aggregate(format!(
+        "function {name}({}) does not exist",
+        wanted
+            .iter()
+            .map(|ty| ty.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+/// Resolve an executable built-in support function from the same `pg_proc`
+/// fixture that exposes its declared input, result, and strictness metadata.
+fn builtin_support(
+    name: &str,
+    wanted: &[RoutineType],
+) -> Result<Option<SupportRoutine>, ExecError> {
+    if !crate::func::is_scalar(name) {
+        return Ok(None);
+    }
+    let Some(wanted) = wanted
+        .iter()
+        .map(|ty| ty.column.map(|column| Datum::Int4(column.oid() as i32)))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    let Some(row) = crate::routine::builtin_pg_proc_rows()?.into_iter().find(|row| {
+        row.get(1) == Some(&Datum::Text(name.to_string()))
+            && matches!(row.get(19), Some(Datum::OidVector(args)) if args.elems == wanted)
+    })
+    else {
+        return Ok(None);
+    };
+    let (Some(Datum::Int4(result_oid)), Some(Datum::Bool(strict)), Some(Datum::Bool(setof))) =
+        (row.get(18), row.get(12), row.get(13))
+    else {
+        return Err(ExecError::Unsupported("built-in pg_proc fixture is corrupt".into()));
+    };
+    let result = crate::exec::column_type_from_oid(*result_oid as u32)?;
+    Ok(Some(SupportRoutine::Builtin {
+        result: RoutineResult::Type {
+            ty: RoutineType::builtin(result),
+            setof: *setof,
+        },
+        strict: *strict,
+    }))
 }
 
 /// Does a parameter declared `declared` accept an aggregate support argument of
@@ -529,6 +591,18 @@ pub(crate) fn exists(name: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// Does a user aggregate with this call arity exist in the statement catalog?
+pub(crate) fn exists_with_arity(name: &str, arity: usize) -> bool {
+    with_catalog(|kv| {
+        routines_named(kv, name).is_ok_and(|found| {
+            found
+                .iter()
+                .any(|routine| routine.is_aggregate() && routine.input_params().count() == arity)
+        })
+    })
+    .unwrap_or(false)
+}
+
 fn with_catalog<T>(f: impl FnOnce(&dyn Kv) -> T) -> Option<T> {
     let catalog: Arc<dyn Kv> = crate::routine::scalar_runtime_catalog()?;
     Some(f(catalog.as_ref()))
@@ -705,7 +779,7 @@ fn compile(
         state_type,
         result_type,
         initcond: definition.initcond.clone(),
-        strict_transition: transition_is_strict(kv, &definition.transfn),
+        strict_transition: transition_is_strict(kv, &definition.transfn, &argument_types),
     })
 }
 
@@ -745,11 +819,13 @@ fn resolve_state_type(
     })
 }
 
-fn transition_is_strict(kv: &dyn Kv, name: &str) -> bool {
-    routines_named(kv, name)
-        .ok()
-        .and_then(|found| found.into_iter().next())
-        .is_some_and(|routine| routine.strict)
+fn transition_is_strict(kv: &dyn Kv, name: &str, types: &[ColumnType]) -> bool {
+    let wanted = types
+        .iter()
+        .copied()
+        .map(RoutineType::builtin)
+        .collect::<Vec<_>>();
+    lookup(kv, name, &wanted).is_ok_and(|support| support.strict())
 }
 
 /// Turn a support-function call into an expression over `scope`: an inlined SQL

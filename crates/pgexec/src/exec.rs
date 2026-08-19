@@ -14204,7 +14204,7 @@ impl OuterAggregatePass<'_, '_> {
     fn expr(&self, expr: &Expr, enclosing: &[&[crabka_pgparser::ast::TableExpr]]) -> bool {
         if !enclosing.is_empty()
             && let Expr::Func(call) = expr
-            && crate::agg::is_aggregate_name(&call.name)
+            && crate::agg::is_aggregate_call(call)
             && self.belongs_to_statement(call, enclosing)
         {
             return true;
@@ -14532,7 +14532,7 @@ fn from_item_calls_aggregate(te: &crabka_pgparser::ast::TableExpr) -> bool {
 /// sub-selects because an aggregate inside one can still belong out here.
 fn expr_calls_aggregate(expr: &Expr) -> bool {
     if let Expr::Func(call) = expr
-        && crate::agg::is_aggregate_name(&call.name)
+        && crate::agg::is_aggregate_call(call)
     {
         return true;
     }
@@ -14652,7 +14652,7 @@ impl FromClauseAggregatePass<'_, '_> {
         ctx: FromAggregateContext,
     ) -> Result<(), ExecError> {
         if let Expr::Func(call) = expr
-            && crate::agg::is_aggregate_name(&call.name)
+            && crate::agg::is_aggregate_call(call)
             && self.belongs_to_this_level(call, enclosing, ctx)
         {
             return Err(ExecError::FunctionError {

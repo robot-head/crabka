@@ -161,22 +161,25 @@ impl AggFunc {
     }
 }
 
-/// Is `name` one of the aggregates this engine implements?
-///
-/// An `OVER` clause on a call is legal for a window function or an aggregate
-/// and nothing else. The window planner therefore asks this function to tell
-/// `PostgreSQL`'s 42809, a real function used with `OVER`, from its 42883, no
-/// such function.
-pub(crate) fn is_aggregate_name(name: &str) -> bool {
-    aggregate_func(name).is_some() || crate::useragg::exists(name)
+/// Does this particular call resolve as an aggregate? User aggregates share a
+/// namespace with ordinary functions, so their name alone is not enough.
+pub(crate) fn is_aggregate_call(call: &FuncCall) -> bool {
+    aggregate_func(&call.name).is_some()
+        || crate::useragg::exists_with_arity(&call.name, argument_count(&call.args))
+}
+
+fn argument_count(args: &FuncArgs) -> usize {
+    match args {
+        FuncArgs::Star => 0,
+        FuncArgs::Exprs(args) => args.len(),
+        FuncArgs::Named { positional, named } => positional.len() + named.len(),
+        FuncArgs::Variadic { positional, .. } => positional.len() + 1,
+    }
 }
 
 /// Is `name` one of the aggregates *built into* this engine?
 ///
-/// Distinct from [`is_aggregate_name`], which also consults the catalog. A
-/// caller asking "is this name spoken for by the engine itself?" — rather than
-/// "does this call resolve?" — wants this one, because it answers the same way
-/// whether or not a statement runtime is installed.
+/// This answers the same way whether or not a statement runtime is installed.
 pub(crate) fn is_builtin_aggregate_name(name: &str) -> bool {
     aggregate_func(name).is_some()
 }
@@ -261,7 +264,7 @@ fn resolve_user(
 pub(crate) fn contains_aggregate(e: &Expr) -> bool {
     match e {
         Expr::Func(fc) => {
-            is_aggregate_name(&fc.name)
+            is_aggregate_call(fc)
                 || match &fc.args {
                     FuncArgs::Star => false,
                     FuncArgs::Exprs(args) => args.iter().any(contains_aggregate),
@@ -328,7 +331,7 @@ pub(crate) fn is_aggregate_query(s: &SelectStmt) -> bool {
 /// A known aggregate there is misplaced or nested, which is 42803. Every other
 /// call is an undefined function, which is 42883.
 pub(crate) fn func_in_scalar_context_error(fc: &FuncCall) -> ExecError {
-    if is_aggregate_name(&fc.name) {
+    if is_aggregate_call(fc) {
         ExecError::Grouping(format!(
             "aggregate function \"{}\" is not allowed here \
              (aggregates cannot be nested)",
@@ -930,7 +933,7 @@ fn reject_nested_aggregate(arg: &Expr) -> Result<(), ExecError> {
 /// A non-aggregate function call is an undefined function, which is 42883.
 fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<(), ExecError> {
     match e {
-        Expr::Func(fc) if is_aggregate_name(&fc.name) => {
+        Expr::Func(fc) if is_aggregate_call(fc) => {
             let spec = spec_of(fc, scope)?;
             if !specs.contains(&spec) {
                 specs.push(spec);
@@ -1179,7 +1182,7 @@ pub(crate) fn eval_over_aggregate_values(
 /// below matches `t.a` against a bare `a` naming the same column.
 fn validate_grouped(e: &Expr, group_by: &[Expr], scope: &Scope) -> Result<(), ExecError> {
     if let Expr::Func(fc) = e
-        && is_aggregate_name(&fc.name)
+        && is_aggregate_call(fc)
     {
         return Ok(()); // an aggregate may reference any column in its argument
     }
@@ -1339,7 +1342,7 @@ fn eval_grouped_depth(
     }
     let d = depth + 1;
     if let Expr::Func(fc) = e
-        && is_aggregate_name(&fc.name)
+        && is_aggregate_call(fc)
     {
         let spec = spec_of(fc, scope)?;
         let i = specs
@@ -4729,7 +4732,7 @@ mod tests {
     }
 
     /// PostgreSQL accepts `json_agg(x) OVER ()` — an aggregate used as a window
-    /// function is legal, and it is `is_aggregate_name` that tells the window
+    /// function is legal, and it is `is_aggregate_call` that tells the window
     /// planner so. Without the name registered the call would be 42883.
     #[test]
     fn json_aggregate_names_are_known_to_the_window_planner() {
@@ -4739,7 +4742,7 @@ mod tests {
             "jsonb_agg",
             "jsonb_object_agg",
         ] {
-            assert2::assert!(is_aggregate_name(name), "{name}");
+            assert2::assert!(is_builtin_aggregate_name(name), "{name}");
         }
         // The `_strict`/`_unique` variants PostgreSQL also has are NOT
         // implemented, so they stay 42883 rather than silently aggregating.
@@ -4753,7 +4756,7 @@ mod tests {
             "jsonb_object_agg_unique",
             "jsonb_object_agg_unique_strict",
         ] {
-            assert2::assert!(!is_aggregate_name(name), "{name}");
+            assert2::assert!(!is_builtin_aggregate_name(name), "{name}");
         }
     }
 
