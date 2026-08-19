@@ -242,6 +242,35 @@ async fn pg_type_links_array_and_range_io_routines() {
     );
 }
 
+#[tokio::test]
+async fn pg_type_uses_postgresqls_nonmechanical_io_routine_stems() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typinput, typoutput, typreceive, typsend \
+             FROM pg_type WHERE typname IN ('money', 'polygon') ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("money".into()),
+                    Some("cash_in".into()),
+                    Some("cash_out".into()),
+                    Some("cash_recv".into()),
+                    Some("cash_send".into()),
+                ],
+                vec![
+                    Some("polygon".into()),
+                    Some("poly_in".into()),
+                    Some("poly_out".into()),
+                    Some("poly_recv".into()),
+                    Some("poly_send".into()),
+                ],
+            ]
+    );
+}
+
 /// User-defined types use `PostgreSQL`'s shared I/O routines rather than a
 /// made-up routine derived from the type name.
 #[tokio::test]

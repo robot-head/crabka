@@ -1790,7 +1790,7 @@ fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [
     };
     let io = |suffix: &str| {
         family.map_or_else(
-            || named(row.name, suffix),
+            || named(pg_type_routine_stem(row.name), suffix),
             |name| routine(&format!("{name}_{suffix}")),
         )
     };
@@ -1800,14 +1800,22 @@ fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [
         io("out"),
         io("recv"),
         io("send"),
-        named(row.name, "typmodin"),
-        named(row.name, "typmodout"),
+        named(pg_type_routine_stem(row.name), "typmodin"),
+        named(pg_type_routine_stem(row.name), "typmodout"),
         if row.typtype == "r" {
             routine("range_typanalyze")
         } else {
             absent_regproc()
         },
     ]
+}
+
+fn pg_type_routine_stem(name: &str) -> &str {
+    match name {
+        "money" => "cash",
+        "polygon" => "poly",
+        _ => name,
+    }
 }
 
 fn regproc(oid: i32, name: &str) -> Datum {
