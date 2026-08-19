@@ -199,14 +199,15 @@ async fn pg_range_describes_user_range_collations() {
         &engine,
         "CREATE TYPE default_text_range AS RANGE (subtype = text); \
          CREATE TYPE c_text_range AS RANGE (subtype = text, collation = \"C\"); \
-         CREATE TYPE int_range AS RANGE (subtype = int4)",
+         CREATE TYPE int_range AS RANGE (subtype = int4); \
+         CREATE TYPE float_range AS RANGE (subtype = float8)",
     )
     .await;
     let result = run(
         &engine,
-        "SELECT t.typname, r.rngcollation \
+        "SELECT t.typname, r.rngcollation, r.rngsubopc \
          FROM pg_catalog.pg_range r JOIN pg_catalog.pg_type t ON t.oid = r.rngtypid \
-         WHERE t.typname IN ('c_text_range', 'default_text_range', 'int_range') \
+         WHERE t.typname IN ('c_text_range', 'default_text_range', 'float_range', 'int_range') \
          ORDER BY t.typname",
     )
     .await;
@@ -215,9 +216,26 @@ async fn pg_range_describes_user_range_collations() {
             .map(|i| row_text(&result, i))
             .collect::<Vec<_>>()
             == vec![
-                vec![Some("c_text_range".into()), Some("950".into())],
-                vec![Some("default_text_range".into()), Some("100".into())],
-                vec![Some("int_range".into()), Some("0".into())],
+                vec![
+                    Some("c_text_range".into()),
+                    Some("950".into()),
+                    Some("3126".into()),
+                ],
+                vec![
+                    Some("default_text_range".into()),
+                    Some("100".into()),
+                    Some("3126".into()),
+                ],
+                vec![
+                    Some("float_range".into()),
+                    Some("0".into()),
+                    Some("3123".into()),
+                ],
+                vec![
+                    Some("int_range".into()),
+                    Some("0".into()),
+                    Some("1978".into()),
+                ],
             ]
     );
 }

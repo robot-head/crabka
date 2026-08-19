@@ -2178,6 +2178,14 @@ pub(crate) fn pg_range_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             .into_iter()
             .filter_map(|ty| {
                 let range = ty.range()?;
+                let subtype_opclass = crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
+                    .iter()
+                    .find(|(_, method, _, _, input, default, _)| {
+                        *method == crate::catalog_rel::BTREE_AM_OID
+                            && *default
+                            && u32::try_from(*input) == Ok(range.subtype.oid())
+                    })
+                    .map_or(0, |(oid, ..)| *oid);
                 Some(vec![
                     oid(i32::try_from(ty.oid).unwrap_or(0)),
                     oid(i32::try_from(range.subtype.oid()).unwrap_or(0)),
@@ -2189,7 +2197,7 @@ pub(crate) fn pg_range_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
                             .and_then(crate::catalog_rel::collation_oid)
                             .unwrap_or_else(|| text_collation_oid(range.subtype)),
                     ),
-                    oid(0),
+                    oid(subtype_opclass),
                     absent_regproc(),
                     absent_regproc(),
                 ])
