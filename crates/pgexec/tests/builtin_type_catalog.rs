@@ -781,6 +781,25 @@ async fn pg_type_links_user_type_io_routines() {
     );
 }
 
+/// Array rows use the same typmod routines as their element rows, which is how
+/// `PostgreSQL` preserves declarations such as `timestamp(3)[]` in catalog
+/// introspection.
+#[tokio::test]
+async fn array_type_typmod_routines_match_their_elements() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT a.typname \
+             FROM pg_type a JOIN pg_type e ON e.typarray = a.oid \
+             WHERE a.typmodin <> e.typmodin OR a.typmodout <> e.typmodout \
+             ORDER BY a.typname",
+        )
+        .await
+            == Vec::<Vec<Option<String>>>::new()
+    );
+}
+
 /// The physical fields are not decorative: type sanity uses them to decide
 /// whether a datum can be passed by value or must be stored out of line.
 #[tokio::test]

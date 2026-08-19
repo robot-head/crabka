@@ -1911,14 +1911,18 @@ fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [
     };
     let is_array = row.name.starts_with('_') || matches!(row.name, "int2vector" | "oidvector");
     if is_array {
+        let element_name = builtin_type_rows()
+            .iter()
+            .find(|type_row| type_row.oid == row.typelem)
+            .map_or_else(|| row.name.trim_start_matches('_'), |type_row| type_row.name);
         return [
             routine("array_subscript_handler"),
             routine("array_in"),
             routine("array_out"),
             routine("array_recv"),
             routine("array_send"),
-            absent_regproc(),
-            absent_regproc(),
+            named(pg_type_routine_stem(element_name), "typmodin"),
+            named(pg_type_routine_stem(element_name), "typmodout"),
             routine("array_typanalyze"),
         ];
     }
