@@ -319,6 +319,27 @@ async fn whole_row_references_describe_the_relation_rowtype() {
     run(&engine, "CREATE TABLE whole_row_type_text (id text)").await;
     let QueryResult::Rows { fields, .. } = run(
         &engine,
+        "SELECT (SELECT (whole_row_type).id \
+         FROM whole_row_type_text AS whole_row_type) FROM whole_row_type",
+    )
+    .await
+    else {
+        panic!("expected rows");
+    };
+    assert!(fields[0].type_oid == 25);
+    assert!(
+        engine
+            .connect()
+            .simple_query(
+                "SELECT (SELECT (whole_row_type).id \
+                 FROM (SELECT 'x' AS whole_row_type) AS inner_scope) \
+                 FROM whole_row_type",
+            )
+            .await
+            .is_err()
+    );
+    let QueryResult::Rows { fields, .. } = run(
+        &engine,
         "SELECT (a).id FROM whole_row_type_text AS b JOIN whole_row_type AS a ON true",
     )
     .await
