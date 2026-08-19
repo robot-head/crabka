@@ -371,6 +371,15 @@ async fn whole_row_references_describe_the_relation_rowtype() {
     assert!(row_text(&result, 0) == vec![Some("t".into())]);
     run(
         &engine,
+        "CREATE FUNCTION whole_row_id(value whole_row_type) RETURNS int4 \
+         LANGUAGE sql RETURN (value).id",
+    )
+    .await;
+    run(&engine, "INSERT INTO whole_row_type (id) VALUES (7)").await;
+    let result = run(&engine, "SELECT whole_row_id(whole_row_type) FROM whole_row_type").await;
+    assert!(row_text(&result, 0) == vec![Some("7".into())]);
+    run(
+        &engine,
         "CREATE FUNCTION whole_row_out(IN value whole_row_type, OUT result int4) \
          LANGUAGE sql RETURN 1",
     )
