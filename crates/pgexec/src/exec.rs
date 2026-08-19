@@ -13120,6 +13120,9 @@ impl BindPass<'_, '_> {
     }
 
     fn expr(&mut self, expr: &mut Expr, shadow: &Shadow) {
+        if self.whole_row_field(expr, shadow) {
+            return;
+        }
         if let Expr::Column { table, name } = expr {
             let bindable = match table {
                 Some(qualifier) => !shadow.qualifiers.iter().any(|q| q == qualifier),
@@ -13161,6 +13164,47 @@ impl BindPass<'_, '_> {
         for query in query_children_mut(expr) {
             self.query(query, shadow);
         }
+    }
+
+    /// Substitute a correlated `(relation).field` as one scalar.  Replacing
+    /// only its whole-row child would leave the inner inference path with a
+    /// named relation type that is deliberately absent from the user-type
+    /// registry.
+    fn whole_row_field(&mut self, expr: &mut Expr, shadow: &Shadow) -> bool {
+        let Expr::FieldSelect { base, field } = &*expr else {
+            return false;
+        };
+        let Expr::Column {
+            table: None,
+            name: qualifier,
+        } = &**base
+        else {
+            return false;
+        };
+        if shadow.qualifiers.iter().any(|q| q == qualifier)
+            || shadow
+                .columns
+                .as_ref()
+                .is_some_and(|columns| columns.iter().any(|column| column == qualifier))
+            || !matches!(self.outer.resolve(None, qualifier), Err(ExecError::UndefinedColumn(_)))
+        {
+            return false;
+        }
+        let Some(ty) = self.outer.whole_row_field_type(qualifier, field) else {
+            return false;
+        };
+        let Some(value) = self.outer.refs_value(qualifier, self.row) else {
+            return false;
+        };
+        let Ok(value) = crate::eval::select_field(&value, field) else {
+            return false;
+        };
+        self.substituted = true;
+        if self.referenced.is_none() {
+            self.referenced = Some(qualifier.clone());
+        }
+        *expr = Expr::Const { value, ty };
+        true
     }
 
     /// Substitute `expr` — a bare name that resolved to no outer column — with

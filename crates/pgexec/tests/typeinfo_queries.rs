@@ -310,6 +310,12 @@ async fn whole_row_references_describe_the_relation_rowtype() {
         panic!("expected rows");
     };
     assert!(fields[0].type_oid == 23);
+    let QueryResult::Rows { fields, .. } =
+        run(&engine, "SELECT (SELECT (whole_row_type).id) FROM whole_row_type").await
+    else {
+        panic!("expected rows");
+    };
+    assert!(fields[0].type_oid == 23);
     run(&engine, "CREATE TABLE whole_row_type_text (id text)").await;
     let QueryResult::Rows { fields, .. } = run(
         &engine,
