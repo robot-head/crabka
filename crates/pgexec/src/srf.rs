@@ -69,7 +69,8 @@ enum Srf {
     /// `ROWS FROM`.
     Unnest,
     /// `generate_series(start, stop [, step])` over int4/int8/numeric, and
-    /// `(timestamp|timestamptz, same, interval)`.
+    /// `(timestamp|timestamptz, same, interval)`, plus the four-argument
+    /// `timestamptz` form whose final argument names the stepping zone.
     GenerateSeries,
     /// `generate_subscripts(anyarray, dim [, reverse])`.
     GenerateSubscripts,
@@ -782,7 +783,7 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
             } else {
                 value
             };
-            vec![Some(value), Some(value), Some(step)]
+            vec![Some(value), Some(value), Some(step), Some(ColumnType::Text)]
         }
         Srf::GenerateSubscripts => vec![None, Some(ColumnType::Int4), Some(ColumnType::Bool)],
         Srf::StringToTable | Srf::RegexpSplitToTable | Srf::RegexpMatches => {
@@ -1997,7 +1998,7 @@ fn unnest_rows(vals: &[Datum]) -> Vec<Vec<Datum>> {
 /// them, which is 42883. A call whose bounds are all `unknown` literals matches
 /// several equally well, which is 42725.
 fn series_types(name: &str, given: &[ArgType]) -> Result<ColumnType, ExecError> {
-    require_arity(name, given, (2, 3))?;
+    require_arity(name, given, (2, 4))?;
     let bounds: Vec<ColumnType> = given[..2].iter().filter_map(|arg| arg.known()).collect();
     if bounds.is_empty() {
         return Err(ExecError::Type(TypeError::Domain {
@@ -2013,7 +2014,7 @@ fn series_types(name: &str, given: &[ArgType]) -> Result<ColumnType, ExecError> 
             ColumnType::Timestamp | ColumnType::Timestamptz | ColumnType::Date
         )
     }) {
-        if given.len() != 3 {
+        if !(3..=4).contains(&given.len()) {
             return Err(undefined_function(name, given));
         }
         let value = if bounds
@@ -2029,7 +2030,16 @@ fn series_types(name: &str, given: &[ArgType]) -> Result<ColumnType, ExecError> 
         if step.is_some_and(|t| t != ColumnType::Interval) {
             return Err(undefined_function(name, given));
         }
+        if given.len() == 4
+            && (value != ColumnType::Timestamptz
+                || given[3].known().is_some_and(|t| t != ColumnType::Text))
+        {
+            return Err(undefined_function(name, given));
+        }
         return Ok(value);
+    }
+    if given.len() > 3 {
+        return Err(undefined_function(name, given));
     }
     // A numeric series takes its type from every argument that carries one, by
     // the same numeric-tower unification the arithmetic operators use.
@@ -2063,6 +2073,17 @@ fn series_rows(
         Some(step) => step.clone(),
         None => default_step(value_ty),
     };
+    let series_time_zone = match vals.get(3) {
+        Some(Datum::Text(name)) => crabka_pgtypes::datetime::resolve_time_zone(name)
+            .ok_or_else(|| ExecError::UnknownTimeZone(name.clone()))?,
+        Some(other) => {
+            return Err(ExecError::TypeMismatch(format!(
+                "generate_series fourth argument is of type {} but must be text",
+                other.column_type().map_or("unknown", ColumnType::name)
+            )));
+        }
+        None => ctx.time_zone.clone(),
+    };
     let ascending = match step_sign(&step)? {
         std::cmp::Ordering::Equal => {
             return Err(ExecError::Type(TypeError::Domain {
@@ -2089,7 +2110,7 @@ fn series_rows(
         }
         budget.charge_row(std::slice::from_ref(&current))?;
         out.push(vec![current.clone()]);
-        current = series_advance(&current, &step, ctx)?;
+        current = series_advance(&current, &step, &series_time_zone)?;
     }
     Ok(out)
 }
@@ -2121,10 +2142,14 @@ fn step_sign(step: &Datum) -> Result<std::cmp::Ordering, ExecError> {
 
 /// `current + step`. `timestamptz + interval` is zone-aware, so it does not live
 /// in the type layer's `ops::add`.
-fn series_advance(current: &Datum, step: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+fn series_advance(
+    current: &Datum,
+    step: &Datum,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, ExecError> {
     if let (Datum::Timestamptz(ts), Datum::Interval(iv)) = (current, step) {
         return Ok(Datum::Timestamptz(
-            crabka_pgtypes::datetime::timestamptz_plus_interval(*ts, *iv, &ctx.time_zone)?,
+            crabka_pgtypes::datetime::timestamptz_plus_interval(*ts, *iv, time_zone)?,
         ));
     }
     Ok(crabka_pgtypes::ops::add(current, step)?)
@@ -2696,6 +2721,12 @@ mod tests {
                 ColumnType::Timestamp,
             )
         };
+        let date = |s: &str| {
+            constant(
+                Datum::Date(crabka_pgtypes::datetime::parse_date(s).expect("date")),
+                ColumnType::Date,
+            )
+        };
         let interval = constant(
             Datum::Interval(crabka_pgtypes::datetime::Interval {
                 months: 0,
@@ -2724,9 +2755,63 @@ mod tests {
                 vec![
                     ts("2024-01-01 00:00:00"),
                     ts("2024-01-03 00:00:00"),
-                    interval,
+                    interval.clone(),
                 ],
                 Ok(ColumnType::Timestamp),
+            ),
+            (
+                vec![
+                    constant(
+                        Datum::Timestamptz(
+                            crabka_pgtypes::datetime::parse_timestamptz(
+                                "2024-03-10 05:00:00+00",
+                                &jiff::tz::TimeZone::UTC,
+                            )
+                            .expect("timestamptz"),
+                        ),
+                        ColumnType::Timestamptz,
+                    ),
+                    constant(
+                        Datum::Timestamptz(
+                            crabka_pgtypes::datetime::parse_timestamptz(
+                                "2024-03-12 04:00:00+00",
+                                &jiff::tz::TimeZone::UTC,
+                            )
+                            .expect("timestamptz"),
+                        ),
+                        ColumnType::Timestamptz,
+                    ),
+                    interval.clone(),
+                    text("America/New_York"),
+                ],
+                Ok(ColumnType::Timestamptz),
+            ),
+            (
+                vec![
+                    date("2024-03-10"),
+                    date("2024-03-12"),
+                    interval.clone(),
+                    text("America/New_York"),
+                ],
+                Ok(ColumnType::Timestamptz),
+            ),
+            (
+                vec![
+                    ts("2024-03-10 00:00:00"),
+                    ts("2024-03-12 00:00:00"),
+                    interval.clone(),
+                    text("America/New_York"),
+                ],
+                Err("42883"),
+            ),
+            (
+                vec![
+                    ts("2024-03-10 00:00:00"),
+                    date("2024-03-12"),
+                    interval.clone(),
+                    text("America/New_York"),
+                ],
+                Err("42883"),
             ),
             (vec![float.clone(), float], Err("42883")),
             (vec![int4(1)], Err("42883")),
@@ -2779,6 +2864,76 @@ mod tests {
                 "generate_series{args:?}"
             );
         }
+    }
+
+    #[test]
+    fn generate_series_uses_its_fourth_argument_for_dst_steps() {
+        let zoned = |s| {
+            constant(
+                Datum::Timestamptz(
+                    crabka_pgtypes::datetime::parse_timestamptz(s, &jiff::tz::TimeZone::UTC)
+                        .expect("timestamptz"),
+                ),
+                ColumnType::Timestamptz,
+            )
+        };
+        let day = constant(
+            Datum::Interval(crabka_pgtypes::datetime::Interval {
+                months: 0,
+                days: 1,
+                micros: 0,
+            }),
+            ColumnType::Interval,
+        );
+        assert!(
+            single_column(
+                "generate_series",
+                &[
+                    zoned("2024-03-10 05:00:00+00"),
+                    zoned("2024-03-12 04:00:00+00"),
+                    day,
+                    text("America/New_York"),
+                ],
+            )
+            .expect("series")
+                == [
+                    "2024-03-10 05:00:00+00",
+                    "2024-03-11 04:00:00+00",
+                    "2024-03-12 04:00:00+00",
+                ]
+                .into_iter()
+                .map(|s| Datum::Timestamptz(
+                    crabka_pgtypes::datetime::parse_timestamptz(s, &jiff::tz::TimeZone::UTC)
+                        .expect("expected timestamptz"),
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            single_column(
+                "generate_series",
+                &[
+                    zoned("2024-03-10 05:00:00+00"),
+                    zoned("2024-03-11 05:00:00+00"),
+                    constant(
+                        Datum::Interval(crabka_pgtypes::datetime::Interval {
+                            months: 0,
+                            days: 1,
+                            micros: 0,
+                        }),
+                        ColumnType::Interval,
+                    ),
+                    text("UTC"),
+                ],
+            )
+            .expect("UTC series")
+                == ["2024-03-10 05:00:00+00", "2024-03-11 05:00:00+00"]
+                    .into_iter()
+                    .map(|s| Datum::Timestamptz(
+                        crabka_pgtypes::datetime::parse_timestamptz(s, &jiff::tz::TimeZone::UTC)
+                            .expect("expected timestamptz"),
+                    ))
+                    .collect::<Vec<_>>()
+        );
     }
 
     #[test]
