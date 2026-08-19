@@ -147,16 +147,16 @@ async fn pg_type_exposes_all_postgresql_18_catalog_columns() {
                 Some("t".into()),
                 Some(",".into()),
                 Some("0".into()),
-                Some("0".into()),
+                Some("-".into()),
                 Some("0".into()),
                 Some("1007".into()),
-                Some("0".into()),
-                Some("0".into()),
-                Some("0".into()),
-                Some("0".into()),
-                Some("0".into()),
-                Some("0".into()),
-                Some("0".into()),
+                Some("int4in".into()),
+                Some("int4out".into()),
+                Some("int4recv".into()),
+                Some("int4send".into()),
+                Some("-".into()),
+                Some("-".into()),
+                Some("-".into()),
                 Some("i".into()),
                 Some("p".into()),
                 Some("f".into()),
@@ -193,6 +193,114 @@ async fn pg_type_uses_oid_and_int2_column_types_on_the_wire() {
             .map(|field| field.type_oid)
             .collect::<Vec<_>>()
             == vec![26, 26, 26, 21, 26, 26, 26, 26, 26]
+    );
+}
+
+/// I/O and subscripting metadata comes from the same built-in `pg_proc`
+/// fixture that backs `pg_proc`, so every nonzero regproc link is real.
+#[tokio::test]
+async fn pg_type_links_array_and_range_io_routines() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typsubscript, typinput, typoutput, typreceive, typsend, typanalyze \
+             FROM pg_type \
+             WHERE typname IN ('_int4', 'int4range', 'int4multirange') \
+             ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("_int4".into()),
+                    Some("array_subscript_handler".into()),
+                    Some("array_in".into()),
+                    Some("array_out".into()),
+                    Some("array_recv".into()),
+                    Some("array_send".into()),
+                    Some("array_typanalyze".into()),
+                ],
+                vec![
+                    Some("int4multirange".into()),
+                    Some("-".into()),
+                    Some("multirange_in".into()),
+                    Some("multirange_out".into()),
+                    Some("multirange_recv".into()),
+                    Some("multirange_send".into()),
+                    Some("-".into()),
+                ],
+                vec![
+                    Some("int4range".into()),
+                    Some("-".into()),
+                    Some("range_in".into()),
+                    Some("range_out".into()),
+                    Some("range_recv".into()),
+                    Some("range_send".into()),
+                    Some("-".into()),
+                ],
+            ]
+    );
+}
+
+/// User-defined types use `PostgreSQL`'s shared I/O routines rather than a
+/// made-up routine derived from the type name.
+#[tokio::test]
+async fn pg_type_links_user_type_io_routines() {
+    let (_engine, mut s) = session();
+    for sql in [
+        "CREATE TYPE routine_enum AS ENUM ('a', 'b')",
+        "CREATE TYPE routine_composite AS (x int4)",
+        "CREATE DOMAIN routine_domain AS int4",
+    ] {
+        s.simple_query(sql)
+            .await
+            .unwrap_or_else(|e| panic!("`{sql}` should succeed: {e:?}"));
+    }
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typsubscript, typinput, typoutput, typreceive, typsend, \
+                    typmodin, typmodout, typanalyze \
+             FROM pg_type \
+             WHERE typname IN ('routine_enum', 'routine_composite', 'routine_domain') \
+             ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("routine_composite".into()),
+                    Some("-".into()),
+                    Some("record_in".into()),
+                    Some("record_out".into()),
+                    Some("record_recv".into()),
+                    Some("record_send".into()),
+                    Some("-".into()),
+                    Some("-".into()),
+                    Some("-".into()),
+                ],
+                vec![
+                    Some("routine_domain".into()),
+                    Some("-".into()),
+                    Some("domain_in".into()),
+                    Some("int4out".into()),
+                    Some("domain_recv".into()),
+                    Some("int4send".into()),
+                    Some("-".into()),
+                    Some("-".into()),
+                    Some("-".into()),
+                ],
+                vec![
+                    Some("routine_enum".into()),
+                    Some("-".into()),
+                    Some("enum_in".into()),
+                    Some("enum_out".into()),
+                    Some("enum_recv".into()),
+                    Some("enum_send".into()),
+                    Some("-".into()),
+                    Some("-".into()),
+                    Some("-".into()),
+                ],
+            ]
     );
 }
 

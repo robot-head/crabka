@@ -1,5 +1,7 @@
 //! DDL and catalog code carved out of `exec`.
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 pub(crate) fn cols(defs: &[(&str, ColumnType)]) -> Vec<Column> {
@@ -1588,6 +1590,7 @@ pub(crate) fn builtin_type_collation_oid(oid: i32) -> i32 {
 }
 
 pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let proc_oids = builtin_proc_oids()?;
     let mut rows: Vec<Vec<Datum>> = builtin_type_rows()
         .iter()
         .map(|ty| {
@@ -1601,23 +1604,37 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
             } else {
                 "b"
             };
-            pg_type_row(PgTypeRow {
-                oid: ty.oid,
-                name: ty.name,
-                namespace: PG_CATALOG_NAMESPACE_OID,
-                len: i32::from(ty.len),
-                category: ty.category,
-                typtype,
-                typrelid: 0,
-                typelem: ty.elem,
-                typarray: ty.array,
-                typbasetype: 0,
-                typcollation: builtin_type_collation_oid(ty.oid),
-            })
+            pg_type_row(
+                PgTypeRow {
+                    oid: ty.oid,
+                    name: ty.name,
+                    namespace: PG_CATALOG_NAMESPACE_OID,
+                    len: i32::from(ty.len),
+                    category: ty.category,
+                    typtype,
+                    typrelid: 0,
+                    typelem: ty.elem,
+                    typarray: ty.array,
+                    typbasetype: 0,
+                    typcollation: builtin_type_collation_oid(ty.oid),
+                    domain_base: None,
+                },
+                &proc_oids,
+            )
         })
         .collect();
-    rows.extend(user_type_rows(catalog_kv)?);
+    rows.extend(user_type_rows(catalog_kv, &proc_oids)?);
     Ok(rows)
+}
+
+fn builtin_proc_oids() -> Result<BTreeMap<String, i32>, ExecError> {
+    Ok(crate::routine::builtin_pg_proc_rows()?
+        .into_iter()
+        .filter_map(|row| match (row.first(), row.get(1)) {
+            (Some(Datum::Int4(oid)), Some(Datum::Text(name))) => Some((name.clone(), *oid)),
+            _ => None,
+        })
+        .collect())
 }
 
 /// The 32 physical columns PostgreSQL exposes from `pg_type`.
@@ -1639,9 +1656,10 @@ struct PgTypeRow<'a> {
     typarray: i32,
     typbasetype: i32,
     typcollation: i32,
+    domain_base: Option<&'a str>,
 }
 
-fn pg_type_row(row: PgTypeRow<'_>) -> Vec<Datum> {
+fn pg_type_row(row: PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> Vec<Datum> {
     let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
     let typalign = match row.len {
         1 => "c",
@@ -1650,6 +1668,7 @@ fn pg_type_row(row: PgTypeRow<'_>) -> Vec<Datum> {
         _ => "i",
     };
     let typstorage = if row.len < 0 { "x" } else { "p" };
+    let routines = pg_type_routines(&row, proc_oids);
     vec![
         oid(row.oid),
         text(row.name),
@@ -1663,16 +1682,16 @@ fn pg_type_row(row: PgTypeRow<'_>) -> Vec<Datum> {
         Datum::Bool(true),
         Datum::InternalChar(b','),
         oid(row.typrelid),
-        int(0),
+        routines[0].clone(),
         oid(row.typelem),
         oid(row.typarray),
-        int(0),
-        int(0),
-        int(0),
-        int(0),
-        int(0),
-        int(0),
-        int(0),
+        routines[1].clone(),
+        routines[2].clone(),
+        routines[3].clone(),
+        routines[4].clone(),
+        routines[5].clone(),
+        routines[6].clone(),
+        routines[7].clone(),
         Datum::InternalChar(typalign.as_bytes()[0]),
         Datum::InternalChar(typstorage.as_bytes()[0]),
         Datum::Bool(false),
@@ -1684,6 +1703,110 @@ fn pg_type_row(row: PgTypeRow<'_>) -> Vec<Datum> {
         Datum::Null,
         Datum::Null,
     ]
+}
+
+/// The built-in procedure fixture is also PostgreSQL's authoritative OID
+/// source for the regproc links in `pg_type`. Most I/O function names are
+/// mechanical; the underscore fallback covers the handful of families such as
+/// `timestamp_in` and `bit_in`.
+fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [Datum; 8] {
+    let routine = |name: &str| {
+        proc_oids
+            .get(name)
+            .map_or_else(absent_regproc, |oid| regproc(*oid, name))
+    };
+    let named = |type_name: &str, suffix: &str| {
+        let plain = format!("{type_name}{suffix}");
+        proc_oids.get(&plain).map_or_else(
+            || {
+                let underscored = format!("{type_name}_{suffix}");
+                routine(&underscored)
+            },
+            |oid| regproc(*oid, &plain),
+        )
+    };
+    let is_array = row.name.starts_with('_') || matches!(row.name, "int2vector" | "oidvector");
+    if is_array {
+        return [
+            routine("array_subscript_handler"),
+            routine("array_in"),
+            routine("array_out"),
+            routine("array_recv"),
+            routine("array_send"),
+            absent_regproc(),
+            absent_regproc(),
+            routine("array_typanalyze"),
+        ];
+    }
+    if row.typtype == "e" {
+        return [
+            absent_regproc(),
+            routine("enum_in"),
+            routine("enum_out"),
+            routine("enum_recv"),
+            routine("enum_send"),
+            absent_regproc(),
+            absent_regproc(),
+            absent_regproc(),
+        ];
+    }
+    if row.typtype == "c" {
+        return [
+            absent_regproc(),
+            routine("record_in"),
+            routine("record_out"),
+            routine("record_recv"),
+            routine("record_send"),
+            absent_regproc(),
+            absent_regproc(),
+            absent_regproc(),
+        ];
+    }
+    if row.typtype == "d" {
+        return [
+            absent_regproc(),
+            routine("domain_in"),
+            row.domain_base
+                .map_or_else(absent_regproc, |base| named(base, "out")),
+            routine("domain_recv"),
+            row.domain_base
+                .map_or_else(absent_regproc, |base| named(base, "send")),
+            absent_regproc(),
+            absent_regproc(),
+            absent_regproc(),
+        ];
+    }
+    let family = if row.typtype == "m" {
+        Some("multirange")
+    } else if row.typtype == "r" {
+        Some("range")
+    } else {
+        None
+    };
+    let io = |suffix: &str| {
+        family.map_or_else(
+            || named(row.name, suffix),
+            |name| routine(&format!("{name}_{suffix}")),
+        )
+    };
+    [
+        absent_regproc(),
+        io("in"),
+        io("out"),
+        io("recv"),
+        io("send"),
+        named(row.name, "typmodin"),
+        named(row.name, "typmodout"),
+        absent_regproc(),
+    ]
+}
+
+fn regproc(oid: i32, name: &str) -> Datum {
+    Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(oid, name))
+}
+
+fn absent_regproc() -> Datum {
+    Datum::Regclass(crabka_pgtypes::RegclassValue::unresolved(0))
 }
 
 pub(crate) fn text_search_catalog_rows(
@@ -1725,7 +1848,10 @@ pub(crate) fn text_search_catalog_rows(
 /// off (`pg_attribute` uses the same derivation), and `typbasetype` of a domain
 /// is the base type's oid — the two columns `\d` and every driver's type
 /// introspection walk.
-pub(crate) fn user_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+pub(crate) fn user_type_rows(
+    catalog_kv: &dyn Kv,
+    proc_oids: &BTreeMap<String, i32>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgtypes::usertype;
     let mut rows = Vec::new();
     for ty in crabka_pgcatalog::list_user_types(catalog_kv)? {
@@ -1751,35 +1877,46 @@ pub(crate) fn user_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exe
         // A shell is the one user type with no `ColumnType`, and `TypeShellMake`
         // gives it `sizeof(int32)` regardless.
         let shell_typlen = 4;
-        rows.push(pg_type_row(PgTypeRow {
-            oid: i32::try_from(ty.oid).unwrap_or(0),
-            name: &ty.name,
-            namespace: crate::catalog_rel::namespace_oid(&ty.schema),
-            len: column_type.map_or(shell_typlen, |ty| i32::from(ty.type_size())),
-            category,
-            typtype: ty.typtype(),
-            typrelid,
-            typelem: 0,
-            typarray: 0,
-            typbasetype,
-            typcollation: column_type.map_or(0, text_collation_oid),
-        }));
+        rows.push(pg_type_row(
+            PgTypeRow {
+                oid: i32::try_from(ty.oid).unwrap_or(0),
+                name: &ty.name,
+                namespace: crate::catalog_rel::namespace_oid(&ty.schema),
+                len: column_type.map_or(shell_typlen, |ty| i32::from(ty.type_size())),
+                category,
+                typtype: ty.typtype(),
+                typrelid,
+                typelem: 0,
+                typarray: 0,
+                typbasetype,
+                typcollation: column_type.map_or(0, text_collation_oid),
+                domain_base: match &ty.body {
+                    usertype::UserTypeBody::Domain(domain) => builtin_type_name(domain.base.oid()),
+                    _ => None,
+                },
+            },
+            proc_oids,
+        ));
         if let (Some((schema, name)), Some(multirange)) =
             (ty.multirange_identity(), ty.multirange_type())
         {
-            rows.push(pg_type_row(PgTypeRow {
-                oid: i32::try_from(ty.oid + 3).unwrap_or(0),
-                name: &name,
-                namespace: crate::catalog_rel::namespace_oid(&schema),
-                len: i32::from(multirange.type_size()),
-                category: "R",
-                typtype: "m",
-                typrelid: 0,
-                typelem: 0,
-                typarray: 0,
-                typbasetype: 0,
-                typcollation: 0,
-            }));
+            rows.push(pg_type_row(
+                PgTypeRow {
+                    oid: i32::try_from(ty.oid + 3).unwrap_or(0),
+                    name: &name,
+                    namespace: crate::catalog_rel::namespace_oid(&schema),
+                    len: i32::from(multirange.type_size()),
+                    category: "R",
+                    typtype: "m",
+                    typrelid: 0,
+                    typelem: 0,
+                    typarray: 0,
+                    typbasetype: 0,
+                    typcollation: 0,
+                    domain_base: None,
+                },
+                proc_oids,
+            ));
         }
     }
     Ok(rows)
@@ -3666,19 +3803,23 @@ mod tests {
 
     #[test]
     fn a_zero_length_type_is_not_toastable() {
-        let row = pg_type_row(PgTypeRow {
-            oid: 1,
-            name: "synthetic",
-            namespace: PG_CATALOG_NAMESPACE_OID,
-            len: 0,
-            category: "P",
-            typtype: "p",
-            typrelid: 0,
-            typelem: 0,
-            typarray: 0,
-            typbasetype: 0,
-            typcollation: 0,
-        });
+        let row = pg_type_row(
+            PgTypeRow {
+                oid: 1,
+                name: "synthetic",
+                namespace: PG_CATALOG_NAMESPACE_OID,
+                len: 0,
+                category: "P",
+                typtype: "p",
+                typrelid: 0,
+                typelem: 0,
+                typarray: 0,
+                typbasetype: 0,
+                typcollation: 0,
+                domain_base: None,
+            },
+            &BTreeMap::new(),
+        );
         assert!(row[23] == Datum::InternalChar(b'p'));
     }
 }
