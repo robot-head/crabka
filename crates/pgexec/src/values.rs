@@ -59,7 +59,12 @@ fn values_to_relation_with_schema(
         let mut out = Vec::with_capacity(row.len());
         for (expr, ty) in row.iter().zip(&schema.types) {
             let value = crate::eval::eval(expr, &Scope::empty(), &[], ctx)?;
-            out.push(crate::eval::cast_value_in(&value, *ty, ctx.output_style())?);
+            out.push(crate::eval::cast_value_in_at(
+                &value,
+                *ty,
+                ctx.output_style(),
+                ctx.now,
+            )?);
         }
         rows.push(out);
     }

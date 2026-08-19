@@ -362,8 +362,7 @@ fn populate_value(
         ColumnType::Record(_) => populate_composite(target, node, ctx),
         _ => {
             let text = Datum::Text(node.as_sql_text());
-            crabka_pgtypes::cast::cast_assign_in(&text, target, ctx.output_style())
-                .map_err(ExecError::from)
+            crate::eval::cast_assign_value_in_at(&text, target, ctx.output_style(), ctx.now)
         }
     }
 }
@@ -380,8 +379,7 @@ fn populate_composite(
 ) -> Result<Datum, ExecError> {
     if node.kind() == Kind::String {
         let text = Datum::Text(node.as_sql_text());
-        return crabka_pgtypes::cast::cast_assign_in(&text, target, ctx.output_style())
-            .map_err(ExecError::from);
+        return crate::eval::cast_assign_value_in_at(&text, target, ctx.output_style(), ctx.now);
     }
     let ColumnType::Record(named) = target else {
         unreachable!("only a record type reaches populate_composite");
@@ -417,12 +415,12 @@ fn populate_array(
 ) -> Result<Datum, ExecError> {
     if node.kind() == Kind::String {
         let text = Datum::Text(node.as_sql_text());
-        return crabka_pgtypes::cast::cast_assign_in(
+        return crate::eval::cast_assign_value_in_at(
             &text,
             ColumnType::Array(elem),
             ctx.output_style(),
-        )
-        .map_err(ExecError::from);
+            ctx.now,
+        );
     }
     let Some(items) = node.array_elements() else {
         return Err(expected_json_array(context));

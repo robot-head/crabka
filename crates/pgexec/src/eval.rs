@@ -260,6 +260,20 @@ pub(crate) fn cast_value_in_at(
                 )
                 .map(Datum::Timestamptz)?,
             ),
+            ColumnType::Time => Some(crabka_pgtypes::datetime::parse_time_in_at(
+                text,
+                style.date_order,
+                style.time_zone,
+                now,
+            )
+            .map(Datum::Time)?),
+            ColumnType::Timetz => Some(crabka_pgtypes::datetime::parse_timetz_in_at(
+                text,
+                style.date_order,
+                style.time_zone,
+                now,
+            )
+            .map(Datum::Timetz)?),
             _ => None,
         };
         if let Some(parsed) = parsed {
@@ -271,6 +285,31 @@ pub(crate) fn cast_value_in_at(
         ColumnType::Array(ElemType::JsonPath) => crate::jsonpath::cast_array_datum(value),
         _ => crabka_pgtypes::cast::cast_in(value, target, style).map_err(ExecError::from),
     }
+}
+
+/// Assignment-context counterpart to [`cast_value_in_at`].
+pub(crate) fn cast_assign_value_in_at(
+    value: &Datum,
+    target: ColumnType,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+    now: jiff::Timestamp,
+) -> Result<Datum, ExecError> {
+    let base = target.temporal_base().map_or(target, |(base, _)| base);
+    if matches!(value, Datum::Text(_))
+        && matches!(
+            base,
+            ColumnType::Date
+                | ColumnType::Time
+                | ColumnType::Timetz
+                | ColumnType::Timestamp
+                | ColumnType::Timestamptz
+        )
+    {
+        let parsed = cast_value_in_at(value, base, style, now)?;
+        return crabka_pgtypes::cast::cast_assign_in(&parsed, target, style)
+            .map_err(ExecError::from);
+    }
+    crabka_pgtypes::cast::cast_assign_in(value, target, style).map_err(ExecError::from)
 }
 
 /// Depth-tracking core of [`eval`]. `depth` is the current recursion level; every
@@ -5664,6 +5703,20 @@ mod tests {
                 Datum::Timestamp(
                     crabka_pgtypes::datetime::parse_timestamp("2024-03-10 05:06:07")
                         .expect("timestamp"),
+                ),
+            ),
+            (
+                "time 'now'",
+                Datum::Time(crabka_pgtypes::datetime::parse_time("05:06:07").expect("time")),
+            ),
+            (
+                "timetz 'now'",
+                Datum::Timetz(
+                    crabka_pgtypes::datetime::parse_timetz(
+                        "05:06:07+00",
+                        &jiff::tz::TimeZone::UTC,
+                    )
+                    .expect("timetz"),
                 ),
             ),
             ("timestamptz 'now'", Datum::Timestamptz(now)),

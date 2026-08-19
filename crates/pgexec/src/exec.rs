@@ -1234,19 +1234,24 @@ fn build_copy_row(
         let target = column.ty;
         let converted = match value {
             Some(value) if let Some(base) = jsonpath_assignment_base(target) => {
-                crate::eval::cast_value_in(&Datum::Text(value.clone()), base, ctx.output_style())
-                    .and_then(|value| coerce(value, target, ctx))
+                crate::eval::cast_value_in_at(
+                    &Datum::Text(value.clone()),
+                    base,
+                    ctx.output_style(),
+                    ctx.now,
+                )
+                .and_then(|value| coerce(value, target, ctx))
             }
             // A COPY field runs the column type's input function under
             // *assignment* rules, so an over-long `varchar(n)` is 22001 rather
             // than the silent truncation an explicit cast would do — and the
             // date arms read the session's `DateStyle` field order.
-            Some(value) => crabka_pgtypes::cast::cast_assign_in(
+            Some(value) => crate::eval::cast_assign_value_in_at(
                 &Datum::Text(value.clone()),
                 target,
                 ctx.output_style(),
-            )
-            .map_err(ExecError::from),
+                ctx.now,
+            ),
             None => coerce(Datum::Null, target, ctx),
         };
         // An input conversion is the one failure PostgreSQL can name a column
@@ -10799,7 +10804,7 @@ fn resolve_unknown_literal(
     };
     let value = Datum::Text(text.to_owned());
     if let Some(jsonpath) = jsonpath_assignment_base(base) {
-        return crate::eval::cast_value_in(&value, jsonpath, ctx.output_style());
+        return crate::eval::cast_value_in_at(&value, jsonpath, ctx.output_style(), ctx.now);
     }
     match base {
         // `bytea_in` is the escape/hex decoder rather than a cast arm.
@@ -10808,11 +10813,12 @@ fn resolve_unknown_literal(
         // target type's input function here, and `date_in`/`timestamp_in` read
         // `DateStyle`'s field order. A stored `'97/02/10'` has to mean what the
         // same literal means when it is written as a cast.
-        _ => Ok(crabka_pgtypes::cast::cast_assign_in(
+        _ => crate::eval::cast_assign_value_in_at(
             &value,
             base,
             ctx.output_style(),
-        )?),
+            ctx.now,
+        ),
     }
 }
 
@@ -10874,11 +10880,12 @@ pub(crate) fn coerce(
         return Ok(value);
     }
     if matches!(target, ColumnType::Temporal(_, _)) {
-        return Ok(crabka_pgtypes::cast::cast_assign_in(
+        return crate::eval::cast_assign_value_in_at(
             &value,
             target,
             ctx.output_style(),
-        )?);
+            ctx.now,
+        );
     }
     if target == ColumnType::JsonPath {
         return match value {
@@ -25497,6 +25504,27 @@ mod tests {
         assert!(widened == Datum::Array(ArrayValue::new(ElemType::Int8, vec![Datum::Int8(7)])));
         // Malformed input is the type's input-function error, not 42804.
         assert!(super::coerce(Datum::Text("{".into()), ColumnType::Jsonb, &ctx).is_err());
+    }
+
+    #[test]
+    fn assignment_temporal_input_uses_the_transaction_timestamp() {
+        use assert2::assert;
+        use crabka_pgtypes::{ColumnType, Datum};
+
+        let now = "2024-03-10T05:06:07Z".parse().expect("timestamp");
+        let mut ctx = crate::clock::EvalCtx::test_default();
+        ctx.now = now;
+        for (target, expected) in [
+            (
+                ColumnType::Time,
+                Datum::Time(crabka_pgtypes::datetime::parse_time("05:06:07").expect("time")),
+            ),
+            (ColumnType::Timestamptz, Datum::Timestamptz(now)),
+        ] {
+            assert!(
+                super::resolve_unknown_literal("now", target, &ctx).expect("literal") == expected
+            );
+        }
     }
 
     /// The DDL gate covers every column type: exactly the types whose datums

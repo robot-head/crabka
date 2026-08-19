@@ -134,10 +134,11 @@ pub(crate) fn coerce_inout(
             "cast source value has no valid text form".to_string(),
         ))
     })?;
-    let converted = crate::eval::cast_value_in(
+    let converted = crate::eval::cast_value_in_at(
         &Datum::Text(rendered),
         physical_type(target),
         ctx.output_style(),
+        ctx.now,
     )?;
     // A domain target keeps its constraints: `cast_value_in` converts to the
     // base and stops there, exactly as it does on the built-in cast path.

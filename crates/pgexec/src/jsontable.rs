@@ -599,10 +599,11 @@ impl Plan<'_> {
     /// value rather than truncating it — which is what makes `char(4)` NULL for
     /// `"aaaaaaa"` instead of `aaaa`.
     fn convert(&self, text: &str, ty: ColumnType) -> Result<Datum, ExecError> {
-        let value = crabka_pgtypes::cast::cast_assign_in(
+        let value = crate::eval::cast_assign_value_in_at(
             &Datum::Text(text.to_string()),
             ty,
             self.ctx.output_style(),
+            self.ctx.now,
         )?;
         crate::usertype::check_domain(ty, &value, self.ctx)?;
         Ok(value)
@@ -623,10 +624,11 @@ impl Plan<'_> {
             ColumnType::Int4 => Datum::Int4(i32::from(value)),
             _ => {
                 let text = if value { "true" } else { "false" };
-                crabka_pgtypes::cast::cast_assign_in(
+                crate::eval::cast_assign_value_in_at(
                     &Datum::Text(text.to_string()),
                     ty,
                     self.ctx.output_style(),
+                    self.ctx.now,
                 )?
             }
         };

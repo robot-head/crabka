@@ -1514,10 +1514,20 @@ pub fn parse_time(s: &str) -> Result<PgTime, TypeError> {
 
 /// [`parse_time`] with the session's `DateStyle` field order and zone.
 pub fn parse_time_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<PgTime, TypeError> {
+    parse_time_in_at(s, order, tz, clock_now())
+}
+
+/// [`parse_time_in`] with an explicit reference instant for relative words.
+pub fn parse_time_in_at(
+    s: &str,
+    order: DateOrder,
+    tz: &TimeZone,
+    now: Timestamp,
+) -> Result<PgTime, TypeError> {
     // `time_in` names the type `time` in its errors, not the canonical
     // `time without time zone` that `pg_typeof` and `format_type` report.
     let type_name = "time";
-    let micros = match decode(s.trim(), order, DecodeMode::TimeOnly, tz)
+    let micros = match decode_at(s.trim(), order, DecodeMode::TimeOnly, tz, now)
         .map_err(|e| decode_error(e, type_name, s))?
     {
         // `DecodeTimeOnly` takes `now` (which fills the clock and arrives as
@@ -1609,12 +1619,22 @@ pub fn parse_timetz(s: &str, tz: &TimeZone) -> Result<TimeTz, TypeError> {
 
 /// [`parse_timetz`] with the session's `DateStyle` field order.
 pub fn parse_timetz_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<TimeTz, TypeError> {
+    parse_timetz_in_at(s, order, tz, clock_now())
+}
+
+/// [`parse_timetz_in`] with an explicit reference instant for relative words.
+pub fn parse_timetz_in_at(
+    s: &str,
+    order: DateOrder,
+    tz: &TimeZone,
+    now: Timestamp,
+) -> Result<TimeTz, TypeError> {
     let type_name = "time with time zone";
     let syntax = || TypeError::InvalidDatetimeFormat {
         type_name,
         value: s.to_string(),
     };
-    let parts = match decode(s.trim(), order, DecodeMode::TimeOnly, tz)
+    let parts = match decode_at(s.trim(), order, DecodeMode::TimeOnly, tz, now)
         .map_err(|e| decode_error(e, type_name, s))?
     {
         Decoded::Special(_) => return Err(syntax()),
@@ -1643,7 +1663,7 @@ pub fn parse_timetz_in(s: &str, order: DateOrder, tz: &TimeZone) -> Result<TimeT
         None => {
             let date = parts
                 .date
-                .unwrap_or_else(|| tz.to_datetime(clock_now()).date());
+                .unwrap_or_else(|| tz.to_datetime(now).date());
             zone_offset_for(instant_on(date), tz)
         }
     };

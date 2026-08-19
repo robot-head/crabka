@@ -493,8 +493,8 @@ pub fn decode_at(
     let mut zone: Option<Zone> = None;
     let mut special: Option<Special> = None;
     let mut claimed = Claimed::default();
-    // The caller supplies one stable instant. It is only converted to the
-    // session zone if a relative spelling actually needs it.
+    // The caller supplies one stable instant. Keep its zoned representation so
+    // every relative spelling in this literal reads the same transaction time.
     let mut wall: Option<Zoned> = Some(now.to_zoned(tz.clone()));
     let mut is_bc = false;
     let mut meridiem: Option<bool> = None;
