@@ -449,8 +449,18 @@ pub(crate) fn role_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError>
         .into_iter()
         .map(|role| role.name)
         .filter(|name| name != crate::catalog_fn::OBJECT_OWNER)
+        .filter(|name| {
+            !crabka_pgcatalog::PREDEFINED_ROLES
+                .iter()
+                .any(|(predefined, _)| *predefined == name)
+        })
         .collect::<Vec<_>>();
     let mut oids = banded_oids(crate::catalog_fn::ROLE_OID_BASE, &names);
+    oids.extend(
+        crabka_pgcatalog::PREDEFINED_ROLES
+            .iter()
+            .map(|(name, oid)| ((*name).to_string(), *oid)),
+    );
     oids.insert(
         crate::catalog_fn::OBJECT_OWNER.to_string(),
         crate::catalog_fn::BOOTSTRAP_ROLE_OID,
@@ -3676,6 +3686,20 @@ mod tests {
         let assigned = banded_oids(1_000, &names);
         let distinct = assigned.values().collect::<std::collections::BTreeSet<_>>();
         assert!(distinct.len() == names.len());
+    }
+
+    #[test]
+    fn predefined_roles_keep_postgres_oids() {
+        let kv = MemKv::default();
+        crabka_pgcatalog::create_role(&kv, "reader", false).expect("reader");
+        let oids = role_oids(&kv).expect("role oids");
+
+        assert!(oids[crabka_pgcatalog::BOOTSTRAP_ROLE] == 10);
+        for (name, expected) in crabka_pgcatalog::PREDEFINED_ROLES {
+            assert!(oids[*name] == *expected, "{name}");
+        }
+        assert!(oids.contains_key("reader"));
+        assert!(!oids.contains_key(crabka_pgcatalog::PUBLIC_ROLE));
     }
 
     /// Every projection that carries a schema reports the relation's own

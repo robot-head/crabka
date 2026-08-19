@@ -1108,6 +1108,51 @@ pub const PUBLIC_ROLE: &str = "public";
 /// owns the schema the database starts with.
 pub const PUBLIC_SCHEMA_OWNER: &str = "pg_database_owner";
 
+/// The fixed `pg_authid` identities every `PostgreSQL` cluster supplies.
+///
+/// They are catalog fixtures, not stored roles: user-created roles keep their
+/// durable records, while these retain the OIDs `PostgreSQL` assigns them.
+pub const PREDEFINED_ROLES: &[(&str, i32)] = &[
+    ("pg_monitor", 3373),
+    ("pg_read_all_settings", 3374),
+    ("pg_read_all_stats", 3375),
+    ("pg_stat_scan_tables", 3377),
+    ("pg_signal_backend", 4200),
+    ("pg_checkpoint", 4544),
+    ("pg_use_reserved_connections", 4550),
+    ("pg_read_server_files", 4569),
+    ("pg_write_server_files", 4570),
+    ("pg_execute_server_program", 4571),
+    ("pg_database_owner", 6171),
+    ("pg_read_all_data", 6181),
+    ("pg_write_all_data", 6182),
+    ("pg_create_subscription", 6304),
+    ("pg_maintain", 6337),
+    ("pg_signal_autovacuum_worker", 6392),
+];
+
+fn builtin_role(name: &str) -> Option<Role> {
+    if name != BOOTSTRAP_ROLE && !PREDEFINED_ROLES.iter().any(|(role, _)| *role == name) {
+        return None;
+    }
+    let mut attributes = RoleAttributes::default();
+    if name == BOOTSTRAP_ROLE {
+        for attribute in [
+            RoleAttribute::Superuser,
+            RoleAttribute::CreateRole,
+            RoleAttribute::CreateDb,
+            RoleAttribute::BypassRls,
+        ] {
+            attributes.set(attribute, true);
+        }
+    }
+    Some(Role {
+        name: name.to_string(),
+        can_login: name == BOOTSTRAP_ROLE,
+        attributes,
+    })
+}
+
 /// The schemas a database has before anything is created in it, each with the
 /// owner `PostgreSQL` bootstraps it under.
 ///
@@ -5265,6 +5310,9 @@ pub fn get_role(kv: &dyn Kv, name: &str) -> Result<Role, CatalogError> {
             attributes: RoleAttributes::default(),
         });
     }
+    if let Some(role) = builtin_role(name) {
+        return Ok(role);
+    }
     let bytes = kv
         .get(&role_key(name))?
         .ok_or_else(|| CatalogError::UndefinedObject(name.to_string()))?;
@@ -5296,26 +5344,25 @@ pub fn role_is_nameable(kv: &dyn Kv, name: &str) -> Result<bool, CatalogError> {
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
 pub fn role_exists(kv: &dyn Kv, name: &str) -> Result<bool, CatalogError> {
-    if name == "public" {
+    if name == "public" || builtin_role(name).is_some() {
         return Ok(true);
     }
     Ok(kv.get(&role_key(name))?.is_some())
 }
 
-/// List roles, including the built-in starter `public` session user.
+/// List the `pg_authid` rows a fresh cluster contains plus stored roles.
 ///
 /// # Errors
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
 pub fn list_roles(kv: &dyn Kv) -> Result<Vec<Role>, CatalogError> {
-    let mut roles = vec![Role {
-        name: "public".into(),
-        can_login: true,
-        attributes: RoleAttributes::default(),
-    }];
+    let mut roles = std::iter::once(BOOTSTRAP_ROLE)
+        .chain(PREDEFINED_ROLES.iter().map(|(name, _)| *name))
+        .filter_map(builtin_role)
+        .collect::<Vec<_>>();
     for (_, bytes) in kv.scan_prefix(ROLE_PREFIX)? {
         let role = deserialize_role(&bytes)?;
-        if role.name != "public" {
+        if role.name != "public" && builtin_role(&role.name).is_none() {
             roles.push(role);
         }
     }
@@ -6615,7 +6662,7 @@ pub fn set_next_table_id_op(next: TableId) -> WriteOp {
 
 #[cfg(test)]
 mod tests {
-    use crabka_pgkv::{FjallKv, MemKv};
+    use crabka_pgkv::{FjallKv, MemKv, WriteOp};
     use crabka_pgtypes::{
         ColumnType,
         usertype::{DomainBody, RangeBody},
@@ -7264,6 +7311,58 @@ mod tests {
         .expect("revoke ops");
         kv.write_batch(&ops).expect("revoke write");
         assert!(list_table_privileges(&kv).expect("privileges").is_empty());
+    }
+
+    #[test]
+    fn predefined_roles_are_pg_authid_rows_but_public_is_not() {
+        let kv = MemKv::default();
+        create_role(&kv, "reader", true).expect("reader");
+        // A stored `PUBLIC` row is corrupt catalog state, but must not turn the
+        // pseudo-role into a `pg_authid` row if one is encountered on read.
+        kv.write_batch(&[WriteOp::Put {
+            key: role_key(PUBLIC_ROLE),
+            value: serialize_role(PUBLIC_ROLE, true, RoleAttributes::default()),
+        }])
+        .expect("corrupt public row");
+        let names = list_roles(&kv)
+            .expect("roles")
+            .into_iter()
+            .map(|role| role.name)
+            .collect::<Vec<_>>();
+
+        assert!(names == vec![
+            "pg_checkpoint",
+            "pg_create_subscription",
+            "pg_database_owner",
+            "pg_execute_server_program",
+            "pg_maintain",
+            "pg_monitor",
+            "pg_read_all_data",
+            "pg_read_all_settings",
+            "pg_read_all_stats",
+            "pg_read_server_files",
+            "pg_signal_autovacuum_worker",
+            "pg_signal_backend",
+            "pg_stat_scan_tables",
+            "pg_use_reserved_connections",
+            "pg_write_all_data",
+            "pg_write_server_files",
+            "postgres",
+            "reader",
+        ]);
+        assert!(get_role(&kv, "pg_monitor").expect("pg_monitor").can_login == false);
+        let bootstrap = get_role(&kv, BOOTSTRAP_ROLE).expect("bootstrap");
+        assert!(bootstrap.can_login);
+        for attribute in [
+            RoleAttribute::Superuser,
+            RoleAttribute::CreateRole,
+            RoleAttribute::CreateDb,
+            RoleAttribute::BypassRls,
+        ] {
+            assert!(bootstrap.attributes.has(attribute), "{attribute:?}");
+        }
+        assert!(role_exists(&kv, "pg_monitor").expect("exists"));
+        assert!(!names.iter().any(|name| name == PUBLIC_ROLE));
     }
 
     fn grant(kv: &dyn Kv, relation: &RelationName, grantee: &str, privileges: &[&str]) {
