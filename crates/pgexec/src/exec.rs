@@ -19966,7 +19966,9 @@ pub(crate) fn field(name: &str, ty: ColumnType) -> FieldDescription {
 pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
     Ok(match oid {
         crabka_pgtypes::oids::BOOL => ColumnType::Bool,
+        crabka_pgtypes::oids::BYTEA => ColumnType::Bytea,
         crabka_pgtypes::oids::INT2 => ColumnType::Int2,
+        crabka_pgtypes::oids::INT2VECTOR => ColumnType::Int2Vector,
         crabka_pgtypes::oids::INT4 => ColumnType::Int4,
         crabka_pgtypes::oids::OIDVECTOR => ColumnType::OidVector,
         // The whole `reg*` family, including `regclass` itself: a UNION or a
@@ -19985,6 +19987,8 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::REGCOLLATION => ColumnType::Regcollation,
         crabka_pgtypes::oids::INT8 => ColumnType::Int8,
         crabka_pgtypes::oids::TEXT => ColumnType::Text,
+        crabka_pgtypes::oids::ACLITEM => ColumnType::Aclitem,
+        crabka_pgtypes::oids::REFCURSOR => ColumnType::Refcursor,
         crabka_pgtypes::oids::VARCHAR => ColumnType::Varchar(None),
         crabka_pgtypes::oids::BPCHAR => ColumnType::Char(None),
         crabka_pgtypes::oids::CHAR => ColumnType::InternalChar,
@@ -20009,6 +20013,9 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::TIMESTAMP => ColumnType::Timestamp,
         crabka_pgtypes::oids::TIMESTAMPTZ => ColumnType::Timestamptz,
         crabka_pgtypes::oids::INTERVAL => ColumnType::Interval,
+        crabka_pgtypes::oids::MONEY => ColumnType::Money,
+        crabka_pgtypes::oids::BIT => ColumnType::Bit(None),
+        crabka_pgtypes::oids::VARBIT => ColumnType::VarBit(None),
         crabka_pgtypes::oids::UUID => ColumnType::Uuid,
         crabka_pgtypes::oids::XML => ColumnType::Xml,
         crabka_pgtypes::oids::JSON => ColumnType::Json,
@@ -20022,16 +20029,20 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::PG_LSN => ColumnType::PgLsn,
         crabka_pgtypes::oids::PG_SNAPSHOT => ColumnType::PgSnapshot,
         crabka_pgtypes::oids::TXID_SNAPSHOT => ColumnType::TxidSnapshot,
+        crabka_pgtypes::oids::TSVECTOR => ColumnType::TsVector,
+        crabka_pgtypes::oids::TSQUERY => ColumnType::TsQuery,
+        crabka_pgtypes::oids::INET => ColumnType::Inet,
+        crabka_pgtypes::oids::CIDR => ColumnType::Cidr,
+        crabka_pgtypes::oids::MACADDR => ColumnType::MacAddr,
+        crabka_pgtypes::oids::MACADDR8 => ColumnType::MacAddr8,
         crabka_pgtypes::oids::RECORD => ColumnType::Record(None),
         // Every array oid crabka has an element type for, `_json` included.
-        _ => match crabka_pgtypes::ElemType::from_array_oid(oid) {
-            Some(elem) => ColumnType::Array(elem),
-            None => {
-                return Err(ExecError::Unsupported(format!(
-                    "unknown query field type oid {oid}"
-                )));
-            }
-        },
+        _ => crabka_pgtypes::ColumnType::builtin_range(oid)
+            .or_else(|| crabka_pgtypes::ColumnType::builtin_multirange(oid))
+            .or_else(|| crabka_pgtypes::ColumnType::information_schema_domain_by_oid(oid))
+            .or_else(|| crabka_pgtypes::usertype::column_type_for_oid(oid))
+            .or_else(|| crabka_pgtypes::ElemType::from_array_oid(oid).map(ColumnType::Array))
+            .ok_or_else(|| ExecError::Unsupported(format!("unknown query field type oid {oid}")))?,
     })
 }
 
@@ -25570,7 +25581,7 @@ mod tests {
     }
 
     #[test]
-    fn column_type_from_oid_maps_json_jsonb_and_every_array_oid() {
+    fn column_type_from_oid_maps_supported_scalars_and_every_array_oid() {
         use assert2::assert;
         use crabka_pgtypes::{ColumnType, ElemType, oids};
 
@@ -25579,8 +25590,25 @@ mod tests {
             // jsonb decomposes it. Each oid must map to its own.
             (oids::JSON, ColumnType::Json),
             (oids::JSONB, ColumnType::Jsonb),
+            (oids::ACLITEM, ColumnType::Aclitem),
+            (oids::REFCURSOR, ColumnType::Refcursor),
+            (oids::BYTEA, ColumnType::Bytea),
+            (oids::INT2VECTOR, ColumnType::Int2Vector),
+            (oids::MONEY, ColumnType::Money),
+            (oids::BIT, ColumnType::Bit(None)),
+            (oids::VARBIT, ColumnType::VarBit(None)),
+            (oids::TSVECTOR, ColumnType::TsVector),
+            (oids::TSQUERY, ColumnType::TsQuery),
+            (oids::INET, ColumnType::Inet),
+            (oids::CIDR, ColumnType::Cidr),
+            (oids::MACADDR, ColumnType::MacAddr),
+            (oids::MACADDR8, ColumnType::MacAddr8),
             (oids::JSONARRAY, ColumnType::Array(ElemType::Json)),
             (oids::RECORD, ColumnType::Record(None)),
+            (
+                oids::INFORMATION_SCHEMA_CARDINAL_NUMBER,
+                ColumnType::information_schema_domain("cardinal_number").expect("domain"),
+            ),
         ] {
             assert!(super::column_type_from_oid(oid).expect("known oid") == expected);
         }
@@ -25625,6 +25653,7 @@ mod tests {
     #[test]
     fn pg_type_rows_match_the_declared_column_list() {
         use assert2::assert;
+        use crabka_pgtypes::Datum;
 
         let columns = super::virtual_catalog_columns("pg_type");
         let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
@@ -25633,54 +25662,64 @@ mod tests {
                 == [
                     "oid",
                     "typname",
-                    "typlen",
-                    "typcategory",
                     "typnamespace",
-                    "typrelid",
+                    "typowner",
+                    "typlen",
+                    "typbyval",
                     "typtype",
+                    "typcategory",
+                    "typispreferred",
+                    "typisdefined",
                     "typdelim",
+                    "typrelid",
+                    "typsubscript",
                     "typelem",
                     "typarray",
+                    "typinput",
+                    "typoutput",
+                    "typreceive",
+                    "typsend",
+                    "typmodin",
+                    "typmodout",
+                    "typanalyze",
+                    "typalign",
+                    "typstorage",
+                    "typnotnull",
                     "typbasetype",
+                    "typtypmod",
+                    "typndims",
                     "typcollation",
+                    "typdefaultbin",
+                    "typdefault",
+                    "typacl",
                 ]
         );
         let rows = super::pg_type_rows(&crabka_pgkv::MemKv::default()).expect("pg_type rows");
         for row in &rows {
             assert!(row.len() == columns.len());
         }
-        // The `_int4` row, in full: PostgreSQL's own values for OID 1007.
+        // `_int4` keeps PostgreSQL's scalar/array links and physical shape.
         let int4_array = rows
             .iter()
-            .find(|row| row[0] == super::int(1007))
+            .find(|row| row[0] == Datum::Oid(1007))
             .expect("_int4 row");
-        assert!(
-            *int4_array
-                == vec![
-                    super::int(1007),
-                    super::text("_int4"),
-                    super::int(-1),
-                    super::text("A"),
-                    super::int(super::PG_CATALOG_NAMESPACE_OID),
-                    super::int(0),
-                    super::text("b"),
-                    super::text(","),
-                    super::int(23),
-                    super::int(0),
-                    super::int(0),
-                    super::int(0),
-                ]
-        );
+        assert!(int4_array[0] == Datum::Oid(1007));
+        assert!(int4_array[1] == super::text("_int4"));
+        assert!(int4_array[2] == Datum::Oid(super::PG_CATALOG_NAMESPACE_OID as u32));
+        assert!(int4_array[7] == Datum::InternalChar(b'A'));
+        assert!(int4_array[13] == Datum::Oid(23));
+        assert!(int4_array[14] == Datum::Oid(0));
+        assert!(int4_array[22] == Datum::InternalChar(b'i'));
+        assert!(int4_array[23] == Datum::InternalChar(b'x'));
         // `text` is the collatable case: its `typcollation` has to be the same
         // database default `attcollation` gives a text column, or `\d` reports a
         // collation on every text column.
         let text_row = rows
             .iter()
-            .find(|row| row[0] == super::int(25))
+            .find(|row| row[0] == Datum::Oid(25))
             .expect("text row");
         assert!(
-            *text_row.last().expect("typcollation")
-                == super::int(crate::catalog_rel::DEFAULT_COLLATION_OID)
+            text_row[28] == Datum::Oid(crate::catalog_rel::DEFAULT_COLLATION_OID as u32)
         );
     }
 
