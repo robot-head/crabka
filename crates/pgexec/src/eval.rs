@@ -192,11 +192,13 @@ pub(crate) fn cast_operand(
     {
         return Ok(resolved);
     }
-    if ty == ColumnType::Array(ElemType::Regtype)
-        && let Datum::OidVector(arguments) = value
-    {
-        let elems = arguments
-            .elems
+    if ty == ColumnType::Array(ElemType::Regtype) {
+        let (elems, dims) = match value {
+            Datum::OidVector(arguments) => (&arguments.elems, &arguments.dims),
+            Datum::Array(arguments) => (&arguments.elems, &arguments.dims),
+            _ => return cast_value_in_at(value, ty, ctx.output_style(), ctx.now),
+        };
+        let elems = elems
             .iter()
             .map(|argument| {
                 crate::reg_fn::reg_cast(crate::reg_fn::RegKind::Type, argument, ctx)?
@@ -206,7 +208,7 @@ pub(crate) fn cast_operand(
         return Ok(Datum::Array(crabka_pgtypes::ArrayValue::with_dims(
             ElemType::Regtype,
             elems,
-            arguments.dims.clone(),
+            dims.clone(),
         )));
     }
     let cast = cast_value_in_at(value, ty, ctx.output_style(), ctx.now)?;

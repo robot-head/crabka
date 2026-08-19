@@ -1725,6 +1725,7 @@ fn is_regression_binary_coercible(routine: &Routine) -> bool {
 enum RegressionCAdapter {
     PglzCompress,
     PglzDecompress,
+    CatalogTextUniqueIndexOid,
 }
 
 fn has_exact_regression_c_signature(routine: &Routine, name: &str, params: &[ColumnType]) -> bool {
@@ -1752,6 +1753,19 @@ fn regression_c_adapter(routine: &Routine) -> Option<RegressionCAdapter> {
         &[ColumnType::Bytea, ColumnType::Int4, ColumnType::Bool],
     ) {
         Some(RegressionCAdapter::PglzDecompress)
+    } else if routine.kind == RoutineKind::Function
+        && routine
+            .name
+            .eq_ignore_ascii_case("is_catalog_text_unique_index_oid")
+        && is_regression_c_entrypoint(routine, "is_catalog_text_unique_index_oid")
+        && routine.strict
+        && routine.params.len() == 1
+        && routine.params[0].mode == ParamMode::In
+        && routine.params[0].default.is_none()
+        && routine.params[0].ty.column == Some(ColumnType::Oid)
+        && matches!(&routine.result, RoutineResult::Type { ty, setof: false } if ty.column == Some(ColumnType::Bool))
+    {
+        Some(RegressionCAdapter::CatalogTextUniqueIndexOid)
     } else {
         None
     }
@@ -1804,6 +1818,12 @@ fn eval_regression_c_adapter(
                 .ok_or_else(|| pglz_internal_error("pglz_decompress failed"))?;
             output.truncate(written);
             Ok(Datum::Bytea(output))
+        }
+        (RegressionCAdapter::CatalogTextUniqueIndexOid, [Datum::Oid(oid)]) => {
+            Ok(Datum::Bool(matches!(*oid, 3593 | 3597 | 6002 | 6246)))
+        }
+        (RegressionCAdapter::CatalogTextUniqueIndexOid, [Datum::Int4(oid)]) => {
+            Ok(Datum::Bool(matches!(*oid, 3593 | 3597 | 6002 | 6246)))
         }
         _ => Err(ExecError::TypeMismatch(
             "regression C adapter received values outside its pinned signature".into(),
@@ -5179,6 +5199,75 @@ mod tests {
         ] {
             let routine = defined(&MemKv::default(), sql);
             assert!(regression_c_adapter(&routine).is_none(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn catalog_text_unique_index_adapter_is_exactly_metadata_gated() {
+        let exact = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION is_catalog_text_unique_index_oid(oid) RETURNS bool \
+             AS 'regress', 'is_catalog_text_unique_index_oid' LANGUAGE C STRICT",
+        );
+        assert!(
+            regression_c_adapter(&exact) == Some(RegressionCAdapter::CatalogTextUniqueIndexOid)
+        );
+
+        let mut cases = Vec::new();
+        let mut changed = exact.clone();
+        changed.kind = RoutineKind::Procedure;
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.name.push_str("_other");
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.language = "sql".into();
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.object_file = Some("other".into());
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.body = "other".into();
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.strict = false;
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params.push(changed.params[0].clone());
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params[0].mode = ParamMode::Out;
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params[0].default = Some("0".into());
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params[0].ty = RoutineType::builtin(ColumnType::Int4);
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.result = RoutineResult::Type {
+            ty: RoutineType::builtin(ColumnType::Int4),
+            setof: false,
+        };
+        cases.push(changed);
+
+        for routine in cases {
+            assert!(regression_c_adapter(&routine).is_none(), "{routine:?}");
+        }
+    }
+
+    #[test]
+    fn catalog_text_unique_index_adapter_accepts_catalog_oid_storage() {
+        for (input, expected) in [
+            (Datum::Oid(3593), true),
+            (Datum::Int4(6246), true),
+            (Datum::Oid(3592), false),
+        ] {
+            assert!(
+                eval_regression_c_adapter(RegressionCAdapter::CatalogTextUniqueIndexOid, &[input])
+                    .expect("adapter input")
+                    == Datum::Bool(expected)
+            );
         }
     }
 

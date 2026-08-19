@@ -1597,7 +1597,9 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
             // Every exposed built-in — scalar or array — is a base type with
             // no domain base type. Range and multirange rows use their own
             // `typtype`, matching PostgreSQL's catalogue.
-            let typtype = if ty.category == "R" && ty.name.ends_with("multirange") {
+            let typtype = if ty.name == "cstring" {
+                "p"
+            } else if ty.category == "R" && ty.name.ends_with("multirange") {
                 "m"
             } else if ty.category == "R" {
                 "r"
@@ -1666,13 +1668,21 @@ struct PgTypeRow<'a> {
 
 fn pg_type_row(row: PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> Vec<Datum> {
     let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
-    let typalign = row.range_align.unwrap_or(match row.len {
-        1 => "c",
-        2 => "s",
-        8 => "d",
-        _ => "i",
-    });
-    let typstorage = if row.len < 0 { "x" } else { "p" };
+    let typalign = if row.name == "cstring" {
+        "c"
+    } else {
+        row.range_align.unwrap_or(match row.len {
+            1 => "c",
+            2 => "s",
+            8 => "d",
+            _ => "i",
+        })
+    };
+    let typstorage = if row.name == "cstring" || row.len >= 0 {
+        "p"
+    } else {
+        "x"
+    };
     let routines = pg_type_routines(&row, proc_oids);
     vec![
         oid(row.oid),
@@ -1814,6 +1824,7 @@ fn pg_type_routine_stem(name: &str) -> &str {
     match name {
         "money" => "cash",
         "polygon" => "poly",
+        "refcursor" => "text",
         _ => name,
     }
 }
@@ -2799,6 +2810,12 @@ pub(crate) fn regtype_oid(name: &str) -> Option<i32> {
         .iter()
         .find(|(candidate, _)| *candidate == name)
         .map(|(_, oid)| *oid)
+        .or_else(|| {
+            builtin_type_rows()
+                .iter()
+                .find(|row| row.name == name)
+                .map(|row| row.oid)
+        })
         // `TYPE_OIDS` lists the scalar spellings. An array is written either
         // `int4[]` or as `pg_type.typname` spells it, `_int4`, and both reach
         // the same type -- so fall back to the ordinary type-name resolver
@@ -2815,6 +2832,13 @@ pub(crate) fn regtype_oid(name: &str) -> Option<i32> {
                 .map(str::trim_end)
                 .map(std::borrow::Cow::Borrowed)
                 .unwrap_or(std::borrow::Cow::Borrowed(spelling));
+            if spelling.ends_with("[]")
+                && let Some(row) = builtin_type_rows()
+                    .iter()
+                    .find(|row| row.name.eq_ignore_ascii_case(&element) && row.array != 0)
+            {
+                return Some(row.array);
+            }
             let resolved = crabka_pgtypes::ColumnType::from_builtin_sql_name(&element)?;
             let resolved = if spelling.ends_with("[]") {
                 crabka_pgtypes::ColumnType::array_of(resolved)?
@@ -2828,6 +2852,20 @@ pub(crate) fn regtype_oid(name: &str) -> Option<i32> {
 pub(crate) fn regtype_name(oid: i32) -> String {
     crabka_pgtypes::usertype::lookup_oid(u32::try_from(oid).unwrap_or(0))
         .map(|ty| ty.name.clone())
+        .or_else(|| {
+            builtin_type_rows()
+                .iter()
+                .find(|row| row.oid == oid)
+                .map(|row| {
+                    builtin_type_rows()
+                        .iter()
+                        .find(|element| row.category == "A" && element.oid == row.elem)
+                        .map_or_else(
+                            || row.name.to_string(),
+                            |element| format!("{}[]", element.name),
+                        )
+                })
+        })
         .unwrap_or_else(|| {
             let formatted = crate::func::format_type(i64::from(oid), -1);
             if formatted == "-" {
@@ -3058,6 +3096,22 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             category: "N",
             elem: 0,
             array: 2211,
+        },
+        BuiltinTypeRow {
+            oid: 2275,
+            name: "cstring",
+            len: -2,
+            category: "P",
+            elem: 0,
+            array: 1263,
+        },
+        BuiltinTypeRow {
+            oid: 1790,
+            name: "refcursor",
+            len: -1,
+            category: "U",
+            elem: 0,
+            array: 2201,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::BOOL as i32,
@@ -3497,6 +3551,22 @@ pub(crate) fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
     static ROWS: std::sync::LazyLock<Vec<BuiltinTypeRow>> = std::sync::LazyLock::new(|| {
         let mut rows = scalar_type_rows().to_vec();
         rows.extend([
+            BuiltinTypeRow {
+                oid: 1263,
+                name: "_cstring",
+                len: -1,
+                category: "A",
+                elem: 2275,
+                array: 0,
+            },
+            BuiltinTypeRow {
+                oid: 2201,
+                name: "_refcursor",
+                len: -1,
+                category: "A",
+                elem: 1790,
+                array: 0,
+            },
             BuiltinTypeRow {
                 oid: 1013,
                 name: "_oidvector",

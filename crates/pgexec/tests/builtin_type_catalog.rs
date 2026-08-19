@@ -271,6 +271,115 @@ async fn pg_type_uses_postgresqls_nonmechanical_io_routine_stems() {
     );
 }
 
+/// `cstring` and `refcursor` are catalog-visible even though application SQL
+/// cannot construct a `cstring` value. Their arrays are used by type-sanity's
+/// routine and core-type probes.
+#[tokio::test]
+async fn pg_type_exposes_cstring_and_refcursor_with_their_arrays() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typlen, typcategory, typtype, typarray, typinput, typoutput, \
+                    typreceive, typsend, typalign, typstorage \
+             FROM pg_type WHERE typname IN ('cstring', '_cstring', 'refcursor', '_refcursor') \
+             ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("_cstring".into()),
+                    Some("-1".into()),
+                    Some("A".into()),
+                    Some("b".into()),
+                    Some("0".into()),
+                    Some("array_in".into()),
+                    Some("array_out".into()),
+                    Some("array_recv".into()),
+                    Some("array_send".into()),
+                    Some("i".into()),
+                    Some("x".into())
+                ],
+                vec![
+                    Some("_refcursor".into()),
+                    Some("-1".into()),
+                    Some("A".into()),
+                    Some("b".into()),
+                    Some("0".into()),
+                    Some("array_in".into()),
+                    Some("array_out".into()),
+                    Some("array_recv".into()),
+                    Some("array_send".into()),
+                    Some("i".into()),
+                    Some("x".into())
+                ],
+                vec![
+                    Some("cstring".into()),
+                    Some("-2".into()),
+                    Some("P".into()),
+                    Some("p".into()),
+                    Some("1263".into()),
+                    Some("cstring_in".into()),
+                    Some("cstring_out".into()),
+                    Some("cstring_recv".into()),
+                    Some("cstring_send".into()),
+                    Some("c".into()),
+                    Some("p".into())
+                ],
+                vec![
+                    Some("refcursor".into()),
+                    Some("-1".into()),
+                    Some("U".into()),
+                    Some("b".into()),
+                    Some("2201".into()),
+                    Some("textin".into()),
+                    Some("textout".into()),
+                    Some("textrecv".into()),
+                    Some("textsend".into()),
+                    Some("i".into()),
+                    Some("x".into())
+                ],
+            ]
+    );
+    assert!(
+        rows(
+            &mut s,
+            "SELECT 'cstring[]'::regtype, 'refcursor'::regtype, \
+                    23::oid != ALL(ARRAY['regproc', 'regprocedure']::regtype[])",
+        )
+        .await
+            == vec![vec![
+                Some("cstring[]".into()),
+                Some("refcursor".into()),
+                Some("t".into())
+            ]]
+    );
+}
+
+/// `type_sanity` uses this regress-library helper to keep `PostgreSQL`'s
+/// hard-coded catalog-index set audited. Its result is the upstream predicate,
+/// not an approximation from Crabkas virtual index rows.
+#[tokio::test]
+async fn catalog_text_unique_index_helper_matches_postgresqls_catalog_oids() {
+    let (_engine, mut s) = session();
+    s.simple_query(
+        "CREATE FUNCTION is_catalog_text_unique_index_oid(oid) RETURNS bool \
+         AS 'regress', 'is_catalog_text_unique_index_oid' LANGUAGE C STRICT",
+    )
+    .await
+    .expect("create the pinned regress helper");
+    assert!(
+        rows(
+            &mut s,
+            "SELECT is_catalog_text_unique_index_oid(3593::oid), \
+                    is_catalog_text_unique_index_oid(6246::oid), \
+                    is_catalog_text_unique_index_oid(3592::oid)",
+        )
+        .await
+            == vec![vec![Some("t".into()), Some("t".into()), Some("f".into())]]
+    );
+}
+
 /// User-defined types use `PostgreSQL`'s shared I/O routines rather than a
 /// made-up routine derived from the type name.
 #[tokio::test]

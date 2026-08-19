@@ -690,6 +690,10 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         (Datum::Oid(x), Datum::Oid(y))
         | (Datum::Xid(x), Datum::Xid(y))
         | (Datum::Cid(x), Datum::Cid(y)) => x.cmp(y),
+        // Every `reg*` datum carries its oid with the output name. It therefore
+        // compares with `oid` through the same binary coercion as PostgreSQL.
+        (Datum::Oid(x), Datum::Regclass(y)) => x.cmp(&(y.oid as u32)),
+        (Datum::Regclass(x), Datum::Oid(y)) => (x.oid as u32).cmp(y),
         (Datum::Xid8(x), Datum::Xid8(y)) | (Datum::PgLsn(x), Datum::PgLsn(y)) => x.cmp(y),
         // `ItemPointerCompare`: block number first, then offset.
         (Datum::Tid(x), Datum::Tid(y)) => x.cmp(y),
@@ -1881,6 +1885,19 @@ mod tests {
         assert_eq!(
             compare(&Datum::Bool(true), &Datum::Bool(true)).expect("ok"),
             Some(Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn oid_and_regclass_compare_by_oid() {
+        let named = Datum::Regclass(crate::RegclassValue::resolved(42, "pg_type"));
+        assert_eq!(
+            compare(&Datum::Oid(42), &named).expect("oid = regclass"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            compare(&named, &Datum::Oid(43)).expect("regclass < oid"),
+            Some(Ordering::Less)
         );
     }
 
