@@ -165,7 +165,11 @@ impl AggFunc {
 /// namespace with ordinary functions, so their name alone is not enough.
 pub(crate) fn is_aggregate_call(call: &FuncCall) -> bool {
     aggregate_func(&call.name).is_some()
-        || crate::useragg::exists_with_arity(&call.name, argument_count(&call.args))
+        || crate::useragg::exists_with_call(
+            &call.name,
+            argument_count(&call.args),
+            call.within_group,
+        )
 }
 
 fn argument_count(args: &FuncArgs) -> usize {
@@ -248,16 +252,21 @@ fn resolve_user(
         return Ok(None);
     }
     // `agg(*)` is how a zero-argument aggregate is called, built-in or not.
-    let args: &[Expr] = match &fc.args {
+    let direct_args: &[Expr] = match &fc.args {
         FuncArgs::Star => &[],
         FuncArgs::Exprs(args) => args,
         FuncArgs::Named { .. } | FuncArgs::Variadic { .. } => return Ok(None),
     };
-    let given = args
+    let ordered_args: Vec<Expr> = fc
+        .within_group
+        .then(|| fc.order_by.iter().map(|item| item.expr.clone()).collect())
+        .unwrap_or_default();
+    let given = direct_args
         .iter()
+        .chain(&ordered_args)
         .map(|arg| crate::eval::infer_type(arg, scope))
         .collect::<Result<Vec<_>, _>>()?;
-    crate::useragg::resolve(&fc.name, args, &given).transpose()
+    crate::useragg::resolve(&fc.name, direct_args, &ordered_args, &given).transpose()
 }
 
 /// Does `e` (or any subexpression) call a known aggregate function?
@@ -634,6 +643,15 @@ fn validate_aggregate_order_by(fc: &FuncCall, scope: &Scope) -> Result<(), ExecE
         reject_nested_aggregate(&item.expr)?;
         let ty = crate::eval::infer_type(&item.expr, scope)?;
         crate::eval::require_ordering_operator(ty)?;
+    }
+    if fc.within_group {
+        if fc.distinct {
+            return Err(ExecError::FunctionError {
+                sqlstate: "0A000",
+                message: "DISTINCT is not implemented for ordered-set aggregates".into(),
+            });
+        }
+        return Ok(());
     }
     if !fc.distinct {
         return Ok(());
@@ -1623,6 +1641,9 @@ struct Acc {
     /// `Some` iff the spec carries a sort: each row's evaluated sort key tuple
     /// beside its argument tuple.
     ordered: Option<Vec<(Vec<Datum>, Vec<Datum>)>>,
+    /// Direct ordered-set arguments are invariant for a group, so retaining
+    /// the first row's values avoids re-evaluating them per transition.
+    direct_args: Option<Vec<Datum>>,
 }
 
 /// The running value of one aggregate.
@@ -1773,6 +1794,7 @@ impl Acc {
             // buffer already carries the argument tuples the dedup runs over.
             distinct: (spec.distinct && !ordered).then(Vec::new),
             ordered: ordered.then(Vec::new),
+            direct_args: None,
         }
     }
 
@@ -1787,6 +1809,11 @@ impl Acc {
         row: &[Datum],
         ctx: &EvalCtx,
     ) -> Result<(), ExecError> {
+        if self.direct_args.is_none()
+            && let Some(user) = &spec.user
+        {
+            self.direct_args = Some(user.direct_values(scope, row, ctx)?);
+        }
         // FILTER comes first: PostgreSQL decides whether the row participates at
         // all before evaluating the argument, so a rejected row does not count for
         // `count(*)` and never enters the DISTINCT buffer. A predicate that is
@@ -1842,7 +1869,12 @@ impl Acc {
                 self.state.fold_args(spec, &args, ctx)?;
             }
         }
-        self.state.finish(spec, ctx)
+        let direct_args = match (&spec.user, self.direct_args.as_deref()) {
+            (Some(_), Some(args)) => args.to_vec(),
+            (Some(user), None) => user.direct_values(&Scope::default(), &[], ctx)?,
+            (None, _) => Vec::new(),
+        };
+        self.state.finish(spec, &direct_args, ctx)
     }
 }
 
@@ -2351,7 +2383,12 @@ impl AccState {
         Ok(())
     }
 
-    fn finish(&self, spec: &AggSpec, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    fn finish(
+        &self,
+        spec: &AggSpec,
+        direct_args: &[Datum],
+        ctx: &EvalCtx,
+    ) -> Result<Datum, ExecError> {
         Ok(match self {
             AccState::User { state } => {
                 let user = spec
@@ -2362,7 +2399,7 @@ impl AccState {
                     Some(current) => current.clone(),
                     None => user.initial_state(ctx)?,
                 };
-                return user.finish(&current, ctx);
+                return user.finish(&current, direct_args, ctx);
             }
             AccState::Count { n } => Datum::Int8(*n),
             AccState::SumI { acc } => acc.map(Datum::Int8).unwrap_or(Datum::Null),
@@ -2641,6 +2678,7 @@ fn build_jsonb(builder: &str, args: Vec<Datum>, ctx: &EvalCtx) -> Result<Datum, 
                 .collect(),
         ),
         order_by: Vec::new(),
+        within_group: false,
         filter: None,
     };
     crate::json_fn::eval_json(&call, ctx, |e| match e {

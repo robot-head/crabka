@@ -10,7 +10,7 @@ use crabka_pgparser::{
     ParseError,
     ast::{
         AggregateArgs, AggregateOption, AggregateSignature, AlterRoutineAction,
-        CreateAggregateStmt, RoutineArg, RoutineArgMode, RoutineType, Statement,
+        CreateAggregateStmt, Expr, RoutineArg, RoutineArgMode, RoutineType, Statement,
     },
     command::CommandIdentity,
     parse, parse_with_command_identities,
@@ -625,29 +625,59 @@ fn parses_alter_aggregate_on_the_star_form() {
 }
 
 // ---------------------------------------------------------------------------
-// Refusals
+// Ordered-set signatures
 // ---------------------------------------------------------------------------
 
 #[test]
-fn refuses_the_ordered_set_spellings() {
-    let cases = [
-        "create aggregate my_percentile_disc(float8 ORDER BY anyelement) (
+fn parses_ordered_and_hypothetical_set_signatures() {
+    let ordered = create(
+        "CREATE AGGREGATE my_percentile_disc(float8 ORDER BY anyelement) (
            stype = internal, sfunc = ordered_set_transition,
-           finalfunc = percentile_disc_final, finalfunc_extra = true,
-           finalfunc_modify = read_write)",
-        "create aggregate my_rank(VARIADIC \"any\" ORDER BY VARIADIC \"any\") (
-           stype = internal, sfunc = ordered_set_transition_multi,
-           finalfunc = rank_final, finalfunc_extra = true, hypothetical)",
-        "CREATE OR REPLACE AGGREGATE myavg (order by numeric) (stype = numeric, sfunc = numeric_add)",
-        "alter aggregate my_percentile_disc(float8 ORDER BY anyelement) rename to test_percentile_disc",
-        "alter aggregate my_rank(VARIADIC \"any\" ORDER BY VARIADIC \"any\") rename to test_rank",
-        "DROP AGGREGATE my_rank(VARIADIC \"any\" ORDER BY VARIADIC \"any\")",
-    ];
-    for sql in cases {
-        let e = error(sql);
-        assert!(e.sqlstate() == "0A000");
-        assert!(e.message == "ordered-set aggregates are not supported");
-    }
+           finalfunc = percentile_disc_final, finalfunc_extra = true)",
+    );
+    assert!(ordered.args == Some(AggregateArgs::Ordered {
+        direct: vec![arg(builtin(ColumnType::Float8))],
+        ordered: vec![arg(named("anyelement"))],
+    }));
+    assert!(ordered.options.contains(&AggregateOption::Unimplemented {
+        name: "finalfunc_extra".into(),
+        value: "true".into(),
+    }));
+
+    let hypothetical = create(
+        "CREATE AGGREGATE my_rank(VARIADIC \"any\" ORDER BY VARIADIC \"any\") (
+           stype = internal, sfunc = ordered_set_transition_multi, hypothetical)",
+    );
+    assert!(hypothetical.args == Some(AggregateArgs::Ordered {
+        direct: vec![RoutineArg {
+            name: None,
+            mode: RoutineArgMode::Variadic,
+            ty: named("any"),
+            default: None,
+        }],
+        ordered: vec![RoutineArg {
+            name: None,
+            mode: RoutineArgMode::Variadic,
+            ty: named("any"),
+            default: None,
+        }],
+    }));
+    assert!(hypothetical.options.contains(&AggregateOption::Hypothetical));
+}
+
+#[test]
+fn parses_within_group_as_an_ordered_set_call() {
+    let Expr::Func(call) = crabka_pgparser::parser::parse_expression(
+        "n16_ordered(0.5) WITHIN GROUP (ORDER BY value DESC)",
+    )
+    .expect("parses")
+    else {
+        panic!("expected a function call");
+    };
+    assert!(call.name == "n16_ordered");
+    assert!(call.within_group);
+    assert!(call.order_by.len() == 1);
+    assert!(!call.order_by[0].asc);
 }
 
 #[test]

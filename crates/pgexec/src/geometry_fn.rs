@@ -718,6 +718,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(exprs),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
         let ctx = EvalCtx::test_default();

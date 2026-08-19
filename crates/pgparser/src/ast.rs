@@ -4089,6 +4089,11 @@ pub struct FuncCall {
     /// key evaluation, direction and NULL placement it sorts a result set with.
     /// Only an aggregate may carry one; a scalar call with a sort is `42809`.
     pub order_by: Vec<OrderItem>,
+    /// `agg(direct_args) WITHIN GROUP (ORDER BY ordered_args)` — marks that
+    /// [`Self::order_by`] belongs to the ordered-set syntax rather than the
+    /// ordinary per-aggregate input sort. The two spellings have different
+    /// argument binding rules and must not be conflated by the executor.
+    pub within_group: bool,
     /// `agg(args) FILTER (WHERE predicate)` — only rows for which the predicate
     /// is true are fed to the aggregate. `None` when the call had no clause.
     ///
@@ -4967,6 +4972,13 @@ pub enum AggregateArgs {
     Star,
     /// A written argument list, which may be empty.
     Args(Vec<RoutineArg>),
+    /// `direct_args ORDER BY ordered_args` — the signature of an ordered-set
+    /// or hypothetical-set aggregate. The complete routine signature is their
+    /// concatenation, while a call supplies the two sets in separate clauses.
+    Ordered {
+        direct: Vec<RoutineArg>,
+        ordered: Vec<RoutineArg>,
+    },
 }
 
 /// One `option = value` pair from an aggregate definition.

@@ -502,6 +502,7 @@ pub(crate) fn niladic_keyword_call(name: &str) -> Option<FuncCall> {
         distinct: false,
         args: FuncArgs::Exprs(Vec::new()),
         order_by: Vec::new(),
+        within_group: false,
         filter: None,
     })
 }

@@ -1630,6 +1630,7 @@ impl Parser {
                     distinct: false,
                     args: crate::ast::FuncArgs::Exprs(vec![]),
                     order_by: Vec::new(),
+                    within_group: false,
                     filter: None,
                 }))
             }
@@ -1707,6 +1708,7 @@ impl Parser {
                         distinct: false,
                         args: crate::ast::FuncArgs::Exprs(vec![]),
                         order_by: Vec::new(),
+                        within_group: false,
                         filter: None,
                     }));
                 }
@@ -1968,7 +1970,7 @@ impl Parser {
         // `f(*)` — the star form (no DISTINCT, no other args, and no sort:
         // `count(* ORDER BY x)` is a syntax error in `PostgreSQL` too, which the
         // `)` this branch demands reports.
-        let (distinct, args, order_by) = if *self.peek() == Token::Star {
+        let (distinct, args, mut order_by) = if *self.peek() == Token::Star {
             self.bump();
             self.expect(&Token::RParen)?;
             (false, FuncArgs::Star, Vec::new())
@@ -2064,8 +2066,35 @@ impl Parser {
             self.expect(&Token::RParen)?;
             (distinct, args, order_by)
         };
+        let within_group = self.eat_word_eq("within");
+        if within_group {
+            if !order_by.is_empty() {
+                return Err(ParseError::new_sqlstate(
+                    "42601",
+                    "cannot use multiple ORDER BY clauses with WITHIN GROUP",
+                    self.peek_pos(),
+                ));
+            }
+            self.expect(&Token::Keyword(Keyword::Group))?;
+            self.expect(&Token::LParen)?;
+            order_by = self.parse_order_by()?;
+            if order_by.is_empty() {
+                return Err(ParseError::new(
+                    "WITHIN GROUP requires an ORDER BY clause",
+                    self.peek_pos(),
+                ));
+            }
+            self.expect(&Token::RParen)?;
+        }
         let filter = self.opt_filter_clause()?;
         let over = self.opt_over_clause()?;
+        if within_group && over.is_some() {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "WITHIN GROUP is not allowed for window functions",
+                self.peek_pos(),
+            ));
+        }
         if !order_by.is_empty() && over.is_some() {
             // `PostgreSQL` refuses the windowed spelling itself, with this
             // SQLSTATE and this message. A window's own frame already fixes the
@@ -2088,6 +2117,7 @@ impl Parser {
                 distinct,
                 args,
                 order_by,
+                within_group,
                 filter: filter.map(Box::new),
             }));
         };
@@ -2526,6 +2556,7 @@ impl Parser {
             distinct: false,
             args: FuncArgs::Exprs(args),
             order_by,
+            within_group: false,
             filter: None,
         }))
     }
@@ -2763,6 +2794,7 @@ impl Parser {
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral(field), source]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         }))
     }
@@ -3187,6 +3219,7 @@ impl Parser {
             distinct: false,
             args: crate::ast::FuncArgs::Exprs(args),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         })
     }
@@ -14540,7 +14573,7 @@ impl Parser {
 
     /// Is the current token a word that ends a routine parameter?
     fn at_routine_arg_end(&self) -> bool {
-        matches!(self.peek(), Token::Comma | Token::RParen | Token::Eq)
+        matches!(self.peek(), Token::Comma | Token::RParen | Token::Eq | Token::Keyword(Keyword::Order))
             || self.peek_ident_eq("default")
     }
 
@@ -15120,60 +15153,41 @@ impl Parser {
         matches!(self.peek_n(offset), Token::Ident(word) if word.eq_ignore_ascii_case("aggregate"))
     }
 
-    /// Refuse the ordered-set and hypothetical-set spellings, whose argument
-    /// list carries a top-level `ORDER BY` (`my_rank(VARIADIC "any" ORDER BY
-    /// VARIADIC "any")`). Those aggregates accumulate a sorted input, which this
-    /// engine's aggregate path cannot do, so the statement is refused up front
-    /// with `0A000` rather than silently dropping the sort — the same choice
-    /// [`Parser::func_call`] makes for a call-site aggregate `ORDER BY`.
-    ///
-    /// The cursor is left where it was: this only looks. A `(` that never
-    /// closes is left for the argument-list parser to report.
-    fn reject_ordered_set_aggregate(&self) -> Result<(), ParseError> {
-        if *self.peek() != Token::LParen {
-            return Ok(());
-        }
-        let mut depth = 0usize;
-        let mut offset = 0usize;
-        loop {
-            match self.peek_n(offset) {
-                Token::LParen => depth += 1,
-                Token::RParen => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return Ok(());
-                    }
-                }
-                // `ORDER` only ever separates the direct arguments from the
-                // ordered ones at the top level of the list; deeper down it
-                // would be inside a type modifier, which cannot hold one.
-                Token::Keyword(Keyword::Order) if depth == 1 => {
-                    return Err(ParseError::new_sqlstate(
-                        "0A000",
-                        "ordered-set aggregates are not supported",
-                        self.peek_pos(),
-                    ));
-                }
-                Token::Eof | Token::Semicolon => return Ok(()),
-                _ => {}
-            }
-            offset += 1;
-        }
-    }
-
     /// `( * )` or `( argtype [, …] )` — the argument spelling shared by
     /// `CREATE`, `DROP` and `ALTER AGGREGATE`.
     fn aggregate_args(&mut self) -> Result<crate::ast::AggregateArgs, ParseError> {
         use crate::ast::AggregateArgs;
 
-        self.reject_ordered_set_aggregate()?;
         if *self.peek() == Token::LParen && *self.peek2() == Token::Star {
             self.bump();
             self.bump();
             self.expect(&Token::RParen)?;
             return Ok(AggregateArgs::Star);
         }
-        Ok(AggregateArgs::Args(self.routine_arg_list()?))
+        self.expect(&Token::LParen)?;
+        let mut direct = Vec::new();
+        if *self.peek() != Token::Keyword(Keyword::Order) {
+            loop {
+                direct.push(self.routine_arg()?);
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+        }
+        if !self.eat_keyword(Keyword::Order) {
+            self.expect(&Token::RParen)?;
+            return Ok(AggregateArgs::Args(direct));
+        }
+        self.expect(&Token::Keyword(Keyword::By))?;
+        let mut ordered = Vec::new();
+        loop {
+            ordered.push(self.routine_arg()?);
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(AggregateArgs::Ordered { direct, ordered })
     }
 
     /// Is the `(` at the cursor the old-style definition list — the spelling
@@ -15551,6 +15565,7 @@ fn timezone_call(args: Vec<Expr>) -> Expr {
         distinct: false,
         args: crate::ast::FuncArgs::Exprs(args),
         order_by: Vec::new(),
+        within_group: false,
         filter: None,
     })
 }
@@ -18013,6 +18028,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(vec![]),
             order_by: vec![],
+            within_group: false,
             filter: None,
         });
         for sql in ["CURRENT_USER", "USER"] {
@@ -18602,6 +18618,7 @@ mod tests {
                         distinct: false,
                         args: FuncArgs::Exprs(vec![]),
                         order_by: Vec::new(),
+                        within_group: false,
                         filter: None,
                     }),
                 "niladic `{name}`"
@@ -18616,6 +18633,7 @@ mod tests {
                     distinct: false,
                     args: FuncArgs::Exprs(vec![]),
                     order_by: Vec::new(),
+                    within_group: false,
                     filter: None,
                 })
         );
@@ -19259,6 +19277,7 @@ mod tests {
                     distinct: false,
                     args: FuncArgs::Star,
                     ref order_by,
+                    within_group: false,
                     filter: None,
                 }),
                 ..
@@ -19289,6 +19308,7 @@ mod tests {
                         distinct,
                         args,
                         order_by,
+                        within_group: false,
                         filter: None,
                     }),
                 ..

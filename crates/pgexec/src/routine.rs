@@ -1506,6 +1506,7 @@ pub(crate) fn normalize_named_call(
         distinct: call.distinct,
         args: FuncArgs::Exprs(args),
         order_by: call.order_by.clone(),
+        within_group: call.within_group,
         filter: call.filter.clone(),
     }))
 }
@@ -1562,6 +1563,7 @@ fn normalize_builtin_named_call(call: &FuncCall) -> Result<Option<FuncCall>, Exe
         distinct: call.distinct,
         args: FuncArgs::Exprs(matches.into_iter().next().expect("one matching signature")),
         order_by: call.order_by.clone(),
+        within_group: call.within_group,
         filter: call.filter.clone(),
     }))
 }
@@ -2947,6 +2949,7 @@ fn substitute(
                     })
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?,
+            within_group: call.within_group,
             filter: call.filter.as_deref().map(boxed).transpose()?,
         }),
         Expr::IsNull { expr, negated } => Expr::IsNull {
@@ -4794,6 +4797,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(Vec::new()),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
         let (request_tx, mut request_rx) = tokio::sync::mpsc::channel::<ScalarFunctionRequest>(1);
@@ -4854,6 +4858,7 @@ mod tests {
             distinct,
             args: FuncArgs::Exprs(Vec::new()),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
 
@@ -4910,6 +4915,7 @@ mod tests {
                 ty: ColumnType::Int4,
             }]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
         let error = with_scalar_runtime(&catalog, None, || {
@@ -5355,6 +5361,7 @@ mod tests {
                 named: vec![("timeout".into(), Expr::IntLiteral("1".into()))],
             },
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
 
@@ -5534,6 +5541,7 @@ mod tests {
                 Expr::IntLiteral("2".into()),
             ]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
         let inlined = inline_scalar_call(
@@ -5572,6 +5580,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::IntLiteral("4".into())]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
         let inlined = inline_scalar_call(&kv, &call, &[ArgType::Known(ColumnType::Int4)])
@@ -5599,6 +5608,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral("x".into())]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
         assert!(inline_scalar(&kv, &call).expect("no error").is_none());
@@ -5623,6 +5633,7 @@ mod tests {
                 Expr::IntLiteral("23".into()),
             ]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         });
         let scope = crate::scope::Scope::empty();
@@ -5651,6 +5662,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral("value".into())]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         });
 
@@ -5786,6 +5798,7 @@ mod tests {
                     .collect(),
             ),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
         assert!(inline_scalar(catalog.as_ref(), &call)?.is_none());
@@ -5972,6 +5985,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(vec![text("a"), text("b")]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         });
         let scope = crate::scope::Scope::empty();
@@ -6107,6 +6121,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::IntLiteral("1".into())]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         };
         let error = inline_scalar(&kv, &call).expect_err("a procedure is not selectable");

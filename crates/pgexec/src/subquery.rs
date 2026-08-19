@@ -484,6 +484,7 @@ pub(crate) fn resolve_expr_skipping(
                         })
                     })
                     .collect::<Result<Vec<_>, ExecError>>()?,
+                within_group: fc.within_group,
                 // The FILTER predicate resolves like an argument; dropping it here
                 // would silently turn a filtered aggregate into an unfiltered one.
                 filter: match &fc.filter {
@@ -973,6 +974,7 @@ fn resolve_types_in_call(
                 })
             })
             .collect::<Result<Vec<_>, ExecError>>()?,
+        within_group: fc.within_group,
         filter: match &fc.filter {
             Some(predicate) => Some(Box::new(resolve_types_in_expr(
                 catalog_kv, resolution, predicate, ctes,

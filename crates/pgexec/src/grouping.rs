@@ -945,6 +945,7 @@ pub(crate) fn rewrite(
             distinct,
             args,
             order_by,
+            within_group,
             filter,
         }) => Expr::Func(FuncCall {
             sql_syntax: *sql_syntax,
@@ -972,6 +973,7 @@ pub(crate) fn rewrite(
             // canonicalization above all, which is what lets a sort key be
             // matched against the argument list under DISTINCT.
             order_by: rewrite_order_by(order_by, fold, into_aggregates)?,
+            within_group: *within_group,
             // A FILTER predicate is an ordinary expression over the same rows, so
             // it is rewritten exactly like the arguments.
             filter: match filter {

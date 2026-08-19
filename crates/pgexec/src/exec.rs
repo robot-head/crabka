@@ -5966,6 +5966,7 @@ fn rewrite_image_refs(expr: &Expr, aliases: &ImageAliases<'_>) -> Expr {
                     nulls_first: item.nulls_first,
                 })
                 .collect(),
+            within_group: fc.within_group,
             // The FILTER predicate is rewritten like an argument; dropping it
             // would turn a filtered aggregate into an unfiltered one.
             filter: fc.filter.as_deref().map(recurse),
@@ -13413,6 +13414,7 @@ fn initplan_marker(index: usize, lhs: Option<Expr>) -> Expr {
         distinct: false,
         args: FuncArgs::Exprs(args),
         order_by: Vec::new(),
+        within_group: false,
         filter: None,
     })
 }
@@ -13424,6 +13426,7 @@ fn initplan_parts(expr: &Expr) -> Option<(usize, Option<&Expr>)> {
         distinct: false,
         args: FuncArgs::Exprs(args),
         order_by,
+        within_group: false,
         filter: None,
     }) = expr
     else {
@@ -13448,6 +13451,7 @@ fn scalar_lookup_marker(index: usize, key: Expr) -> Expr {
         distinct: false,
         args: FuncArgs::Exprs(vec![Expr::IntLiteral(index.to_string()), key]),
         order_by: Vec::new(),
+        within_group: false,
         filter: None,
     })
 }
@@ -13459,6 +13463,7 @@ fn scalar_lookup_parts(expr: &Expr) -> Option<(usize, &Expr)> {
         distinct: false,
         args: FuncArgs::Exprs(args),
         order_by,
+        within_group: false,
         filter: None,
     }) = expr
     else {

@@ -1248,6 +1248,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(Vec::new()),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         }
     }

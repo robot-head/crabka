@@ -1404,6 +1404,7 @@ fn scalar_builtin_call(call: &TableFuncCall) -> Result<Option<FuncCall>, ExecErr
         distinct: false,
         args: FuncArgs::Exprs(call.args.clone()),
         order_by: Vec::new(),
+        within_group: false,
         filter: None,
         sql_syntax: false,
     };

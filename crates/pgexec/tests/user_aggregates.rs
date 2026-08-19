@@ -195,15 +195,73 @@ async fn a_definition_is_refused_the_way_postgresql_refuses_it() {
             "CREATE AGGREGATE bad (int4) (SFUNC = nosuchfn, STYPE = int4)",
             "function nosuchfn(integer, integer) does not exist",
         ),
-        (
-            "CREATE AGGREGATE bad (float8 ORDER BY anyelement) (SFUNC = addint, STYPE = int4)",
-            "ordered-set aggregates are not supported",
-        ),
     ];
     for (sql, expected) in cases {
         let message = error(&engine, sql).await;
         assert!(message.contains(expected), "{sql}\ngave: {message}");
     }
+}
+
+#[tokio::test]
+async fn ordered_set_aggregates_sort_transition_rows_and_bind_direct_final_args() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE FUNCTION n16_ordered_trans(text, int4) RETURNS text LANGUAGE sql AS \
+         'select $1 || $2::text'",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE FUNCTION n16_ordered_final(text, float8, int4) RETURNS text LANGUAGE sql AS \
+         'select $2::text'",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE AGGREGATE n16_ordered(float8 ORDER BY int4) (SFUNC = n16_ordered_trans, \
+         STYPE = text, INITCOND = '', FINALFUNC = n16_ordered_final, FINALFUNC_EXTRA = true)",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE AGGREGATE n16_ordered_state(float8 ORDER BY int4) (SFUNC = n16_ordered_trans, \
+         STYPE = text, INITCOND = '')",
+    )
+    .await;
+
+    assert!(
+        grid(
+            &engine,
+            "SELECT n16_ordered_state(0.5) WITHIN GROUP (ORDER BY f1 DESC), \
+             n16_ordered(0.5) WITHIN GROUP (ORDER BY f1) FROM t",
+        )
+        .await
+            == vec![some(&["321", "0.5"])]
+    );
+    assert!(
+        error(
+            &engine,
+            "SELECT n16_ordered(DISTINCT 0.5) WITHIN GROUP (ORDER BY f1) FROM t",
+        )
+        .await
+        .contains("DISTINCT is not implemented for ordered-set aggregates")
+    );
+
+    run(
+        &engine,
+        "CREATE AGGREGATE n16_plain(*) (SFUNC = int8inc, STYPE = int8, INITCOND = '0')",
+    )
+    .await;
+    let plain_error = error(
+        &engine,
+        "SELECT n16_plain(*) WITHIN GROUP (ORDER BY f1) FROM t",
+    )
+    .await;
+    assert!(
+        plain_error.contains("function n16_plain(...) does not exist"),
+        "{plain_error}"
+    );
 }
 
 #[tokio::test]

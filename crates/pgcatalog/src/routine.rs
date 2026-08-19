@@ -229,6 +229,16 @@ pub struct AggregateDefinition {
     pub finalfn: Option<String>,
     /// `pg_aggregate.agginitval`: the initial state's text representation.
     pub initcond: Option<String>,
+    /// Parameters before `ORDER BY` in an ordered-set signature. Zero for an
+    /// ordinary aggregate.
+    pub direct_args: usize,
+    /// Parameters after `ORDER BY` in an ordered-set signature. Zero for an
+    /// ordinary aggregate.
+    pub ordered_args: usize,
+    /// Whether the final function receives NULL placeholders for every input.
+    pub finalfunc_extra: bool,
+    /// Whether an ordered-set aggregate is hypothetical-set.
+    pub hypothetical: bool,
     /// Options this engine records for catalog fidelity but does not execute,
     /// each already spelled `name=value`.
     pub unimplemented: Vec<String>,
@@ -433,7 +443,7 @@ pub fn drop_routine_ops(identity: &str) -> Vec<WriteOp> {
     }]
 }
 
-const ROUTINE_VERSION: u8 = 3;
+const ROUTINE_VERSION: u8 = 4;
 
 fn write_routine_type(out: &mut Vec<u8>, ty: &RoutineType) {
     match ty.column {
@@ -507,6 +517,10 @@ fn write_aggregate(out: &mut Vec<u8>, aggregate: Option<&AggregateDefinition>) {
     write_routine_type(out, &aggregate.transtype);
     write_opt_str(out, aggregate.finalfn.as_deref());
     write_opt_str(out, aggregate.initcond.as_deref());
+    write_count(out, aggregate.direct_args);
+    write_count(out, aggregate.ordered_args);
+    out.push(u8::from(aggregate.finalfunc_extra));
+    out.push(u8::from(aggregate.hypothetical));
     write_count(out, aggregate.unimplemented.len());
     for option in &aggregate.unimplemented {
         write_str(out, option);
@@ -523,6 +537,10 @@ fn read_aggregate(cur: &mut &[u8]) -> Result<Option<AggregateDefinition>, KvErro
             let transtype = read_routine_type(cur)?;
             let finalfn = read_opt_str(cur)?;
             let initcond = read_opt_str(cur)?;
+            let direct_args = read_count(cur)?;
+            let ordered_args = read_count(cur)?;
+            let finalfunc_extra = take_u8(cur)? != 0;
+            let hypothetical = take_u8(cur)? != 0;
             let count = read_count(cur)?;
             let mut unimplemented = Vec::with_capacity(count.min(1024));
             for _ in 0..count {
@@ -533,6 +551,10 @@ fn read_aggregate(cur: &mut &[u8]) -> Result<Option<AggregateDefinition>, KvErro
                 transtype,
                 finalfn,
                 initcond,
+                direct_args,
+                ordered_args,
+                finalfunc_extra,
+                hypothetical,
                 unimplemented,
             }))
         }
@@ -796,6 +818,10 @@ mod tests {
                 transtype: RoutineType::named("_int8".into()),
                 finalfn: Some("int8_avg".into()),
                 initcond: Some("{0,0}".into()),
+                direct_args: 0,
+                ordered_args: 0,
+                finalfunc_extra: false,
+                hypothetical: false,
                 unimplemented: vec!["parallel=safe".into(), "sortop=<".into()],
             }),
             ..sample()
@@ -932,6 +958,10 @@ mod tests {
                 transtype: RoutineType::builtin(ColumnType::Int4),
                 finalfn: None,
                 initcond: None,
+                direct_args: 0,
+                ordered_args: 0,
+                finalfunc_extra: false,
+                hypothetical: false,
                 unimplemented: Vec::new(),
             }),
             ..sample_aggregate()
@@ -941,6 +971,19 @@ mod tests {
             assert!(bytes[0] == ROUTINE_VERSION);
             assert!(deserialize_routine(&bytes).expect("decodes") == routine);
         }
+    }
+
+    #[test]
+    fn round_trips_ordered_set_aggregate_metadata() {
+        let mut routine = sample_aggregate();
+        let aggregate = routine.aggregate.as_mut().expect("sample is an aggregate");
+        aggregate.direct_args = 1;
+        aggregate.ordered_args = 1;
+        aggregate.finalfunc_extra = true;
+        aggregate.hypothetical = true;
+
+        let bytes = serialize_routine(&routine);
+        assert!(deserialize_routine(&bytes).expect("decodes") == routine);
     }
 
     #[test]

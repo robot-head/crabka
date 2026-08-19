@@ -1537,6 +1537,14 @@ fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
         // the operator node it holds brings whatever it needs.
         format!(" FILTER (WHERE {})", expr_text(predicate, ctx))
     });
+    if call.within_group {
+        return format!(
+            "{}({}{args}) WITHIN GROUP (ORDER BY {}){filter}",
+            call.name,
+            if call.distinct { "DISTINCT " } else { "" },
+            order_list(&call.order_by, ctx),
+        );
+    }
     format!(
         "{}({}{args}{order_by}){filter}",
         call.name,

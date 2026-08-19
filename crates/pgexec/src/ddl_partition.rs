@@ -485,6 +485,7 @@ mod tests {
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::IntLiteral("1".into())]),
             order_by: Vec::new(),
+            within_group: false,
             filter: None,
         })
     }

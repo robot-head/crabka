@@ -17,7 +17,7 @@
 //! catalog still describes what was written: the moving-aggregate family
 //! (`MSFUNC`/`MSTYPE`/`MINVFUNC`/`MINITCOND`), parallel aggregation
 //! (`COMBINEFUNC`/`SERIALFUNC`/`DESERIALFUNC`, which have no plan to run in),
-//! `SORTOP`, `SSPACE`, `FINALFUNC_EXTRA` and `FINALFUNC_MODIFY`.
+//! `SORTOP`, `SSPACE` and `FINALFUNC_MODIFY`.
 
 use std::sync::Arc;
 
@@ -141,23 +141,33 @@ pub(crate) fn create(
 /// spelling. The old-style form carries its single argument in `BASETYPE`,
 /// where `'ANY'` means "takes one argument of any type" — this engine records
 /// that the same way `(*)` is recorded, since it has no `"any"` value model.
+struct DeclaredArgs {
+    params: Vec<RoutineParam>,
+    direct_count: usize,
+    ordered_count: usize,
+}
+
 fn declared_args(
     kv: &dyn Kv,
     stmt: &CreateAggregateStmt,
     options: &Collected,
-) -> Result<Vec<RoutineParam>, ExecError> {
-    let args = match &stmt.args {
-        Some(AggregateArgs::Star) => Vec::new(),
+) -> Result<DeclaredArgs, ExecError> {
+    let (args, direct_count, ordered_count) = match &stmt.args {
+        Some(AggregateArgs::Star) => (Vec::new(), 0, 0),
         None => match options.basetype.value() {
-            Some(ty) => vec![RoutineParam {
-                name: None,
-                mode: ParamMode::In,
-                ty: crate::routine::resolve_routine_type(kv, ty, false)?,
-                default: None,
-            }],
+            Some(ty) => (
+                vec![RoutineParam {
+                    name: None,
+                    mode: ParamMode::In,
+                    ty: crate::routine::resolve_routine_type(kv, ty, false)?,
+                    default: None,
+                }],
+                0,
+                0,
+            ),
             // `(*)`, an absent BASETYPE, and `BASETYPE = 'ANY'` all describe an
             // aggregate with no declared argument type.
-            None => Vec::new(),
+            None => (Vec::new(), 0, 0),
         },
         Some(AggregateArgs::Args(args)) => args
             .iter()
@@ -169,9 +179,31 @@ fn declared_args(
                     default: None,
                 })
             })
-            .collect::<Result<Vec<_>, ExecError>>()?,
+            .collect::<Result<Vec<_>, ExecError>>()
+            .map(|params| (params, 0, 0))?,
+        Some(AggregateArgs::Ordered { direct, ordered }) => {
+            let direct_count = direct.len();
+            let ordered_count = ordered.len();
+            direct
+                .iter()
+                .chain(ordered)
+                .map(|arg| {
+                    Ok(RoutineParam {
+                        name: arg.name.clone(),
+                        mode: ParamMode::In,
+                        ty: crate::routine::resolve_routine_type(kv, &arg.ty, false)?,
+                        default: None,
+                    })
+                })
+                .collect::<Result<Vec<_>, ExecError>>()
+                .map(|params| (params, direct_count, ordered_count))?
+        }
     };
-    Ok(args)
+    Ok(DeclaredArgs {
+        params: args,
+        direct_count,
+        ordered_count,
+    })
 }
 
 /// The options an aggregate definition supplied, after folding the numbered
@@ -186,6 +218,8 @@ struct Collected {
     /// the first lets a strict transition function bootstrap from the first row.
     initcond: Written<String>,
     basetype: Written<crabka_pgparser::ast::RoutineType>,
+    finalfunc_extra: bool,
+    hypothetical: bool,
     unimplemented: Vec<String>,
 }
 
@@ -232,11 +266,14 @@ impl Collected {
                 AggregateOption::BaseType(ty) => {
                     collected.basetype = Written::from_option(ty.clone());
                 }
+                AggregateOption::Unimplemented { name, value } if name == "finalfunc_extra" => {
+                    collected.finalfunc_extra = value == "true";
+                }
                 AggregateOption::Unimplemented { name, value } => {
                     collected.unimplemented.push(format!("{name}={value}"));
                 }
                 AggregateOption::Hypothetical => {
-                    collected.unimplemented.push("hypothetical=true".into());
+                    collected.hypothetical = true;
                 }
             }
         }
@@ -246,7 +283,8 @@ impl Collected {
 
 fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine, ExecError> {
     let options = Collected::of(&stmt.options);
-    let params = declared_args(kv, stmt, &options)?;
+    let declared = declared_args(kv, stmt, &options)?;
+    let params = declared.params;
     let Some(sfunc) = options.sfunc.clone() else {
         return Err(invalid_definition("aggregate sfunc must be specified"));
     };
@@ -270,13 +308,21 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
         });
     }
     let mut wanted = vec![transtype.clone()];
-    wanted.extend(params.iter().map(|param| param.ty.clone()));
+    wanted.extend(
+        params[declared.direct_count..]
+            .iter()
+            .map(|param| param.ty.clone()),
+    );
     // The lookup is the validation: PostgreSQL refuses a definition whose
     // support function does not exist with exactly this signature.
     lookup(kv, &sfunc, &wanted)?;
     let result = match &options.finalfunc {
         Some(finalfunc) => {
-            let function = lookup(kv, finalfunc, std::slice::from_ref(&transtype))?;
+            let mut wanted = vec![transtype.clone()];
+            if options.finalfunc_extra {
+                wanted.extend(params.iter().map(|param| param.ty.clone()));
+            }
+            let function = lookup(kv, finalfunc, &wanted)?;
             function.result()
         }
         None => RoutineResult::Type {
@@ -311,6 +357,10 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
             transtype,
             finalfn: options.finalfunc.clone(),
             initcond: options.initcond.value().cloned(),
+            direct_args: declared.direct_count,
+            ordered_args: declared.ordered_count,
+            finalfunc_extra: options.finalfunc_extra,
+            hypothetical: options.hypothetical,
             unimplemented: options.unimplemented,
         }),
     })
@@ -557,6 +607,11 @@ fn resolve_signature(
             .iter()
             .map(|arg| Ok(crate::routine::resolve_routine_type(kv, &arg.ty, false)?.name))
             .collect::<Result<Vec<_>, ExecError>>()?,
+        AggregateArgs::Ordered { direct, ordered } => direct
+            .iter()
+            .chain(ordered)
+            .map(|arg| Ok(crate::routine::resolve_routine_type(kv, &arg.ty, false)?.name))
+            .collect::<Result<Vec<_>, ExecError>>()?,
     };
     let identity = signature_identity(&signature.name, &names);
     Ok(get_routine(kv, &identity)?.filter(Routine::is_aggregate))
@@ -569,6 +624,20 @@ fn spelled(signature: &AggregateSignature) -> String {
             "{}({})",
             signature.name,
             args.iter()
+                .map(|arg| arg.ty.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        AggregateArgs::Ordered { direct, ordered } => format!(
+            "{}({} ORDER BY {})",
+            signature.name,
+            direct
+                .iter()
+                .map(|arg| arg.ty.name.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+            ordered
+                .iter()
                 .map(|arg| arg.ty.name.clone())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -592,12 +661,20 @@ pub(crate) fn exists(name: &str) -> bool {
 }
 
 /// Does a user aggregate with this call arity exist in the statement catalog?
-pub(crate) fn exists_with_arity(name: &str, arity: usize) -> bool {
+pub(crate) fn exists_with_call(name: &str, arity: usize, within_group: bool) -> bool {
     with_catalog(|kv| {
         routines_named(kv, name).is_ok_and(|found| {
-            found
-                .iter()
-                .any(|routine| routine.is_aggregate() && routine.input_params().count() == arity)
+            found.iter().any(|routine| {
+                let Some(definition) = routine.aggregate.as_ref() else {
+                    return false;
+                };
+                routine.is_aggregate()
+                    && if within_group {
+                        definition.ordered_args > 0 && definition.direct_args == arity
+                    } else {
+                        definition.ordered_args == 0 && routine.input_params().count() == arity
+                    }
+            })
         })
     })
     .unwrap_or(false)
@@ -614,6 +691,9 @@ fn with_catalog<T>(f: impl FnOnce(&dyn Kv) -> T) -> Option<T> {
 pub(crate) struct UserAggregate {
     /// The call's argument expressions, in declaration order.
     pub(crate) args: Vec<Expr>,
+    /// `WITHIN GROUP`'s direct arguments, evaluated once per group and passed
+    /// to an extra-argument final function rather than to each transition.
+    direct_args: Vec<Expr>,
     /// The transition expression over [`Self::transition_scope`].
     transition: Expr,
     transition_scope: Scope,
@@ -621,6 +701,8 @@ pub(crate) struct UserAggregate {
     /// written.
     final_expr: Option<Expr>,
     final_scope: Scope,
+    finalfunc_extra: bool,
+    ordered_args: usize,
     /// The resolved state type.
     state_type: ColumnType,
     /// The aggregate's resolved result type.
@@ -674,10 +756,33 @@ impl UserAggregate {
     }
 
     /// The group's answer, once every row has been folded.
-    pub(crate) fn finish(&self, state: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    pub(crate) fn direct_values(
+        &self,
+        scope: &Scope,
+        row: &[Datum],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<Datum>, ExecError> {
+        self.direct_args
+            .iter()
+            .map(|arg| crate::eval::eval(arg, scope, row, ctx))
+            .collect()
+    }
+
+    pub(crate) fn finish(
+        &self,
+        state: &Datum,
+        direct_args: &[Datum],
+        ctx: &EvalCtx,
+    ) -> Result<Datum, ExecError> {
         let value = match &self.final_expr {
             Some(expr) => {
-                crate::eval::eval(expr, &self.final_scope, std::slice::from_ref(state), ctx)?
+                let mut row = Vec::with_capacity(1 + direct_args.len() + self.ordered_args);
+                row.push(state.clone());
+                if self.finalfunc_extra {
+                    row.extend_from_slice(direct_args);
+                    row.extend(std::iter::repeat_n(Datum::Null, self.ordered_args));
+                }
+                crate::eval::eval(expr, &self.final_scope, &row, ctx)?
             }
             None => state.clone(),
         };
@@ -716,23 +821,34 @@ fn synthetic_args(count: usize) -> Vec<Expr> {
 /// resolution and error. `Some(Err(_))` is a real refusal.
 pub(crate) fn resolve(
     name: &str,
-    args: &[Expr],
+    direct_args: &[Expr],
+    ordered_args: &[Expr],
     given: &[ColumnType],
 ) -> Option<Result<UserAggregate, ExecError>> {
-    with_catalog(|kv| resolve_in(kv, name, args, given))?
+    with_catalog(|kv| resolve_in(kv, name, direct_args, ordered_args, given))?
 }
 
 fn resolve_in(
     kv: &dyn Kv,
     name: &str,
-    args: &[Expr],
+    direct_args: &[Expr],
+    ordered_args: &[Expr],
     given: &[ColumnType],
 ) -> Option<Result<UserAggregate, ExecError>> {
     let candidates = routines_named(kv, name).ok()?;
     let routine = candidates.into_iter().find(|candidate| {
-        candidate.is_aggregate() && candidate.input_params().count() == args.len()
+        let Some(definition) = candidate.aggregate.as_ref() else {
+            return false;
+        };
+        candidate.is_aggregate()
+            && if definition.ordered_args == 0 {
+                ordered_args.is_empty() && candidate.input_params().count() == direct_args.len()
+            } else {
+                definition.direct_args == direct_args.len()
+                    && definition.ordered_args == ordered_args.len()
+            }
     })?;
-    Some(compile(kv, &routine, args, given))
+    Some(compile(kv, &routine, direct_args, ordered_args, given))
 }
 
 /// Compile a resolved aggregate's transition and final functions into
@@ -740,7 +856,8 @@ fn resolve_in(
 fn compile(
     kv: &dyn Kv,
     routine: &Routine,
-    args: &[Expr],
+    direct_args: &[Expr],
+    ordered_args: &[Expr],
     given: &[ColumnType],
 ) -> Result<UserAggregate, ExecError> {
     let definition = routine.aggregate.as_ref().ok_or_else(|| {
@@ -751,8 +868,13 @@ fn compile(
     // option that would — an ordered-set aggregate — is refused in the grammar
     // and never reaches the catalog.
     let state_type = resolve_state_type(routine, definition, given)?;
+    let transition_given = if definition.ordered_args == 0 {
+        given
+    } else {
+        &given[definition.direct_args..]
+    };
     let mut argument_types = vec![state_type];
-    argument_types.extend_from_slice(given);
+    argument_types.extend_from_slice(transition_given);
     let transition_scope = synthetic_scope(&argument_types);
     let transition = compile_call(
         kv,
@@ -760,22 +882,33 @@ fn compile(
         &synthetic_args(argument_types.len()),
         &transition_scope,
     )?;
-    let final_scope = synthetic_scope(&[state_type]);
+    let mut final_types = vec![state_type];
+    if definition.finalfunc_extra {
+        final_types.extend_from_slice(given);
+    }
+    let final_scope = synthetic_scope(&final_types);
     let final_expr = definition
         .finalfn
         .as_ref()
-        .map(|name| compile_call(kv, name, &synthetic_args(1), &final_scope))
+        .map(|name| compile_call(kv, name, &synthetic_args(final_types.len()), &final_scope))
         .transpose()?;
     let result_type = match &final_expr {
         Some(expr) => crate::eval::infer_type(expr, &final_scope)?,
         None => state_type,
     };
     Ok(UserAggregate {
-        args: args.to_vec(),
+        args: if definition.ordered_args == 0 {
+            direct_args.to_vec()
+        } else {
+            ordered_args.to_vec()
+        },
+        direct_args: direct_args.to_vec(),
         transition,
         transition_scope,
         final_expr,
         final_scope,
+        finalfunc_extra: definition.finalfunc_extra,
+        ordered_args: definition.ordered_args,
         state_type,
         result_type,
         initcond: definition.initcond.clone(),
@@ -828,6 +961,65 @@ fn transition_is_strict(kv: &dyn Kv, name: &str, types: &[ColumnType]) -> bool {
     lookup(kv, name, &wanted).is_ok_and(|support| support.strict())
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crabka_pgkv::{Kv, MemKv};
+
+    use super::*;
+
+    fn aggregate(name: &str, direct_args: usize, ordered_args: usize) -> Routine {
+        Routine {
+            oid: 1,
+            name: name.into(),
+            kind: RoutineKind::Aggregate,
+            params: Vec::new(),
+            result: RoutineResult::Unspecified,
+            language: "internal".into(),
+            body: "aggregate_dummy".into(),
+            object_file: None,
+            body_form: crabka_pgcatalog::routine::BodyForm::Source,
+            volatility: 'i',
+            parallel: 'u',
+            strict: false,
+            security_definer: false,
+            leakproof: false,
+            cost: 1.0,
+            rows: 0.0,
+            config: Vec::new(),
+            owner: "postgres".into(),
+            aggregate: Some(AggregateDefinition {
+                transfn: "int8inc".into(),
+                transtype: RoutineType::builtin(ColumnType::Int8),
+                finalfn: None,
+                initcond: Some("0".into()),
+                direct_args,
+                ordered_args,
+                finalfunc_extra: false,
+                hypothetical: false,
+                unimplemented: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn within_group_classifies_only_ordered_set_aggregates() {
+        let kv = MemKv::default();
+        kv.write_batch(&put_routine_ops(&kv, &aggregate("plain", 0, 0)).expect("ops"))
+            .expect("writes");
+        kv.write_batch(&put_routine_ops(&kv, &aggregate("ordered", 1, 1)).expect("ops"))
+            .expect("writes");
+        let catalog: Arc<dyn Kv> = Arc::new(kv);
+
+        crate::routine::with_scalar_runtime(&catalog, None, || {
+            assert!(exists_with_call("plain", 0, false));
+            assert!(!exists_with_call("plain", 0, true));
+            assert!(exists_with_call("ordered", 1, true));
+        });
+    }
+}
+
 /// Turn a support-function call into an expression over `scope`: an inlined SQL
 /// body where the routine model can inline one, and the call node itself
 /// otherwise, which is what routes a `plpgsql` body through the scalar runtime.
@@ -838,6 +1030,7 @@ fn compile_call(kv: &dyn Kv, name: &str, args: &[Expr], scope: &Scope) -> Result
         distinct: false,
         args: FuncArgs::Exprs(args.to_vec()),
         order_by: Vec::new(),
+        within_group: false,
         filter: None,
     };
     let given = crate::eval::static_arg_types(args, scope)?;

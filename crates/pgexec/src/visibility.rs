@@ -820,9 +820,10 @@ mod tests {
             distinct: false,
             args: crabka_pgparser::ast::FuncArgs::Exprs(vec![
                 crabka_pgparser::ast::Expr::IntLiteral("0".into()),
-            ]),
-            order_by: Vec::new(),
-            filter: None,
+           ]),
+           order_by: Vec::new(),
+            within_group: false,
+           filter: None,
         };
         let publishable =
             crate::catalog_fn::eval_catalog(&call, &session, |_| Ok(oid.clone())).expect("answer");

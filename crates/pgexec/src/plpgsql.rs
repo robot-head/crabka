@@ -3299,6 +3299,7 @@ fn rewrite_expr_with(
                     })
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?,
+            within_group: call.within_group,
             filter: call.filter.as_deref().map(boxed).transpose()?,
         }),
         Expr::IsNull { expr, negated } => Expr::IsNull {
