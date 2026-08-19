@@ -452,6 +452,154 @@ async fn pg_type_exposes_aclitem_with_its_array_and_wire_identity() {
     );
 }
 
+#[tokio::test]
+async fn pg_type_exposes_information_schema_domains() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT oid, typname, typnamespace, typlen, typcategory, typtype, \
+                    typelem, typarray, typbasetype, typinput, typoutput, typreceive, \
+                    typsend, typalign, typstorage \
+             FROM pg_type WHERE oid IN (12437, 12440, 12442, 12448, 12450) ORDER BY oid",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("12437".into()),
+                    Some("cardinal_number".into()),
+                    Some("12423".into()),
+                    Some("4".into()),
+                    Some("N".into()),
+                    Some("d".into()),
+                    Some("0".into()),
+                    Some("12436".into()),
+                    Some("23".into()),
+                    Some("domain_in".into()),
+                    Some("int4out".into()),
+                    Some("domain_recv".into()),
+                    Some("int4send".into()),
+                    Some("i".into()),
+                    Some("p".into())
+                ],
+                vec![
+                    Some("12440".into()),
+                    Some("character_data".into()),
+                    Some("12423".into()),
+                    Some("-1".into()),
+                    Some("S".into()),
+                    Some("d".into()),
+                    Some("0".into()),
+                    Some("12439".into()),
+                    Some("1043".into()),
+                    Some("domain_in".into()),
+                    Some("varcharout".into()),
+                    Some("domain_recv".into()),
+                    Some("varcharsend".into()),
+                    Some("i".into()),
+                    Some("x".into())
+                ],
+                vec![
+                    Some("12442".into()),
+                    Some("sql_identifier".into()),
+                    Some("12423".into()),
+                    Some("64".into()),
+                    Some("S".into()),
+                    Some("d".into()),
+                    Some("0".into()),
+                    Some("12441".into()),
+                    Some("19".into()),
+                    Some("domain_in".into()),
+                    Some("nameout".into()),
+                    Some("domain_recv".into()),
+                    Some("namesend".into()),
+                    Some("c".into()),
+                    Some("p".into())
+                ],
+                vec![
+                    Some("12448".into()),
+                    Some("time_stamp".into()),
+                    Some("12423".into()),
+                    Some("8".into()),
+                    Some("D".into()),
+                    Some("d".into()),
+                    Some("0".into()),
+                    Some("12447".into()),
+                    Some("1184".into()),
+                    Some("domain_in".into()),
+                    Some("timestamptz_out".into()),
+                    Some("domain_recv".into()),
+                    Some("timestamptz_send".into()),
+                    Some("d".into()),
+                    Some("p".into())
+                ],
+                vec![
+                    Some("12450".into()),
+                    Some("yes_or_no".into()),
+                    Some("12423".into()),
+                    Some("-1".into()),
+                    Some("S".into()),
+                    Some("d".into()),
+                    Some("0".into()),
+                    Some("12449".into()),
+                    Some("1043".into()),
+                    Some("domain_in".into()),
+                    Some("varcharout".into()),
+                    Some("domain_recv".into()),
+                    Some("varcharsend".into()),
+                    Some("i".into()),
+                    Some("x".into())
+                ],
+            ]
+    );
+    let result = s
+        .simple_query(
+            "SELECT 1::information_schema.cardinal_number, \
+                    'x'::information_schema.character_data, \
+                    'x'::information_schema.sql_identifier, \
+                    '2020-01-02 03:04:05+00'::information_schema.time_stamp, \
+                    'YES'::information_schema.yes_or_no",
+        )
+        .await
+        .expect("information_schema domain input succeeds");
+    let QueryResult::Rows { fields, .. } = &result[0] else {
+        panic!("information_schema domain query should return rows");
+    };
+    assert!(
+        fields
+            .iter()
+            .map(|field| field.type_oid)
+            .collect::<Vec<_>>()
+            == vec![12437, 12440, 12442, 12448, 12450]
+    );
+    s.simple_query(
+        "CREATE TABLE information_schema_domain_catalog (\
+            cardinal information_schema.cardinal_number, \
+            character information_schema.character_data, \
+            identifier information_schema.sql_identifier, \
+            stamp information_schema.time_stamp, \
+            yesno information_schema.yes_or_no)",
+    )
+    .await
+    .expect("information_schema domain columns succeed");
+    assert!(
+        rows(
+            &mut s,
+            "SELECT atttypid FROM pg_attribute \
+             WHERE attrelid = 'information_schema_domain_catalog'::regclass \
+             AND attnum > 0 ORDER BY attnum",
+        )
+        .await
+            == vec![
+                vec![Some("12437".into())],
+                vec![Some("12440".into())],
+                vec![Some("12442".into())],
+                vec![Some("12448".into())],
+                vec![Some("12450".into())],
+            ]
+    );
+}
+
 /// Every `pg_type` array row is varlena. The catalog has several manual rows
 /// for element types that Crabka intentionally cannot construct yet, so this
 /// guards those rows as well as the generated `ElemType` array rows.

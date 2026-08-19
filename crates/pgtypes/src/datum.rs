@@ -28,6 +28,16 @@ pub mod oids {
     pub const ACLITEM: u32 = 1033;
     /// `aclitem[]`.
     pub const ACLITEMARRAY: u32 = 1034;
+    /// `information_schema.cardinal_number`.
+    pub const INFORMATION_SCHEMA_CARDINAL_NUMBER: u32 = 12437;
+    /// `information_schema.character_data`.
+    pub const INFORMATION_SCHEMA_CHARACTER_DATA: u32 = 12440;
+    /// `information_schema.sql_identifier`.
+    pub const INFORMATION_SCHEMA_SQL_IDENTIFIER: u32 = 12442;
+    /// `information_schema.time_stamp`.
+    pub const INFORMATION_SCHEMA_TIME_STAMP: u32 = 12448;
+    /// `information_schema.yes_or_no`.
+    pub const INFORMATION_SCHEMA_YES_OR_NO: u32 = 12450;
     /// PostgreSQL `refcursor`: a cursor name with `text`'s physical storage.
     pub const REFCURSOR: u32 = 1790;
     /// `refcursor[]`.
@@ -731,6 +741,38 @@ pub enum TemporalType {
     Interval,
 }
 
+static CARDINAL_NUMBER_BASE: ColumnType = ColumnType::Int4;
+static CHARACTER_DATA_BASE: ColumnType = ColumnType::Varchar(None);
+static SQL_IDENTIFIER_BASE: ColumnType = ColumnType::Text;
+static TIME_STAMP_BASE: ColumnType = ColumnType::Timestamptz;
+static YES_OR_NO_BASE: ColumnType = ColumnType::Varchar(None);
+
+const CARDINAL_NUMBER: DomainRef = DomainRef {
+    oid: oids::INFORMATION_SCHEMA_CARDINAL_NUMBER,
+    name: "information_schema.cardinal_number",
+    base: &CARDINAL_NUMBER_BASE,
+};
+const CHARACTER_DATA: DomainRef = DomainRef {
+    oid: oids::INFORMATION_SCHEMA_CHARACTER_DATA,
+    name: "information_schema.character_data",
+    base: &CHARACTER_DATA_BASE,
+};
+const SQL_IDENTIFIER: DomainRef = DomainRef {
+    oid: oids::INFORMATION_SCHEMA_SQL_IDENTIFIER,
+    name: "information_schema.sql_identifier",
+    base: &SQL_IDENTIFIER_BASE,
+};
+const TIME_STAMP: DomainRef = DomainRef {
+    oid: oids::INFORMATION_SCHEMA_TIME_STAMP,
+    name: "information_schema.time_stamp",
+    base: &TIME_STAMP_BASE,
+};
+const YES_OR_NO: DomainRef = DomainRef {
+    oid: oids::INFORMATION_SCHEMA_YES_OR_NO,
+    name: "information_schema.yes_or_no",
+    base: &YES_OR_NO_BASE,
+};
+
 /// A SQL column type. SP30 added `Float8`; SP32 added `Numeric`, which carries
 /// an optional `numeric(precision, scale)` modifier for column definitions and
 /// casts, where `None` is unconstrained `numeric`. SP37 adds five date/time
@@ -934,6 +976,32 @@ pub enum ColumnType {
 }
 
 impl ColumnType {
+    /// The five built-in `information_schema` domains PostgreSQL exposes.
+    #[must_use]
+    pub fn information_schema_domain(name: &str) -> Option<Self> {
+        match name {
+            "cardinal_number" => Some(Self::Domain(CARDINAL_NUMBER)),
+            "character_data" => Some(Self::Domain(CHARACTER_DATA)),
+            "sql_identifier" => Some(Self::Domain(SQL_IDENTIFIER)),
+            "time_stamp" => Some(Self::Domain(TIME_STAMP)),
+            "yes_or_no" => Some(Self::Domain(YES_OR_NO)),
+            _ => None,
+        }
+    }
+
+    /// Resolve a built-in `information_schema` domain from its stable OID.
+    #[must_use]
+    pub const fn information_schema_domain_by_oid(oid: u32) -> Option<Self> {
+        match oid {
+            oids::INFORMATION_SCHEMA_CARDINAL_NUMBER => Some(Self::Domain(CARDINAL_NUMBER)),
+            oids::INFORMATION_SCHEMA_CHARACTER_DATA => Some(Self::Domain(CHARACTER_DATA)),
+            oids::INFORMATION_SCHEMA_SQL_IDENTIFIER => Some(Self::Domain(SQL_IDENTIFIER)),
+            oids::INFORMATION_SCHEMA_TIME_STAMP => Some(Self::Domain(TIME_STAMP)),
+            oids::INFORMATION_SCHEMA_YES_OR_NO => Some(Self::Domain(YES_OR_NO)),
+            _ => None,
+        }
+    }
+
     /// Resolve a built-in PostgreSQL range oid.
     #[must_use]
     pub fn builtin_range(oid: u32) -> Option<Self> {
@@ -3282,6 +3350,26 @@ mod tests {
             assert!(ty.storage_type() == *ty, "{name} stores as itself");
             assert!(ty.composite() == None, "{name} is not a composite");
         }
+    }
+
+    #[test]
+    fn information_schema_domains_have_stable_names_and_oids() {
+        use assert2::assert;
+
+        for (name, oid) in [
+            ("cardinal_number", 12437),
+            ("character_data", 12440),
+            ("sql_identifier", 12442),
+            ("time_stamp", 12448),
+            ("yes_or_no", 12450),
+        ] {
+            let ty = ColumnType::information_schema_domain(name).expect("known domain");
+            assert!(ty.oid() == oid, "{name} oid");
+            assert!(ty.name() == format!("information_schema.{name}"), "{name} name");
+            assert!(ColumnType::information_schema_domain_by_oid(oid) == Some(ty));
+        }
+        assert!(ColumnType::information_schema_domain("missing") == None);
+        assert!(ColumnType::information_schema_domain_by_oid(0) == None);
     }
 
     #[test]

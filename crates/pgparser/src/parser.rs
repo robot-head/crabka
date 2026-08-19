@@ -727,6 +727,9 @@ impl Parser {
         let ty = match type_schema.as_deref() {
             Some("pg_catalog") => quoted_builtin
                 .or_else(|| crabka_pgtypes::ColumnType::from_builtin_sql_name(&type_word)),
+            Some("information_schema") => {
+                crabka_pgtypes::ColumnType::information_schema_domain(&type_word)
+            }
             Some(schema) => crabka_pgtypes::usertype::column_type_for_name_in(schema, &type_word),
             None => self.type_schemas.as_ref().map_or_else(
                 || quoted_builtin.or_else(|| crabka_pgtypes::ColumnType::from_sql_name(&type_word)),

@@ -1634,7 +1634,114 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
         })
         .collect();
     rows.extend(user_type_rows(catalog_kv, &proc_oids)?);
+    rows.extend(information_schema_domain_rows(&proc_oids));
     Ok(rows)
+}
+
+fn information_schema_domain_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<Datum>> {
+    let collation = crate::catalog_rel::DEFAULT_COLLATION_OID;
+    let mut rows = Vec::with_capacity(10);
+    for (array_oid, array_name, oid, name, len, category, base, typcollation, align) in [
+        (
+            12436,
+            "_cardinal_number",
+            12437,
+            "cardinal_number",
+            4,
+            "N",
+            "int4",
+            0,
+            None,
+        ),
+        (
+            12439,
+            "_character_data",
+            12440,
+            "character_data",
+            -1,
+            "S",
+            "varchar",
+            collation,
+            None,
+        ),
+        (
+            12441,
+            "_sql_identifier",
+            12442,
+            "sql_identifier",
+            64,
+            "S",
+            "name",
+            collation,
+            Some("c"),
+        ),
+        (
+            12447,
+            "_time_stamp",
+            12448,
+            "time_stamp",
+            8,
+            "D",
+            "timestamptz",
+            0,
+            Some("d"),
+        ),
+        (
+            12449,
+            "_yes_or_no",
+            12450,
+            "yes_or_no",
+            -1,
+            "S",
+            "varchar",
+            collation,
+            None,
+        ),
+    ] {
+        rows.push(pg_type_row(
+            PgTypeRow {
+                oid: array_oid,
+                name: array_name,
+                namespace: 12423,
+                len: -1,
+                category: "A",
+                typtype: "b",
+                typrelid: 0,
+                typelem: oid,
+                typarray: 0,
+                typbasetype: 0,
+                typcollation,
+                domain_base: None,
+                range_align: align,
+            },
+            proc_oids,
+        ));
+        rows.push(pg_type_row(
+            PgTypeRow {
+                oid,
+                name,
+                namespace: 12423,
+                len,
+                category,
+                typtype: "d",
+                typrelid: 0,
+                typelem: 0,
+                typarray: array_oid,
+                typbasetype: match base {
+                    "int4" => crabka_pgtypes::oids::INT4 as i32,
+                    "varchar" => crabka_pgtypes::oids::VARCHAR as i32,
+                    "name" => 19,
+                    "timestamptz" => crabka_pgtypes::oids::TIMESTAMPTZ as i32,
+                    _ => unreachable!("fixed information_schema domain base"),
+                },
+                typcollation,
+                domain_base: Some(base),
+                range_align: align,
+            },
+            proc_oids,
+        ));
+    }
+    rows
 }
 
 fn builtin_proc_oids() -> Result<BTreeMap<String, i32>, ExecError> {
@@ -2785,15 +2892,13 @@ pub(crate) fn resolve_type_name(
     // crabka declares every type in `pg_catalog`, so a qualifier that names an
     // existing schema other than that one finds nothing — which is exactly what
     // PostgreSQL reports for `public.int4`.
-    let qualified_elsewhere = schema
-        .as_deref()
-        .is_some_and(|schema| schema != "pg_catalog");
-    let found = if qualified_elsewhere {
-        None
-    } else {
-        regtype_oid(&name).or_else(|| {
+    let found = match schema.as_deref() {
+        Some("information_schema") => crabka_pgtypes::ColumnType::information_schema_domain(&name)
+            .and_then(|ty| i32::try_from(ty.oid()).ok()),
+        Some(schema) if schema != "pg_catalog" => None,
+        _ => regtype_oid(&name).or_else(|| {
             crabka_pgtypes::usertype::lookup(&name).and_then(|ty| i32::try_from(ty.oid).ok())
-        })
+        }),
     };
     found.ok_or_else(|| {
         let spelled = schema.map_or_else(|| name.clone(), |schema| format!("{schema}.{name}"));

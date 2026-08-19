@@ -589,6 +589,7 @@ fn read_type_with(
                 ColumnType::Refcursor
             } else if let Some(builtin) = crabka_pgtypes::ColumnType::builtin_range(oid)
                 .or_else(|| crabka_pgtypes::ColumnType::builtin_multirange(oid))
+                .or_else(|| crabka_pgtypes::ColumnType::information_schema_domain_by_oid(oid))
             {
                 builtin
             } else {

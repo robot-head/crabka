@@ -1362,6 +1362,9 @@ pub fn check_domain(
     let ColumnType::Domain(domain_ref) = ty else {
         return Ok(());
     };
+    if ColumnType::information_schema_domain_by_oid(domain_ref.oid).is_some() {
+        return Ok(());
+    }
     let Some(registered) = usertype::lookup_oid(domain_ref.oid) else {
         return Err(ExecError::UndefinedObject(format!(
             "type \"{}\" does not exist",
