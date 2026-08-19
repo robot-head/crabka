@@ -814,6 +814,18 @@ mod tests {
         .code
     }
 
+    fn pg_error(sql: &str) -> crabka_pgwire::error::PgError {
+        let ctx = EvalCtx::test_default();
+        crate::eval::eval(
+            &crabka_pgparser::parser::parse_expr_for_test(sql).expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx,
+        )
+        .expect_err("error")
+        .into_pg()
+    }
+
     /// An `FF`n pattern does not truncate what it reads — every digit is parsed
     /// — it asks for the finished instant to be rounded to n fractional digits,
     /// half away from zero. Expectations are PostgreSQL 18.4's.
@@ -939,6 +951,28 @@ mod tests {
             "22023"
         ); // bad zone
         assert_eq!(ec("to_char(true, 'YYYY')"), "42883"); // non-formattable type
+    }
+
+    #[test]
+    fn template_errors_keep_postgres_detail_and_hint() {
+        let short = pg_error("to_timestamp('19971', 'YYYYMMDD')");
+        assert!(short.code == "22007");
+        assert!(short.message == "source string too short for \"MM\" formatting field");
+        let diagnostics = short.diagnostics.expect("diagnostics");
+        assert!(
+            diagnostics.detail.as_deref()
+                == Some("Field requires 2 characters, but only 1 remain.")
+        );
+        assert!(
+            diagnostics.hint.as_deref()
+                == Some("If your source string is not fixed-width, try using the \"FM\" modifier.")
+        );
+
+        let clobbered = pg_error("to_timestamp('1997-11-Jan-16', 'YYYY-MM-Mon-DD')");
+        assert!(
+            clobbered.diagnostics.and_then(|d| d.detail)
+                == Some("This value contradicts a previous setting for the same field type.".into())
+        );
     }
 
     // ---- additional coverage ----

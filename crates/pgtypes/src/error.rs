@@ -55,10 +55,14 @@ pub enum TypeError {
     /// Free-form rather than shaped, because `PostgreSQL` raises a different
     /// sentence for each way a template can fail — a value that is not an
     /// integer, a field set twice, Gregorian and ISO week fields mixed — and the
-    /// message is the whole diagnosis. The DETAIL and HINT lines it attaches
-    /// alongside are not carried: the error channel has room for one message.
+    /// message is the whole diagnosis. Some failures also carry PostgreSQL's
+    /// DETAIL and HINT fields through the executor's normal type-error path.
     #[error("{message}")]
-    InvalidDatetimeTemplate { message: String },
+    InvalidDatetimeTemplate {
+        message: String,
+        detail: Option<String>,
+        hint: Option<String>,
+    },
     /// SP37: a date/time field out of range (e.g. month 13) (22008).
     #[error("date/time field value out of range: \"{value}\"")]
     DatetimeFieldOverflow { value: String },
@@ -181,6 +185,10 @@ impl TypeError {
     #[must_use]
     pub fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
         match self {
+            TypeError::InvalidDatetimeTemplate {
+                detail: Some(detail),
+                ..
+            } => Some(std::borrow::Cow::Borrowed(detail)),
             TypeError::RangeMalformed { detail, .. } => Some(std::borrow::Cow::Borrowed(*detail)),
             TypeError::InvalidCidr { .. } => Some(std::borrow::Cow::Borrowed(
                 "Value has bits set to right of mask.",
@@ -204,8 +212,12 @@ impl TypeError {
 
     /// `PostgreSQL`'s HINT for this error, when it has one.
     #[must_use]
-    pub fn hint(&self) -> Option<&'static str> {
+    pub fn hint(&self) -> Option<&str> {
         match self {
+            TypeError::InvalidDatetimeTemplate {
+                hint: Some(hint),
+                ..
+            } => Some(hint),
             TypeError::CodedWithHint { hint, .. } => Some(hint),
             _ => None,
         }

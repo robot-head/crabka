@@ -4873,11 +4873,21 @@ struct TmFromChar {
 }
 
 /// A template scan or assembly failure, carrying `PostgreSQL`'s message verbatim.
-///
-/// The DETAIL and HINT lines `PostgreSQL` attaches are not reproduced: gres's
-/// error channel carries one message, so only the primary line survives.
 fn template_error(message: String) -> TypeError {
-    TypeError::InvalidDatetimeTemplate { message }
+    template_error_with(message, None, None)
+}
+
+/// A template failure with PostgreSQL's optional diagnostics.
+fn template_error_with(
+    message: String,
+    detail: Option<String>,
+    hint: Option<String>,
+) -> TypeError {
+    TypeError::InvalidDatetimeTemplate {
+        message,
+        detail,
+        hint,
+    }
 }
 
 /// `from_char_set_int`: store `value`, rejecting a second, different value.
@@ -4887,9 +4897,11 @@ fn template_error(message: String) -> TypeError {
 /// not an oversight to correct here.
 fn set_int(dest: &mut i32, value: i32, name: &str) -> Result<(), TypeError> {
     if *dest != 0 && *dest != value {
-        return Err(template_error(format!(
-            "conflicting values for \"{name}\" field in formatting string"
-        )));
+            return Err(template_error_with(
+                format!("conflicting values for \"{name}\" field in formatting string"),
+                Some("This value contradicts a previous setting for the same field type.".into()),
+                None,
+            ));
     }
     *dest = value;
     Ok(())
@@ -5034,9 +5046,11 @@ fn parse_int(
         value
     } else {
         if used < len {
-            return Err(template_error(format!(
-                "source string too short for \"{name}\" formatting field"
-            )));
+            return Err(template_error_with(
+                format!("source string too short for \"{name}\" formatting field"),
+                Some(format!("Field requires {len} characters, but only {used} remain.")),
+                Some("If your source string is not fixed-width, try using the \"FM\" modifier.".into()),
+            ));
         }
         let limit = (input.pos + len).min(input.chars.len());
         let (value, end, overflow) = input.read_signed(input.pos, limit);
@@ -5045,20 +5059,22 @@ fn parse_int(
         }
         let consumed = end - input.pos;
         if consumed > 0 && consumed < len {
-            return Err(template_error(format!(
-                "invalid value \"{}\" for \"{name}\"",
-                copy()
-            )));
+            return Err(template_error_with(
+                format!("invalid value \"{}\" for \"{name}\"", copy()),
+                Some(format!("Field requires {len} characters, but only {consumed} could be parsed.")),
+                Some("If your source string is not fixed-width, try using the \"FM\" modifier.".into()),
+            ));
         }
         input.pos = end;
         value
     };
 
     if input.pos == init {
-        return Err(template_error(format!(
-            "invalid value \"{}\" for \"{name}\"",
-            copy()
-        )));
+        return Err(template_error_with(
+            format!("invalid value \"{}\" for \"{name}\"", copy()),
+            Some("Value must be an integer.".into()),
+            None,
+        ));
     }
     let value = i32::try_from(value).map_err(|_| out_of_range_value(name))?;
     Ok((value, input.pos - init))
