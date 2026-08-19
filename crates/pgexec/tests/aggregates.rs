@@ -114,6 +114,23 @@ async fn count_distinct_and_min_max() {
 }
 
 #[tokio::test]
+async fn any_value_returns_a_non_null_input_without_comparison() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TABLE values_for_any_value (v int4); INSERT INTO values_for_any_value VALUES (NULL), (7), (9)")
+        .await
+        .expect("fixture");
+
+    let row = client
+        .query_one("SELECT any_value(v) FROM values_for_any_value", &[])
+        .await
+        .expect("any_value");
+    assert!(row.get::<_, i32>(0) == 7);
+}
+
+#[tokio::test]
 async fn overloaded_plpgsql_wrapper_resolves_aggregate_argument_from_input_scope() {
     let client = connect(spawn().await).await;
     client

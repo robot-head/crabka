@@ -46,6 +46,8 @@ enum AggFunc {
     Avg,
     Min,
     Max,
+    /// `any_value(x)`, one arbitrary non-NULL input value.
+    AnyValue,
     /// `array_agg(x)`, the inputs as a one-dimensional array, in input order.
     ArrayAgg,
     /// `jsonb_agg(x)`, the inputs as a JSON array, in input order.
@@ -190,6 +192,7 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
         "avg" => Some(AggFunc::Avg),
         "min" => Some(AggFunc::Min),
         "max" => Some(AggFunc::Max),
+        "any_value" => Some(AggFunc::AnyValue),
         "array_agg" => Some(AggFunc::ArrayAgg),
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
@@ -393,6 +396,10 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
                 return Err(undefined_for_arg(&fc.name, ty));
             }
             Ok(ty)
+        }
+        AggFunc::AnyValue => {
+            let arg = single_value_arg(fc)?;
+            crate::eval::infer_type(arg, scope)
         }
         // array_agg(x) -> x[]; an element type crabka has no array type for is 0A000.
         // `array_agg(anyarray)` stacks its inputs as the outer dimension of one
@@ -1636,6 +1643,9 @@ enum AccState {
     MinMax {
         best: Option<Datum>,
     },
+    AnyValue {
+        value: Option<Datum>,
+    },
     Avg {
         sum: f64,
         n: i64,
@@ -1936,6 +1946,7 @@ impl AccState {
                 }
             }
             AggFunc::Min | AggFunc::Max => AccState::MinMax { best: None },
+            AggFunc::AnyValue => AccState::AnyValue { value: None },
             // The argument type was validated by `spec_of`, so it has an array
             // element type; `text` is a harmless stand-in for the impossible case.
             AggFunc::ArrayAgg => AccState::ArrayAgg {
@@ -2099,6 +2110,11 @@ impl AccState {
                 };
                 if take {
                     *best = Some(v);
+                }
+            }
+            AccState::AnyValue { value } => {
+                if value.is_none() {
+                    *value = Some(v);
                 }
             }
             // The elements are coerced to the accumulator's element type so the
@@ -2346,6 +2362,7 @@ impl AccState {
             // SP32: an empty/all-null numeric sum is NULL; else the exact numeric.
             AccState::SumN { acc } => acc.clone().unwrap_or(Datum::Null),
             AccState::MinMax { best } => best.clone().unwrap_or(Datum::Null),
+            AccState::AnyValue { value } => value.clone().unwrap_or(Datum::Null),
             // avg over zero non-null rows is NULL; otherwise the float8 mean.
             AccState::Avg { sum, n } => {
                 if *n == 0 {
