@@ -1644,7 +1644,7 @@ impl Parser {
             }
             Token::Param(n) => {
                 self.bump();
-                Ok(Expr::Param(n))
+                self.field_selection(Expr::Param(n))
             }
             // `DEFAULT` is reserved in PostgreSQL and its grammar admits it
             // anywhere an `a_expr` may go, leaving parse analysis to refuse every
@@ -20029,6 +20029,13 @@ mod tests {
             }
         );
         assert_eq!(expr("$2"), Expr::Param(2));
+        assert_eq!(
+            expr("$2.id"),
+            Expr::FieldSelect {
+                base: Box::new(Expr::Param(2)),
+                field: "id".into(),
+            }
+        );
     }
 
     #[test]
