@@ -1639,6 +1639,44 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
             )
         })
         .collect();
+    rows.extend([
+        pg_type_row(
+            PgTypeRow {
+                oid: crabka_pgtypes::oids::RECORD as i32,
+                name: "record",
+                namespace: PG_CATALOG_NAMESPACE_OID,
+                len: -1,
+                category: "P",
+                typtype: "p",
+                typrelid: 0,
+                typelem: 0,
+                typarray: crabka_pgtypes::oids::RECORDARRAY as i32,
+                typbasetype: 0,
+                typcollation: 0,
+                domain_base: None,
+                range_align: Some("d"),
+            },
+            &proc_oids,
+        ),
+        pg_type_row(
+            PgTypeRow {
+                oid: crabka_pgtypes::oids::RECORDARRAY as i32,
+                name: "_record",
+                namespace: PG_CATALOG_NAMESPACE_OID,
+                len: -1,
+                category: "P",
+                typtype: "p",
+                typrelid: 0,
+                typelem: crabka_pgtypes::oids::RECORD as i32,
+                typarray: 0,
+                typbasetype: 0,
+                typcollation: 0,
+                domain_base: None,
+                range_align: Some("d"),
+            },
+            &proc_oids,
+        ),
+    ]);
     rows.extend(user_type_rows(catalog_kv, &proc_oids)?);
     rows.extend(information_schema_domain_rows(&proc_oids));
     Ok(rows)

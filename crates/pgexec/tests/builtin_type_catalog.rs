@@ -937,6 +937,50 @@ async fn character_type_array_links_are_bidirectional() {
     }
 }
 
+/// `record` and `_record` are pseudo-types, but both are real built-in catalog
+/// rows with the normal record and array I/O links.
+#[tokio::test]
+async fn record_pseudotype_rows_keep_their_array_and_io_metadata() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typtype, typcategory, typlen, typelem, typarray, \
+                    typinput, typoutput, typreceive, typsend, typalign \
+             FROM pg_type WHERE typname IN ('record', '_record') ORDER BY oid",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("record".into()),
+                    Some("p".into()),
+                    Some("P".into()),
+                    Some("-1".into()),
+                    Some("0".into()),
+                    Some("2287".into()),
+                    Some("record_in".into()),
+                    Some("record_out".into()),
+                    Some("record_recv".into()),
+                    Some("record_send".into()),
+                    Some("d".into()),
+                ],
+                vec![
+                    Some("_record".into()),
+                    Some("p".into()),
+                    Some("P".into()),
+                    Some("-1".into()),
+                    Some("2249".into()),
+                    Some("0".into()),
+                    Some("array_in".into()),
+                    Some("array_out".into()),
+                    Some("array_recv".into()),
+                    Some("array_send".into()),
+                    Some("d".into()),
+                ],
+            ]
+    );
+}
+
 /// The lookup every client driver caches its type table from. A type with no
 /// row answers it with nothing, and a driver that finds no `timetz` has no oid
 /// to bind a `timetz` parameter with.
