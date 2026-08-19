@@ -101,6 +101,7 @@ async fn every_named_catalog_relation_resolves() {
         "pg_catalog.pg_collation",
         "pg_catalog.pg_enum",
         "pg_catalog.pg_range",
+        "pg_catalog.pg_shdepend",
         "pg_catalog.pg_settings",
         "pg_catalog.pg_stat_activity",
         "pg_catalog.pg_locks",
@@ -159,6 +160,35 @@ async fn pg_am_uses_postgresql_handlers_and_oid_regproc_columns() {
             .map(|field| field.type_oid)
             .collect::<Vec<_>>()
             == vec![26, 25, 24, 18]
+    );
+}
+
+#[tokio::test]
+async fn pg_shdepend_has_postgresqls_empty_bootstrap_shape() {
+    let engine = SqlEngine::new();
+    assert!(
+        grid(
+            &engine,
+            "SELECT oid FROM pg_class WHERE relname = 'pg_shdepend'",
+        )
+        .await
+            == vec![some(&["1214"])]
+    );
+    let QueryResult::Rows { fields, rows, .. } = run(
+        &engine,
+        "SELECT dbid, classid, objid, objsubid, refclassid, refobjid, deptype FROM pg_shdepend",
+    )
+    .await
+    else {
+        panic!("pg_shdepend query should return rows");
+    };
+    assert!(rows.is_empty());
+    assert!(
+        fields
+            .iter()
+            .map(|field| field.type_oid)
+            .collect::<Vec<_>>()
+            == vec![26, 26, 26, 23, 26, 26, 18]
     );
 }
 
