@@ -1832,6 +1832,7 @@ fn pg_type_row(row: PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> Vec<Dat
         | "_int8"
         | "_float8"
         | "_time"
+        | "_time_stamp"
         | "_timestamp"
         | "_timestamptz"
         | "_money"

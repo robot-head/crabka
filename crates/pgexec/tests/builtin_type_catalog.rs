@@ -1047,7 +1047,7 @@ async fn array_catalog_rows_keep_postgres_alignment() {
              WHERE typname IN ('_aclitem', '_record', '_xid8', '_pg_lsn', '_int8', \
                                '_float8', '_time', '_timestamp', '_timestamptz', \
                                '_money', '_macaddr8', '_tsrange', '_tstzrange', \
-                               '_int8range', '_sql_identifier') \
+                               '_int8range', '_sql_identifier', '_time_stamp') \
              ORDER BY typname",
         )
         .await
@@ -1062,6 +1062,7 @@ async fn array_catalog_rows_keep_postgres_alignment() {
                 vec![Some("_record".into()), Some("d".into())],
                 vec![Some("_sql_identifier".into()), Some("i".into())],
                 vec![Some("_time".into()), Some("d".into())],
+                vec![Some("_time_stamp".into()), Some("d".into())],
                 vec![Some("_timestamp".into()), Some("d".into())],
                 vec![Some("_timestamptz".into()), Some("d".into())],
                 vec![Some("_tsrange".into()), Some("d".into())],
