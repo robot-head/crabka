@@ -59,14 +59,14 @@ pub(crate) fn pg_attribute_columns() -> Vec<Column> {
         ("atttypmod", Int4),
         ("attndims", Int2),
         ("attbyval", Bool),
-        ("attalign", Text),
-        ("attstorage", Text),
-        ("attcompression", Text),
+        ("attalign", ColumnType::InternalChar),
+        ("attstorage", ColumnType::InternalChar),
+        ("attcompression", ColumnType::InternalChar),
         ("attnotnull", Bool),
         ("atthasdef", Bool),
         ("atthasmissing", Bool),
-        ("attidentity", Text),
-        ("attgenerated", Text),
+        ("attidentity", ColumnType::InternalChar),
+        ("attgenerated", ColumnType::InternalChar),
         ("attisdropped", Bool),
         ("attislocal", Bool),
         ("attinhcount", Int2),
@@ -1402,9 +1402,9 @@ pub(crate) fn attribute_rows_for_table(
                 int(catalog_typmod(column.ty)),
                 Datum::Int2(i16::from(matches!(column.ty, ColumnType::Array(_)))),
                 Datum::Bool(column.ty.type_size() > 0),
-                text("i"),
-                text(attribute_storage(column.ty)),
-                text(""),
+                Datum::InternalChar(b'i'),
+                Datum::InternalChar(attribute_storage(column.ty).as_bytes()[0]),
+                Datum::InternalChar(b'\0'),
                 Datum::Bool(column.not_null),
                 // `atthasdef` means "this column has a `pg_attrdef` row", and a
                 // generated column has one: its expression is stored there, and
@@ -1412,8 +1412,15 @@ pub(crate) fn attribute_rows_for_table(
                 // through this flag.
                 Datum::Bool(column.default.is_some() || column.generated.is_some()),
                 Datum::Bool(false),
-                text(identity),
-                text(column.attgenerated()),
+                Datum::InternalChar(identity.as_bytes().first().copied().unwrap_or(b'\0')),
+                Datum::InternalChar(
+                    column
+                        .attgenerated()
+                        .as_bytes()
+                        .first()
+                        .copied()
+                        .unwrap_or(b'\0'),
+                ),
                 Datum::Bool(false),
                 Datum::Bool(true),
                 Datum::Int2(0),
@@ -1584,34 +1591,99 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
     let mut rows: Vec<Vec<Datum>> = builtin_type_rows()
         .iter()
         .map(|ty| {
-            vec![
-                int(ty.oid),
-                text(ty.name),
-                int(i32::from(ty.len)),
-                text(ty.category),
-                int(PG_CATALOG_NAMESPACE_OID),
-                int(0),
-                // Every exposed built-in — scalar or array — is a base type
-                // ('b') with no domain base type, matching PostgreSQL 18's
-                // pg_type for these OIDs. Only `box` uses a typdelim other
-                // than ',', and crabka has no geometric types.
-                text(if ty.category == "R" && ty.name.ends_with("multirange") {
-                    "m"
-                } else if ty.category == "R" {
-                    "r"
-                } else {
-                    "b"
-                }),
-                text(","),
-                int(ty.elem),
-                int(ty.array),
-                int(0),
-                int(builtin_type_collation_oid(ty.oid)),
-            ]
+            // Every exposed built-in — scalar or array — is a base type with
+            // no domain base type. Range and multirange rows use their own
+            // `typtype`, matching PostgreSQL's catalogue.
+            let typtype = if ty.category == "R" && ty.name.ends_with("multirange") {
+                "m"
+            } else if ty.category == "R" {
+                "r"
+            } else {
+                "b"
+            };
+            pg_type_row(PgTypeRow {
+                oid: ty.oid,
+                name: ty.name,
+                namespace: PG_CATALOG_NAMESPACE_OID,
+                len: i32::from(ty.len),
+                category: ty.category,
+                typtype,
+                typrelid: 0,
+                typelem: ty.elem,
+                typarray: ty.array,
+                typbasetype: 0,
+                typcollation: builtin_type_collation_oid(ty.oid),
+            })
         })
         .collect();
     rows.extend(user_type_rows(catalog_kv)?);
     Ok(rows)
+}
+
+/// The 32 physical columns PostgreSQL exposes from `pg_type`.
+///
+/// The executor used to publish only the fields its early driver probes used.
+/// That made the catalog unlike a catalog table: upstream's own type sanity
+/// checks could not bind ordinary fields such as `typisdefined` or `typinput`.
+/// Keep the row construction here, beside the data source, so every built-in
+/// and user type remains the same width as the virtual relation.
+struct PgTypeRow<'a> {
+    oid: i32,
+    name: &'a str,
+    namespace: i32,
+    len: i32,
+    category: &'a str,
+    typtype: &'a str,
+    typrelid: i32,
+    typelem: i32,
+    typarray: i32,
+    typbasetype: i32,
+    typcollation: i32,
+}
+
+fn pg_type_row(row: PgTypeRow<'_>) -> Vec<Datum> {
+    let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
+    let typalign = match row.len {
+        1 => "c",
+        2 => "s",
+        8 => "d",
+        _ => "i",
+    };
+    let typstorage = if row.len < 0 { "x" } else { "p" };
+    vec![
+        int(row.oid),
+        text(row.name),
+        int(row.namespace),
+        int(10),
+        int(row.len),
+        Datum::Bool(typbyval),
+        Datum::InternalChar(row.typtype.as_bytes()[0]),
+        Datum::InternalChar(row.category.as_bytes()[0]),
+        Datum::Bool(false),
+        Datum::Bool(true),
+        Datum::InternalChar(b','),
+        int(row.typrelid),
+        int(0),
+        int(row.typelem),
+        int(row.typarray),
+        int(0),
+        int(0),
+        int(0),
+        int(0),
+        int(0),
+        int(0),
+        int(0),
+        Datum::InternalChar(typalign.as_bytes()[0]),
+        Datum::InternalChar(typstorage.as_bytes()[0]),
+        Datum::Bool(false),
+        int(row.typbasetype),
+        int(-1),
+        int(0),
+        int(row.typcollation),
+        Datum::Null,
+        Datum::Null,
+        Datum::Null,
+    ]
 }
 
 pub(crate) fn text_search_catalog_rows(
@@ -1679,41 +1751,35 @@ pub(crate) fn user_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exe
         // A shell is the one user type with no `ColumnType`, and `TypeShellMake`
         // gives it `sizeof(int32)` regardless.
         let shell_typlen = 4;
-        let delimiter = match &ty.body {
-            usertype::UserTypeBody::Base(base) => base.delimiter.clone(),
-            _ => ",".to_string(),
-        };
-        rows.push(vec![
-            int(i32::try_from(ty.oid).unwrap_or(0)),
-            text(&ty.name),
-            int(column_type.map_or(shell_typlen, |ty| i32::from(ty.type_size()))),
-            text(category),
-            int(crate::catalog_rel::namespace_oid(&ty.schema)),
-            int(typrelid),
-            text(ty.typtype()),
-            text(&delimiter),
-            int(0),
-            int(0),
-            int(typbasetype),
-            int(column_type.map_or(0, text_collation_oid)),
-        ]);
+        rows.push(pg_type_row(PgTypeRow {
+            oid: i32::try_from(ty.oid).unwrap_or(0),
+            name: &ty.name,
+            namespace: crate::catalog_rel::namespace_oid(&ty.schema),
+            len: column_type.map_or(shell_typlen, |ty| i32::from(ty.type_size())),
+            category,
+            typtype: ty.typtype(),
+            typrelid,
+            typelem: 0,
+            typarray: 0,
+            typbasetype,
+            typcollation: column_type.map_or(0, text_collation_oid),
+        }));
         if let (Some((schema, name)), Some(multirange)) =
             (ty.multirange_identity(), ty.multirange_type())
         {
-            rows.push(vec![
-                int(i32::try_from(ty.oid + 3).unwrap_or(0)),
-                text(&name),
-                int(i32::from(multirange.type_size())),
-                text("R"),
-                int(crate::catalog_rel::namespace_oid(&schema)),
-                int(0),
-                text("m"),
-                text(","),
-                int(0),
-                int(0),
-                int(0),
-                int(0),
-            ]);
+            rows.push(pg_type_row(PgTypeRow {
+                oid: i32::try_from(ty.oid + 3).unwrap_or(0),
+                name: &name,
+                namespace: crate::catalog_rel::namespace_oid(&schema),
+                len: i32::from(multirange.type_size()),
+                category: "R",
+                typtype: "m",
+                typrelid: 0,
+                typelem: 0,
+                typarray: 0,
+                typbasetype: 0,
+                typcollation: 0,
+            }));
         }
     }
     Ok(rows)
@@ -3588,4 +3654,27 @@ pub(crate) fn int(value: i32) -> Datum {
 
 pub(crate) fn text(value: &str) -> Datum {
     Datum::Text(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_zero_length_type_is_not_toastable() {
+        let row = pg_type_row(PgTypeRow {
+            oid: 1,
+            name: "synthetic",
+            namespace: PG_CATALOG_NAMESPACE_OID,
+            len: 0,
+            category: "P",
+            typtype: "p",
+            typrelid: 0,
+            typelem: 0,
+            typarray: 0,
+            typbasetype: 0,
+            typcollation: 0,
+        });
+        assert!(row[23] == Datum::InternalChar(b'p'));
+    }
 }

@@ -117,6 +117,139 @@ async fn every_datetime_type_has_its_postgresql_pg_type_row() {
     }
 }
 
+/// `pg_type` is a system catalog, not a reduced driver lookup table. Its full
+/// `PostgreSQL` 18 column set has to bind before type-sanity checks can examine
+/// the fixture rows that populate it.
+#[tokio::test]
+async fn pg_type_exposes_all_postgresql_18_catalog_columns() {
+    let (_engine, mut s) = session();
+    let columns = rows(
+        &mut s,
+        "SELECT typnamespace, typowner, typlen, typbyval, typtype, typcategory, \
+                typispreferred, typisdefined, typdelim, typrelid, typsubscript, \
+                typelem, typarray, typinput, typoutput, typreceive, typsend, \
+                typmodin, typmodout, typanalyze, typalign, typstorage, typnotnull, \
+                typbasetype, typtypmod, typndims, typcollation, typdefaultbin, \
+                typdefault, typacl \
+         FROM pg_type WHERE typname = 'int4'",
+    )
+    .await;
+    assert!(
+        columns
+            == vec![vec![
+                Some("11".into()),
+                Some("10".into()),
+                Some("4".into()),
+                Some("t".into()),
+                Some("b".into()),
+                Some("N".into()),
+                Some("f".into()),
+                Some("t".into()),
+                Some(",".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("1007".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("0".into()),
+                Some("i".into()),
+                Some("p".into()),
+                Some("f".into()),
+                Some("0".into()),
+                Some("-1".into()),
+                Some("0".into()),
+                Some("0".into()),
+                None,
+                None,
+                None,
+            ]]
+    );
+}
+
+/// The physical fields are not decorative: type sanity uses them to decide
+/// whether a datum can be passed by value or must be stored out of line.
+#[tokio::test]
+async fn pg_type_uses_the_physical_layout_of_fixed_and_variable_types() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typlen, typbyval, typalign, typstorage \
+             FROM pg_type \
+             WHERE typname IN ('bool', 'int2', 'int4', 'int8', 'text') \
+             ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("bool".into()),
+                    Some("1".into()),
+                    Some("t".into()),
+                    Some("c".into()),
+                    Some("p".into()),
+                ],
+                vec![
+                    Some("int2".into()),
+                    Some("2".into()),
+                    Some("t".into()),
+                    Some("s".into()),
+                    Some("p".into()),
+                ],
+                vec![
+                    Some("int4".into()),
+                    Some("4".into()),
+                    Some("t".into()),
+                    Some("i".into()),
+                    Some("p".into()),
+                ],
+                vec![
+                    Some("int8".into()),
+                    Some("8".into()),
+                    Some("t".into()),
+                    Some("d".into()),
+                    Some("p".into()),
+                ],
+                vec![
+                    Some("text".into()),
+                    Some("-1".into()),
+                    Some("f".into()),
+                    Some("i".into()),
+                    Some("x".into()),
+                ],
+            ]
+    );
+}
+
+/// Ranges and multiranges share a category, but `PostgreSQL` distinguishes their
+/// `typtype`; callers use that distinction to find their `pg_range` metadata.
+#[tokio::test]
+async fn pg_type_distinguishes_range_and_multirange_rows() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typcategory, typtype \
+             FROM pg_type \
+             WHERE typname IN ('int4range', 'int4multirange') \
+             ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![
+                    Some("int4multirange".into()),
+                    Some("R".into()),
+                    Some("m".into())
+                ],
+                vec![Some("int4range".into()), Some("R".into()), Some("r".into())],
+            ]
+    );
+}
+
 /// The two other built-ins that had no row, and the array rows the scalars'
 /// `typarray` now points at. A `typarray` aimed at a row that is not there is
 /// the dangling link `type_sanity` exists to catch.

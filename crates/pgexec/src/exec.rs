@@ -18438,27 +18438,36 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
         "pg_type" => cols(&[
             ("oid", Int4),
             ("typname", Text),
-            ("typlen", Int4),
-            ("typcategory", Text),
             ("typnamespace", Int4),
+            ("typowner", Int4),
+            ("typlen", Int4),
+            ("typbyval", Bool),
+            ("typtype", ColumnType::InternalChar),
+            ("typcategory", ColumnType::InternalChar),
+            ("typispreferred", Bool),
+            ("typisdefined", Bool),
+            ("typdelim", ColumnType::InternalChar),
             ("typrelid", Int4),
-            // `typtype` is `"char"` (OID 18) in PostgreSQL; Text is the
-            // closest synthesized type, same trade-off as `typcategory`.
-            ("typtype", Text),
-            // `typdelim` is `"char"` in PostgreSQL too. It is the element
-            // separator of the array text literal — ',' for every type crabka
-            // exposes — and drivers read it when parsing array output.
-            ("typdelim", Text),
-            // `typelem`/`typarray` are the two halves of the scalar ↔ array
-            // link a driver walks to recognize an array OID and to find the
-            // array type of a scalar.
+            ("typsubscript", ColumnType::Regproc),
             ("typelem", Int4),
             ("typarray", Int4),
+            ("typinput", ColumnType::Regproc),
+            ("typoutput", ColumnType::Regproc),
+            ("typreceive", ColumnType::Regproc),
+            ("typsend", ColumnType::Regproc),
+            ("typmodin", ColumnType::Regproc),
+            ("typmodout", ColumnType::Regproc),
+            ("typanalyze", ColumnType::Regproc),
+            ("typalign", ColumnType::InternalChar),
+            ("typstorage", ColumnType::InternalChar),
+            ("typnotnull", Bool),
             ("typbasetype", Int4),
-            // `\d`'s collation column is `attcollation <> typcollation`, so the
-            // two have to be derived the same way or every text column would
-            // report a collation it does not have.
+            ("typtypmod", Int4),
+            ("typndims", Int4),
             ("typcollation", Int4),
+            ("typdefaultbin", Text),
+            ("typdefault", Text),
+            ("typacl", ColumnType::Array(crabka_pgtypes::ElemType::Text)),
         ]),
         "pg_ts_config" => cols(&[
             ("oid", Int4),
