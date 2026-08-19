@@ -119,6 +119,18 @@ async fn a_builtin_transition_function_defines_a_user_aggregate() {
 }
 
 #[tokio::test]
+async fn int4_sum_transition_defines_a_user_aggregate() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_int4_sum (int4) (SFUNC = int4_sum, STYPE = int8)",
+    )
+    .await;
+
+    assert!(grid(&engine, "SELECT builtin_int4_sum(f1) FROM t").await == vec![some(&["6"])]);
+}
+
+#[tokio::test]
 async fn float8_accumulator_and_finalizer_define_a_user_average() {
     let engine = fixture().await;
     run(

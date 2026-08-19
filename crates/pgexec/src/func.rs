@@ -49,6 +49,7 @@ enum ScalarFunc {
     Mod,
     TypedAdd(ColumnType),
     Int8Inc,
+    Int4Sum,
     Int4AvgAccum,
     Int8Avg,
     Float8Accum,
@@ -174,6 +175,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "float4pl" => ScalarFunc::TypedAdd(ColumnType::Float4),
         "float8pl" => ScalarFunc::TypedAdd(ColumnType::Float8),
         "int8inc" => ScalarFunc::Int8Inc,
+        "int4_sum" => ScalarFunc::Int4Sum,
         "int4_avg_accum" => ScalarFunc::Int4AvgAccum,
         "int8_avg" => ScalarFunc::Int8Avg,
         "float8_accum" => ScalarFunc::Float8Accum,
@@ -798,6 +800,16 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
         ScalarFunc::Int8Inc => {
             require_arity(fc, n == 1)?;
             if crate::eval::infer_type(&args[0], scope)? == ColumnType::Int8 {
+                Ok(ColumnType::Int8)
+            } else {
+                Err(undefined_function_spelled(&fc.name, args, scope))
+            }
+        }
+        ScalarFunc::Int4Sum => {
+            require_arity(fc, n == 2)?;
+            if crate::eval::infer_type(&args[0], scope)? == ColumnType::Int8
+                && crate::eval::infer_type(&args[1], scope)? == ColumnType::Int4
+            {
                 Ok(ColumnType::Int8)
             } else {
                 Err(undefined_function_spelled(&fc.name, args, scope))
@@ -1590,8 +1602,9 @@ fn coerce_unknown_args(
 }
 
 /// Apply an eager scalar function to its already-evaluated arguments. Every
-/// function here except `concat` is strict, and returns NULL for any NULL
-/// argument. `concat` skips NULLs and never returns NULL.
+/// function here except `concat` and `int4_sum` is strict, and returns NULL
+/// for any NULL argument. `concat` skips NULLs and `int4_sum` initializes or
+/// preserves its aggregate state around a NULL.
 fn eval_eager(
     f: ScalarFunc,
     fc: &FuncCall,
@@ -1647,8 +1660,9 @@ fn eval_eager(
             .map(Datum::Multirange)
             .map_err(ExecError::from);
     }
-    // Strict: a NULL argument short-circuits to NULL.
-    if vals.iter().any(Datum::is_null) {
+    // Strict: a NULL argument short-circuits to NULL. `int4_sum` is the
+    // aggregate transition exception: PostgreSQL calls it with a NULL state.
+    if f != ScalarFunc::Int4Sum && vals.iter().any(Datum::is_null) {
         return Ok(Datum::Null);
     }
     if let (ScalarFunc::RangeMerge, [Datum::Multirange(multirange)]) = (f, vals) {
@@ -1943,6 +1957,25 @@ fn eval_eager(
         ScalarFunc::Int8Inc => {
             require_arity(fc, vals.len() == 1)?;
             Ok(ops::add(&vals[0], &Datum::Int8(1))?)
+        }
+        ScalarFunc::Int4Sum => {
+            require_arity(fc, vals.len() == 2)?;
+            let state = match &vals[0] {
+                Datum::Null => None,
+                Datum::Int8(value) => Some(*value),
+                other => return Err(type_error(&fc.name, other)),
+            };
+            let value = match &vals[1] {
+                Datum::Null => None,
+                Datum::Int4(value) => Some(i64::from(*value)),
+                other => return Err(type_error(&fc.name, other)),
+            };
+            match (state, value) {
+                (None, None) => Ok(Datum::Null),
+                (None, Some(value)) => Ok(Datum::Int8(value)),
+                (Some(state), None) => Ok(Datum::Int8(state)),
+                (Some(state), Some(value)) => Ok(Datum::Int8(state.wrapping_add(value))),
+            }
         }
         ScalarFunc::Int4AvgAccum => {
             require_arity(fc, vals.len() == 2)?;
@@ -4176,6 +4209,24 @@ mod tests {
         );
         assert!(ev("int4_avg_accum(NULL::int8[], 2)") == Datum::Null);
         assert!(ev("int8_avg(NULL::int8[])") == Datum::Null);
+        assert_eq!(ev("int4_sum(NULL::int8, 2)"), Datum::Int8(2));
+        assert_eq!(ev("int4_sum(7::int8, NULL::int4)"), Datum::Int8(7));
+        assert_eq!(ev("int4_sum(NULL::int8, NULL::int4)"), Datum::Null);
+        assert_eq!(
+            ev("int4_sum(9223372036854775807::int8, 1)"),
+            Datum::Int8(i64::MIN)
+        );
+        assert_eq!(
+            crate::eval::infer_type(
+                &pexpr("int4_sum(7::int8, 2)").expect("parse"),
+                &Scope::empty(),
+            )
+            .expect("int4_sum signature"),
+            ColumnType::Int8
+        );
+        assert_eq!(err_code("int4_sum(7::int8)", None), "42883");
+        assert_eq!(err_code("int4_sum(7, 2)", None), "42883");
+        assert_eq!(err_code("int4_sum(7::int8, 2::int8)", None), "42883");
         assert_eq!(
             err_code("int4_avg_accum(ARRAY[0::int8, 0::int8])", None),
             "42883"
