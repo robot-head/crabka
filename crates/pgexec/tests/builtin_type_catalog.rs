@@ -917,6 +917,26 @@ async fn the_remaining_row_less_builtins_and_their_array_types_are_present() {
     }
 }
 
+/// `varchar[]` and `character[]` already have array rows; their scalar rows
+/// must point back at those rows or catalog walkers treat the arrays as orphaned.
+#[tokio::test]
+async fn character_type_array_links_are_bidirectional() {
+    let (_engine, mut s) = session();
+
+    let cases: &[(u32, Vec<Option<String>>)] = &[
+        (1042, row("bpchar", -1, "S", 0, 1014)),
+        (1014, row("_bpchar", -1, "A", 1042, 0)),
+        (1043, row("varchar", -1, "S", 0, 1015)),
+        (1015, row("_varchar", -1, "A", 1043, 0)),
+    ];
+    for (oid, want) in cases {
+        assert!(
+            pg_type_row(&mut s, *oid).await == vec![want.clone()],
+            "oid {oid}"
+        );
+    }
+}
+
 /// The lookup every client driver caches its type table from. A type with no
 /// row answers it with nothing, and a driver that finds no `timetz` has no oid
 /// to bind a `timetz` parameter with.

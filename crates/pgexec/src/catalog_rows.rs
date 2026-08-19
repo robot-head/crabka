@@ -3298,7 +3298,7 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             len: -1,
             category: "S",
             elem: 0,
-            array: 0,
+            array: crabka_pgtypes::oids::BPCHARARRAY as i32,
         },
         // `"char"` is not in the string category with its neighbours: it is
         // `typcategory` Z, the internal-use category, because it is one byte
@@ -3318,7 +3318,7 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             len: -1,
             category: "S",
             elem: 0,
-            array: 0,
+            array: crabka_pgtypes::oids::VARCHARARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::FLOAT4 as i32,
