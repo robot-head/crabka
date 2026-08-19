@@ -22,6 +22,15 @@ async fn scalar(s: &mut SqlSession, sql: &str) -> Option<String> {
     }
 }
 
+async fn error_context(s: &mut SqlSession, sql: &str) -> String {
+    let error = s.simple_query(sql).await.expect_err("statement must fail");
+    error
+        .diagnostics
+        .as_ref()
+        .and_then(|fields| fields.context.clone())
+        .unwrap_or_else(|| panic!("missing context: {error:?}"))
+}
+
 /// Every statement runs, and the final one supplies the scalar result.
 #[tokio::test]
 async fn a_sql_body_runs_every_statement_and_returns_its_final_result() {
@@ -133,6 +142,69 @@ async fn a_sql_scalar_routine_rejects_multiple_final_rows() {
         .await
         .expect_err("multiple result rows must fail");
     assert!(error.code == "21000", "{}", error.code);
+}
+
+#[tokio::test]
+async fn a_sql_routine_error_reports_its_statement_context() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION failing_context() RETURNS int VOLATILE LANGUAGE sql \
+         AS 'SELECT 1; SELECT 1 / 0'",
+    )
+    .await;
+
+    let error = s
+        .simple_query("SELECT failing_context()")
+        .await
+        .expect_err("division by zero");
+    assert!(error.code == "22012", "{error:?}");
+    assert!(
+        error
+            .diagnostics
+            .as_ref()
+            .and_then(|fields| fields.context.as_deref())
+            == Some("SQL function \"failing_context\" statement 2"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn every_sql_routine_executor_counts_context_statements() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION scalar_bind_context(int) RETURNS int LANGUAGE sql \
+         AS 'SELECT 1; SELECT * FROM missing_scalar_bind_context'; \
+         CREATE PROCEDURE procedure_bind_context(int) LANGUAGE sql \
+         AS 'SELECT 1; SELECT * FROM missing_procedure_bind_context'; \
+         CREATE PROCEDURE procedure_run_context() LANGUAGE sql \
+         AS 'SELECT 1; SELECT 1 / 0'; \
+         CREATE FUNCTION set_bind_context(int) RETURNS SETOF int LANGUAGE sql \
+         AS 'SELECT 1; SELECT * FROM missing_set_bind_context'; \
+         CREATE FUNCTION set_run_context() RETURNS SETOF int LANGUAGE sql \
+         AS 'SELECT 1; SELECT 1 / 0'",
+    )
+    .await;
+
+    for (sql, name) in [
+        ("SELECT scalar_bind_context(1)", "scalar_bind_context"),
+        ("CALL procedure_bind_context(1)", "procedure_bind_context"),
+        ("CALL procedure_run_context()", "procedure_run_context"),
+        ("SELECT set_bind_context(1)", "set_bind_context"),
+        ("SELECT set_run_context()", "set_run_context"),
+    ] {
+        assert!(
+            error_context(&mut s, sql).await == format!("SQL function \"{name}\" statement 2"),
+            "{sql}"
+        );
+    }
 }
 
 #[tokio::test]

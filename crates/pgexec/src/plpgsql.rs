@@ -231,8 +231,10 @@ async fn execute_call_body(
             routine_oid: routine.oid,
         };
         let statements = crate::routine::parse_body(&routine)?;
-        for statement in statements {
-            let statement = interpreter.bind_statement(&statement)?;
+        for (index, statement) in statements.into_iter().enumerate() {
+            let statement = interpreter
+                .bind_statement(&statement)
+                .map_err(|error| sql_statement_error(error, &routine, index + 1))?;
             match &statement {
                 Statement::Commit { .. } | Statement::Rollback { .. }
                     if !allow_transaction_control =>
@@ -242,7 +244,9 @@ async fn execute_call_body(
                     ));
                 }
                 _ => {
-                    Box::pin(interpreter.session.run_one(&statement)).await?;
+                    Box::pin(interpreter.session.run_one(&statement))
+                        .await
+                        .map_err(|error| sql_statement_error(error, &routine, index + 1))?;
                 }
             }
         }
@@ -332,9 +336,15 @@ pub(crate) async fn execute_sql_scalar_function(
     };
     let statements = crate::routine::parse_body(routine)?;
     let mut final_result = None;
-    for statement in statements {
-        let statement = interpreter.bind_statement(&statement)?;
-        final_result = Some(Box::pin(interpreter.session.run_one(&statement)).await?);
+    for (index, statement) in statements.into_iter().enumerate() {
+        let statement = interpreter
+            .bind_statement(&statement)
+            .map_err(|error| sql_statement_error(error, routine, index + 1))?;
+        final_result = Some(
+            Box::pin(interpreter.session.run_one(&statement))
+                .await
+                .map_err(|error| sql_statement_error(error, routine, index + 1))?,
+        );
     }
     if crate::routine::declared_returns_void(routine) {
         return Ok(crate::routine::void_result_value());
@@ -563,9 +573,15 @@ pub(crate) async fn execute_sql_table_function(
         routine_oid: routine.oid,
     };
     let mut final_result = None;
-    for statement in crate::routine::parse_body(routine)? {
-        let statement = interpreter.bind_statement(&statement)?;
-        final_result = Some(Box::pin(interpreter.session.run_one(&statement)).await?);
+    for (index, statement) in crate::routine::parse_body(routine)?.into_iter().enumerate() {
+        let statement = interpreter
+            .bind_statement(&statement)
+            .map_err(|error| sql_statement_error(error, routine, index + 1))?;
+        final_result = Some(
+            Box::pin(interpreter.session.run_one(&statement))
+                .await
+                .map_err(|error| sql_statement_error(error, routine, index + 1))?,
+        );
     }
     let QueryResult::Rows { fields, rows, .. } = final_result.ok_or_else(|| {
         ExecError::Syntax("SQL function body must contain a final query or DML RETURNING statement".into())
@@ -3055,6 +3071,13 @@ fn ensure_error_context(error: PgError, context: &str) -> PgError {
     } else {
         error.with_context(context)
     }
+}
+
+fn sql_statement_error(error: ExecError, routine: &Routine, statement: usize) -> ExecError {
+    ExecError::Remote(ensure_error_context(
+        error.into_pg(),
+        &format!("SQL function \"{}\" statement {statement}", routine.name),
+    ))
 }
 
 fn assign_subscripted(
