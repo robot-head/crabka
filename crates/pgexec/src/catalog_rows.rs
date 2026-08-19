@@ -1651,21 +1651,21 @@ fn pg_type_row(row: PgTypeRow<'_>) -> Vec<Datum> {
     };
     let typstorage = if row.len < 0 { "x" } else { "p" };
     vec![
-        int(row.oid),
+        oid(row.oid),
         text(row.name),
-        int(row.namespace),
-        int(10),
-        int(row.len),
+        oid(row.namespace),
+        oid(10),
+        Datum::Int2(row.len.try_into().expect("pg_type typlen must fit in int2")),
         Datum::Bool(typbyval),
         Datum::InternalChar(row.typtype.as_bytes()[0]),
         Datum::InternalChar(row.category.as_bytes()[0]),
         Datum::Bool(false),
         Datum::Bool(true),
         Datum::InternalChar(b','),
-        int(row.typrelid),
+        oid(row.typrelid),
         int(0),
-        int(row.typelem),
-        int(row.typarray),
+        oid(row.typelem),
+        oid(row.typarray),
         int(0),
         int(0),
         int(0),
@@ -1676,10 +1676,10 @@ fn pg_type_row(row: PgTypeRow<'_>) -> Vec<Datum> {
         Datum::InternalChar(typalign.as_bytes()[0]),
         Datum::InternalChar(typstorage.as_bytes()[0]),
         Datum::Bool(false),
-        int(row.typbasetype),
+        oid(row.typbasetype),
         int(-1),
         int(0),
-        int(row.typcollation),
+        oid(row.typcollation),
         Datum::Null,
         Datum::Null,
         Datum::Null,
@@ -3650,6 +3650,10 @@ pub(crate) fn usize_i32(value: usize) -> Result<i32, ExecError> {
 
 pub(crate) fn int(value: i32) -> Datum {
     Datum::Int4(value)
+}
+
+fn oid(value: i32) -> Datum {
+    Datum::Oid(value as u32)
 }
 
 pub(crate) fn text(value: &str) -> Datum {

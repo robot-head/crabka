@@ -171,6 +171,31 @@ async fn pg_type_exposes_all_postgresql_18_catalog_columns() {
     );
 }
 
+/// The catalog's object identifiers and `typlen` keep their catalog types in
+/// `RowDescription`, so driver type caches do not mistake them for `int4`.
+#[tokio::test]
+async fn pg_type_uses_oid_and_int2_column_types_on_the_wire() {
+    let (_engine, mut s) = session();
+    let result = s
+        .simple_query(
+            "SELECT oid, typnamespace, typowner, typlen, typrelid, typelem, \
+                    typarray, typbasetype, typcollation \
+             FROM pg_type WHERE typname = 'int4'",
+        )
+        .await
+        .expect("pg_type query succeeds");
+    let QueryResult::Rows { fields, .. } = &result[0] else {
+        panic!("pg_type query should return rows");
+    };
+    assert!(
+        fields
+            .iter()
+            .map(|field| field.type_oid)
+            .collect::<Vec<_>>()
+            == vec![26, 26, 26, 21, 26, 26, 26, 26, 26]
+    );
+}
+
 /// The physical fields are not decorative: type sanity uses them to decide
 /// whether a datum can be passed by value or must be stored out of line.
 #[tokio::test]
