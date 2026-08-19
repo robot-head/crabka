@@ -136,11 +136,19 @@ async fn aggregate_transition_support_functions_are_callable() {
 
     let client = connect(spawn().await).await;
     let row = client
-        .query_one("SELECT int4pl(4, 5), int8inc(9::int8)", &[])
+        .query_one(
+            "SELECT int2pl(4::int2, 5::int2), int4pl(4, 5), int8pl(4::int8, 5::int8), \
+             float4pl(4::float4, 5::float4), float8pl(4::float8, 5::float8), int8inc(9::int8)",
+            &[],
+        )
         .await
         .expect("aggregate support functions");
-    assert!(row.get::<_, i32>(0) == 9);
-    assert!(row.get::<_, i64>(1) == 10);
+    assert!(row.get::<_, i16>(0) == 9);
+    assert!(row.get::<_, i32>(1) == 9);
+    assert!(row.get::<_, i64>(2) == 9);
+    assert!((row.get::<_, f32>(3) - 9.0).abs() < f32::EPSILON);
+    assert!((row.get::<_, f64>(4) - 9.0).abs() < f64::EPSILON);
+    assert!(row.get::<_, i64>(5) == 10);
 }
 
 #[tokio::test]

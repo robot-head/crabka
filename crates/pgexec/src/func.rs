@@ -47,7 +47,7 @@ enum ScalarFunc {
     Concat,
     Abs,
     Mod,
-    Int4Add,
+    TypedAdd(ColumnType),
     Int8Inc,
     BoolCompare {
         equal: bool,
@@ -164,7 +164,11 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "concat" => ScalarFunc::Concat,
         "abs" => ScalarFunc::Abs,
         "mod" => ScalarFunc::Mod,
-        "int4pl" => ScalarFunc::Int4Add,
+        "int2pl" => ScalarFunc::TypedAdd(ColumnType::Int2),
+        "int4pl" => ScalarFunc::TypedAdd(ColumnType::Int4),
+        "int8pl" => ScalarFunc::TypedAdd(ColumnType::Int8),
+        "float4pl" => ScalarFunc::TypedAdd(ColumnType::Float4),
+        "float8pl" => ScalarFunc::TypedAdd(ColumnType::Float8),
         "int8inc" => ScalarFunc::Int8Inc,
         "booleq" => ScalarFunc::BoolCompare { equal: true },
         "boolne" => ScalarFunc::BoolCompare { equal: false },
@@ -771,14 +775,14 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 Ok(promote(lt, rt))
             }
         }
-        ScalarFunc::Int4Add => {
+        ScalarFunc::TypedAdd(ty) => {
             require_arity(fc, n == 2)?;
             for arg in args {
-                if crate::eval::infer_type(arg, scope)? != ColumnType::Int4 {
+                if crate::eval::infer_type(arg, scope)? != ty {
                     return Err(undefined_function_spelled(&fc.name, args, scope));
                 }
             }
-            Ok(ColumnType::Int4)
+            Ok(ty)
         }
         ScalarFunc::Int8Inc => {
             require_arity(fc, n == 1)?;
@@ -1885,7 +1889,7 @@ fn eval_eager(
             require_arity(fc, vals.len() == 2)?;
             Ok(ops::rem(&vals[0], &vals[1])?)
         }
-        ScalarFunc::Int4Add => {
+        ScalarFunc::TypedAdd(_) => {
             require_arity(fc, vals.len() == 2)?;
             Ok(ops::add(&vals[0], &vals[1])?)
         }
