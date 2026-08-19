@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use crabka_pgparser::ast::{
-    DistinctClause, QueryExpr, SelectItem, SelectStmt, TableExpr, ValuesStmt,
+    DistinctClause, Expr, QueryExpr, SelectItem, SelectStmt, TableExpr, ValuesStmt,
 };
 
 use crate::{
@@ -305,7 +305,12 @@ fn execute_nested_loop_window_with_state(
             unreachable!()
         };
         let relation = filter_state.execute_child((**input).clone(), |loop_state| {
-            execute_nested_loop_plan(loop_state, read_ctx, &mut sources.iter())
+            execute_nested_loop_plan(
+                loop_state,
+                read_ctx,
+                &mut sources.iter(),
+                select.filter.as_ref(),
+            )
         })?;
         filter_state.begin_loop();
         filter_relation_rows(filter_state, relation, read_ctx.eval_ctx)
@@ -347,7 +352,12 @@ impl NestedLoopTail<'_, '_> {
         match &state.plan.node {
         PlanNode::Filter { input } => {
             let relation = state.execute_child((**input).clone(), |child| {
-                execute_nested_loop_plan(child, self.read_ctx, &mut self.sources.iter())
+                execute_nested_loop_plan(
+                    child,
+                    self.read_ctx,
+                    &mut self.sources.iter(),
+                    self.select.filter.as_ref(),
+                )
             })?;
             state.begin_loop();
             let relation = filter_relation_rows(state, relation, self.read_ctx.eval_ctx)?;
@@ -646,6 +656,7 @@ fn execute_nested_loop_plan(
     state: &mut PlanState,
     read_ctx: &crate::subquery::SubCtx<'_>,
     sources: &mut std::slice::Iter<'_, TableExpr>,
+    filter: Option<&Expr>,
 ) -> Result<Relation, ExecError> {
     match &state.plan.node {
         PlanNode::SeqScan { .. }
@@ -687,12 +698,23 @@ fn execute_nested_loop_plan(
             let outer = (**outer).clone();
             let inner = (**inner).clone();
             let outer_relation = state.execute_child(outer, |child| {
-                execute_nested_loop_plan(child, read_ctx, sources)
+                execute_nested_loop_plan(child, read_ctx, sources, filter)
             })?;
             let inner_relation = state.execute_child(inner, |child| {
-                execute_nested_loop_plan(child, read_ctx, sources)
+                execute_nested_loop_plan(child, read_ctx, sources, filter)
             })?;
             state.begin_loop();
+            let constraint = if matches!(kind, crabka_pgparser::ast::JoinKind::Cross)
+                && matches!(constraint, crabka_pgparser::ast::JoinConstraint::None)
+            {
+                let mut scope = outer_relation.scope.clone();
+                scope.columns.extend(inner_relation.scope.columns.iter().cloned());
+                exec::inner_join_predicate(filter, &scope)
+                    .map(crabka_pgparser::ast::JoinConstraint::On)
+                    .unwrap_or(constraint)
+            } else {
+                constraint
+            };
             let relation = crate::join::join_relations(
                 outer_relation,
                 inner_relation,
@@ -3410,5 +3432,44 @@ mod tests {
         .into_pg();
 
         assert_eq!(error.code, "53200");
+    }
+
+    #[tokio::test]
+    async fn comma_join_applies_available_where_conjuncts_before_materializing() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{Engine, QueryResult, Session};
+
+        let engine = crate::SqlEngine::new_with_policy(crate::RuntimePolicy {
+            blocking_query_memory: crabka_units::bytes(64 * 1024),
+            ..Default::default()
+        })
+        .expect("policy");
+        let values = (1..=64)
+            .map(|id| format!("({id})"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut session = engine.connect();
+        session
+            .simple_query(&format!(
+                "CREATE TABLE a (id int4); CREATE TABLE b (id int4); CREATE TABLE c (id int4); \
+                 INSERT INTO a VALUES {values}; INSERT INTO b VALUES {values}; INSERT INTO c VALUES {values}"
+            ))
+            .await
+            .expect("fixture");
+
+        let result = session
+            .simple_query("SELECT count(*) FROM a, b, c WHERE a.id = b.id AND b.id = c.id")
+            .await
+            .expect("join predicates avoid the cartesian product");
+        let [QueryResult::Rows { rows, .. }] = result.as_slice() else {
+            panic!("expected count rows");
+        };
+        let [row] = rows.as_slice() else {
+            panic!("expected one count");
+        };
+        let [Some(cell)] = row.as_slice() else {
+            panic!("expected one count cell");
+        };
+        assert!(cell.text.as_ref() == b"64");
     }
 }
