@@ -2759,7 +2759,7 @@ pub(crate) fn check_predicate_resolves(expr: &Expr, scope: &Scope) -> Result<(),
 /// and would then fail every write to the table. This function skips an
 /// `unknown` literal on either side, because that literal adopts the other
 /// operand's type.
-fn comparison_mismatch(node: &Expr, scope: &Scope) -> Option<ExecError> {
+pub(crate) fn comparison_mismatch(node: &Expr, scope: &Scope) -> Option<ExecError> {
     let Expr::Binary { op, left, right } = node else {
         return None;
     };

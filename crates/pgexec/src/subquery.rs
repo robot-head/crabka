@@ -413,11 +413,31 @@ pub(crate) fn resolve_expr_skipping(
             expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
             collation: collation.clone(),
         },
-        Expr::Binary { op, left, right } => Expr::Binary {
-            op: *op,
-            left: Box::new(resolve_expr_skipping(ctx, left, should_skip)?),
-            right: Box::new(resolve_expr_skipping(ctx, right, should_skip)?),
-        },
+        Expr::Binary { op, left, right } => {
+            // A parenthesized subquery normally has to project one column.  In
+            // a row comparison, though, PostgreSQL lets it stand for the row
+            // of its projections; lower only that context to an Expr::Row so
+            // the ordinary scalar-subquery rule stays intact everywhere else.
+            let (left, right) = match (&**left, &**right) {
+                (Expr::Row(items), Expr::ScalarSubquery(query)) => (
+                    resolve_expr_skipping(ctx, left, should_skip)?,
+                    run_row_scalar(ctx, query, items.len())?,
+                ),
+                (Expr::ScalarSubquery(query), Expr::Row(items)) => (
+                    run_row_scalar(ctx, query, items.len())?,
+                    resolve_expr_skipping(ctx, right, should_skip)?,
+                ),
+                _ => (
+                    resolve_expr_skipping(ctx, left, should_skip)?,
+                    resolve_expr_skipping(ctx, right, should_skip)?,
+                ),
+            };
+            Expr::Binary {
+                op: *op,
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        }
         Expr::Func(fc) => {
             let call = FuncCall {
                 sql_syntax: fc.sql_syntax,
@@ -609,13 +629,19 @@ pub(crate) fn resolve_expr_skipping(
             subquery,
             negated,
         } => {
-            let (ty, values) = run_single_column(ctx, subquery)?;
-            Expr::InList {
-                expr: Box::new(resolve_expr_skipping(ctx, expr, should_skip)?),
-                list: values
+            let expr = resolve_expr_skipping(ctx, expr, should_skip)?;
+            let list = if let Expr::Row(items) = &expr {
+                run_row_list(ctx, subquery, items.len())?
+            } else {
+                let (ty, values) = run_single_column(ctx, subquery)?;
+                values
                     .into_iter()
                     .map(|value| Expr::Const { value, ty })
-                    .collect(),
+                    .collect()
+            };
+            Expr::InList {
+                expr: Box::new(expr),
+                list,
                 negated: *negated,
             }
         }
@@ -625,9 +651,17 @@ pub(crate) fn resolve_expr_skipping(
             all,
             subquery,
         } => {
-            let (ty, values) = run_single_column(ctx, subquery)?;
             let lhs = resolve_expr_skipping(ctx, expr, should_skip)?;
-            lower_quantified(&lhs, *op, *all, ty, values)
+            let values = if let Expr::Row(items) = &lhs {
+                run_row_list(ctx, subquery, items.len())?
+            } else {
+                let (ty, values) = run_single_column(ctx, subquery)?;
+                values
+                    .into_iter()
+                    .map(|value| Expr::Const { value, ty })
+                    .collect()
+            };
+            lower_quantified(&lhs, *op, *all, values)
         }
     })
 }
@@ -673,6 +707,50 @@ fn run_scalar(ctx: &SubCtx, q: &QueryExpr) -> Result<(Datum, ColumnType), ExecEr
     Ok((value, ty))
 }
 
+/// Lower one row returned by a subquery into a row constructor.  The caller
+/// has already established that this is a row-valued context, so its width is
+/// part of the expression's contract rather than the scalar-subquery error.
+fn run_row_scalar(ctx: &SubCtx, q: &QueryExpr, width: usize) -> Result<Expr, ExecError> {
+    let rel = run_relation(ctx, q)?;
+    if rel.scope.width() != width {
+        return Err(ExecError::SubqueryColumns);
+    }
+    if rel.rows.len() > 1 {
+        return Err(ExecError::CardinalityViolation);
+    }
+    let row = rel
+        .rows
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| vec![Datum::Null; width]);
+    Ok(row_expr(row, &rel.scope))
+}
+
+/// Lower every row of a subquery for a row `IN` / `ANY` / `ALL` expression.
+fn run_row_list(ctx: &SubCtx, q: &QueryExpr, width: usize) -> Result<Vec<Expr>, ExecError> {
+    let rel = run_relation(ctx, q)?;
+    if rel.scope.width() != width {
+        return Err(ExecError::SubqueryColumns);
+    }
+    Ok(rel
+        .rows
+        .into_iter()
+        .map(|row| row_expr(row, &rel.scope))
+        .collect())
+}
+
+fn row_expr(row: Vec<Datum>, scope: &crate::scope::Scope) -> Expr {
+    Expr::Row(
+        row.into_iter()
+            .enumerate()
+            .map(|(index, value)| Expr::Const {
+                value,
+                ty: scope.ty_at(index),
+            })
+            .collect(),
+    )
+}
+
 /// Run a single-column subquery, and return its column type plus every value,
 /// in row order.
 fn run_single_column(ctx: &SubCtx, q: &QueryExpr) -> Result<(ColumnType, Vec<Datum>), ExecError> {
@@ -689,13 +767,7 @@ fn run_single_column(ctx: &SubCtx, q: &QueryExpr) -> Result<(ColumnType, Vec<Dat
 /// with PostgreSQL's empty-set semantics: ANY gives false, and ALL gives true.
 /// NULL three-valued logic falls out of the existing
 /// `ops::or`/`ops::and`/`ops::compare`.
-fn lower_quantified(
-    lhs: &Expr,
-    op: BinaryOp,
-    all: bool,
-    ty: ColumnType,
-    values: Vec<Datum>,
-) -> Expr {
+fn lower_quantified(lhs: &Expr, op: BinaryOp, all: bool, values: Vec<Expr>) -> Expr {
     if values.is_empty() {
         return Expr::Const {
             value: Datum::Bool(all),
@@ -704,11 +776,11 @@ fn lower_quantified(
     }
     let join = if all { BinaryOp::And } else { BinaryOp::Or };
     let mut acc: Option<Expr> = None;
-    for v in values {
+    for right in values {
         let cmp = Expr::Binary {
             op,
             left: Box::new(lhs.clone()),
-            right: Box::new(Expr::Const { value: v, ty }),
+            right: Box::new(right),
         };
         acc = Some(match acc {
             None => cmp,

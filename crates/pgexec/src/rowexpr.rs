@@ -28,6 +28,11 @@ pub(crate) fn validate_comparison(
     let (Expr::Row(left), Expr::Row(right)) = (left, right) else {
         return Ok(());
     };
+    if left.len() != right.len() {
+        return Err(ExecError::Syntax(
+            "unequal number of entries in row expressions".into(),
+        ));
+    }
     if !matches!(
         op,
         BinaryOp::Eq
@@ -44,6 +49,21 @@ pub(crate) fn validate_comparison(
     }
     for (left, right) in left.iter().zip(right) {
         validate_comparison(op, left, right, scope)?;
+        let field_op = if matches!(op, BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom) {
+            BinaryOp::Eq
+        } else {
+            op
+        };
+        if let Some(error) = crate::eval::comparison_mismatch(
+            &Expr::Binary {
+                op: field_op,
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+            },
+            scope,
+        ) {
+            return Err(error);
+        }
         let (left_type, right_type) = (
             crate::eval::infer_type(left, scope)?,
             crate::eval::infer_type(right, scope)?,
@@ -95,6 +115,11 @@ pub(crate) fn eval_row(
 /// `IS [NOT] DISTINCT FROM` and `IS [NOT] NULL`, which do not go through here,
 /// answer for it happily.
 fn compare(left: &[Datum], right: &[Datum], equality: bool) -> Result<Option<Ordering>, ExecError> {
+    if left.len() != right.len() {
+        return Err(ExecError::Syntax(
+            "unequal number of entries in row expressions".into(),
+        ));
+    }
     if left.is_empty() && right.is_empty() {
         return Err(ExecError::Unsupported(
             "cannot compare rows of zero length".into(),
@@ -122,6 +147,11 @@ fn compare(left: &[Datum], right: &[Datum], equality: bool) -> Result<Option<Ord
 /// pair is distinct. A field pair of two NULLs is not distinct, and a NULL
 /// against a non-NULL is distinct. The result is never NULL.
 fn distinct(left: &[Datum], right: &[Datum]) -> Result<bool, ExecError> {
+    if left.len() != right.len() {
+        return Err(ExecError::Syntax(
+            "unequal number of entries in row expressions".into(),
+        ));
+    }
     for (l, r) in left.iter().zip(right) {
         if is_distinct(l, r)? {
             return Ok(true);

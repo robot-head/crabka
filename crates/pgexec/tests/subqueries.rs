@@ -153,6 +153,89 @@ async fn in_not_in_exists_quantified() {
 }
 
 #[tokio::test]
+async fn row_subqueries_lower_to_row_comparisons() {
+    let client = connect(spawn().await).await;
+    seed(&client).await;
+
+    assert_eq!(
+        col0(
+            &client,
+            "SELECT ROW(1, 10) = (SELECT id, v FROM t WHERE id = 1)",
+        )
+        .await,
+        vec![Some("t".into())]
+    );
+    assert_eq!(
+        col0(
+            &client,
+            "SELECT (SELECT id, v FROM t WHERE id = 1) = ROW(1, 10)",
+        )
+        .await,
+        vec![Some("t".into())]
+    );
+    assert_eq!(
+        col0(&client, "SELECT ROW(1, 10) = ANY (SELECT id, v FROM t)").await,
+        vec![Some("t".into())]
+    );
+    assert_eq!(
+        col0(&client, "SELECT ROW(2, 20) <> ALL (SELECT id, v FROM t)").await,
+        vec![Some("f".into())]
+    );
+    assert_eq!(
+        col0(&client, "SELECT ROW(2, 20) IN (SELECT id, v FROM t)").await,
+        vec![Some("t".into())]
+    );
+    assert_eq!(
+        col0(
+            &client,
+            "SELECT ROW(1, NULL) = (SELECT id, v FROM t WHERE id = 1)",
+        )
+        .await,
+        vec![None]
+    );
+    assert_eq!(
+        rows(
+            &client,
+            "SELECT ROW(NULL, NULL) IS NULL, ROW(1, NULL) IS NULL, ROW(1, NULL) IS NOT NULL, \
+                    ROW(1, NULL) IS DISTINCT FROM ROW(1, NULL), \
+                    ROW(1, NULL) IS DISTINCT FROM ROW(1, 2)",
+        )
+        .await,
+        vec![vec![
+            Some("t".into()),
+            Some("f".into()),
+            Some("f".into()),
+            Some("f".into()),
+            Some("t".into()),
+        ]]
+    );
+    assert_eq!(
+        err_code(&client, "SELECT ROW(1, 10) = (SELECT id, v FROM t)").await,
+        "21000"
+    );
+    assert_eq!(
+        err_code(
+            &client,
+            "SELECT ROW(1, 10) = (SELECT id FROM t WHERE id = 1)",
+        )
+        .await,
+        "42601"
+    );
+    assert_eq!(
+        err_code(&client, "SELECT ROW(1, 10) = ROW(1)").await,
+        "42601"
+    );
+    assert_eq!(
+        err_code(&client, "SELECT ROW(1, 10) IS DISTINCT FROM ROW(1)").await,
+        "42601"
+    );
+    assert_eq!(
+        err_code(&client, "SELECT ROW(1, 10) = ROW('x'::text, 10)").await,
+        "42883"
+    );
+}
+
+#[tokio::test]
 async fn correlated_exists_uses_each_outer_row_and_inner_names_shadow_it() {
     let client = connect(spawn().await).await;
     seed(&client).await;
