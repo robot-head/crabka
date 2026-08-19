@@ -342,6 +342,25 @@ async fn whole_row_references_describe_the_relation_rowtype() {
     )
     .await;
     assert!(row_text(&result, 0) == vec![Some("t".into())]);
+    run(
+        &engine,
+        "CREATE FUNCTION whole_row_out(IN value whole_row_type, OUT result int4) \
+         LANGUAGE sql RETURN 1",
+    )
+    .await;
+    let result = run(
+        &engine,
+        "SELECT p.prorettype = 23, p.proallargtypes[1] = c.reltype, \
+                p.proallargtypes[2] = 23 \
+         FROM pg_catalog.pg_proc p \
+         JOIN pg_catalog.pg_class c ON c.relname = 'whole_row_type' \
+         WHERE p.proname = 'whole_row_out'",
+    )
+    .await;
+    assert!(
+        row_text(&result, 0)
+            == vec![Some("t".into()), Some("t".into()), Some("t".into())]
+    );
 
     run(
         &engine,
