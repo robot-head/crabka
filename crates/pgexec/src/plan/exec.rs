@@ -15,7 +15,7 @@ use crate::{
     error::ExecError,
     exec,
     join::Relation,
-    scope::Scope,
+    scope::{ColumnBinding, POSITION_QUALIFIER, Scope},
 };
 
 use super::query::{Executor, Plan, PlanNode, PlanState, RestrictInfo, TargetEntry};
@@ -144,6 +144,9 @@ fn try_execute_nested_loop_with_state(
             input: Box::new(loop_plan),
         },
     };
+    let pruned_columns = (!aggregate && !project_set)
+        .then(|| nested_loop_pruned_columns(select, &filter, &scope))
+        .flatten();
     if aggregate {
         let plan = Plan {
             target_list: bind_target_list(&exprs, &fields, &scope)?,
@@ -160,6 +163,7 @@ fn try_execute_nested_loop_with_state(
             tys: &tys,
             order_by: &select.order_by,
             sort_positions: &[],
+            pruned_columns: pruned_columns.as_deref(),
             limit: select.limit.as_ref(),
             offset: select.offset.as_ref(),
             select,
@@ -229,6 +233,7 @@ fn try_execute_nested_loop_with_state(
         tys: &tys,
         order_by: &select.order_by,
         sort_positions: &sort_positions,
+        pruned_columns: pruned_columns.as_deref(),
         limit: select.limit.as_ref(),
         offset: select.offset.as_ref(),
         select,
@@ -310,6 +315,7 @@ fn execute_nested_loop_window_with_state(
                 read_ctx,
                 &mut sources.iter(),
                 select.filter.as_ref(),
+                None,
             )
         })?;
         filter_state.begin_loop();
@@ -341,6 +347,7 @@ struct NestedLoopTail<'a, 'b> {
     tys: &'a [crabka_pgtypes::ColumnType],
     order_by: &'a [crabka_pgparser::ast::OrderItem],
     sort_positions: &'a [usize],
+    pruned_columns: Option<&'a [ColumnBinding]>,
     limit: Option<&'a crabka_pgparser::ast::Expr>,
     offset: Option<&'a crabka_pgparser::ast::Expr>,
     select: &'a SelectStmt,
@@ -357,6 +364,7 @@ impl NestedLoopTail<'_, '_> {
                     self.read_ctx,
                     &mut self.sources.iter(),
                     self.select.filter.as_ref(),
+                    self.pruned_columns,
                 )
             })?;
             state.begin_loop();
@@ -652,11 +660,72 @@ fn plan_nested_loop_source(
     }
 }
 
+fn nested_loop_pruned_columns(
+    select: &SelectStmt,
+    filter: &Plan,
+    scope: &Scope,
+) -> Option<Vec<ColumnBinding>> {
+    if !select
+        .from
+        .iter()
+        .all(|source| matches!(source, TableExpr::Table { .. }))
+    {
+        return None;
+    }
+    let mut positions = BTreeSet::<usize>::new();
+    let mut all_bound = true;
+    for expr in filter
+        .target_list
+        .iter()
+        .map(|target| target.expr.expr())
+        .chain(filter.quals.iter().map(|qual| qual.clause.expr()))
+    {
+        crate::grouping::visit_expr(expr, &mut |node| {
+            if let Expr::Column { table, name } = node {
+                if table.as_deref() == Some(POSITION_QUALIFIER) {
+                    match name.parse() {
+                        Ok(position) => {
+                            positions.insert(position);
+                        }
+                        Err(_) => all_bound = false,
+                    }
+                } else {
+                    all_bound = false;
+                }
+            }
+        });
+    }
+    all_bound.then(|| {
+        positions
+            .into_iter()
+            .map(|position| scope.columns.get(position).cloned())
+            .collect::<Option<Vec<_>>>()
+    })?
+}
+
+fn prune_nested_loop_relation(
+    mut relation: Relation,
+    pruned_columns: Option<&[ColumnBinding]>,
+) -> Relation {
+    let Some(pruned_columns) = pruned_columns else {
+        return relation;
+    };
+    for row in &mut relation.rows {
+        for (column, datum) in relation.scope.columns.iter().zip(row) {
+            if !pruned_columns.contains(column) {
+                *datum = crabka_pgtypes::Datum::Null;
+            }
+        }
+    }
+    relation
+}
+
 fn execute_nested_loop_plan(
     state: &mut PlanState,
     read_ctx: &crate::subquery::SubCtx<'_>,
     sources: &mut std::slice::Iter<'_, TableExpr>,
     filter: Option<&Expr>,
+    pruned_columns: Option<&[ColumnBinding]>,
 ) -> Result<Relation, ExecError> {
     match &state.plan.node {
         PlanNode::SeqScan { .. }
@@ -672,7 +741,8 @@ fn execute_nested_loop_plan(
                         "NestedLoop had an unknown range-table entry".into(),
                     )
                 })?;
-            match &state.plan.node {
+            let materialization = pruned_columns.map(|_| read_ctx.statement_memory.reserve());
+            let relation = match &state.plan.node {
                 PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source: source.clone() }.execute(state),
                 PlanNode::FunctionScan | PlanNode::TableFunctionScan => {
                     FunctionScanExecutor { read_ctx, source: source.clone() }.execute(state)
@@ -685,7 +755,17 @@ fn execute_nested_loop_plan(
                     NamedTuplestoreScanExecutor { read_ctx, source: source.clone() }.execute(state)
                 }
                 _ => unreachable!("nested-loop leaf was matched above"),
+            }?;
+            let relation = prune_nested_loop_relation(relation, pruned_columns);
+            if let Some(materialization) = materialization {
+                let bytes = relation
+                    .rows
+                    .iter()
+                    .map(|row| crate::scanner::datum_row_bytes(row))
+                    .sum();
+                materialization.replace_with(bytes)?;
             }
+            Ok(relation)
         }
         PlanNode::NestedLoop {
             outer,
@@ -699,10 +779,10 @@ fn execute_nested_loop_plan(
             let inner = (**inner).clone();
             let materialization = read_ctx.statement_memory.reserve();
             let outer_relation = state.execute_child(outer, |child| {
-                execute_nested_loop_plan(child, read_ctx, sources, filter)
+                execute_nested_loop_plan(child, read_ctx, sources, filter, pruned_columns)
             })?;
             let inner_relation = state.execute_child(inner, |child| {
-                execute_nested_loop_plan(child, read_ctx, sources, filter)
+                execute_nested_loop_plan(child, read_ctx, sources, filter, pruned_columns)
             })?;
             state.begin_loop();
             let constraint = if matches!(kind, crabka_pgparser::ast::JoinKind::Cross)
@@ -3478,5 +3558,39 @@ mod tests {
             panic!("expected one count cell");
         };
         assert!(cell.text.as_ref() == b"128");
+    }
+
+    #[tokio::test]
+    async fn comma_join_prunes_unreferenced_wide_columns() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{Engine, QueryResult, Session};
+
+        let engine = crate::SqlEngine::new_with_policy(crate::RuntimePolicy {
+            blocking_query_memory: crabka_units::bytes(96 * 1024),
+            ..Default::default()
+        })
+        .expect("policy");
+        let padding = "x".repeat(1024);
+        let values = (1..=32)
+            .map(|id| format!("({id},'{padding}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut session = engine.connect();
+        session
+            .simple_query(&format!(
+                "CREATE TABLE a (id int4, padding text); CREATE TABLE b (id int4, padding text); \
+                 INSERT INTO a VALUES {values}; INSERT INTO b VALUES {values}"
+            ))
+            .await
+            .expect("fixture");
+
+        let result = session
+            .simple_query("SELECT a.id, b.id FROM a, b WHERE a.id = b.id ORDER BY 1")
+            .await
+            .expect("unused wide values must not reach the join");
+        let [QueryResult::Rows { rows, .. }] = result.as_slice() else {
+            panic!("expected join rows");
+        };
+        assert!(rows.len() == 32);
     }
 }
