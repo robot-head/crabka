@@ -132,6 +132,24 @@ async fn a_sql_routine_accepts_a_variadic_array_argument() {
     assert!(scalar(&mut s, "SELECT array_count(VARIADIC ARRAY[1, 2, 3])").await == Some("3".to_string()));
 }
 
+/// PostgreSQL installs these labels/defaults during initdb, so they must come
+/// from the initialized pg_proc fixture rather than a hand-maintained table.
+#[tokio::test]
+async fn a_builtin_accepts_catalog_named_default_arguments() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    assert!(
+        scalar(
+            &mut s,
+            "SELECT jsonb_path_exists(target => '{\"a\": 1}'::jsonb, path => '$.a'::jsonpath)",
+        )
+        .await
+            == Some("t".to_string())
+    );
+}
+
 /// A scalar built-in in FROM is a one-row `FunctionScan`, not an undefined SRF.
 #[tokio::test]
 async fn a_scalar_builtin_scans_as_one_row_from_item() {

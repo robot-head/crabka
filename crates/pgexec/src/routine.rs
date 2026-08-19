@@ -1463,7 +1463,7 @@ pub(crate) fn normalize_named_call(
         .filter(|routine| !routine.is_aggregate())
         .collect();
     if candidates.is_empty() {
-        return Ok(None);
+        return normalize_builtin_named_call(call);
     }
     let mut groups: Vec<(Vec<ArgType>, Vec<(Routine, Vec<Expr>)>)> = Vec::new();
     for routine in candidates {
@@ -1508,6 +1508,127 @@ pub(crate) fn normalize_named_call(
         order_by: call.order_by.clone(),
         filter: call.filter.clone(),
     }))
+}
+
+/// The input signature of a built-in routine whose catalog row has argument
+/// labels. This is decoded from the initialized PostgreSQL `pg_proc` fixture:
+/// initdb adds several labels/defaults which are absent from `pg_proc.dat`.
+#[derive(Clone)]
+struct BuiltinNamedSignature {
+    name: String,
+    input_types: Vec<Option<ColumnType>>,
+    input_names: Vec<String>,
+    defaults: Vec<Expr>,
+}
+
+static BUILTIN_NAMED_SIGNATURES: std::sync::OnceLock<Option<Vec<BuiltinNamedSignature>>> =
+    std::sync::OnceLock::new();
+
+fn normalize_builtin_named_call(call: &FuncCall) -> Result<Option<FuncCall>, ExecError> {
+    let FuncArgs::Named { positional, named } = &call.args else {
+        return Ok(None);
+    };
+    let signatures = BUILTIN_NAMED_SIGNATURES
+        .get_or_init(|| decode_builtin_named_signatures().ok())
+        .as_ref()
+        .ok_or_else(|| ExecError::Unsupported("built-in pg_proc fixture is corrupt".into()))?;
+    let mut exact = Vec::new();
+    let mut coercible = Vec::new();
+    for signature in signatures
+        .iter()
+        .filter(|signature| signature.name.eq_ignore_ascii_case(&call.name))
+    {
+        let Some(args) = bind_builtin_named_args(signature, positional, named, &call.name)? else {
+            continue;
+        };
+        match builtin_named_match(signature, &args) {
+            Some(true) => exact.push(args),
+            Some(false) => coercible.push(args),
+            None => {}
+        }
+    }
+    let matches = if exact.len() == 1 {
+        exact
+    } else if exact.is_empty() && coercible.len() == 1 {
+        coercible
+    } else if exact.is_empty() && coercible.is_empty() {
+        return Ok(None);
+    } else {
+        return Err(undefined_routine(format!("function {} does not exist", call.name)));
+    };
+    Ok(Some(FuncCall {
+        sql_syntax: call.sql_syntax,
+        name: call.name.clone(),
+        distinct: call.distinct,
+        args: FuncArgs::Exprs(matches.into_iter().next().expect("one matching signature")),
+        order_by: call.order_by.clone(),
+        filter: call.filter.clone(),
+    }))
+}
+
+fn bind_builtin_named_args(
+    signature: &BuiltinNamedSignature,
+    positional: &[Expr],
+    named: &[(String, Expr)],
+    routine_name: &str,
+) -> Result<Option<Vec<Expr>>, ExecError> {
+    if positional.len() > signature.input_names.len() {
+        return Ok(None);
+    }
+    let mut slots = positional.iter().cloned().map(Some).collect::<Vec<_>>();
+    slots.resize(signature.input_names.len(), None);
+    for (label, value) in named {
+        let Some(index) = signature
+            .input_names
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(label))
+        else {
+            return Ok(None);
+        };
+        if slots[index].is_some() {
+            return Err(ExecError::Syntax(format!(
+                "argument \"{label}\" of {routine_name} specified more than once"
+            )));
+        }
+        slots[index] = Some(value.clone());
+    }
+    let first_default = signature
+        .input_names
+        .len()
+        .checked_sub(signature.defaults.len())
+        .expect("default count cannot exceed argument count");
+    let mut args = Vec::with_capacity(signature.input_names.len());
+    for (index, argument) in slots.into_iter().enumerate() {
+        match argument {
+            Some(argument) => args.push(argument),
+            None if index >= first_default => {
+                args.push(signature.defaults[index - first_default].clone());
+            }
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(args))
+}
+
+fn builtin_named_match(signature: &BuiltinNamedSignature, args: &[Expr]) -> Option<bool> {
+    let given = best_effort_arg_types(args);
+    let mut exact = true;
+    for (arg, target) in given.iter().zip(&signature.input_types) {
+        let Some(target) = target else {
+            if !matches!(arg, ArgType::Unknown | ArgType::Opaque) {
+                return None;
+            }
+            exact = false;
+            continue;
+        };
+        match arg {
+            ArgType::Known(source) if source == target => {}
+            ArgType::Known(source) if implicitly_coercible(*source, *target) => exact = false,
+            ArgType::Known(_) => return None,
+            ArgType::Unknown | ArgType::Opaque => exact = false,
+        }
+    }
+    Some(exact)
 }
 
 /// Resolve a procedure call whose argument list includes `OUT` placeholders.
@@ -3990,6 +4111,7 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 argument_modes,
                 all_argument_types,
                 argument_names,
+                argument_defaults,
             ] = fields.as_slice()
             else {
                 return Err(corrupt());
@@ -4090,7 +4212,11 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                     )),
                     None => Datum::Null,
                 },
-                Datum::Null,
+                if *argument_defaults == "-" {
+                    Datum::Null
+                } else {
+                    Datum::Text((*argument_defaults).to_string())
+                },
                 Datum::Null,
                 Datum::Text((*source).to_string()),
                 if int(language)? == 13 {
@@ -4104,6 +4230,126 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
             ])
         })
         .collect()
+}
+
+fn decode_builtin_named_signatures() -> Result<Vec<BuiltinNamedSignature>, ExecError> {
+    let corrupt = || ExecError::Unsupported("built-in pg_proc fixture is corrupt".into());
+    let signatures = crate::builtin_procs::BUILTIN_PROCS
+        .iter()
+        .map(|data| zstd::decode_all(*data).map_err(|_| corrupt()))
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .flat_map(|data| data.split(|byte| *byte == b'\n'))
+        .filter(|line| !line.is_empty())
+        .map(|line| -> Result<Option<BuiltinNamedSignature>, ExecError> {
+            let line = std::str::from_utf8(line).map_err(|_| corrupt())?;
+            let fields = line.split('\t').collect::<Vec<_>>();
+            let [
+                _,
+                name,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                argument_count,
+                default_count,
+                _,
+                argument_types,
+                _,
+                argument_modes,
+                _,
+                argument_names,
+                defaults,
+            ] = fields.as_slice()
+            else {
+                return Err(corrupt());
+            };
+            if *argument_names == "-" {
+                return Ok(None);
+            }
+            let argument_count = argument_count.parse::<usize>().map_err(|_| corrupt())?;
+            let default_count = default_count.parse::<usize>().map_err(|_| corrupt())?;
+            let type_oids = argument_types
+                .split_whitespace()
+                .map(|oid| oid.parse::<u32>().map_err(|_| corrupt()))
+                .collect::<Result<Vec<_>, _>>()?;
+            if type_oids.len() != argument_count || default_count > argument_count {
+                return Err(corrupt());
+            }
+            let Some(names) = array_items(argument_names, &corrupt)? else {
+                return Ok(None);
+            };
+            let input_names = match array_items(argument_modes, &corrupt)? {
+                None => names,
+                Some(modes) => names
+                    .into_iter()
+                    .zip(modes)
+                    .filter_map(|(name, mode)| matches!(mode.as_str(), "i" | "b" | "v").then_some(name))
+                    .collect(),
+            };
+            if input_names.len() != argument_count {
+                return Ok(None);
+            }
+            let defaults = default_exprs(defaults, default_count, &corrupt)?;
+            Ok(Some(BuiltinNamedSignature {
+                name: (*name).to_string(),
+                input_types: type_oids
+                    .into_iter()
+                    .map(|oid| crate::exec::column_type_from_oid(oid).ok())
+                    .collect(),
+                input_names,
+                defaults,
+            }))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(signatures.into_iter().flatten().collect())
+}
+
+fn array_items(
+    value: &str,
+    corrupt: impl Fn() -> ExecError,
+) -> Result<Option<Vec<String>>, ExecError> {
+    if value == "-" {
+        return Ok(None);
+    }
+    let values = value
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .ok_or_else(|| corrupt())?;
+    let items = values
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .collect::<Vec<_>>();
+    if items.is_empty() || items.iter().any(|item| item.is_empty()) {
+        return Err(corrupt());
+    }
+    Ok(Some(items))
+}
+
+fn default_exprs(
+    defaults: &str,
+    count: usize,
+    corrupt: impl Fn() -> ExecError,
+) -> Result<Vec<Expr>, ExecError> {
+    if count == 0 {
+        return (defaults == "-").then(Vec::new).ok_or_else(corrupt);
+    }
+    let Expr::ArrayLiteral(expressions) = crabka_pgparser::parser::parse_expression(&format!(
+        "ARRAY[{defaults}]"
+    ))
+    .map_err(|_| corrupt())?
+    else {
+        return Err(corrupt());
+    };
+    if expressions.len() != count {
+        return Err(corrupt());
+    }
+    Ok(expressions)
 }
 
 /// `pg_proc.proallargtypes` — every parameter's type, in declaration order.
@@ -5088,6 +5334,26 @@ mod tests {
                 .expect("no error")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn builtin_named_call_selects_one_coercible_signature() {
+        let call = FuncCall {
+            sql_syntax: false,
+            name: "pg_terminate_backend".into(),
+            distinct: false,
+            args: FuncArgs::Named {
+                positional: vec![Expr::IntLiteral("1".into())],
+                named: vec![("timeout".into(), Expr::IntLiteral("1".into()))],
+            },
+            order_by: Vec::new(),
+            filter: None,
+        };
+
+        let call = normalize_builtin_named_call(&call)
+            .expect("normalizes")
+            .expect("built-in signature");
+        assert!(matches!(call.args, FuncArgs::Exprs(args) if args.len() == 2));
     }
 
     #[test]

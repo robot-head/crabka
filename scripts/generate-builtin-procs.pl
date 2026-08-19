@@ -7,11 +7,95 @@ use File::Spec;
 use File::Temp qw(tempdir);
 use FindBin;
 
-my $check = @ARGV && $ARGV[0] eq '--check' ? shift @ARGV : 0;
+my ($check, $live) = (0, 0);
+while (@ARGV && $ARGV[0] =~ /^--(?:check|live)$/)
+{
+    my $option = shift @ARGV;
+    $check = 1 if $option eq '--check';
+    $live = 1 if $option eq '--live';
+}
+my $default_fixture_dir =
+  File::Spec->catdir($FindBin::Bin, '..', 'crates', 'pgexec', 'src');
+
+if ($live)
+{
+    my $fixture_dir = shift @ARGV // $default_fixture_dir;
+    die "usage: $0 [--check] --live [FIXTURE_DIR]\n" if @ARGV;
+
+    # pg_proc.dat is not the final catalog. initdb runs system_functions.sql,
+    # which adds routines and installs argument names/defaults on existing
+    # entries. Read an initialized PostgreSQL 18 server through the standard
+    # libpq environment (PGHOST, PGPORT, PGUSER) so this captures that catalog.
+    my $query = <<'SQL';
+SELECT oid, proname, prolang, procost::int, prorows::int, provariadic,
+       CASE WHEN prosupport = 0 THEN '0' ELSE prosupport::regproc::text END, ascii(prokind),
+       (CASE WHEN prosecdef THEN '1' ELSE '0' END) ||
+       (CASE WHEN proleakproof THEN '1' ELSE '0' END) ||
+       (CASE WHEN proisstrict THEN '1' ELSE '0' END) ||
+       (CASE WHEN proretset THEN '1' ELSE '0' END),
+       ascii(provolatile), ascii(proparallel), pronargs, pronargdefaults,
+       prorettype, proargtypes::text, prosrc,
+       coalesce(proargmodes::text, '-'), coalesce(proallargtypes::text, '-'),
+       coalesce(proargnames::text, '-'), coalesce(pg_get_expr(proargdefaults, 0), '-')
+FROM pg_proc
+ORDER BY oid
+SQL
+    open my $input, '-|', 'psql', '-XAt', '-F', "\t", '-v',
+      'ON_ERROR_STOP=1', '-d', 'postgres', '-c', $query
+      or die "cannot read initialized PostgreSQL catalog: $!\n";
+    my @rows;
+    while (my $line = <$input>)
+    {
+        chomp $line;
+        my @fields = split /\t/, $line, -1;
+        die "live pg_proc row has " . scalar(@fields) . " fields, expected 20\n"
+          unless @fields == 20;
+        die "live pg_proc row has unsafe field\n"
+          if grep { /[\t\n]/ } @fields;
+        push @rows, join("\t", @fields) . "\n";
+    }
+    close $input or die "psql failed while reading initialized PostgreSQL catalog\n";
+    die "expected 3413 initialized pg_proc rows, got " . scalar(@rows) . "\n"
+      unless @rows == 3413;
+
+    my $temporary = tempdir('builtin-procs.XXXXXX', DIR => $fixture_dir, CLEANUP => 1);
+    my @generated;
+    my $chunk = int((@rows + 3) / 4);
+    for my $index (0 .. 3)
+    {
+        my $start = $index * $chunk;
+        my $count = $index == 3 ? @rows - $start : $chunk;
+        my $tsv = File::Spec->catfile($temporary, "builtin_procs_$index.tsv");
+        my $compressed = "$tsv.zst";
+        open my $output, '>', $tsv or die "cannot write $tsv: $!\n";
+        print {$output} @rows[$start .. $start + $count - 1];
+        close $output or die "cannot close $tsv: $!\n";
+        system 'zstd', '--quiet', '--force', '-19', $tsv, '-o', $compressed;
+        die "zstd failed for chunk $index\n" if $? != 0;
+        chmod 0644, $compressed or die "cannot chmod $compressed: $!\n";
+        push @generated, $compressed;
+    }
+    for my $index (0 .. 3)
+    {
+        my $path = File::Spec->catfile($fixture_dir, "builtin_procs_$index.tsv.zst");
+        if ($check)
+        {
+            die "$path is not reproducible\n" unless compare($path, $generated[$index]) == 0;
+        }
+        else
+        {
+            rename $generated[$index], $path or die "cannot replace $path: $!\n";
+        }
+    }
+    print $check
+      ? "verified 3413 initialized pg_proc rows in 854/854/854/851-row chunks\n"
+      : "generated 3413 initialized pg_proc rows in 854/854/854/851-row chunks\n";
+    exit 0;
+}
+
 my $catalog_dir = shift // die
   "usage: $0 [--check] POSTGRES_CATALOG_DIR [FIXTURE_DIR]\n";
-my $fixture_dir = shift
-  // File::Spec->catdir($FindBin::Bin, '..', 'crates', 'pgexec', 'src');
+my $fixture_dir = shift // $default_fixture_dir;
 die "usage: $0 [--check] POSTGRES_CATALOG_DIR [FIXTURE_DIR]\n" if @ARGV;
 
 unshift @INC, "$catalog_dir/../../backend/catalog";
