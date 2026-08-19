@@ -1124,10 +1124,10 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("aggminitval", Text),
         ]),
         "pg_am" => cols(&[
-            ("oid", Int4),
+            ("oid", ColumnType::Oid),
             ("amname", Text),
-            ("amhandler", Text),
-            ("amtype", Text),
+            ("amhandler", ColumnType::Regproc),
+            ("amtype", ColumnType::InternalChar),
         ]),
         "pg_attrdef" => cols(&[
             ("oid", Int4),
@@ -1638,16 +1638,23 @@ fn pg_stat_activity_columns() -> Vec<Column> {
 /// `amname`.
 fn pg_am_rows() -> Vec<Vec<Datum>> {
     [
-        (BTREE_AM_OID, "btree", "i"),
-        (HASH_AM_OID, "hash", "i"),
-        (GIST_AM_OID, "gist", "i"),
-        (GIN_AM_OID, "gin", "i"),
-        (SPGIST_AM_OID, "spgist", "i"),
-        (3580, "brin", "i"),
-        (2, "heap", "t"),
+        (BTREE_AM_OID, "btree", 330, "bthandler", b'i'),
+        (HASH_AM_OID, "hash", 331, "hashhandler", b'i'),
+        (GIST_AM_OID, "gist", 332, "gisthandler", b'i'),
+        (GIN_AM_OID, "gin", 333, "ginhandler", b'i'),
+        (SPGIST_AM_OID, "spgist", 334, "spghandler", b'i'),
+        (3580, "brin", 335, "brinhandler", b'i'),
+        (2, "heap", 3, "heap_tableam_handler", b't'),
     ]
     .into_iter()
-    .map(|(oid, name, kind)| vec![int(oid), text(name), text(name), text(kind)])
+    .map(|(oid, name, handler_oid, handler, kind)| {
+        vec![
+            Datum::Oid(oid as u32),
+            text(name),
+            Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(handler_oid, handler)),
+            Datum::InternalChar(kind),
+        ]
+    })
     .collect()
 }
 

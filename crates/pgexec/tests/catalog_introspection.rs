@@ -134,6 +134,34 @@ async fn every_named_catalog_relation_resolves() {
     }
 }
 
+#[tokio::test]
+async fn pg_am_uses_postgresql_handlers_and_oid_regproc_columns() {
+    let engine = SqlEngine::new();
+    let sql = "SELECT oid, amname, amhandler, amtype FROM pg_am ORDER BY oid";
+    assert!(
+        grid(&engine, sql).await
+            == vec![
+                some(&["2", "heap", "heap_tableam_handler", "t"]),
+                some(&["403", "btree", "bthandler", "i"]),
+                some(&["405", "hash", "hashhandler", "i"]),
+                some(&["783", "gist", "gisthandler", "i"]),
+                some(&["2742", "gin", "ginhandler", "i"]),
+                some(&["3580", "brin", "brinhandler", "i"]),
+                some(&["4000", "spgist", "spghandler", "i"]),
+            ]
+    );
+    let QueryResult::Rows { fields, .. } = run(&engine, sql).await else {
+        panic!("pg_am query should return rows");
+    };
+    assert!(
+        fields
+            .iter()
+            .map(|field| field.type_oid)
+            .collect::<Vec<_>>()
+            == vec![26, 25, 24, 18]
+    );
+}
+
 /// `PostgreSQL`'s own `sanity_check.sql` requires every low-oid system catalog
 /// with an `oid` column to have an immediate, unique one-column oid index.
 #[tokio::test]
