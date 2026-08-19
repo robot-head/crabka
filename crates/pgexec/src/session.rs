@@ -18158,6 +18158,40 @@ mod tests {
             matches!(input.node, crate::plan::query::PlanNode::TableFunctionScan),
             "PL/pgSQL table function should plan a TableFunctionScan"
         );
+        let rows_from_select = select_of(
+            "SELECT a, b FROM ROWS FROM (generate_series(1, 2), generate_series(10, 11)) \
+             AS t(a, b)",
+        );
+        let planned = crate::plan::exec::function_scan_plan_for_test(
+            &read_ctx,
+            &rows_from_select,
+            &rows_from_select.from[0],
+        )
+        .expect("ROWS FROM FunctionScan plans")
+        .expect("ROWS FROM uses a FunctionScan plan");
+        let crate::plan::query::PlanNode::Filter { input } = &planned.node else {
+            panic!("ROWS FROM should plan a Filter");
+        };
+        assert!(
+            matches!(input.node, crate::plan::query::PlanNode::TableFunctionScan),
+            "ROWS FROM should plan a TableFunctionScan"
+        );
+        let nested_rows_from_select = select_of(
+            "SELECT seq_scan_test.a, t.n FROM seq_scan_test, \
+             ROWS FROM (generate_series(1, 2)) AS t(n)",
+        );
+        let planned = crate::plan::exec::nested_loop_plan_for_test(
+            &read_ctx,
+            &nested_rows_from_select,
+        )
+        .expect("ROWS FROM joins use nested-loop planning");
+        let crate::plan::query::PlanNode::NestedLoop { inner, .. } = &planned.node else {
+            panic!("ROWS FROM join should plan a Nested Loop");
+        };
+        assert!(
+            matches!(inner.node, crate::plan::query::PlanNode::TableFunctionScan),
+            "ROWS FROM join should scan the function on the inner side"
+        );
         for (sql, expected) in [
             ("SELECT a FROM seq_scan_test LIMIT 1", vec![1]),
             ("SELECT a FROM seq_scan_test OFFSET 1", vec![2, 2]),

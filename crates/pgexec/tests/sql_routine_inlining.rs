@@ -45,7 +45,6 @@ async fn a_sql_body_runs_every_statement_and_returns_its_final_result() {
          AS 'INSERT INTO audit VALUES ($1); SELECT $1;'",
     )
     .await;
-
     assert!(scalar(&mut s, "SELECT f(7)").await == Some("7".to_string()));
     assert!(scalar(&mut s, "SELECT count(*) FROM audit").await == Some("1".to_string()));
 }
@@ -299,7 +298,6 @@ async fn a_sql_set_function_scans_in_from_with_ordinality() {
          AS 'SELECT n FROM generate_series(1, $1) AS n'",
     )
     .await;
-
     assert!(
         scalar(
             &mut s,
@@ -308,6 +306,63 @@ async fn a_sql_set_function_scans_in_from_with_ordinality() {
         )
         .await
             == Some("1:1,2:2".to_string())
+    );
+}
+
+#[tokio::test]
+async fn a_sql_table_function_participates_in_rows_from() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION rows_from_sql(int) RETURNS SETOF int LANGUAGE sql \
+         AS 'SELECT n FROM generate_series(1, $1) AS n'",
+    )
+    .await;
+    run(
+        &mut s,
+        "CREATE FUNCTION rows_from_plpgsql(limit_value int) RETURNS SETOF int LANGUAGE plpgsql \
+         AS $$ BEGIN RETURN QUERY SELECT n FROM generate_series(1, limit_value) AS n; END $$",
+    )
+    .await;
+
+    assert!(
+        scalar(
+            &mut s,
+            "EXPLAIN (COSTS OFF) SELECT * \
+             FROM ROWS FROM (rows_from_sql(2), generate_series(10, 12)) AS t(a, b)",
+        )
+        .await
+            == Some("Function Scan".to_string())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "EXPLAIN (COSTS OFF) SELECT * FROM (VALUES (1)) AS input(value), \
+             ROWS FROM (rows_from_sql(2), generate_series(10, 12)) AS t(a, b)",
+        )
+        .await
+            == Some("Nested Loop".to_string())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "SELECT string_agg(coalesce(a::text, 'null') || ':' || b::text, ',' ORDER BY b) \
+             FROM ROWS FROM (rows_from_sql(2), generate_series(10, 12)) AS t(a, b)",
+        )
+        .await
+            == Some("1:10,2:11,null:12".to_string())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "SELECT string_agg(coalesce(a::text, 'null') || ':' || b::text, ',' ORDER BY b) \
+             FROM ROWS FROM (rows_from_plpgsql(1), generate_series(20, 21)) AS t(a, b)",
+        )
+        .await
+            == Some("1:20,null:21".to_string())
     );
 }
 

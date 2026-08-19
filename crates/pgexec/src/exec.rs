@@ -16255,6 +16255,42 @@ fn build_table_expr(
             let inner = crate::query::query_to_relation_with_ctes(read_ctx, subquery)?;
             crate::values::requalify_derived(inner, alias, columns)
         }
+        TableExpr::Function {
+            functions,
+            with_ordinality,
+            rows_from: true,
+            alias,
+            column_aliases,
+            ..
+        } => {
+            let mut calls = Vec::with_capacity(functions.len());
+            for call in functions {
+                if crate::routine::plpgsql_table_function_schema(read_ctx.catalog_kv, call)?
+                    .is_some()
+                {
+                    let Some(call_rows) = crate::routine::eval_plpgsql_table_function(call, ctx)?
+                    else {
+                        return Err(ExecError::Unsupported(
+                            "table function requires a session executor".into(),
+                        ));
+                    };
+                    calls.push(call_rows);
+                } else {
+                    calls.push(crate::srf::function_call_rows_with_memory(
+                        call,
+                        ctx,
+                        &read_ctx.statement_memory,
+                    )?);
+                }
+            }
+            crate::srf::rows_from_function_relation(
+                &functions[0].name,
+                calls,
+                *with_ordinality,
+                alias.as_deref(),
+                column_aliases,
+            )
+        }
         // P2: a user-defined SQL function in FROM position is a parameterized
         // derived table — its body runs under the caller's own read context.
         // Built-in set-returning functions stay with the `srf` registry.
@@ -18162,6 +18198,32 @@ fn build_table_expr_schema_with_ctes(
                 rows: Vec::new(),
             };
             crate::values::requalify_derived(inner, alias, columns)
+        }
+        TableExpr::Function {
+            functions,
+            with_ordinality,
+            rows_from: true,
+            alias,
+            column_aliases,
+            ..
+        } => {
+            let mut calls = Vec::with_capacity(functions.len());
+            for call in functions {
+                if let Some((_routine, columns)) =
+                    crate::routine::plpgsql_table_function_schema(catalog_kv, call)?
+                {
+                    calls.push((columns, Vec::new()));
+                } else {
+                    calls.push((crate::srf::function_call_schema(call)?, Vec::new()));
+                }
+            }
+            crate::srf::rows_from_function_relation(
+                &functions[0].name,
+                calls,
+                *with_ordinality,
+                alias.as_deref(),
+                column_aliases,
+            )
         }
         TableExpr::Function {
             functions,

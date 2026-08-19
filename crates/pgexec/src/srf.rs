@@ -61,6 +61,9 @@ use crate::{
     scope::{ColumnBinding, Exposure, Scope},
 };
 
+/// The columns and rows a single FROM-position function call produces.
+pub(crate) type FunctionCallRows = (Vec<(String, ColumnType)>, Vec<Vec<Datum>>);
+
 /// The set-returning functions crabka implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Srf {
@@ -1238,6 +1241,33 @@ pub(crate) fn from_item_with_memory(
     qualify(&plans, rows, with_ordinality, alias, column_aliases)
 }
 
+/// Expand one built-in FunctionScan call without applying an item alias.
+pub(crate) fn function_call_rows_with_memory(
+    call: &TableFuncCall,
+    ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<FunctionCallRows, ExecError> {
+    let item = [call.clone()];
+    let relation = from_item_with_memory(
+        &item,
+        false,
+        false,
+        None,
+        &None,
+        ctx,
+        statement_memory,
+    )?;
+    Ok((
+        relation
+            .scope
+            .columns
+            .into_iter()
+            .map(|column| (column.name, column.ty))
+            .collect(),
+        relation.rows,
+    ))
+}
+
 /// The same item's schema, with no rows. This is the `Describe` path, and it
 /// must agree with the runtime FROM-position path on every column name and type.
 pub(crate) fn from_item_schema(
@@ -1257,6 +1287,57 @@ pub(crate) fn from_item_schema(
     }
     let plans = plan_all(functions)?;
     qualify(&plans, Vec::new(), with_ordinality, alias, column_aliases)
+}
+
+/// Describe one built-in FunctionScan call without applying an item alias.
+pub(crate) fn function_call_schema(
+    call: &TableFuncCall,
+) -> Result<Vec<(String, ColumnType)>, ExecError> {
+    let item = [call.clone()];
+    let relation = from_item_schema(&item, false, false, None, &None)?;
+    Ok(relation
+        .scope
+        .columns
+        .into_iter()
+        .map(|column| (column.name, column.ty))
+        .collect())
+}
+
+/// Build a `ROWS FROM` relation from calls that have already supplied columns
+/// and rows. Each call is zipped in lockstep and shorter calls are null-padded.
+pub(crate) fn rows_from_function_relation(
+    function_name: &str,
+    calls: Vec<FunctionCallRows>,
+    with_ordinality: bool,
+    alias: Option<&str>,
+    column_aliases: &Option<Vec<String>>,
+) -> Result<Relation, ExecError> {
+    let height = calls.iter().map(|(_, rows)| rows.len()).max().unwrap_or(0);
+    let rows = (0..height)
+        .map(|index| {
+            calls
+                .iter()
+                .flat_map(|(columns, rows)| {
+                    rows.get(index)
+                        .cloned()
+                        .unwrap_or_else(|| vec![Datum::Null; columns.len()])
+                })
+                .collect()
+        })
+        .collect();
+    let columns = calls
+        .into_iter()
+        .flat_map(|(columns, _)| columns)
+        .collect();
+    user_function_relation(
+        function_name,
+        columns,
+        rows,
+        with_ordinality,
+        alias,
+        column_aliases,
+        None,
+    )
 }
 
 /// A scalar built-in in `FROM` supplies its one result as a one-row relation.

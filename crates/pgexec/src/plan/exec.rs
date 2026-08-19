@@ -616,10 +616,12 @@ fn plan_nested_loop_source(
                 node,
             })
         }
-        TableExpr::Function { functions, .. } => Some(Plan {
+        TableExpr::Function {
+            functions, rows_from, ..
+        } => Some(Plan {
             target_list: Vec::new(),
             quals: Vec::new(),
-            node: if crate::routine::expands_as_table(read_ctx.catalog_kv, functions) {
+            node: if *rows_from || crate::routine::expands_as_table(read_ctx.catalog_kv, functions) {
                 PlanNode::TableFunctionScan
             } else {
                 PlanNode::FunctionScan
@@ -1241,8 +1243,10 @@ fn plan_function_scan(
     source: &TableExpr,
 ) -> Result<Option<SeqScanPlan>, ExecError> {
     let table_function = match source {
-        TableExpr::Function { functions, .. } => {
-            crate::routine::expands_as_table(read_ctx.catalog_kv, functions)
+        TableExpr::Function {
+            functions, rows_from, ..
+        } => {
+            *rows_from || crate::routine::expands_as_table(read_ctx.catalog_kv, functions)
         }
         TableExpr::JsonTable(_) => true,
         _ => return Ok(None),
@@ -1261,13 +1265,33 @@ fn plan_function_scan(
     let scope = if let TableExpr::Function {
         functions,
         with_ordinality,
+        rows_from,
         alias,
         column_aliases,
         ..
     } = source
         && table_function
     {
-        if let Some((_, columns)) =
+        if *rows_from {
+            let mut calls = Vec::with_capacity(functions.len());
+            for call in functions {
+                if let Some((_routine, columns)) =
+                    crate::routine::plpgsql_table_function_schema(read_ctx.catalog_kv, call)?
+                {
+                    calls.push((columns, Vec::new()));
+                } else {
+                    calls.push((crate::srf::function_call_schema(call)?, Vec::new()));
+                }
+            }
+            crate::srf::rows_from_function_relation(
+                &functions[0].name,
+                calls,
+                *with_ordinality,
+                alias.as_deref(),
+                column_aliases,
+            )?
+            .scope
+        } else if let Some((_, columns)) =
             crate::routine::plpgsql_table_function_schema(read_ctx.catalog_kv, &functions[0])?
         {
             crate::srf::user_function_relation(
@@ -1508,6 +1532,14 @@ pub(crate) fn function_scan_plan_for_test(
     source: &TableExpr,
 ) -> Result<Option<Plan>, ExecError> {
     plan_function_scan(read_ctx, select, source).map(|plan| plan.map(|planned| planned.plan))
+}
+
+#[cfg(test)]
+pub(crate) fn nested_loop_plan_for_test(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    select: &SelectStmt,
+) -> Option<Plan> {
+    nested_loop_input_plan(read_ctx, select).map(|(_, plan)| plan)
 }
 
 fn plan_subquery_scan(
@@ -2446,7 +2478,37 @@ impl Executor for FunctionScanExecutor<'_, '_> {
             ));
         };
         state.begin_loop();
-        let relation = if matches!(state.plan.node, PlanNode::TableFunctionScan) {
+        let relation = if *rows_from {
+            let mut calls = Vec::with_capacity(functions.len());
+            for call in functions {
+                if crate::routine::plpgsql_table_function_schema(self.read_ctx.catalog_kv, call)?
+                    .is_some()
+                {
+                    let Some(call_rows) = crate::routine::eval_plpgsql_table_function(
+                        call,
+                        self.read_ctx.eval_ctx,
+                    )? else {
+                        return Err(ExecError::Unsupported(
+                            "table function requires a session executor".into(),
+                        ));
+                    };
+                    calls.push(call_rows);
+                } else {
+                    calls.push(crate::srf::function_call_rows_with_memory(
+                        call,
+                        self.read_ctx.eval_ctx,
+                        &self.read_ctx.statement_memory,
+                    )?);
+                }
+            }
+            crate::srf::rows_from_function_relation(
+                &functions[0].name,
+                calls,
+                *with_ordinality,
+                alias.as_deref(),
+                column_aliases,
+            )?
+        } else if matches!(state.plan.node, PlanNode::TableFunctionScan) {
             if let Some((columns, rows)) =
                 crate::routine::eval_plpgsql_table_function(&functions[0], self.read_ctx.eval_ctx)?
             {
