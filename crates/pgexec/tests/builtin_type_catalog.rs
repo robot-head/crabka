@@ -981,6 +981,42 @@ async fn record_pseudotype_rows_keep_their_array_and_io_metadata() {
     );
 }
 
+/// Array alignment follows the element's physical alignment: the wide types
+/// retain `d`, while a `name`-based domain array is the normal `i` alignment.
+#[tokio::test]
+async fn array_catalog_rows_keep_postgres_alignment() {
+    let (_engine, mut s) = session();
+    assert!(
+        rows(
+            &mut s,
+            "SELECT typname, typalign FROM pg_type \
+             WHERE typname IN ('_aclitem', '_record', '_xid8', '_pg_lsn', '_int8', \
+                               '_float8', '_time', '_timestamp', '_timestamptz', \
+                               '_money', '_macaddr8', '_tsrange', '_tstzrange', \
+                               '_int8range', '_sql_identifier') \
+             ORDER BY typname",
+        )
+        .await
+            == vec![
+                vec![Some("_aclitem".into()), Some("d".into())],
+                vec![Some("_float8".into()), Some("d".into())],
+                vec![Some("_int8".into()), Some("d".into())],
+                vec![Some("_int8range".into()), Some("d".into())],
+                vec![Some("_macaddr8".into()), Some("d".into())],
+                vec![Some("_money".into()), Some("d".into())],
+                vec![Some("_pg_lsn".into()), Some("d".into())],
+                vec![Some("_record".into()), Some("d".into())],
+                vec![Some("_sql_identifier".into()), Some("i".into())],
+                vec![Some("_time".into()), Some("d".into())],
+                vec![Some("_timestamp".into()), Some("d".into())],
+                vec![Some("_timestamptz".into()), Some("d".into())],
+                vec![Some("_tsrange".into()), Some("d".into())],
+                vec![Some("_tstzrange".into()), Some("d".into())],
+                vec![Some("_xid8".into()), Some("d".into())],
+            ]
+    );
+}
+
 /// The lookup every client driver caches its type table from. A type with no
 /// row answers it with nothing, and a driver that finds no `timetz` has no oid
 /// to bind a `timetz` parameter with.

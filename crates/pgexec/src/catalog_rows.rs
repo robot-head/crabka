@@ -1823,15 +1823,29 @@ struct PgTypeRow<'a> {
 
 fn pg_type_row(row: PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> Vec<Datum> {
     let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
-    let typalign = if row.name == "cstring" {
-        "c"
-    } else {
-        row.range_align.unwrap_or(match row.len {
+    let typalign = match row.name {
+        "cstring" => "c",
+        "_aclitem"
+        | "_record"
+        | "_xid8"
+        | "_pg_lsn"
+        | "_int8"
+        | "_float8"
+        | "_time"
+        | "_timestamp"
+        | "_timestamptz"
+        | "_money"
+        | "_macaddr8"
+        | "_tsrange"
+        | "_tstzrange"
+        | "_int8range" => "d",
+        name if name.starts_with('_') => "i",
+        _ => row.range_align.unwrap_or(match row.len {
             1 => "c",
             2 => "s",
             8 => "d",
             _ => "i",
-        })
+        }),
     };
     let typstorage = if row.name == "cstring" || row.len >= 0 {
         "p"
