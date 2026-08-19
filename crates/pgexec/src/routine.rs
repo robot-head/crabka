@@ -1945,7 +1945,7 @@ pub(crate) fn plpgsql_declared_call_type(
     if routine.language == "plpgsql" {
         validate_plpgsql_scalar(&routine)?;
     }
-    called_scalar_result_type(&routine, &given)
+    called_scalar_result_type_with_catalog(kv, &routine, &given)?
         .ok_or_else(|| {
             ExecError::Unsupported(format!(
                 "function {} has no scalar result type",
@@ -1997,7 +1997,8 @@ pub(crate) fn plpgsql_scalar_result_type(
             if matches!(routine.language.as_str(), "plpgsql" | "sql") {
                 validate_plpgsql_scalar(&routine)?;
             }
-            called_scalar_result_type(&routine, &given).ok_or_else(|| {
+            called_scalar_result_type_with_catalog(runtime.catalog.as_ref(), &routine, &given)?
+                .ok_or_else(|| {
                 ExecError::Unsupported(format!(
                     "function {} has no scalar result type",
                     routine.identity()
@@ -2968,6 +2969,41 @@ fn called_scalar_result_type(routine: &Routine, given: &[ArgType]) -> Option<Col
         return Some(VOID_RESULT_TYPE);
     }
     resolved_scalar_result_type(routine, given)
+}
+
+fn called_scalar_result_type_with_catalog(
+    kv: &dyn Kv,
+    routine: &Routine,
+    given: &[ArgType],
+) -> Result<Option<ColumnType>, ExecError> {
+    Ok(called_scalar_result_type(routine, given).or(
+        declared_relation_rowtype(kv, routine)?.map(|rowtype| ColumnType::Record(Some(rowtype))),
+    ))
+}
+
+pub(crate) fn declared_relation_rowtype(
+    kv: &dyn Kv,
+    routine: &Routine,
+) -> Result<Option<crabka_pgtypes::usertype::UserTypeRef>, ExecError> {
+    let RoutineResult::Type { ty, setof: false } = &routine.result else {
+        return Ok(None);
+    };
+    if ty.column.is_some() {
+        return Ok(None);
+    }
+    let resolution = crate::relname::ResolutionScope::default_scope();
+    let Ok(written) = crate::relname::parse_written_relation(resolution, &ty.name) else {
+        return Ok(None);
+    };
+    let Ok(relation) = crate::relname::resolve_relation(
+        kv,
+        resolution,
+        &written.reference,
+        crate::relname::SchemaDisposition::Reference,
+    ) else {
+        return Ok(None);
+    };
+    crate::catalog_rel::relation_rowtype(kv, &relation)
 }
 
 /// The scalar type a routine's result carries, when Gres models it.

@@ -167,6 +167,24 @@ async fn a_sql_set_function_expands_in_a_select_list() {
     );
 }
 
+#[tokio::test]
+async fn a_sql_routine_returns_a_declared_rowtype() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE TABLE pair (a int, b text); \
+         CREATE FUNCTION make_pair(int) RETURNS pair LANGUAGE sql \
+         AS 'SELECT $1 AS a, ''value''::text AS b'",
+    )
+    .await;
+
+    assert!(scalar(&mut s, "SELECT (make_pair(4)).a").await == Some("4".to_string()));
+    assert!(scalar(&mut s, "SELECT (make_pair(4)).b").await == Some("value".to_string()));
+}
+
 /// Parameters inside a FROM-clause function are substituted before its query
 /// is evaluated.
 #[tokio::test]

@@ -345,6 +345,27 @@ pub(crate) async fn execute_sql_scalar_function(
     if rows.len() > 1 {
         return Err(ExecError::CardinalityViolation);
     }
+    if let Some(rowtype) = crate::routine::declared_relation_rowtype(
+        interpreter.session.plpgsql_catalog(),
+        routine,
+    )? {
+        if row.len() != fields.len() {
+            return Err(ExecError::ObjectNotInPrerequisiteState(
+                "SQL function executor returned the wrong table width".into(),
+            ));
+        }
+        let values = fields
+            .iter()
+            .zip(row)
+            .map(|(field, value)| interpreter.session.plpgsql_decode_cell(field, value.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let names: Vec<_> = fields.iter().map(|field| field.name.clone()).collect();
+        return Ok(Datum::Record(RecordValue::named(
+            Some(rowtype),
+            Arc::from(names),
+            values,
+        )));
+    }
     match (fields.as_slice(), row.as_slice()) {
         ([field], [value]) => interpreter.session.plpgsql_decode_cell(field, value.as_ref()),
         _ => Err(ExecError::TypeMismatch(
