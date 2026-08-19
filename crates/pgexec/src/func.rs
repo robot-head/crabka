@@ -49,6 +49,8 @@ enum ScalarFunc {
     Mod,
     TypedAdd(ColumnType),
     Int8Inc,
+    Float8Accum,
+    Float8Avg,
     BoolCompare {
         equal: bool,
     },
@@ -170,6 +172,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "float4pl" => ScalarFunc::TypedAdd(ColumnType::Float4),
         "float8pl" => ScalarFunc::TypedAdd(ColumnType::Float8),
         "int8inc" => ScalarFunc::Int8Inc,
+        "float8_accum" => ScalarFunc::Float8Accum,
+        "float8_avg" => ScalarFunc::Float8Avg,
         "booleq" => ScalarFunc::BoolCompare { equal: true },
         "boolne" => ScalarFunc::BoolCompare { equal: false },
         "coalesce" => ScalarFunc::Coalesce,
@@ -791,6 +795,24 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             require_arity(fc, n == 1)?;
             if crate::eval::infer_type(&args[0], scope)? == ColumnType::Int8 {
                 Ok(ColumnType::Int8)
+            } else {
+                Err(undefined_function_spelled(&fc.name, args, scope))
+            }
+        }
+        ScalarFunc::Float8Accum => {
+            require_arity(fc, n == 2)?;
+            if crate::eval::infer_type(&args[0], scope)? == ColumnType::Array(ElemType::Float8)
+                && crate::eval::infer_type(&args[1], scope)? == ColumnType::Float8
+            {
+                Ok(ColumnType::Array(ElemType::Float8))
+            } else {
+                Err(undefined_function_spelled(&fc.name, args, scope))
+            }
+        }
+        ScalarFunc::Float8Avg => {
+            require_arity(fc, n == 1)?;
+            if crate::eval::infer_type(&args[0], scope)? == ColumnType::Array(ElemType::Float8) {
+                Ok(ColumnType::Float8)
             } else {
                 Err(undefined_function_spelled(&fc.name, args, scope))
             }
@@ -1899,6 +1921,56 @@ fn eval_eager(
         ScalarFunc::Int8Inc => {
             require_arity(fc, vals.len() == 1)?;
             Ok(ops::add(&vals[0], &Datum::Int8(1))?)
+        }
+        ScalarFunc::Float8Accum => {
+            require_arity(fc, vals.len() == 2)?;
+            let Datum::Array(state) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            if state.elem != ElemType::Float8 || state.elems.len() != 3 {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "22023",
+                    message: "float8_accum: expected 3-element float8 array".into(),
+                });
+            }
+            let Datum::Float8(value) = vals[1] else {
+                return Err(type_error(&fc.name, &vals[1]));
+            };
+            let [Datum::Float8(count), Datum::Float8(sum), Datum::Float8(sum2)] =
+                state.elems.as_slice()
+            else {
+                unreachable!("validated float8 accumulator state");
+            };
+            Ok(Datum::Array(crabka_pgtypes::ArrayValue::new(
+                ElemType::Float8,
+                vec![
+                    Datum::Float8(count + 1.0),
+                    Datum::Float8(sum + value),
+                    Datum::Float8(sum2 + value * value),
+                ],
+            )))
+        }
+        ScalarFunc::Float8Avg => {
+            require_arity(fc, vals.len() == 1)?;
+            let Datum::Array(state) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            if state.elem != ElemType::Float8 || state.elems.len() != 3 {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "22023",
+                    message: "float8_avg: expected 3-element float8 array".into(),
+                });
+            }
+            let [Datum::Float8(count), Datum::Float8(sum), Datum::Float8(_)] =
+                state.elems.as_slice()
+            else {
+                unreachable!("validated float8 accumulator state");
+            };
+            if *count == 0.0 {
+                Ok(Datum::Null)
+            } else {
+                Ok(Datum::Float8(sum / count))
+            }
         }
         ScalarFunc::Floor | ScalarFunc::Ceil | ScalarFunc::Sign => {
             require_arity(fc, vals.len() == 1)?;
@@ -3997,6 +4069,39 @@ mod tests {
         let err = crate::eval::eval(&pexpr("mod(1, 0)").expect("p"), &Scope::empty(), &[], &ctx)
             .expect_err("div0");
         assert_eq!(err.into_pg().code, "22012");
+    }
+
+    #[test]
+    fn float8_accumulator_keeps_count_sum_and_sum_of_squares() {
+        assert!(
+            ev("float8_accum(ARRAY[0::float8, 0::float8, 0::float8], 2::float8)")
+                == Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Float8,
+                    vec![Datum::Float8(1.0), Datum::Float8(2.0), Datum::Float8(4.0)],
+                ))
+        );
+        assert!(ev("float8_avg(ARRAY[3::float8, 6::float8, 14::float8])") == Datum::Float8(2.0));
+        assert!(ev("float8_avg(ARRAY[0::float8, 0::float8, 0::float8])") == Datum::Null);
+        assert_eq!(
+            err_code("float8_accum(ARRAY[0::float8, 0::float8, 0::float8])", None),
+            "42883"
+        );
+        assert_eq!(
+            err_code("float8_accum(ARRAY[0, 0, 0], 2::float8)", None),
+            "42883"
+        );
+        assert_eq!(
+            err_code("float8_accum(ARRAY[0::float8, 0::float8, 0::float8], 2)", None),
+            "42883"
+        );
+        assert_eq!(
+            err_code("float8_accum(ARRAY[0::float8, 0::float8], 2::float8)", None),
+            "22023"
+        );
+        assert_eq!(
+            err_code("float8_avg(ARRAY[0::float8, 0::float8])", None),
+            "22023"
+        );
     }
 
     #[test]
