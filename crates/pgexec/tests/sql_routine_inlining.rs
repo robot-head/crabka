@@ -130,6 +130,19 @@ async fn a_sql_routine_accepts_a_variadic_array_argument() {
     .await;
 
     assert!(scalar(&mut s, "SELECT array_count(VARIADIC ARRAY[1, 2, 3])").await == Some("3".to_string()));
+    run(
+        &mut s,
+        "CREATE VIEW array_count_view AS \
+         SELECT array_count(VARIADIC ARRAY[1, 2, 3]) AS result",
+    )
+    .await;
+    assert!(scalar(&mut s, "SELECT result FROM array_count_view").await == Some("3".to_string()));
+    assert!(
+        scalar(&mut s, "SELECT pg_get_viewdef('array_count_view'::regclass)")
+            .await
+            .expect("view definition")
+            .contains("VARIADIC ARRAY[1, 2, 3]")
+    );
 }
 
 /// PostgreSQL installs these labels/defaults during initdb, so they must come

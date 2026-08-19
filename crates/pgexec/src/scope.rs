@@ -878,6 +878,12 @@ impl StatementRefs {
                         self.add_expr(arg);
                     }
                 }
+                FuncArgs::Variadic { positional, array } => {
+                    for arg in positional {
+                        self.add_expr(arg);
+                    }
+                    self.add_expr(array);
+                }
                 // `count(*)` reads no expression at all.
                 FuncArgs::Star => {}
             }

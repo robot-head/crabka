@@ -4122,6 +4122,12 @@ pub enum FuncArgs {
         positional: Vec<Expr>,
         named: Vec<(String, Expr)>,
     },
+    /// `f(a, VARIADIC array)`: execution receives `array` as the final
+    /// positional argument, while a stored view keeps the spelling to deparse.
+    Variadic {
+        positional: Vec<Expr>,
+        array: Box<Expr>,
+    },
 }
 
 /// The scope qualifier that binds a `SELECT`'s window-function results during

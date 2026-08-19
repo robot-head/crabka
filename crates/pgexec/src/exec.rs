@@ -5945,7 +5945,13 @@ fn rewrite_image_refs(expr: &Expr, aliases: &ImageAliases<'_>) -> Expr {
                         named: named
                             .iter()
                             .map(|(label, arg)| (label.clone(), *recurse(arg)))
-                            .collect(),
+                        .collect(),
+                    }
+                }
+                crabka_pgparser::ast::FuncArgs::Variadic { positional, array } => {
+                    crabka_pgparser::ast::FuncArgs::Variadic {
+                        positional: recurse_all(positional),
+                        array: recurse(array),
                     }
                 }
             },

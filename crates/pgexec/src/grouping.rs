@@ -711,7 +711,7 @@ fn grouping_args(e: &Expr) -> Option<&[Expr]> {
     }
     match &call.args {
         FuncArgs::Exprs(args) => Some(args),
-        FuncArgs::Star | FuncArgs::Named { .. } => None,
+        FuncArgs::Star | FuncArgs::Named { .. } | FuncArgs::Variadic { .. } => None,
     }
 }
 
@@ -962,6 +962,10 @@ pub(crate) fn rewrite(
                         })
                         .collect::<Result<_, ExecError>>()?,
                 },
+                FuncArgs::Variadic { positional, array } => FuncArgs::Variadic {
+                    positional: rewrite_all(positional, fold, into_aggregates)?,
+                    array: Box::new(rewrite(array, fold, into_aggregates)?),
+                },
             },
             // An aggregate's sort keys are ordinary expressions over the input
             // rows, so they take the same rewrite the arguments take — column
@@ -1134,6 +1138,10 @@ fn is_aggregate_call(call: &FuncCall) -> bool {
         FuncArgs::Named { positional, named } => !positional
             .iter()
             .chain(named.iter().map(|(_, arg)| arg))
+            .any(crate::agg::contains_aggregate),
+        FuncArgs::Variadic { positional, array } => !positional
+            .iter()
+            .chain(std::iter::once(array.as_ref()))
             .any(crate::agg::contains_aggregate),
     }
 }

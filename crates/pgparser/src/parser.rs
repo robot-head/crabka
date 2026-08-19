@@ -1983,6 +1983,7 @@ impl Parser {
             let mut args = Vec::new();
             let mut named: Vec<(String, Expr)> = Vec::new();
             let mut saw_named = false;
+            let mut variadic = None;
             if *self.peek() != Token::RParen {
                 loop {
                     // `VARIADIC array_expr` passes the array as a routine's
@@ -1991,7 +1992,13 @@ impl Parser {
                     // path once the modifier has been consumed.
                     if self.peek_ident_eq("variadic") {
                         self.bump();
-                        args.push(self.expr(0)?);
+                        if saw_named {
+                            return Err(ParseError::new(
+                                "VARIADIC argument cannot follow named argument",
+                                self.peek_pos(),
+                            ));
+                        }
+                        variadic = Some(self.expr(0)?);
                         if self.eat_comma() {
                             return Err(ParseError::new(
                                 "VARIADIC argument must be the last argument",
@@ -2025,7 +2032,12 @@ impl Parser {
                     break;
                 }
             }
-            let args = if named.is_empty() {
+            let args = if let Some(array) = variadic {
+                FuncArgs::Variadic {
+                    positional: args,
+                    array: Box::new(array),
+                }
+            } else if named.is_empty() {
                 FuncArgs::Exprs(args)
             } else if name == "make_interval" {
                 // Built-ins have no catalog parameter names here. Keep the one
@@ -25362,6 +25374,22 @@ mod q1_statement_completeness_tests {
             }) if positional.len() == 1 && matches!(named.as_slice(), [(label, Expr::IntLiteral(value))] if label == "third" && value == "4")
         ));
         assert!(parse("SELECT user_function(first => 1, 2)").is_err());
+    }
+
+    #[test]
+    fn a_variadic_array_argument_keeps_its_spelling() {
+        use crate::ast::{FuncArgs, FuncCall};
+
+        let expression = parse_expression("array_count(1, VARIADIC ARRAY[2, 3])")
+            .expect("expression");
+        assert!(matches!(
+            expression,
+            Expr::Func(FuncCall {
+                args: FuncArgs::Variadic { positional, array },
+                ..
+            }) if positional.len() == 1 && matches!(&*array, Expr::ArrayLiteral(items) if items.len() == 2)
+        ));
+        assert!(parse("SELECT array_count(VARIADIC ARRAY[1], 2)").is_err());
     }
 
     #[test]

@@ -537,6 +537,12 @@ fn window_call_text(call: &WindowCall, ctx: Ctx<'_>) -> String {
             }))
             .collect::<Vec<_>>()
             .join(", "),
+        FuncArgs::Variadic { positional, array } => positional
+            .iter()
+            .map(|argument| expr_text(argument, ctx))
+            .chain(std::iter::once(format!("VARIADIC {}", expr_text(array, ctx))))
+            .collect::<Vec<_>>()
+            .join(", "),
     };
     let filter = call.filter.as_ref().map_or_else(String::new, |predicate| {
         // `get_agg_expr` adds no parentheses of its own around the predicate;
@@ -1509,6 +1515,12 @@ fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
             .chain(named.iter().map(|(label, arg)| {
                 format!("{label} => {}", expr_text(arg, ctx))
             }))
+            .collect::<Vec<_>>()
+            .join(", "),
+        FuncArgs::Variadic { positional, array } => positional
+            .iter()
+            .map(|arg| expr_text(arg, ctx))
+            .chain(std::iter::once(format!("VARIADIC {}", expr_text(array, ctx))))
             .collect::<Vec<_>>()
             .join(", "),
     };

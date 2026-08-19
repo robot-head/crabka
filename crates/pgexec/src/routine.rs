@@ -2686,6 +2686,10 @@ fn unsafe_to_duplicate(arg: &Expr) -> bool {
                     .iter()
                     .chain(named.iter().map(|(_, arg)| arg))
                     .any(unsafe_to_duplicate),
+                FuncArgs::Variadic { positional, array } => positional
+                    .iter()
+                    .chain(std::iter::once(array.as_ref()))
+                    .any(unsafe_to_duplicate),
                 FuncArgs::Star => true,
             }
         }
@@ -2923,6 +2927,10 @@ fn substitute(
                         .iter()
                         .map(|(label, arg)| Ok((label.clone(), sub(arg)?)))
                         .collect::<Result<_, ExecError>>()?,
+                },
+                FuncArgs::Variadic { positional, array } => FuncArgs::Variadic {
+                    positional: list(positional)?,
+                    array: boxed(array)?,
                 },
             },
             // A routine body may aggregate, so its sort keys and its FILTER are

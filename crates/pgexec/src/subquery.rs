@@ -462,6 +462,14 @@ pub(crate) fn resolve_expr_skipping(
                             })
                             .collect::<Result<_, ExecError>>()?,
                     },
+                    FuncArgs::Variadic { positional, array } => {
+                        let mut args = positional
+                            .iter()
+                            .map(|arg| resolve_expr_skipping(ctx, arg, should_skip))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        args.push(resolve_expr_skipping(ctx, array, should_skip)?);
+                        FuncArgs::Exprs(args)
+                    }
                 },
                 // An aggregate's sort keys resolve like its arguments — they
                 // may name the very columns this pass rewrites.
@@ -945,6 +953,14 @@ fn resolve_types_in_call(
                     })
                     .collect::<Result<_, ExecError>>()?,
             },
+            FuncArgs::Variadic { positional, array } => {
+                let mut args = positional
+                    .iter()
+                    .map(|arg| resolve_types_in_expr(catalog_kv, resolution, arg, ctes))
+                    .collect::<Result<Vec<_>, _>>()?;
+                args.push(resolve_types_in_expr(catalog_kv, resolution, array, ctes)?);
+                FuncArgs::Exprs(args)
+            }
         },
         order_by: fc
             .order_by

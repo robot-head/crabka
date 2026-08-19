@@ -540,7 +540,9 @@ fn order_by_not_aggregate(name: &str) -> ExecError {
 fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
     match &fc.args {
         FuncArgs::Exprs(v) => Ok(v),
-        FuncArgs::Star | FuncArgs::Named { .. } => Err(undefined_function(&fc.name)),
+        FuncArgs::Star | FuncArgs::Named { .. } | FuncArgs::Variadic { .. } => {
+            Err(undefined_function(&fc.name))
+        }
     }
 }
 

@@ -163,6 +163,10 @@ fn contains_placeholder(expr: &Expr) -> bool {
                 .iter()
                 .chain(named.iter().map(|(_, arg)| arg))
                 .any(contains_placeholder),
+            FuncArgs::Variadic { positional, array } => positional
+                .iter()
+                .chain(std::iter::once(array.as_ref()))
+                .any(contains_placeholder),
         },
         _ => false,
     }
@@ -234,6 +238,7 @@ impl PlannedCall {
             FuncArgs::Star => &[],
             FuncArgs::Exprs(args) => args,
             FuncArgs::Named { .. } => &[],
+            FuncArgs::Variadic { .. } => &[],
         }
     }
 }
@@ -332,6 +337,12 @@ fn plan_call(
         FuncArgs::Star => &[][..],
         FuncArgs::Exprs(args) => args,
         FuncArgs::Named { .. } => {
+            return Err(ExecError::UndefinedFunction(format!(
+                "function {}(...) does not exist",
+                plain.name
+            )));
+        }
+        FuncArgs::Variadic { .. } => {
             return Err(ExecError::UndefinedFunction(format!(
                 "function {}(...) does not exist",
                 plain.name
@@ -696,6 +707,7 @@ fn is_grouped(s: &SelectStmt, out_exprs: &[Expr], calls: &[WindowCall]) -> bool 
                 FuncArgs::Star => &[][..],
                 FuncArgs::Exprs(args) => args,
                 FuncArgs::Named { .. } => return false,
+                FuncArgs::Variadic { .. } => return false,
             };
             args.iter().any(crate::agg::contains_aggregate)
                 || call
@@ -1042,6 +1054,13 @@ fn split_call(
                 .map(|(label, arg)| Ok((label.clone(), split(arg, leaves)?)))
                 .collect::<Result<_, ExecError>>()?,
         },
+        FuncArgs::Variadic { positional, array } => FuncArgs::Variadic {
+            positional: positional
+                .iter()
+                .map(|arg| split(arg, leaves))
+                .collect::<Result<_, ExecError>>()?,
+            array: Box::new(split(array, leaves)?),
+        },
     };
     let over = WindowRef::Spec(Box::new(split_spec(&resolve_over(&call.over, windows)?, leaves)?));
     Ok(WindowCall {
@@ -1166,6 +1185,7 @@ fn evaluate_default_prefix_aggregate(
         FuncArgs::Exprs(args) => args.first(),
         FuncArgs::Star => return Ok(None),
         FuncArgs::Named { .. } => return Ok(None),
+        FuncArgs::Variadic { .. } => return Ok(None),
     };
     let mut count = 0i64;
     let mut sum: Option<Datum> = None;

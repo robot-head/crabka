@@ -3281,6 +3281,10 @@ fn rewrite_expr_with(
                         .map(|(label, arg)| Ok((label.clone(), one(arg)?)))
                         .collect::<Result<_, ExecError>>()?,
                 },
+                FuncArgs::Variadic { positional, array } => FuncArgs::Variadic {
+                    positional: list(positional)?,
+                    array: boxed(array)?,
+                },
             },
             // An aggregate's sort keys may name the very variables this rewrite
             // substitutes, so they travel through it like the arguments.
