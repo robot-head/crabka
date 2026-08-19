@@ -104,3 +104,21 @@ async fn an_argument_used_twice_is_refused_only_when_duplicating_it_could_matter
     // And one reference is fine however volatile the argument is.
     assert!(scalar(&mut s, "SELECT once(nextval('s')::int)").await == Some("2".to_string()));
 }
+
+/// Parameters inside a FROM-clause function are substituted before its query
+/// is evaluated.
+#[tokio::test]
+async fn a_sql_body_substitutes_parameters_into_from_functions() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION singleton(int) RETURNS int LANGUAGE sql \
+         AS 'SELECT n FROM generate_series($1, $1) AS n'",
+    )
+    .await;
+
+    assert!(scalar(&mut s, "SELECT singleton(7)").await == Some("7".to_string()));
+}

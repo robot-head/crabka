@@ -2591,12 +2591,17 @@ fn bound_args(routine: &Routine, args: &[Expr]) -> Result<Vec<Expr>, ExecError> 
 }
 
 /// Substitute a routine's parameters into one of its body expressions.
-fn substitute(binding: &Binding, expr: &Expr) -> Result<Expr, ExecError> {
+fn substitute(
+    binding: &Binding,
+    expr: &Expr,
+    composite_parameter_fields: bool,
+) -> Result<Expr, ExecError> {
     use crabka_pgparser::ast::ArraySubscript;
 
-    let sub = |e: &Expr| substitute(binding, e);
-    let boxed =
-        |e: &Expr| -> Result<Box<Expr>, ExecError> { Ok(Box::new(substitute(binding, e)?)) };
+    let sub = |e: &Expr| substitute(binding, e, composite_parameter_fields);
+    let boxed = |e: &Expr| -> Result<Box<Expr>, ExecError> {
+        Ok(Box::new(substitute(binding, e, composite_parameter_fields)?))
+    };
     let list = |es: &[Expr]| -> Result<Vec<Expr>, ExecError> { es.iter().map(sub).collect() };
     Ok(match expr {
         Expr::Param(index) => binding
@@ -2605,6 +2610,16 @@ fn substitute(binding: &Binding, expr: &Expr) -> Result<Expr, ExecError> {
             .ok_or_else(|| ExecError::Syntax(format!("there is no parameter ${index}")))?,
         Expr::Column { table: None, name } => match binding.named(name) {
             Some(bound) => bound.clone(),
+            None => expr.clone(),
+        },
+        Expr::Column {
+            table: Some(table),
+            name,
+        } if composite_parameter_fields => match binding.named(table) {
+            Some(bound) => Expr::FieldSelect {
+                base: Box::new(bound.clone()),
+                field: name.clone(),
+            },
             None => expr.clone(),
         },
         Expr::IntLiteral(_)
@@ -2849,7 +2864,7 @@ pub(crate) fn inline_scalar_call(
         // The common shape: a single expression over no relation inlines into
         // the caller's own tree, so it evaluates once per row like PostgreSQL's
         // own inlined SQL function.
-        Some(body) => substitute(&binding, body)?,
+        Some(body) => substitute(&binding, body, true)?,
         // A body that reads a relation becomes a scalar subquery, which the
         // subquery pass runs under the caller's snapshot. That pass resolves
         // only *uncorrelated* subqueries, so an argument that varies per row is
@@ -3108,20 +3123,20 @@ fn substitute_in_query(binding: &Binding, query: &QueryExpr) -> Result<QueryExpr
     };
     for item in &mut select.projection {
         if let SelectItem::Expr { expr, .. } = item {
-            *expr = substitute(binding, expr)?;
+            *expr = substitute(binding, expr, false)?;
         }
     }
     if let Some(filter) = &mut select.filter {
-        *filter = substitute(binding, filter)?;
+        *filter = substitute(binding, filter, false)?;
     }
     if let Some(having) = &mut select.having {
-        *having = substitute(binding, having)?;
+        *having = substitute(binding, having, false)?;
     }
     for group in &mut select.group_by {
-        *group = substitute(binding, group)?;
+        *group = substitute(binding, group, false)?;
     }
     for item in &mut out.order_by {
-        item.expr = substitute(binding, &item.expr)?;
+        item.expr = substitute(binding, &item.expr, false)?;
     }
     substitute_in_from(binding, select)?;
     Ok(out)
@@ -3137,7 +3152,7 @@ fn substitute_in_from(binding: &Binding, select: &mut SelectStmt) -> Result<(), 
         if let TableExpr::Function { functions, .. } = item {
             for call in functions.iter_mut() {
                 for arg in &mut call.args {
-                    *arg = substitute(binding, arg)?;
+                    *arg = substitute(binding, arg, false)?;
                 }
             }
         }
