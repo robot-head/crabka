@@ -240,6 +240,30 @@ async fn a_sql_set_function_expands_in_a_select_list() {
 }
 
 #[tokio::test]
+async fn a_sql_set_function_scans_in_from_with_ordinality() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION numbers_from(int) RETURNS SETOF int LANGUAGE sql \
+         AS 'SELECT n FROM generate_series(1, $1) AS n'",
+    )
+    .await;
+
+    assert!(
+        scalar(
+            &mut s,
+            "SELECT string_agg(n::text || ':' || o::text, ',' ORDER BY n) \
+             FROM numbers_from(2) WITH ORDINALITY AS t(n, o)",
+        )
+        .await
+            == Some("1:1,2:2".to_string())
+    );
+}
+
+#[tokio::test]
 async fn a_sql_routine_returns_a_declared_rowtype() {
     use assert2::assert;
 

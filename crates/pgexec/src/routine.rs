@@ -3283,7 +3283,7 @@ pub(crate) fn plpgsql_table_function_schema(
     let Some(routine) = resolve_call(kv, &call.name, &given)? else {
         return Ok(None);
     };
-    if routine.language != "plpgsql" {
+    if !matches!(routine.language.as_str(), "plpgsql" | "sql") {
         return Ok(None);
     }
     if routine.kind != RoutineKind::Function {
