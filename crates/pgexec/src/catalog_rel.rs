@@ -535,6 +535,30 @@ pub(crate) fn sync_relation_rowtypes(kv: &dyn Kv) -> Result<(), ExecError> {
         };
         types.push(relation_rowtype_definition(&view.name, *oid, &view.columns));
     }
+    for (name, _) in crabka_pgcatalog::list_sequences(kv)? {
+        let Some((oid, _)) = rowtype_oids.get(&name) else {
+            continue;
+        };
+        types.push(relation_rowtype_definition(
+            &name,
+            *oid,
+            &sequence_rowtype_columns(),
+        ));
+    }
+    for name in crate::exec::virtual_table_names() {
+        let relation = match name.split_once('.') {
+            Some((schema, relation)) => RelationName::new(schema, relation),
+            None => RelationName::new(crate::search_path::PG_CATALOG, *name),
+        };
+        let Some((oid, _)) = rowtype_oids.get(&relation) else {
+            continue;
+        };
+        types.push(relation_rowtype_definition(
+            &relation,
+            *oid,
+            &crate::exec::virtual_catalog_columns(name),
+        ));
+    }
 
     let active_oids = types.iter().map(|ty| ty.oid).collect::<std::collections::BTreeSet<_>>();
     for registered in crabka_pgtypes::usertype::all() {
@@ -566,6 +590,14 @@ fn relation_rowtype_definition(name: &RelationName, oid: i32, columns: &[Column]
                 .collect(),
         ),
     }
+}
+
+fn sequence_rowtype_columns() -> [Column; 3] {
+    [
+        Column::new("last_value", ColumnType::Int8),
+        Column::new("log_cnt", ColumnType::Int8),
+        Column::new("is_called", ColumnType::Bool),
+    ]
 }
 
 /// Role oids, keyed by role name.

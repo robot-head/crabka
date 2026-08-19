@@ -726,7 +726,10 @@ impl Parser {
         // in either identifier is never mistaken for qualification.
         let ty = match type_schema.as_deref() {
             Some("pg_catalog") => quoted_builtin
-                .or_else(|| crabka_pgtypes::ColumnType::from_builtin_sql_name(&type_word)),
+                .or_else(|| crabka_pgtypes::ColumnType::from_builtin_sql_name(&type_word))
+                .or_else(|| {
+                    crabka_pgtypes::usertype::column_type_for_name_in("pg_catalog", &type_word)
+                }),
             Some("information_schema") => {
                 crabka_pgtypes::ColumnType::information_schema_domain(&type_word)
             }
@@ -20036,6 +20039,27 @@ mod tests {
                 field: "id".into(),
             }
         );
+    }
+
+    #[test]
+    fn pg_catalog_qualified_relation_rowtype_cast_uses_the_type_registry() {
+        use crabka_pgtypes::usertype::{CompositeField, UserType, UserTypeBody};
+
+        let rowtype = UserType {
+            oid: 160_001,
+            schema: "pg_catalog".into(),
+            name: "parser_relation_rowtype".into(),
+            body: UserTypeBody::Composite(vec![CompositeField {
+                name: "value".into(),
+                ty: ColumnType::Int4,
+            }]),
+        };
+        crabka_pgtypes::usertype::replace(&rowtype);
+        let Expr::Cast { ty, .. } = expr("ROW(1)::pg_catalog.parser_relation_rowtype") else {
+            panic!("expected a cast");
+        };
+        assert_eq!(ty, ColumnType::Record(Some(rowtype.type_ref())));
+        crabka_pgtypes::usertype::unregister_in("pg_catalog", "parser_relation_rowtype");
     }
 
     #[test]

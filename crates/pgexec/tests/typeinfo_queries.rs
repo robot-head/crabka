@@ -497,6 +497,20 @@ async fn relation_rowtype_casts_follow_the_catalog() {
     )
     .await;
     assert!(row_text(&result, 0) == vec![Some("2".into())]);
+
+    run(&engine, "CREATE SEQUENCE relation_type_sequence").await;
+    let result = run(
+        &engine,
+        "SELECT (ROW(1, 2, true)::relation_type_sequence).last_value",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("1".into())]);
+    let result = run(
+        &engine,
+        "SELECT (ROW(2200, 'public', 10, NULL)::pg_catalog.pg_namespace).nspname",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("public".into())]);
     let error = engine
         .connect()
         .simple_query("SELECT ROW(1)::relation_type_cast")

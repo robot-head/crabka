@@ -18506,7 +18506,7 @@ fn virtual_catalog_table(name: &str) -> Table {
     }
 }
 
-fn virtual_catalog_columns(name: &str) -> Vec<Column> {
+pub(crate) fn virtual_catalog_columns(name: &str) -> Vec<Column> {
     use ColumnType::{Bool, Int2, Int4, Int8, Text, Timestamptz};
     match name {
         "pg_namespace" => cols(&[
