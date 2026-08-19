@@ -668,7 +668,7 @@ fn nested_loop_pruned_columns(
     if !select
         .from
         .iter()
-        .all(|source| matches!(source, TableExpr::Table { .. }))
+        .all(|source| matches!(source, TableExpr::Table { columns: None, .. }))
     {
         return None;
     }
@@ -743,7 +743,12 @@ fn execute_nested_loop_plan(
                 })?;
             let materialization = pruned_columns.map(|_| read_ctx.statement_memory.reserve());
             let relation = match &state.plan.node {
-                PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source: source.clone() }.execute(state),
+                PlanNode::SeqScan { .. } => SeqScanExecutor {
+                    read_ctx,
+                    source: source.clone(),
+                    pruned_columns,
+                }
+                .execute(state),
                 PlanNode::FunctionScan | PlanNode::TableFunctionScan => {
                     FunctionScanExecutor { read_ctx, source: source.clone() }.execute(state)
                 }
@@ -2336,6 +2341,7 @@ impl Executor for ResultExecutor<'_> {
 struct SeqScanExecutor<'a, 'b> {
     read_ctx: &'a crate::subquery::SubCtx<'b>,
     source: TableExpr,
+    pruned_columns: Option<&'a [ColumnBinding]>,
 }
 
 impl Executor for SeqScanExecutor<'_, '_> {
@@ -2358,8 +2364,14 @@ impl Executor for SeqScanExecutor<'_, '_> {
             name,
             crate::relname::SchemaDisposition::Reference,
         )?;
-        let relation =
-            exec::scan_stored_base_table(self.read_ctx, &self.source, &name, None, None)?;
+        let relation = exec::scan_stored_base_table(
+            self.read_ctx,
+            &self.source,
+            &name,
+            None,
+            None,
+            self.pruned_columns,
+        )?;
         let relation = if let TableExpr::Table {
             sample: Some(sample), ..
         } = &self.source
@@ -2767,7 +2779,12 @@ fn execute_filter_input(
     };
     crate::session::check_query_canceled()?;
     let relation = state.execute_child((**input).clone(), |child| match child.plan.node {
-        PlanNode::SeqScan { .. } => SeqScanExecutor { read_ctx, source }.execute(child),
+        PlanNode::SeqScan { .. } => SeqScanExecutor {
+            read_ctx,
+            source,
+            pruned_columns: None,
+        }
+        .execute(child),
         PlanNode::FunctionScan => FunctionScanExecutor { read_ctx, source }.execute(child),
         PlanNode::TableFunctionScan => FunctionScanExecutor { read_ctx, source }.execute(child),
         PlanNode::SubqueryScan { .. } => SubqueryScanExecutor { read_ctx, source }.execute(child),
@@ -3571,7 +3588,7 @@ mod tests {
         })
         .expect("policy");
         let padding = "x".repeat(1024);
-        let values = (1..=32)
+        let values = (1..=128)
             .map(|id| format!("({id},'{padding}')"))
             .collect::<Vec<_>>()
             .join(",");
@@ -3579,7 +3596,7 @@ mod tests {
         session
             .simple_query(&format!(
                 "CREATE TABLE a (id int4, padding text); CREATE TABLE b (id int4, padding text); \
-                 INSERT INTO a VALUES {values}; INSERT INTO b VALUES {values}"
+                 INSERT INTO a VALUES {values}; INSERT INTO b VALUES (1,'{padding}')"
             ))
             .await
             .expect("fixture");
@@ -3591,6 +3608,6 @@ mod tests {
         let [QueryResult::Rows { rows, .. }] = result.as_slice() else {
             panic!("expected join rows");
         };
-        assert!(rows.len() == 32);
+        assert!(rows.len() == 1);
     }
 }

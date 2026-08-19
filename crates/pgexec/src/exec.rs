@@ -30,7 +30,8 @@ use crate::{
     relname::{SchemaDisposition, is_missing_schema, resolve_relation, resolve_relations},
     scanner::{
         JoinExecutionStrategy, JoinKind as ScannerJoinKind, JoinRangeRequest, JoinRow,
-        JoinSnapshot, JoinTableInterval, PredicatePushdown, RowInterval, ScanRequest, ScannedRow,
+        JoinSnapshot, JoinTableInterval, PredicatePushdown, ProjectionPushdown, RowInterval,
+        ScanRequest, ScannedRow,
     },
     scope::{ColumnBinding, Exposure, Scope},
     timestamp_txn::{PrimaryTxnDecision, ReadTimestamp, TimestampTransactionId, TimestampWrite},
@@ -15523,19 +15524,16 @@ fn scan_stored_relation(
         top_k: distributed_plan.top_k.clone(),
     };
     let scan_attempt = read_ctx.statement_memory.reserve();
-    let rows = match crate::scanner::collect_cursor_bounded(
+    let (mut rows, scan_attempt, projection) = match crate::scanner::collect_cursor_bounded(
         read_ctx.range_scanner,
         scan_request,
         scan_attempt.memory(),
     ) {
-        Ok(rows) => {
-            scan_attempt.commit();
-            rows
-        }
+        Ok(rows) => (rows, scan_attempt, distributed_plan.projection.clone()),
         Err(error) if should_retry_without_scan_pushdown(&error, distributed_plan) => {
             drop(scan_attempt);
             let fallback_attempt = read_ctx.statement_memory.reserve();
-            crate::scanner::collect_cursor_bounded(
+            let rows = crate::scanner::collect_cursor_bounded(
                 read_ctx.range_scanner,
                 ScanRequest {
                     local: read_ctx.kv,
@@ -15553,13 +15551,17 @@ fn scan_stored_relation(
                     top_k: None,
                 },
                 fallback_attempt.memory(),
-            )
-            .inspect(|_| {
-                fallback_attempt.commit();
-            })?
+            )?;
+            (rows, fallback_attempt, ProjectionPushdown::All)
         }
         Err(error) => return Err(error),
     };
+    restore_scan_projection(&mut rows, &projection, t.columns.len())?;
+    scan_attempt.replace_with(
+        rows.iter()
+            .map(|row| crate::scanner::datum_row_bytes(&row.row))
+            .sum(),
+    )?;
     let rows = scanned_rows(read_ctx, t, rows, &stamp, reads)?;
     Ok(crate::rls::RawScan::of_relation(t, scope, rows))
 }
@@ -15597,6 +15599,34 @@ fn scanned_rows(
         stamp.extend_row(row, identity);
     }
     Ok(rows)
+}
+
+fn restore_scan_projection(
+    rows: &mut [ScannedRow],
+    projection: &ProjectionPushdown,
+    width: usize,
+) -> Result<(), ExecError> {
+    let ProjectionPushdown::Columns(columns) = projection else {
+        return Ok(());
+    };
+    for row in rows {
+        if row.row.len() != columns.len() {
+            return Err(ExecError::Unsupported(
+                "projection pushdown returned an unexpected row width".into(),
+            ));
+        }
+        let mut restored = vec![Datum::Null; width];
+        for (value, column) in row.row.drain(..).zip(columns) {
+            let Some(slot) = restored.get_mut(*column) else {
+                return Err(ExecError::Unsupported(
+                    "projection pushdown column is outside the table row".into(),
+                ));
+            };
+            *slot = value;
+        }
+        row.row = restored;
+    }
+    Ok(())
 }
 
 /// `rows`, each extended by the columns `stamp` carries.
@@ -15897,7 +15927,7 @@ fn build_base_table(
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
         Err(error) => return Err(error.into()),
     }
-    scan_stored_base_table(read_ctx, te, name, bounds, scan_plan)
+    scan_stored_base_table(read_ctx, te, name, bounds, scan_plan, None)
 }
 
 /// Whether `te` is the direct physical table shape the first `SeqScan` node
@@ -15959,6 +15989,7 @@ pub(crate) fn scan_stored_base_table(
     name: &crabka_pgcatalog::RelationName,
     bounds: Option<&ScanBounds>,
     scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
+    pruned_columns: Option<&[ColumnBinding]>,
 ) -> Result<Relation, ExecError> {
     let crabka_pgparser::ast::TableExpr::Table { only, alias, .. } = te else {
         return Err(ExecError::Unsupported(
@@ -15986,8 +16017,36 @@ pub(crate) fn scan_stored_base_table(
     // the `WHERE` observe rows the caller may not see.
     let permit = crate::privilege::ReadPermit::acquire(&read_ctx.privileges(), &t)?;
     let reach = if *only { Reach::OwnRows } else { Reach::Tree };
-    let raw = scan_stored_relation(read_ctx, &t, qualifier, reach, bounds, scan_plan, &permit)?;
+    let pruning_plan = pruned_columns.map(|columns| crate::plan_dist::DistributedScanPlan {
+        projection: projected_scan_columns(&t, qualifier, columns),
+        ..Default::default()
+    });
+    let raw = scan_stored_relation(
+        read_ctx,
+        &t,
+        qualifier,
+        reach,
+        bounds,
+        pruning_plan.as_ref().or(scan_plan),
+        &permit,
+    )?;
     crate::rls::apply_row_security(read_ctx, raw)
+}
+
+fn projected_scan_columns(
+    table: &Table,
+    qualifier: &str,
+    pruned_columns: &[ColumnBinding],
+) -> ProjectionPushdown {
+    let scope = Scope::single(table, qualifier);
+    ProjectionPushdown::Columns(
+        scope
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| pruned_columns.contains(column).then_some(index))
+            .collect(),
+    )
 }
 
 fn build_table_expr(

@@ -1014,10 +1014,6 @@ impl StatementMemoryReservation {
         &self.memory
     }
 
-    pub(crate) fn commit(mut self) {
-        self.committed = true;
-    }
-
     pub(crate) fn replace_with(mut self, bytes: usize) -> Result<(), ExecError> {
         let mut budget = match self.memory.0.lock() {
             Ok(budget) => budget,
@@ -1094,16 +1090,6 @@ mod statement_memory_tests {
         memory
             .charge(1)
             .expect("discarded attempt releases only its own charge");
-    }
-
-    #[test]
-    fn committed_reservation_keeps_its_charge() {
-        let memory = StatementMemory::new(crabka_units::bytes(1));
-        let reservation = memory.reserve();
-        reservation.memory().charge(1).expect("charge fits");
-        reservation.commit();
-
-        assert!(memory.charge(1).is_err());
     }
 
     #[test]
