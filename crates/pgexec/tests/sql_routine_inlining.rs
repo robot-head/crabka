@@ -186,6 +186,22 @@ async fn a_sql_routine_returns_a_declared_rowtype() {
 }
 
 #[tokio::test]
+async fn a_sql_routine_returns_an_anonymous_record_in_a_select_list() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION make_record(int) RETURNS record LANGUAGE sql \
+         AS 'SELECT $1 AS a, ''value''::text AS b'",
+    )
+    .await;
+
+    assert!(scalar(&mut s, "SELECT make_record(4)").await == Some("(4,value)".to_string()));
+}
+
+#[tokio::test]
 async fn a_sql_procedure_binds_its_arguments_once() {
     use assert2::assert;
 

@@ -11,7 +11,7 @@ use std::{
     sync::Arc,
 };
 
-use crabka_pgcatalog::routine::{Routine, RoutineKind};
+use crabka_pgcatalog::routine::{Routine, RoutineKind, RoutineResult};
 use crabka_pgparser::ast::{
     ArraySubscript, AssignmentValue, BinaryOp, CteBody, CursorTarget, Expr, FetchCount,
     FetchDirection, FuncArgs, JoinConstraint, PlPgSqlBlock, PlPgSqlDeclaration, PlPgSqlInto,
@@ -352,10 +352,16 @@ pub(crate) async fn execute_sql_scalar_function(
     if rows.len() > 1 {
         return Err(ExecError::CardinalityViolation);
     }
-    if let Some(rowtype) = crate::routine::declared_relation_rowtype(
+    let rowtype = crate::routine::declared_relation_rowtype(
         interpreter.session.plpgsql_catalog(),
         routine,
-    )? {
+    )?;
+    let returns_record = matches!(
+        &routine.result,
+        RoutineResult::Type { ty, setof: false }
+            if ty.is_record() || matches!(ty.column, Some(ColumnType::Record(_)))
+    );
+    if rowtype.is_some() || returns_record {
         if row.len() != fields.len() {
             return Err(ExecError::ObjectNotInPrerequisiteState(
                 "SQL function executor returned the wrong table width".into(),
@@ -368,7 +374,7 @@ pub(crate) async fn execute_sql_scalar_function(
             .collect::<Result<Vec<_>, _>>()?;
         let names: Vec<_> = fields.iter().map(|field| field.name.clone()).collect();
         return Ok(Datum::Record(RecordValue::named(
-            Some(rowtype),
+            rowtype,
             Arc::from(names),
             values,
         )));
