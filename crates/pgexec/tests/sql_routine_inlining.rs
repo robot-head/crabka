@@ -116,6 +116,22 @@ async fn a_named_argument_selects_the_matching_overload() {
     assert!(scalar(&mut s, "SELECT overloaded(value => 'x')").await == Some("text".to_string()));
 }
 
+#[tokio::test]
+async fn a_sql_routine_accepts_a_variadic_array_argument() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(
+        &mut s,
+        "CREATE FUNCTION array_count(VARIADIC values int[]) RETURNS int LANGUAGE sql \
+         AS 'SELECT array_length(values, 1)'",
+    )
+    .await;
+
+    assert!(scalar(&mut s, "SELECT array_count(VARIADIC ARRAY[1, 2, 3])").await == Some("3".to_string()));
+}
+
 /// A scalar built-in in FROM is a one-row `FunctionScan`, not an undefined SRF.
 #[tokio::test]
 async fn a_scalar_builtin_scans_as_one_row_from_item() {

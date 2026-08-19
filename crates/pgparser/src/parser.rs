@@ -1985,6 +1985,21 @@ impl Parser {
             let mut saw_named = false;
             if *self.peek() != Token::RParen {
                 loop {
+                    // `VARIADIC array_expr` passes the array as a routine's
+                    // final variadic parameter. The callee receives that same
+                    // array, so routine binding can use its ordinary positional
+                    // path once the modifier has been consumed.
+                    if self.peek_ident_eq("variadic") {
+                        self.bump();
+                        args.push(self.expr(0)?);
+                        if self.eat_comma() {
+                            return Err(ParseError::new(
+                                "VARIADIC argument must be the last argument",
+                                self.peek_pos(),
+                            ));
+                        }
+                        break;
+                    }
                     // `name := value` and `name => value` — a labeled argument.
                     // Neither `ident : =` nor `ident =>` can begin an
                     // expression, so recognizing them here cannot change how any
