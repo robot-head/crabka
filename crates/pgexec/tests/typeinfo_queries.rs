@@ -190,6 +190,38 @@ async fn pg_range_describes_builtin_ranges() {
     );
 }
 
+/// A user range carries its text subtype's default collation, unless its
+/// definition selected a specific one.
+#[tokio::test]
+async fn pg_range_describes_user_range_collations() {
+    let engine = SqlEngine::new();
+    run(
+        &engine,
+        "CREATE TYPE default_text_range AS RANGE (subtype = text); \
+         CREATE TYPE c_text_range AS RANGE (subtype = text, collation = \"C\"); \
+         CREATE TYPE int_range AS RANGE (subtype = int4)",
+    )
+    .await;
+    let result = run(
+        &engine,
+        "SELECT t.typname, r.rngcollation \
+         FROM pg_catalog.pg_range r JOIN pg_catalog.pg_type t ON t.oid = r.rngtypid \
+         WHERE t.typname IN ('c_text_range', 'default_text_range', 'int_range') \
+         ORDER BY t.typname",
+    )
+    .await;
+    assert!(
+        (0..rows(&result).len())
+            .map(|i| row_text(&result, i))
+            .collect::<Vec<_>>()
+            == vec![
+                vec![Some("c_text_range".into()), Some("950".into())],
+                vec![Some("default_text_range".into()), Some("100".into())],
+                vec![Some("int_range".into()), Some("0".into())],
+            ]
+    );
+}
+
 #[tokio::test]
 async fn pg_range_uses_oid_and_regproc_column_types_on_the_wire() {
     let engine = SqlEngine::new();

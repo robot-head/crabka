@@ -2182,7 +2182,13 @@ pub(crate) fn pg_range_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
                     oid(i32::try_from(ty.oid).unwrap_or(0)),
                     oid(i32::try_from(range.subtype.oid()).unwrap_or(0)),
                     oid(i32::try_from(ty.oid + 3).unwrap_or(0)),
-                    oid(0),
+                    oid(
+                        range
+                            .collation
+                            .as_deref()
+                            .and_then(crate::catalog_rel::collation_oid)
+                            .unwrap_or_else(|| text_collation_oid(range.subtype)),
+                    ),
                     oid(0),
                     absent_regproc(),
                     absent_regproc(),
