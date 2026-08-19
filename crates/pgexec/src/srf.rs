@@ -1199,6 +1199,15 @@ pub(crate) fn from_item_with_memory(
     if with_ordinality {
         reject_ordinality_with_column_defs(functions, rows_from)?;
     }
+    if let Some(relation) = scalar_builtin_relation(
+        functions,
+        with_ordinality,
+        alias,
+        column_aliases,
+        ctx,
+    )? {
+        return Ok(relation);
+    }
     let plans = plan_all(functions)?;
     let mut produced = Vec::new();
     for (call, plan) in functions.iter().zip(&plans) {
@@ -1241,8 +1250,107 @@ pub(crate) fn from_item_schema(
     if with_ordinality {
         reject_ordinality_with_column_defs(functions, rows_from)?;
     }
+    if let Some(relation) =
+        scalar_builtin_schema(functions, with_ordinality, alias, column_aliases)?
+    {
+        return Ok(relation);
+    }
     let plans = plan_all(functions)?;
     qualify(&plans, Vec::new(), with_ordinality, alias, column_aliases)
+}
+
+/// A scalar built-in in `FROM` supplies its one result as a one-row relation.
+///
+/// PostgreSQL accepts `FROM abs(-3) AS t(value)`, even though `abs` is not an
+/// SRF. Keep the value and its type on the same `eval`/`infer_type` path as a
+/// scalar select-list expression; this only supplies the FunctionScan envelope.
+fn scalar_builtin_relation(
+    functions: &[TableFuncCall],
+    with_ordinality: bool,
+    alias: Option<&str>,
+    column_aliases: &Option<Vec<String>>,
+    ctx: &EvalCtx,
+) -> Result<Option<Relation>, ExecError> {
+    let [call] = functions else {
+        return Ok(None);
+    };
+    let Some(call_expr) = scalar_builtin_call(call)? else {
+        return Ok(None);
+    };
+    let scope = Scope::empty();
+    let ty = crate::eval::infer_type(&Expr::Func(call_expr.clone()), &scope)?;
+    let value = crate::eval::eval(&Expr::Func(call_expr), &scope, &[], ctx)?;
+    Ok(Some(qualify_columns(
+        call.name.clone(),
+        vec![column(&call.name, ty)],
+        vec![vec![value]],
+        with_ordinality,
+        alias,
+        column_aliases,
+        true,
+    )?))
+}
+
+/// Describe the same scalar FunctionScan without evaluating its arguments.
+fn scalar_builtin_schema(
+    functions: &[TableFuncCall],
+    with_ordinality: bool,
+    alias: Option<&str>,
+    column_aliases: &Option<Vec<String>>,
+) -> Result<Option<Relation>, ExecError> {
+    let [call] = functions else {
+        return Ok(None);
+    };
+    let Some(call_expr) = scalar_builtin_call(call)? else {
+        return Ok(None);
+    };
+    let scope = Scope::empty();
+    let ty = crate::eval::infer_type(&Expr::Func(call_expr), &scope)?;
+    Ok(Some(qualify_columns(
+        call.name.clone(),
+        vec![column(&call.name, ty)],
+        Vec::new(),
+        with_ordinality,
+        alias,
+        column_aliases,
+        true,
+    )?))
+}
+
+fn scalar_builtin_call(call: &TableFuncCall) -> Result<Option<FuncCall>, ExecError> {
+    let call_expr = FuncCall {
+        name: call.name.clone(),
+        distinct: false,
+        args: FuncArgs::Exprs(call.args.clone()),
+        order_by: Vec::new(),
+        filter: None,
+        sql_syntax: false,
+    };
+    if !is_scalar_builtin(&call_expr) {
+        return Ok(None);
+    }
+    if call.column_defs.is_some() {
+        return Err(ExecError::Syntax(
+            "a column definition list is only allowed for functions returning \"record\"".into(),
+        ));
+    }
+    Ok(Some(call_expr))
+}
+
+/// The scalar-function families handled by [`crate::eval::eval`].
+///
+/// Set-returning built-ins stay on the SRF path, and user-defined functions
+/// are handled by the routine table-function builder before reaching here.
+fn is_scalar_builtin(call: &FuncCall) -> bool {
+    crate::catalog_fn::is_catalog_func(&call.name)
+        || crate::reg_fn::is_reg_func(&call.name)
+        || crate::tid_fn::is_tid_func(&call.name)
+        || crate::datetime_fn::is_datetime_constructor(call)
+        || crate::func::is_scalar(&call.name)
+        || crate::datetime_fn::is_datetime_func(&call.name)
+        || crate::format_fn::is_format_func(&call.name)
+        || crate::json_fn::is_json_func(&call.name)
+        || crate::array_fn::is_array_func(&call.name)
 }
 
 /// The first column name a definition list repeats.

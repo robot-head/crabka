@@ -83,6 +83,54 @@ async fn a_sql_routine_binds_named_and_unused_arguments() {
     assert!(scalar(&mut s, "SELECT named(3, 0, 4)").await == Some("7".to_string()));
 }
 
+/// A scalar built-in in FROM is a one-row FunctionScan, not an undefined SRF.
+#[tokio::test]
+async fn a_scalar_builtin_scans_as_one_row_from_item() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    run(&mut s, "CREATE TABLE tid_source (value int); INSERT INTO tid_source VALUES (1)").await;
+    assert!(
+        scalar(
+            &mut s,
+            "SELECT answer::text || ':' || position::text \
+             FROM abs(-3::int) WITH ORDINALITY AS t(answer, position)",
+        )
+        .await
+            == Some("3:1".to_string())
+    );
+    for (sql, expected) in [
+        (
+            "SELECT value::text FROM to_regtype('int4') AS t(value)",
+            "int4",
+        ),
+        (
+            "SELECT value::text FROM currtid2('tid_source', '(0,1)'::tid) AS t(value)",
+            "(0,1)",
+        ),
+        (
+            "SELECT value::text FROM make_date(2024, 1, 2) AS t(value)",
+            "2024-01-02",
+        ),
+        (
+            "SELECT value::text FROM date_trunc('day', timestamp '2024-01-02 03:04:05') AS t(value)",
+            "2024-01-02 00:00:00",
+        ),
+        ("SELECT value FROM to_char(7, 'FM9') AS t(value)", "7"),
+        (
+            "SELECT value FROM jsonb_typeof('[1]'::jsonb) AS t(value)",
+            "array",
+        ),
+        (
+            "SELECT value::text FROM array_length(ARRAY[1,2], 1) AS t(value)",
+            "2",
+        ),
+    ] {
+        assert!(scalar(&mut s, sql).await == Some(expected.to_string()));
+    }
+}
+
 #[tokio::test]
 async fn a_sql_routine_reads_relations_with_a_row_varying_argument() {
     use assert2::assert;
