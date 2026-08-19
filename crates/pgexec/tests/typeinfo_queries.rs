@@ -240,6 +240,68 @@ async fn pg_range_describes_user_range_collations() {
     );
 }
 
+/// Every relation owns a named composite type and its array companion.
+#[tokio::test]
+async fn pg_class_and_pg_type_link_a_table_rowtype() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE rowtype_table (id int4, label text)").await;
+    let result = run(
+        &engine,
+        "SELECT c.reltype = t.oid, t.typrelid = c.oid, t.typarray = a.oid, \
+                a.typelem = t.oid, t.typtype, a.typname, t.typlen, a.typlen, \
+                t.typalign, a.typalign \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_type t ON t.oid = c.reltype \
+         JOIN pg_catalog.pg_type a ON a.oid = t.typarray \
+         WHERE c.relname = 'rowtype_table'",
+    )
+    .await;
+    assert!(rows(&result).len() == 1);
+    assert!(
+        row_text(&result, 0)
+            == vec![
+                Some("t".into()),
+                Some("t".into()),
+                Some("t".into()),
+                Some("t".into()),
+                Some("c".into()),
+                Some("_rowtype_table".into()),
+                Some("-1".into()),
+                Some("-1".into()),
+                Some("d".into()),
+                Some("d".into()),
+            ]
+    );
+}
+
+/// Array alignment follows its element type, including the fixed `int8` case.
+#[tokio::test]
+async fn pg_type_keeps_d_alignment_for_builtin_and_rowtype_arrays() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE rowtype_alignment_table (id int4)").await;
+    let result = run(
+        &engine,
+        "SELECT typname, typalign FROM pg_catalog.pg_type \
+         WHERE typname IN ('int8', '_int4', '_int8', '_rowtype_alignment_table') \
+         ORDER BY typname",
+    )
+    .await;
+    assert!(
+        (0..rows(&result).len())
+            .map(|index| row_text(&result, index))
+            .collect::<Vec<_>>()
+            == vec![
+                vec![Some("_int4".into()), Some("i".into())],
+                vec![Some("_int8".into()), Some("d".into())],
+                vec![
+                    Some("_rowtype_alignment_table".into()),
+                    Some("d".into()),
+                ],
+                vec![Some("int8".into()), Some("d".into())],
+            ]
+    );
+}
+
 #[tokio::test]
 async fn pg_range_uses_oid_and_regproc_column_types_on_the_wire() {
     let engine = SqlEngine::new();

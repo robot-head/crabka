@@ -281,6 +281,7 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         .map(|index| index.table_id)
         .collect::<std::collections::BTreeSet<_>>();
     let role_oids = crate::catalog_rel::role_oids(catalog_kv)?;
+    let rowtype_oids = crate::catalog_rel::relation_rowtype_oids(catalog_kv)?;
     // Four scans, not four reads per relation: the stored `pg_class` statistics
     // are stored per relation and only stored relations ever have them.
     let relstats = crate::relstats::all(catalog_kv)?;
@@ -307,6 +308,7 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             relkind,
             crate::catalog_rel::namespace_oid(&table.name.schema),
         );
+        row.reltype = rowtype_oids.get(&table.name).map_or(0, |(oid, _)| *oid);
         // A materialized view is rewritten by a rule the way an ordinary view
         // is, so PostgreSQL reports `relhasrules` for one; and its contents
         // exist only once `REFRESH` has run, which is the whole meaning of
@@ -357,6 +359,7 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             "v",
             crate::catalog_rel::namespace_oid(&view.name.schema),
         );
+        row.reltype = rowtype_oids.get(&view.name).map_or(0, |(oid, _)| *oid);
         row.relnatts = view.columns.len();
         row.relowner = role_oid_of(&role_oids, &view.owner);
         row.relhasrules = true;
@@ -376,6 +379,7 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             "S",
             crate::catalog_rel::namespace_oid(&name.schema),
         );
+        row.reltype = rowtype_oids.get(&name).map_or(0, |(oid, _)| *oid);
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&name.schema);
         rows.push(row.build()?);
     }
@@ -405,6 +409,7 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             relkind,
             virtual_relation_namespace_oid(virtual_table),
         );
+        row.reltype = rowtype_oids.get(&table.name).map_or(0, |(oid, _)| *oid);
         row.relnatts = table.columns.len();
         row.relfilenode = relfilenode;
         row.relhasindex = builtin_catalog_oid_index(virtual_table).is_some();
@@ -1678,7 +1683,60 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
         ),
     ]);
     rows.extend(user_type_rows(catalog_kv, &proc_oids)?);
+    rows.extend(relation_type_rows(catalog_kv, &proc_oids)?);
     rows.extend(information_schema_domain_rows(&proc_oids));
+    Ok(rows)
+}
+
+/// The composite type and array row each ordinary relation owns.
+fn relation_type_rows(
+    catalog_kv: &dyn Kv,
+    proc_oids: &BTreeMap<String, i32>,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = Vec::new();
+    for (name, (oid, array_oid)) in crate::catalog_rel::relation_rowtype_oids(catalog_kv)? {
+        rows.push(pg_type_row(
+            PgTypeRow {
+                oid,
+                name: &name.name,
+                namespace: crate::catalog_rel::namespace_oid(&name.schema),
+                len: -1,
+                category: "C",
+                typtype: "c",
+                typrelid: crate::catalog_fn::resolve_relation_in_scope(
+                    catalog_kv,
+                    crate::relname::ResolutionScope::default_scope(),
+                    &name.to_string(),
+                )?,
+                typelem: 0,
+                typarray: array_oid,
+                typbasetype: 0,
+                typcollation: 0,
+                domain_base: None,
+                range_align: Some("d"),
+            },
+            proc_oids,
+        ));
+        let array_name = format!("_{}", name.name);
+        rows.push(pg_type_row(
+            PgTypeRow {
+                oid: array_oid,
+                name: &array_name,
+                namespace: crate::catalog_rel::namespace_oid(&name.schema),
+                len: -1,
+                category: "A",
+                typtype: "b",
+                typrelid: 0,
+                typelem: oid,
+                typarray: 0,
+                typbasetype: 0,
+                typcollation: 0,
+                domain_base: None,
+                range_align: Some("d"),
+            },
+            proc_oids,
+        ));
+    }
     Ok(rows)
 }
 
@@ -1840,7 +1898,6 @@ fn pg_type_row(row: PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> Vec<Dat
         | "_tsrange"
         | "_tstzrange"
         | "_int8range" => "d",
-        name if name.starts_with('_') => "i",
         _ => row.range_align.unwrap_or(match row.len {
             1 => "c",
             2 => "s",

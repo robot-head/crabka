@@ -48,6 +48,10 @@ const CHECK_OID_BASE: i32 = 90_000;
 const NOT_NULL_OID_BASE: i32 = 130_000;
 /// First oid of the band reserved for `FOREIGN KEY` constraints.
 const FOREIGN_KEY_OID_BASE: i32 = 150_000;
+/// First oid of the band reserved for relation composite types.
+const ROWTYPE_OID_BASE: i32 = 160_000;
+/// First oid of the band reserved for arrays over relation composite types.
+const ROWTYPE_ARRAY_OID_BASE: i32 = 170_000;
 /// First oid of the band reserved for column defaults (`pg_attrdef`).
 const ATTRDEF_OID_BASE: i32 = 110_000;
 /// Width of every name-hashed oid band.
@@ -438,6 +442,36 @@ pub(crate) fn sequence_oids(kv: &dyn Kv) -> Result<BTreeMap<RelationName, i32>, 
         .map(|(name, _)| name)
         .collect::<Vec<_>>();
     Ok(banded_oids(SEQUENCE_OID_BASE, &names))
+}
+
+/// The composite and array type oids owned by relations.
+///
+/// A table, view, sequence, or virtual catalog relation has a distinct
+/// `pg_type` row.  User-defined composite types already own their type oid and
+/// so are intentionally absent from this map.
+pub(crate) fn relation_rowtype_oids(
+    kv: &dyn Kv,
+) -> Result<BTreeMap<RelationName, (i32, i32)>, ExecError> {
+    let mut names: Vec<RelationName> = crate::exec::virtual_table_names()
+        .iter()
+        .map(|spelled| match spelled.split_once('.') {
+            Some((schema, relation)) => RelationName::new(schema, relation),
+            None => RelationName::new(crate::search_path::PG_CATALOG, *spelled),
+        })
+        .collect();
+    names.extend(crabka_pgcatalog::list_tables(kv)?.into_iter().map(|table| table.name));
+    names.extend(crabka_pgcatalog::list_views(kv)?.into_iter().map(|view| view.name));
+    names.extend(
+        crabka_pgcatalog::list_sequences(kv)?
+            .into_iter()
+            .map(|(name, _)| name),
+    );
+    let types = banded_oids(ROWTYPE_OID_BASE, &names);
+    let arrays = banded_oids(ROWTYPE_ARRAY_OID_BASE, &names);
+    Ok(types
+        .into_iter()
+        .filter_map(|(name, ty)| arrays.get(&name).copied().map(|array| (name, (ty, array))))
+        .collect())
 }
 
 /// Role oids, keyed by role name.
