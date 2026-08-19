@@ -143,6 +143,30 @@ async fn int4larger_transition_defines_a_user_aggregate() {
 }
 
 #[tokio::test]
+async fn boolean_transitions_define_user_aggregates() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_bool_and (bool) (SFUNC = booland_statefunc, STYPE = bool)",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_bool_or (bool) (SFUNC = boolor_statefunc, STYPE = bool)",
+    )
+    .await;
+
+    assert!(
+        grid(
+            &engine,
+            "SELECT builtin_bool_and(f1 > 1), builtin_bool_or(f1 > 1) FROM t",
+        )
+        .await
+            == vec![some(&["f", "t"])]
+    );
+}
+
+#[tokio::test]
 async fn float8_accumulator_and_finalizer_define_a_user_average() {
     let engine = fixture().await;
     run(

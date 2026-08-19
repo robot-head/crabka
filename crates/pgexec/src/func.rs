@@ -55,6 +55,9 @@ enum ScalarFunc {
     Int8Avg,
     Float8Accum,
     Float8Avg,
+    BoolState {
+        and: bool,
+    },
     BoolCompare {
         equal: bool,
     },
@@ -182,6 +185,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "int8_avg" => ScalarFunc::Int8Avg,
         "float8_accum" => ScalarFunc::Float8Accum,
         "float8_avg" => ScalarFunc::Float8Avg,
+        "booland_statefunc" => ScalarFunc::BoolState { and: true },
+        "boolor_statefunc" => ScalarFunc::BoolState { and: false },
         "booleq" => ScalarFunc::BoolCompare { equal: true },
         "boolne" => ScalarFunc::BoolCompare { equal: false },
         "coalesce" => ScalarFunc::Coalesce,
@@ -864,6 +869,15 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 Err(undefined_function_spelled(&fc.name, args, scope))
             }
         }
+        ScalarFunc::BoolState { .. } => {
+            require_arity(fc, n == 2)?;
+            for arg in args {
+                if !is_unknown_literal(arg) {
+                    require_bool(arg, scope)?;
+                }
+            }
+            Ok(ColumnType::Bool)
+        }
         ScalarFunc::BoolCompare { .. } => {
             require_arity(fc, n == 2)?;
             for arg in args {
@@ -1352,7 +1366,7 @@ fn builtin_eval_scalar(
     }
     let f = scalar_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     let args = checked_args(fc)?;
-    if matches!(f, ScalarFunc::BoolCompare { .. }) {
+    if matches!(f, ScalarFunc::BoolState { .. } | ScalarFunc::BoolCompare { .. }) {
         require_arity(fc, args.len() == 2)?;
         if let Some(scope) = scope {
             for arg in args {
@@ -1996,6 +2010,17 @@ fn eval_eager(
                 return Err(undefined_function(&fc.name));
             };
             Ok(Datum::Int4((*left).max(*right)))
+        }
+        ScalarFunc::BoolState { and } => {
+            require_arity(fc, vals.len() == 2)?;
+            let (Datum::Bool(left), Datum::Bool(right)) = (&vals[0], &vals[1]) else {
+                return Err(undefined_function(&fc.name));
+            };
+            Ok(Datum::Bool(if and {
+                *left && *right
+            } else {
+                *left || *right
+            }))
         }
         ScalarFunc::Int4AvgAccum => {
             require_arity(fc, vals.len() == 2)?;
@@ -4259,6 +4284,24 @@ mod tests {
             ColumnType::Int4
         );
         assert_eq!(err_code("int4larger(2)", None), "42883");
+        assert_eq!(ev("booland_statefunc(true, false)"), Datum::Bool(false));
+        assert_eq!(ev("boolor_statefunc(false, true)"), Datum::Bool(true));
+        assert_eq!(ev("booland_statefunc(NULL::bool, true)"), Datum::Null);
+        assert_eq!(ev("boolor_statefunc(false, NULL::bool)"), Datum::Null);
+        assert!(
+            crate::eval::infer_type(
+                &pexpr("booland_statefunc(true)").expect("parse"),
+                &Scope::empty(),
+            )
+            .is_err()
+        );
+        assert!(
+            crate::eval::infer_type(
+                &pexpr("booland_statefunc(1, true)").expect("parse"),
+                &Scope::empty(),
+            )
+            .is_err()
+        );
         assert_eq!(
             err_code("int4_avg_accum(ARRAY[0::int8, 0::int8])", None),
             "42883"
