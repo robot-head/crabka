@@ -167,6 +167,22 @@ async fn boolean_transitions_define_user_aggregates() {
 }
 
 #[tokio::test]
+async fn float8mi_transition_defines_a_user_aggregate() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_float8_difference (float8) (SFUNC = float8mi, \
+         STYPE = float8, INITCOND = '0')",
+    )
+    .await;
+
+    assert!(
+        grid(&engine, "SELECT builtin_float8_difference(f1::float8) FROM t").await
+            == vec![some(&["-6"])]
+    );
+}
+
+#[tokio::test]
 async fn float8_accumulator_and_finalizer_define_a_user_average() {
     let engine = fixture().await;
     run(

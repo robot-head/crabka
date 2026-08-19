@@ -48,6 +48,7 @@ enum ScalarFunc {
     Abs,
     Mod,
     TypedAdd(ColumnType),
+    TypedSub(ColumnType),
     Int8Inc,
     Int4Sum,
     Int4Larger,
@@ -178,6 +179,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "int8pl" => ScalarFunc::TypedAdd(ColumnType::Int8),
         "float4pl" => ScalarFunc::TypedAdd(ColumnType::Float4),
         "float8pl" => ScalarFunc::TypedAdd(ColumnType::Float8),
+        "float8mi" => ScalarFunc::TypedSub(ColumnType::Float8),
         "int8inc" => ScalarFunc::Int8Inc,
         "int4_sum" => ScalarFunc::Int4Sum,
         "int4larger" => ScalarFunc::Int4Larger,
@@ -796,6 +798,15 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             }
         }
         ScalarFunc::TypedAdd(ty) => {
+            require_arity(fc, n == 2)?;
+            for arg in args {
+                if crate::eval::infer_type(arg, scope)? != ty {
+                    return Err(undefined_function_spelled(&fc.name, args, scope));
+                }
+            }
+            Ok(ty)
+        }
+        ScalarFunc::TypedSub(ty) => {
             require_arity(fc, n == 2)?;
             for arg in args {
                 if crate::eval::infer_type(arg, scope)? != ty {
@@ -1980,6 +1991,10 @@ fn eval_eager(
         ScalarFunc::TypedAdd(_) => {
             require_arity(fc, vals.len() == 2)?;
             Ok(ops::add(&vals[0], &vals[1])?)
+        }
+        ScalarFunc::TypedSub(_) => {
+            require_arity(fc, vals.len() == 2)?;
+            Ok(ops::sub(&vals[0], &vals[1])?)
         }
         ScalarFunc::Int8Inc => {
             require_arity(fc, vals.len() == 1)?;
@@ -4298,6 +4313,24 @@ mod tests {
         assert!(
             crate::eval::infer_type(
                 &pexpr("booland_statefunc(1, true)").expect("parse"),
+                &Scope::empty(),
+            )
+            .is_err()
+        );
+        assert_eq!(ev("float8mi(5::float8, 2::float8)"), Datum::Float8(3.0));
+        assert_eq!(ev("float8mi(-0.0::float8, 0.0::float8)"), Datum::Float8(-0.0));
+        assert_eq!(ev("float8mi(NULL::float8, 2::float8)"), Datum::Null);
+        assert_eq!(
+            crate::eval::infer_type(
+                &pexpr("float8mi(5::float8, 2::float8)").expect("parse"),
+                &Scope::empty(),
+            )
+            .expect("float8mi signature"),
+            ColumnType::Float8
+        );
+        assert!(
+            crate::eval::infer_type(
+                &pexpr("float8mi(5::float8)").expect("parse"),
                 &Scope::empty(),
             )
             .is_err()
