@@ -215,6 +215,22 @@ async fn array_append_transition_resolves_an_array_element_signature() {
 }
 
 #[tokio::test]
+async fn array_cat_transition_resolves_compatible_array_signatures() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_array_concat (int4[]) (SFUNC = array_cat, STYPE = int4[], \
+         INITCOND = '{}')",
+    )
+    .await;
+
+    assert!(
+        grid(&engine, "SELECT builtin_array_concat(ARRAY[f1]) FROM t").await
+            == vec![some(&["{1,2,3}"])]
+    );
+}
+
+#[tokio::test]
 async fn float8_accumulator_and_finalizer_define_a_user_average() {
     let engine = fixture().await;
     run(
