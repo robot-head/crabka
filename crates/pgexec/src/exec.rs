@@ -18409,16 +18409,26 @@ fn virtual_catalog_relation_schema(
     }))
 }
 
-fn relation_scope(
-    catalog_kv: &dyn Kv,
-    table: &Table,
-    qualifier: &str,
-) -> Result<Scope, ExecError> {
-    Ok(Scope::single_with_row_type(
+fn relation_scope(catalog_kv: &dyn Kv, table: &Table, qualifier: &str) -> Result<Scope, ExecError> {
+    let mut scope = Scope::single_with_row_type(
         table,
         qualifier,
         crate::catalog_rel::relation_rowtype(catalog_kv, &table.name)?,
-    ))
+    );
+    let indexes = match crabka_pgcatalog::list_table_indexes(catalog_kv, &table.name) {
+        Ok(indexes) => indexes,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return Ok(scope),
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(primary_key) = indexes.into_iter().find(|index| {
+        matches!(
+            index.constraint,
+            Some(crabka_pgcatalog::IndexConstraint::PrimaryKey)
+        )
+    }) {
+        scope.set_primary_key(qualifier, primary_key.columns);
+    }
+    Ok(scope)
 }
 
 /// A synthesised relation's scope, and the system columns it carries.

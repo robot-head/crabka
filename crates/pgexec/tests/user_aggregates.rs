@@ -356,6 +356,86 @@ async fn aggregate_kind_and_parallel_attributes_are_validated_and_catalogued() {
 }
 
 #[tokio::test]
+async fn grouping_by_a_primary_key_allows_its_dependent_columns() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE TABLE aggregate_primary_key (id int4 PRIMARY KEY, label text); \
+         CREATE TABLE aggregate_primary_key_detail (id int4, detail text); \
+         INSERT INTO aggregate_primary_key VALUES (1, 'one'), (2, 'two'); \
+         INSERT INTO aggregate_primary_key_detail VALUES (1, 'a'), (1, 'b'), (2, 'c')",
+    )
+    .await;
+    assert!(
+        grid(
+            &engine,
+            "SELECT id, label, count(*) FROM aggregate_primary_key GROUP BY id ORDER BY id",
+        )
+        .await
+            == vec![some(&["1", "one", "1"]), some(&["2", "two", "1"])]
+    );
+    assert!(
+        grid(
+            &engine,
+            "SELECT t.id, t.label, count(*) \
+             FROM aggregate_primary_key AS t \
+             JOIN aggregate_primary_key_detail AS d ON d.id = t.id \
+             GROUP BY t.id ORDER BY t.id",
+        )
+        .await
+            == vec![some(&["1", "one", "2"]), some(&["2", "two", "1"])]
+    );
+    assert!(
+        grid(
+            &engine,
+            "SELECT t.id, t.label, count(*) \
+             FROM aggregate_primary_key AS t \
+             JOIN aggregate_primary_key_detail AS d ON d.id = t.id \
+             GROUP BY GROUPING SETS ((t.id), (t.id)) ORDER BY t.id",
+        )
+        .await
+            == vec![
+                some(&["1", "one", "2"]),
+                some(&["1", "one", "2"]),
+                some(&["2", "two", "1"]),
+                some(&["2", "two", "1"]),
+            ]
+    );
+    assert!(
+        grid(
+            &engine,
+            "SELECT t.id, t.label, count(*) FROM aggregate_primary_key AS t GROUP BY t.id ORDER BY t.id",
+        )
+        .await
+            == vec![some(&["1", "one", "1"]), some(&["2", "two", "1"])]
+    );
+    assert!(
+        error(
+            &engine,
+            "SELECT id, label, count(*) FROM aggregate_primary_key GROUP BY label",
+        )
+        .await
+            == "ERROR: column \"aggregate_primary_key.id\" must appear in the GROUP BY clause or be used in an aggregate function (42803)"
+    );
+    assert!(
+        error(
+            &engine,
+            "SELECT id, label, count(*) FROM aggregate_primary_key GROUP BY GROUPING SETS ((id), ())",
+        )
+        .await
+            == "ERROR: column \"aggregate_primary_key.label\" must appear in the GROUP BY clause or be used in an aggregate function (42803)"
+    );
+    assert!(
+        error(
+            &engine,
+            "SELECT grouping(label) FROM aggregate_primary_key GROUP BY GROUPING SETS ((id))",
+        )
+        .await
+            == "ERROR: arguments to GROUPING must be grouping expressions of the associated query level (42803)"
+    );
+}
+
+#[tokio::test]
 async fn int4_sum_transition_defines_a_user_aggregate() {
     let engine = fixture().await;
     run(

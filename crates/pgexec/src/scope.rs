@@ -1048,6 +1048,7 @@ impl StatementRefs {
 pub(crate) struct Scope {
     pub(crate) columns: Vec<ColumnBinding>,
     pub(crate) row_types: BTreeMap<String, UserTypeRef>,
+    pub(crate) primary_keys: BTreeMap<String, Vec<String>>,
 }
 
 impl Scope {
@@ -1057,6 +1058,7 @@ impl Scope {
         Self {
             columns: Vec::new(),
             row_types: BTreeMap::new(),
+            primary_keys: BTreeMap::new(),
         }
     }
 
@@ -1077,6 +1079,7 @@ impl Scope {
                 })
                 .collect(),
             row_types: BTreeMap::new(),
+            primary_keys: BTreeMap::new(),
         }
     }
 
@@ -1101,6 +1104,26 @@ impl Scope {
         self.row_types.insert(qualifier.to_string(), row_type);
     }
 
+    /// Record the primary key that functionally determines every column of a
+    /// base relation in this scope.
+    pub(crate) fn set_primary_key(&mut self, qualifier: &str, columns: Vec<String>) {
+        if !columns.is_empty() {
+            self.primary_keys.insert(qualifier.to_string(), columns);
+        }
+    }
+
+    /// Whether `table.column` is functionally determined by the grouped keys.
+    pub(crate) fn primary_key_is_grouped(&self, table: &str, group_by: &[Expr]) -> bool {
+        self.primary_keys.get(table).is_some_and(|columns| {
+            columns.iter().all(|name| {
+                group_by.iter().any(|expr| {
+                    matches!(expr, Expr::Column { table: Some(group_table), name: group_name }
+                        if group_table == table && group_name == name)
+                })
+            })
+        })
+    }
+
     /// Keep the row type that already belongs to `qualifier`, if any.  A table
     /// column-alias list preserves its relation identity; a derived relation
     /// has no matching input qualifier and remains anonymous.
@@ -1123,8 +1146,18 @@ impl Scope {
     /// Append another relation's bindings and its whole-row identities.
     pub(crate) fn extend(&mut self, other: &Self) {
         self.columns.extend(other.columns.iter().cloned());
-        self.row_types
-            .extend(other.row_types.iter().map(|(qualifier, ty)| (qualifier.clone(), *ty)));
+        self.row_types.extend(
+            other
+                .row_types
+                .iter()
+                .map(|(qualifier, ty)| (qualifier.clone(), *ty)),
+        );
+        self.primary_keys.extend(
+            other
+                .primary_keys
+                .iter()
+                .map(|(qualifier, columns)| (qualifier.clone(), columns.clone())),
+        );
     }
 
     /// Append the hidden [`TABLEOID_COLUMN`] for `qualifier`, at the end of the
@@ -1479,6 +1512,20 @@ mod tests {
     }
 
     #[test]
+    fn primary_key_is_grouped_only_when_every_key_column_is_present() {
+        let t = tbl("t", &[("a", ColumnType::Int4), ("b", ColumnType::Int4)]);
+        let mut scope = Scope::single(&t, "t");
+        scope.set_primary_key("t", vec!["a".into(), "b".into()]);
+        let column = |name: &str| Expr::Column {
+            table: Some("t".into()),
+            name: name.into(),
+        };
+
+        assert!(scope.primary_key_is_grouped("t", &[column("a"), column("b")]));
+        assert!(!scope.primary_key_is_grouped("t", &[column("a")]));
+    }
+
+    #[test]
     #[allow(non_snake_case)]
     fn unknown_column_is_42703_and_unknown_qualifier_is_42P01() {
         let t = tbl("t", &[("id", ColumnType::Int4)]);
@@ -1510,6 +1557,7 @@ mod tests {
                 binding("excluded", "v", ColumnType::Text),
             ],
             row_types: BTreeMap::new(),
+            primary_keys: BTreeMap::new(),
         };
         assert!(Scope::insert_conflict(&t) == expected);
     }
@@ -1584,6 +1632,7 @@ mod tests {
                 },
             ],
             row_types: BTreeMap::new(),
+            primary_keys: BTreeMap::new(),
         };
         assert!(scope_with_tableoid("t", &[("a", ColumnType::Int4)]) == expected);
     }
@@ -1838,6 +1887,7 @@ mod tests {
                 },
             ],
             row_types: BTreeMap::new(),
+            primary_keys: BTreeMap::new(),
         };
         assert!(s == expected);
         // Reachable both ways, and hidden from every expansion of the relation.

@@ -86,6 +86,7 @@ type GroupingSet = Vec<usize>;
 struct GroupingPlan<'a> {
     scope: &'a Scope,
     group_by: Vec<Expr>,
+    explicit_group_count: usize,
     key_types: Vec<ColumnType>,
     sets: Vec<GroupingSet>,
 }
@@ -256,11 +257,17 @@ pub(crate) fn aggregate_rows_with_memory(
         }
     }
 
-    let sets = match &s.grouping {
+    let mut group_by: Vec<Expr> = group_by
+        .iter()
+        .map(|group| canonicalize_columns(group, scope))
+        .collect();
+    let mut sets = match &s.grouping {
         // No set structure: the one grouping set is the whole GROUP BY list.
         None => vec![(0..group_by.len()).collect::<GroupingSet>()],
         Some(clause) => expand(clause),
     };
+    let explicit_group_count = group_by.len();
+    append_primary_key_dependencies(scope, &mut group_by, &mut sets);
     let key_types = group_by
         .iter()
         .map(|g| crate::eval::infer_type(g, scope))
@@ -270,10 +277,8 @@ pub(crate) fn aggregate_rows_with_memory(
     }
     let plan = GroupingPlan {
         scope,
-        group_by: group_by
-            .iter()
-            .map(|g| canonicalize_columns(g, scope))
-            .collect(),
+        group_by,
+        explicit_group_count,
         key_types,
         sets,
     };
@@ -294,6 +299,58 @@ pub(crate) fn aggregate_rows_with_memory(
         ctx,
         statement_memory,
     )
+}
+
+/// Add columns functionally determined by a primary key every grouping set
+/// includes. Treating them as keys is equivalent: the constraint gives each
+/// primary-key value exactly one value for every appended column.
+fn append_primary_key_dependencies(
+    scope: &Scope,
+    group_by: &mut Vec<Expr>,
+    sets: &mut [GroupingSet],
+) {
+    let qualifiers: Vec<_> = scope
+        .primary_keys
+        .iter()
+        .filter_map(|(qualifier, primary_key)| {
+            let positions: Vec<_> = primary_key
+                .iter()
+                .filter_map(|name| {
+                    group_by.iter().position(|expr| {
+                        matches!(expr, Expr::Column { table: Some(table), name: column }
+                            if table == qualifier && column == name)
+                    })
+                })
+                .collect();
+            (positions.len() == primary_key.len()
+                && sets
+                    .iter()
+                    .all(|set| positions.iter().all(|position| set.contains(position))))
+            .then_some(qualifier.clone())
+        })
+        .collect();
+    for qualifier in qualifiers {
+        let dependent: Vec<_> = scope
+            .columns
+            .iter()
+            .filter(|column| {
+                column.exposure == Exposure::Output
+                    && column.qualifier.as_deref() == Some(qualifier.as_str())
+            })
+            .map(|column| Expr::Column {
+                table: Some(qualifier.clone()),
+                name: column.name.clone(),
+            })
+            .filter(|column| !group_by.contains(column))
+            .collect();
+        for column in dependent {
+            let index = group_by.len();
+            group_by.push(column);
+            for set in sets.iter_mut() {
+                set.push(index);
+            }
+        }
+    }
 }
 
 /// `s` with every `*` / `t.*` in its select list replaced by the explicit column
@@ -458,25 +515,22 @@ fn empty_input_rows(
 /// The augmented scope: the input columns plus one hidden column per grouping
 /// expression and one for the grouping-set ordinal.
 fn augmented_scope(scope: &Scope, key_types: &[ColumnType]) -> Scope {
-    let mut columns = scope.columns.clone();
+    let mut augmented = scope.clone();
     for (index, ty) in key_types.iter().enumerate() {
-        columns.push(ColumnBinding {
+        augmented.columns.push(ColumnBinding {
             exposure: Exposure::Output,
             qualifier: Some(GROUPING_QUALIFIER.to_string()),
             name: key_column(index),
             ty: *ty,
         });
     }
-    columns.push(ColumnBinding {
+    augmented.columns.push(ColumnBinding {
         exposure: Exposure::Output,
         qualifier: Some(GROUPING_QUALIFIER.to_string()),
         name: SET_COLUMN.to_string(),
         ty: ColumnType::Int4,
     });
-    Scope {
-        columns,
-        ..Default::default()
-    }
+    augmented
 }
 
 /// One augmented row per (input row, grouping set) pair.
@@ -678,13 +732,15 @@ fn grouping_argument_indices(
     }
     args.iter()
         .map(|arg| {
-            plan.position_of(arg).ok_or_else(|| {
-                ExecError::Grouping(
-                    "arguments to GROUPING must be grouping expressions of the associated query \
-                     level"
-                        .into(),
-                )
-            })
+            plan.position_of(arg)
+                .filter(|index| *index < plan.explicit_group_count)
+                .ok_or_else(|| {
+                    ExecError::Grouping(
+                        "arguments to GROUPING must be grouping expressions of the associated query \
+                         level"
+                            .into(),
+                    )
+                })
         })
         .collect()
 }

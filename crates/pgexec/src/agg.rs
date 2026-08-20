@@ -24,7 +24,11 @@ use crabka_pgtypes::{
 #[cfg(test)]
 use crabka_pgwire::engine::QueryResult;
 
-use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
+use crate::{
+    clock::EvalCtx,
+    error::ExecError,
+    scope::{Exposure, Scope},
+};
 
 /// Maximum expression-tree depth the grouped evaluator (`eval_grouped_depth`)
 /// will recurse before it returns `54001` (statement_too_complex).
@@ -1208,6 +1212,10 @@ fn validate_grouped(e: &Expr, group_by: &[Expr], scope: &Scope) -> Result<(), Ex
         return Ok(()); // matches a grouping expression structurally
     }
     match e {
+        Expr::Column {
+            table: Some(table),
+            name,
+        } if scope.primary_key_is_grouped(table, group_by) => Ok(()),
         Expr::Column { table, name } => Err(ungrouped_column(table.as_deref(), name)),
         Expr::Unary { expr, .. } => validate_grouped(expr, group_by, scope),
         Expr::Binary { left, right, .. } => {
@@ -2902,7 +2910,8 @@ pub(crate) fn aggregate_rows_with_memory(
     // so all of them are canonicalized once here (PostgreSQL compares the
     // underlying variables, which is why `SELECT t.a … GROUP BY a` is valid).
     let canonical = |e: &Expr| crate::grouping::canonicalize_columns(e, scope);
-    let group_by: Vec<Expr> = s.group_by.iter().map(&canonical).collect();
+    let mut group_by: Vec<Expr> = s.group_by.iter().map(&canonical).collect();
+    append_primary_key_dependencies(scope, &mut group_by);
     let out_exprs: Vec<Expr> = out_exprs.iter().map(&canonical).collect();
     let having = s.having.as_ref().map(&canonical);
     let order_keys: Vec<crate::exec::SelectOrderKey> = order_keys
@@ -3082,6 +3091,34 @@ pub(crate) fn aggregate_rows_with_memory(
     };
 
     Ok(crate::exec::apply_row_window(out, window, &s.order_by))
+}
+
+/// Primary-key columns determine every ordinary column from the same base
+/// relation. Append those columns as internal group keys so grouped evaluation
+/// can read their one value without changing the result.
+fn append_primary_key_dependencies(scope: &Scope, group_by: &mut Vec<Expr>) {
+    let qualifiers: Vec<_> = scope
+        .primary_keys
+        .keys()
+        .filter(|qualifier| scope.primary_key_is_grouped(qualifier, group_by))
+        .cloned()
+        .collect();
+    for qualifier in qualifiers {
+        let dependent: Vec<_> = scope
+            .columns
+            .iter()
+            .filter(|column| {
+                column.exposure == Exposure::Output
+                    && column.qualifier.as_deref() == Some(qualifier.as_str())
+            })
+            .map(|column| Expr::Column {
+                table: Some(qualifier.clone()),
+                name: column.name.clone(),
+            })
+            .filter(|column| !group_by.contains(column))
+            .collect();
+        group_by.extend(dependent);
+    }
 }
 
 /// One finalized group on its way out of [`aggregate_rows`].
