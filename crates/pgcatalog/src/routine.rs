@@ -227,6 +227,14 @@ pub struct AggregateDefinition {
     pub transtype: RoutineType,
     /// The final function's name, if the definition named one.
     pub finalfn: Option<String>,
+    /// The optional partial-aggregation combine function.
+    pub combinefn: Option<String>,
+    /// The optional internal-state serialization function.
+    pub serialfn: Option<String>,
+    /// The optional internal-state deserialization function.
+    pub deserialfn: Option<String>,
+    /// `pg_aggregate.aggfinalmodify` (`r`, `s`, or `w`).
+    pub finalfunc_modify: char,
     /// `pg_aggregate.agginitval`: the initial state's text representation.
     pub initcond: Option<String>,
     /// Parameters before `ORDER BY` in an ordered-set signature. Zero for an
@@ -443,7 +451,7 @@ pub fn drop_routine_ops(identity: &str) -> Vec<WriteOp> {
     }]
 }
 
-const ROUTINE_VERSION: u8 = 4;
+const ROUTINE_VERSION: u8 = 5;
 
 fn write_routine_type(out: &mut Vec<u8>, ty: &RoutineType) {
     match ty.column {
@@ -505,8 +513,8 @@ fn read_opt_str(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
 }
 
 /// An aggregate definition: a presence byte, and for a present definition the
-/// transition function name, the transition type, the optional final function
-/// and initial condition, then the recorded-but-unexecuted option list.
+/// transition function name, the transition type, support functions, initial
+/// condition, and then the recorded-but-unexecuted option list.
 fn write_aggregate(out: &mut Vec<u8>, aggregate: Option<&AggregateDefinition>) {
     let Some(aggregate) = aggregate else {
         out.push(0);
@@ -516,6 +524,10 @@ fn write_aggregate(out: &mut Vec<u8>, aggregate: Option<&AggregateDefinition>) {
     write_str(out, &aggregate.transfn);
     write_routine_type(out, &aggregate.transtype);
     write_opt_str(out, aggregate.finalfn.as_deref());
+    write_opt_str(out, aggregate.combinefn.as_deref());
+    write_opt_str(out, aggregate.serialfn.as_deref());
+    write_opt_str(out, aggregate.deserialfn.as_deref());
+    out.push(aggregate.finalfunc_modify as u8);
     write_opt_str(out, aggregate.initcond.as_deref());
     write_count(out, aggregate.direct_args);
     write_count(out, aggregate.ordered_args);
@@ -536,6 +548,10 @@ fn read_aggregate(cur: &mut &[u8]) -> Result<Option<AggregateDefinition>, KvErro
             let transfn = read_string(cur)?;
             let transtype = read_routine_type(cur)?;
             let finalfn = read_opt_str(cur)?;
+            let combinefn = read_opt_str(cur)?;
+            let serialfn = read_opt_str(cur)?;
+            let deserialfn = read_opt_str(cur)?;
+            let finalfunc_modify = char::from(take_u8(cur)?);
             let initcond = read_opt_str(cur)?;
             let direct_args = read_count(cur)?;
             let ordered_args = read_count(cur)?;
@@ -550,6 +566,10 @@ fn read_aggregate(cur: &mut &[u8]) -> Result<Option<AggregateDefinition>, KvErro
                 transfn,
                 transtype,
                 finalfn,
+                combinefn,
+                serialfn,
+                deserialfn,
+                finalfunc_modify,
                 initcond,
                 direct_args,
                 ordered_args,
@@ -817,6 +837,10 @@ mod tests {
                 transfn: "int4_avg_accum".into(),
                 transtype: RoutineType::named("_int8".into()),
                 finalfn: Some("int8_avg".into()),
+                combinefn: None,
+                serialfn: None,
+                deserialfn: None,
+                finalfunc_modify: 'r',
                 initcond: Some("{0,0}".into()),
                 direct_args: 0,
                 ordered_args: 0,
@@ -957,6 +981,10 @@ mod tests {
                 transfn: "int4larger".into(),
                 transtype: RoutineType::builtin(ColumnType::Int4),
                 finalfn: None,
+                combinefn: None,
+                serialfn: None,
+                deserialfn: None,
+                finalfunc_modify: 'r',
                 initcond: None,
                 direct_args: 0,
                 ordered_args: 0,

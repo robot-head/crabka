@@ -1269,29 +1269,29 @@ fn pg_event_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 
 /// Column lists for the `pg_catalog` relations, in PostgreSQL 18.4 order.
 fn pg_catalog_columns(name: &str) -> Vec<Column> {
-    use ColumnType::{Bool, Float4, Int2, Int4, Int8, Text, Timestamptz};
+    use ColumnType::{Bool, Float4, Int2, Int4, Int8, Regoper, Regproc, Regtype, Text, Timestamptz};
     let acl = ColumnType::Array(ElemType::Text);
     match name {
         "pg_aggregate" => cols(&[
-            ("aggfnoid", Int4),
+            ("aggfnoid", Regproc),
             ("aggkind", Text),
             ("aggnumdirectargs", Int2),
-            ("aggtransfn", Int4),
-            ("aggfinalfn", Int4),
-            ("aggcombinefn", Int4),
-            ("aggserialfn", Int4),
-            ("aggdeserialfn", Int4),
-            ("aggmtransfn", Int4),
-            ("aggminvtransfn", Int4),
-            ("aggmfinalfn", Int4),
+            ("aggtransfn", Regproc),
+            ("aggfinalfn", Regproc),
+            ("aggcombinefn", Regproc),
+            ("aggserialfn", Regproc),
+            ("aggdeserialfn", Regproc),
+            ("aggmtransfn", Regproc),
+            ("aggminvtransfn", Regproc),
+            ("aggmfinalfn", Regproc),
             ("aggfinalextra", Bool),
             ("aggmfinalextra", Bool),
             ("aggfinalmodify", Text),
             ("aggmfinalmodify", Text),
-            ("aggsortop", Int4),
-            ("aggtranstype", Int4),
+            ("aggsortop", Regoper),
+            ("aggtranstype", Regtype),
             ("aggtransspace", Int4),
-            ("aggmtranstype", Int4),
+            ("aggmtranstype", Regtype),
             ("aggmtransspace", Int4),
             ("agginitval", Text),
             ("aggminitval", Text),

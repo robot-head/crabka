@@ -4576,11 +4576,23 @@ fn catalog_type_oid(kv: &dyn Kv, ty: &RoutineType) -> Result<i32, ExecError> {
 }
 
 /// A signature type's `pg_type.oid`; `0` for a relation's composite type.
-fn type_oid(ty: &RoutineType) -> i32 {
+pub(crate) fn type_oid(ty: &RoutineType) -> i32 {
     ty.column.map_or_else(
         || named_type_oid(&ty.name),
         |column| i32::try_from(column.oid()).unwrap_or(0),
     )
+}
+
+/// Resolve a `pg_proc` result OID to the routine-signature type it represents.
+pub(crate) fn routine_type_from_oid(oid: u32) -> Result<RoutineType, ExecError> {
+    if let Ok(column) = crate::exec::column_type_from_oid(oid) {
+        return Ok(RoutineType::builtin(column));
+    }
+    TYPE_OIDS
+        .iter()
+        .find(|(_, candidate)| *candidate == i32::try_from(oid).unwrap_or(0))
+        .map(|(name, _)| RoutineType::named((*name).to_string()))
+        .ok_or_else(|| ExecError::Unsupported(format!("unknown routine result type oid {oid}")))
 }
 
 /// `pg_proc.prorettype`.

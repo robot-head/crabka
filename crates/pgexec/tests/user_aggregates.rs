@@ -82,6 +82,14 @@ async fn a_monomorphic_aggregate_folds_every_row_and_groups() {
     .await;
 
     assert!(grid(&engine, "SELECT mysum(f1) FROM t").await == vec![some(&["6"])]);
+    assert!(
+        grid(
+            &engine,
+            "SELECT aggtransfn FROM pg_aggregate WHERE aggfnoid = 'mysum'::REGPROC",
+        )
+        .await
+            == vec![some(&["addint"])]
+    );
     assert!(grid(&engine, "SELECT mysum(f1) FROM t WHERE f1 > 1").await == vec![some(&["5"])]);
     assert!(
         grid(
@@ -193,6 +201,99 @@ async fn moving_aggregate_definition_validates_its_support_functions() {
         wrong_return
             .contains("return type of inverse transition function int_inverse is not double precision"),
         "{wrong_return}"
+    );
+}
+
+#[tokio::test]
+async fn internal_state_aggregate_preserves_parallel_support_catalog_fields() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE FUNCTION wrong_serialize(internal) RETURNS internal LANGUAGE internal AS \
+         'numeric_avg_accum'",
+    )
+    .await;
+    assert!(
+        error(
+            &engine,
+            "CREATE AGGREGATE myavg (numeric) (STYPE = internal, SFUNC = numeric_avg_accum, \
+             SERIALFUNC = numeric_avg_serialize)",
+        )
+        .await
+            == "ERROR: must specify both or neither of serialization and deserialization functions (42P13)"
+    );
+    assert!(
+        error(
+            &engine,
+            "CREATE AGGREGATE myavg (numeric) (STYPE = internal, SFUNC = numeric_avg_accum, \
+             SERIALFUNC = numeric_avg_deserialize, DESERIALFUNC = numeric_avg_deserialize)",
+        )
+        .await
+            == "ERROR: function numeric_avg_deserialize(internal) does not exist (42883)"
+    );
+    assert!(
+        error(
+            &engine,
+            "CREATE AGGREGATE myavg (numeric) (STYPE = internal, SFUNC = numeric_avg_accum, \
+             SERIALFUNC = numeric_avg_serialize, DESERIALFUNC = numeric_avg_serialize)",
+        )
+        .await
+            == "ERROR: function numeric_avg_serialize(bytea, internal) does not exist (42883)"
+    );
+    assert!(
+        error(
+            &engine,
+            "CREATE AGGREGATE myavg (numeric) (STYPE = internal, SFUNC = numeric_avg_accum, \
+             SERIALFUNC = wrong_serialize, DESERIALFUNC = numeric_avg_deserialize)",
+        )
+        .await
+            == "ERROR: return type of serialization function wrong_serialize is not bytea (42P13)"
+    );
+    assert!(
+        error(
+            &engine,
+            "CREATE AGGREGATE myavg (numeric) (STYPE = internal, SFUNC = numeric_avg_accum, \
+             SERIALFUNC = numeric_avg_serialize, DESERIALFUNC = numeric_avg_deserialize, \
+             COMBINEFUNC = int4larger)",
+        )
+        .await
+            == "ERROR: function int4larger(internal, internal) does not exist (42883)"
+    );
+
+    let definition = "CREATE AGGREGATE myavg (numeric) (STYPE = internal, \
+        SFUNC = numeric_avg_accum, FINALFUNC = numeric_avg, \
+        SERIALFUNC = numeric_avg_serialize, DESERIALFUNC = numeric_avg_deserialize, \
+        COMBINEFUNC = numeric_avg_combine, FINALFUNC_MODIFY = shareable)";
+    run(&engine, definition).await;
+    let catalog = "SELECT aggtransfn, aggcombinefn, aggtranstype, aggserialfn, aggdeserialfn, \
+                   aggfinalmodify FROM pg_aggregate WHERE aggfnoid = 'myavg'::REGPROC";
+    assert!(
+        grid(&engine, catalog).await
+            == vec![some(&[
+                "numeric_avg_accum",
+                "numeric_avg_combine",
+                "internal",
+                "numeric_avg_serialize",
+                "numeric_avg_deserialize",
+                "s",
+            ])]
+    );
+
+    run(
+        &engine,
+        "CREATE OR REPLACE AGGREGATE myavg (numeric) (STYPE = numeric, SFUNC = numeric_add)",
+    )
+    .await;
+    assert!(
+        grid(&engine, catalog).await
+            == vec![some(&[
+                "numeric_add",
+                "-",
+                "numeric",
+                "-",
+                "-",
+                "r",
+            ])]
     );
 }
 

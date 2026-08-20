@@ -15,9 +15,8 @@
 //!
 //! Deliberately unimplemented, and recorded rather than rejected so the
 //! catalog still describes what was written: moving-aggregate execution
-//! (`MINITCOND`), parallel aggregation
-//! (`COMBINEFUNC`/`SERIALFUNC`/`DESERIALFUNC`, which have no plan to run in),
-//! `SORTOP`, `SSPACE` and `FINALFUNC_MODIFY`.
+//! (`MINITCOND`), parallel execution (the definition and catalog metadata for
+//! `COMBINEFUNC`/`SERIALFUNC`/`DESERIALFUNC` do validate), `SORTOP` and `SSPACE`.
 
 use std::sync::Arc;
 
@@ -213,6 +212,10 @@ struct Collected {
     sfunc: Option<String>,
     stype: Option<crabka_pgparser::ast::RoutineType>,
     finalfunc: Option<String>,
+    combinefunc: Option<String>,
+    serialfunc: Option<String>,
+    deserialfunc: Option<String>,
+    finalfunc_modify: Option<String>,
     /// `Unwritten` and an explicit `INITCOND = NULL` are different: the second
     /// is still "the state starts NULL", and both are spelled NULL, but only
     /// the first lets a strict transition function bootstrap from the first row.
@@ -273,6 +276,18 @@ impl Collected {
                 AggregateOption::Unimplemented { name, value } if name == "finalfunc_extra" => {
                     collected.finalfunc_extra = value == "true";
                 }
+                AggregateOption::Unimplemented { name, value } if name == "combinefunc" => {
+                    collected.combinefunc = Some(value.clone());
+                }
+                AggregateOption::Unimplemented { name, value } if name == "serialfunc" => {
+                    collected.serialfunc = Some(value.clone());
+                }
+                AggregateOption::Unimplemented { name, value } if name == "deserialfunc" => {
+                    collected.deserialfunc = Some(value.clone());
+                }
+                AggregateOption::Unimplemented { name, value } if name == "finalfunc_modify" => {
+                    collected.finalfunc_modify = Some(value.clone());
+                }
                 AggregateOption::Unimplemented { name, value } if name == "msfunc" => {
                     collected.msfunc = Some(value.clone());
                     collected.unimplemented.push(format!("{name}={value}"));
@@ -328,6 +343,7 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
     // The lookup is the validation: PostgreSQL refuses a definition whose
     // support function does not exist with exactly this signature.
     let transition = lookup(kv, &sfunc, &wanted)?;
+    validate_parallel_definition(kv, &options, &transtype)?;
     validate_moving_definition(kv, &options, &transtype, &wanted, transition.strict())?;
     let result = match &options.finalfunc {
         Some(finalfunc) => {
@@ -369,6 +385,10 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
             transfn: sfunc,
             transtype,
             finalfn: options.finalfunc.clone(),
+            combinefn: options.combinefunc.clone(),
+            serialfn: options.serialfunc.clone(),
+            deserialfn: options.deserialfunc.clone(),
+            finalfunc_modify: finalfunc_modify(&options)?,
             initcond: options.initcond.value().cloned(),
             direct_args: declared.direct_count,
             ordered_args: declared.ordered_count,
@@ -377,6 +397,53 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
             unimplemented: options.unimplemented,
         }),
     })
+}
+
+fn finalfunc_modify(options: &Collected) -> Result<char, ExecError> {
+    match options.finalfunc_modify.as_deref().unwrap_or("read_only") {
+        "read_only" => Ok('r'),
+        "shareable" => Ok('s'),
+        "read_write" => Ok('w'),
+        value => Err(invalid_definition(format!(
+            "parameter \"finalfunc_modify\" must be READ_ONLY, SHAREABLE, or READ_WRITE, not \"{value}\""
+        ))),
+    }
+}
+
+fn validate_parallel_definition(
+    kv: &dyn Kv,
+    options: &Collected,
+    transtype: &RoutineType,
+) -> Result<(), ExecError> {
+    if options.serialfunc.is_some() != options.deserialfunc.is_some() {
+        return Err(invalid_definition(
+            "must specify both or neither of serialization and deserialization functions",
+        ));
+    }
+    if let Some(serialfunc) = options.serialfunc.as_deref() {
+        let serial = lookup(kv, serialfunc, std::slice::from_ref(transtype))?;
+        ensure_return_type(
+            "serialization",
+            serialfunc,
+            &serial,
+            &RoutineType::builtin(ColumnType::Bytea),
+        )?;
+        let deserialfunc = options
+            .deserialfunc
+            .as_deref()
+            .expect("serialization pair was checked");
+        let deserial = lookup(
+            kv,
+            deserialfunc,
+            &[RoutineType::builtin(ColumnType::Bytea), transtype.clone()],
+        )?;
+        ensure_return_type("deserialization", deserialfunc, &deserial, transtype)?;
+    }
+    if let Some(combinefunc) = options.combinefunc.as_deref() {
+        let combine = lookup(kv, combinefunc, &[transtype.clone(), transtype.clone()])?;
+        ensure_return_type("combine", combinefunc, &combine, transtype)?;
+    }
+    Ok(())
 }
 
 /// Validate the moving transition functions even though N17 owns their window
@@ -413,6 +480,27 @@ fn validate_moving_definition(
 }
 
 fn ensure_moving_return_type(
+    role: &str,
+    name: &str,
+    function: &SupportRoutine,
+    expected: &RoutineType,
+) -> Result<(), ExecError> {
+    let RoutineResult::Type { ty, setof: false } = function.result() else {
+        return Err(invalid_definition(format!(
+            "return type of {role} function {name} is not {}",
+            expected.name
+        )));
+    };
+    if ty != *expected {
+        return Err(invalid_definition(format!(
+            "return type of {role} function {name} is not {}",
+            expected.name
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_return_type(
     role: &str,
     name: &str,
     function: &SupportRoutine,
@@ -495,9 +583,6 @@ fn builtin_support(
     name: &str,
     wanted: &[RoutineType],
 ) -> Result<Option<SupportRoutine>, ExecError> {
-    if !crate::func::is_scalar(name) && !crate::array_fn::is_array_func(name) {
-        return Ok(None);
-    }
     let Some(row) = crate::routine::builtin_pg_proc_rows()?.into_iter().find(|row| {
         row.get(1) == Some(&Datum::Text(name.to_string()))
             && matches!(row.get(19), Some(Datum::OidVector(args)) if builtin_support_args_match(&args.elems, wanted))
@@ -519,7 +604,7 @@ fn builtin_support(
     let result = builtin_support_result_type(*result_oid as u32, &args.elems, wanted)?;
     Ok(Some(SupportRoutine::Builtin {
         result: RoutineResult::Type {
-            ty: RoutineType::builtin(result),
+            ty: result,
             setof: *setof,
         },
         strict: *strict,
@@ -574,7 +659,7 @@ fn builtin_support_args_match(declared: &[Datum], wanted: &[RoutineType]) -> boo
                     false
                 }
             }
-            _ => wanted.column.is_some_and(|column| column.oid() == *declared as u32),
+            _ => crate::routine::type_oid(wanted) == *declared,
         }
     })
 }
@@ -587,7 +672,7 @@ fn builtin_support_result_type(
     result_oid: u32,
     declared: &[Datum],
     wanted: &[RoutineType],
-) -> Result<ColumnType, ExecError> {
+) -> Result<RoutineType, ExecError> {
     if matches!(result_oid, 2277 | 5078) {
         return declared
             .iter()
@@ -597,11 +682,12 @@ fn builtin_support_result_type(
                     .then_some(wanted.column)
                     .flatten()
             })
+            .map(RoutineType::builtin)
             .ok_or_else(|| {
                 ExecError::Unsupported("unbound anyarray built-in support result".into())
             });
     }
-    crate::exec::column_type_from_oid(result_oid)
+    crate::routine::routine_type_from_oid(result_oid)
 }
 
 /// Does a parameter declared `declared` accept an aggregate support argument of
@@ -1137,6 +1223,10 @@ mod tests {
                 transfn: "int8inc".into(),
                 transtype: RoutineType::builtin(ColumnType::Int8),
                 finalfn: None,
+                combinefn: None,
+                serialfn: None,
+                deserialfn: None,
+                finalfunc_modify: 'r',
                 initcond: Some("0".into()),
                 direct_args,
                 ordered_args,
@@ -1170,6 +1260,31 @@ mod tests {
             &[
                 RoutineType::builtin(ColumnType::Int4),
                 RoutineType::builtin(ColumnType::Array(ElemType::Int4)),
+            ],
+        ));
+    }
+
+    #[test]
+    fn builtin_support_rejects_mismatched_declared_argument_types() {
+        assert!(!builtin_support_args_match(
+            &[Datum::Int4(701), Datum::Int4(701)],
+            &[
+                RoutineType::builtin(ColumnType::Float8),
+                RoutineType::builtin(ColumnType::Int4),
+            ],
+        ));
+        assert!(!builtin_support_args_match(
+            &[Datum::Int4(5077), Datum::Int4(5078)],
+            &[
+                RoutineType::builtin(ColumnType::Int4),
+                RoutineType::builtin(ColumnType::Array(ElemType::Int8)),
+            ],
+        ));
+        assert!(!builtin_support_args_match(
+            &[Datum::Int4(5078), Datum::Int4(5077)],
+            &[
+                RoutineType::builtin(ColumnType::Array(ElemType::Int8)),
+                RoutineType::builtin(ColumnType::Int4),
             ],
         ));
     }
@@ -1225,36 +1340,45 @@ fn compile_call(kv: &dyn Kv, name: &str, args: &[Expr], scope: &Scope) -> Result
 /// Propagates catalog read errors.
 pub(crate) fn pg_aggregate_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let routines = crabka_pgcatalog::routine::list_routines(kv)?;
+    let builtin_routines = crate::routine::builtin_pg_proc_rows()?;
     let oid_of = |name: &str| -> i32 {
-        routines
+        if let Some(oid) = routines
             .iter()
             .find(|routine| routine.name == name && !routine.is_aggregate())
-            .map_or(0, |routine| i32::try_from(routine.oid).unwrap_or(0))
+            .map(|routine| i32::try_from(routine.oid).unwrap_or(0))
+        {
+            return oid;
+        }
+        builtin_routines
+            .iter()
+            .find(|routine| routine.get(1) == Some(&Datum::Text(name.to_string())))
+            .and_then(|routine| match routine.first() {
+                Some(Datum::Int4(oid)) => Some(*oid),
+                _ => None,
+            })
+            .unwrap_or(0)
     };
     Ok(routines
         .iter()
         .filter(|routine| routine.is_aggregate())
         .filter_map(|routine| {
             let definition = routine.aggregate.as_ref()?;
-            let transtype = definition
-                .transtype
-                .column
-                .map_or(0, |ty| i32::try_from(ty.oid()).unwrap_or(0));
+            let transtype = crate::routine::type_oid(&definition.transtype);
             Some(vec![
                 Datum::Int4(i32::try_from(routine.oid).unwrap_or(0)),
                 Datum::Text("n".into()),
                 Datum::Int2(0),
                 Datum::Int4(oid_of(&definition.transfn)),
                 Datum::Int4(definition.finalfn.as_deref().map_or(0, oid_of)),
-                Datum::Int4(0),
-                Datum::Int4(0),
-                Datum::Int4(0),
+                Datum::Int4(definition.combinefn.as_deref().map_or(0, oid_of)),
+                Datum::Int4(definition.serialfn.as_deref().map_or(0, oid_of)),
+                Datum::Int4(definition.deserialfn.as_deref().map_or(0, oid_of)),
                 Datum::Int4(0),
                 Datum::Int4(0),
                 Datum::Int4(0),
                 Datum::Bool(false),
                 Datum::Bool(false),
-                Datum::Text("r".into()),
+                Datum::Text(definition.finalfunc_modify.to_string()),
                 Datum::Text("r".into()),
                 Datum::Int4(0),
                 Datum::Int4(transtype),

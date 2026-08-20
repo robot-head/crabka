@@ -18372,7 +18372,7 @@ fn virtual_catalog_relation(
     let described = virtual_catalog_table(table);
     let (scope, system) = virtual_catalog_scope(catalog_kv, &described, name, alias, refs)?;
     let rows = virtual_catalog_rows(catalog_kv, table, ctx)?;
-    let rows = if system.ctid {
+    let mut rows = if system.ctid {
         rows.into_iter()
             .zip(1u64..)
             .map(|(mut row, ordinal)| {
@@ -18383,6 +18383,12 @@ fn virtual_catalog_relation(
     } else {
         rows
     };
+    catalog_rows::resolve_regclass_at(
+        catalog_kv,
+        ctx.resolution(),
+        &catalog_rows::regclass_column_indexes(&described, 0),
+        &mut rows,
+    )?;
     Ok(Some(Relation { scope, rows }))
 }
 
