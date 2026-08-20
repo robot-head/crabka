@@ -4995,6 +4995,8 @@ pub enum AggregateOption {
     SFunc(String),
     /// `STYPE`/`STYPE1` — the state value's type.
     SType(RoutineType),
+    /// `MSTYPE` — the moving-state value's type.
+    MSType(RoutineType),
     /// `FINALFUNC` — the function that turns the final state into the result.
     FinalFunc(String),
     /// `INITCOND`/`INITCOND1` — the state's initial value as external text, so

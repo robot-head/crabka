@@ -149,6 +149,54 @@ async fn comment_on_aggregate_resolves_its_signature() {
 }
 
 #[tokio::test]
+async fn moving_aggregate_definition_validates_its_support_functions() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE moving_sum (float8) (STYPE = float8, SFUNC = float8pl, \
+         MSTYPE = float8, MSFUNC = float8pl, MINVFUNC = float8mi, PARALLEL = safe)",
+    )
+    .await;
+    assert!(
+        grid(&engine, "SELECT moving_sum(f1::float8) FROM t").await == vec![some(&["6"])]
+    );
+
+    run(
+        &engine,
+        "CREATE FUNCTION nonstrict_inverse(float8, float8) RETURNS float8 LANGUAGE sql AS \
+         'SELECT $1 - $2'",
+    )
+    .await;
+    assert!(
+        error(
+            &engine,
+            "CREATE AGGREGATE invalid_moving_sum (float8) (STYPE = float8, SFUNC = float8pl, \
+             MSTYPE = float8, MSFUNC = float8pl, MINVFUNC = nonstrict_inverse)",
+        )
+        .await
+        .contains("strictness of aggregate's forward and inverse transition functions must match")
+    );
+
+    run(
+        &engine,
+        "CREATE FUNCTION int_inverse(float8, float8) RETURNS int4 AS \
+         'SELECT CAST($1 - $2 AS int4)' LANGUAGE sql STRICT",
+    )
+    .await;
+    let wrong_return = error(
+        &engine,
+        "CREATE AGGREGATE wrong_moving_sum (float8) (STYPE = float8, SFUNC = float8pl, \
+         MSTYPE = float8, MSFUNC = float8pl, MINVFUNC = int_inverse)",
+    )
+    .await;
+    assert!(
+        wrong_return
+            .contains("return type of inverse transition function int_inverse is not double precision"),
+        "{wrong_return}"
+    );
+}
+
+#[tokio::test]
 async fn int4_sum_transition_defines_a_user_aggregate() {
     let engine = fixture().await;
     run(

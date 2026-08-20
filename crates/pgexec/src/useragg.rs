@@ -14,8 +14,8 @@
 //! goes through the scalar runtime, exactly as it does in any other expression.
 //!
 //! Deliberately unimplemented, and recorded rather than rejected so the
-//! catalog still describes what was written: the moving-aggregate family
-//! (`MSFUNC`/`MSTYPE`/`MINVFUNC`/`MINITCOND`), parallel aggregation
+//! catalog still describes what was written: moving-aggregate execution
+//! (`MINITCOND`), parallel aggregation
 //! (`COMBINEFUNC`/`SERIALFUNC`/`DESERIALFUNC`, which have no plan to run in),
 //! `SORTOP`, `SSPACE` and `FINALFUNC_MODIFY`.
 
@@ -220,6 +220,9 @@ struct Collected {
     basetype: Written<crabka_pgparser::ast::RoutineType>,
     finalfunc_extra: bool,
     hypothetical: bool,
+    msfunc: Option<String>,
+    minvfunc: Option<String>,
+    mstype: Option<crabka_pgparser::ast::RoutineType>,
     unimplemented: Vec<String>,
 }
 
@@ -259,6 +262,7 @@ impl Collected {
             match option {
                 AggregateOption::SFunc(name) => collected.sfunc = Some(name.clone()),
                 AggregateOption::SType(ty) => collected.stype = Some(ty.clone()),
+                AggregateOption::MSType(ty) => collected.mstype = Some(ty.clone()),
                 AggregateOption::FinalFunc(name) => collected.finalfunc = Some(name.clone()),
                 AggregateOption::InitCond(value) => {
                     collected.initcond = Written::from_option(value.clone());
@@ -268,6 +272,14 @@ impl Collected {
                 }
                 AggregateOption::Unimplemented { name, value } if name == "finalfunc_extra" => {
                     collected.finalfunc_extra = value == "true";
+                }
+                AggregateOption::Unimplemented { name, value } if name == "msfunc" => {
+                    collected.msfunc = Some(value.clone());
+                    collected.unimplemented.push(format!("{name}={value}"));
+                }
+                AggregateOption::Unimplemented { name, value } if name == "minvfunc" => {
+                    collected.minvfunc = Some(value.clone());
+                    collected.unimplemented.push(format!("{name}={value}"));
                 }
                 AggregateOption::Unimplemented { name, value } => {
                     collected.unimplemented.push(format!("{name}={value}"));
@@ -315,7 +327,8 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
     );
     // The lookup is the validation: PostgreSQL refuses a definition whose
     // support function does not exist with exactly this signature.
-    lookup(kv, &sfunc, &wanted)?;
+    let transition = lookup(kv, &sfunc, &wanted)?;
+    validate_moving_definition(kv, &options, &transtype, &wanted, transition.strict())?;
     let result = match &options.finalfunc {
         Some(finalfunc) => {
             let mut wanted = vec![transtype.clone()];
@@ -364,6 +377,60 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
             unimplemented: options.unimplemented,
         }),
     })
+}
+
+/// Validate the moving transition functions even though N17 owns their window
+/// execution. A definition must not reach the catalog when the inverse changes
+/// the state type or strictness; both faults are independent of window frames.
+fn validate_moving_definition(
+    kv: &dyn Kv,
+    options: &Collected,
+    transtype: &RoutineType,
+    transition_types: &[RoutineType],
+    transition_strict: bool,
+) -> Result<(), ExecError> {
+    let Some(msfunc) = options.msfunc.as_deref() else {
+        return Ok(());
+    };
+    let mstype = options.mstype.as_ref().map_or_else(
+        || Ok(transtype.clone()),
+        |ty| crate::routine::resolve_routine_type(kv, ty, false),
+    )?;
+    let mut moving_types = transition_types.to_vec();
+    moving_types[0] = mstype.clone();
+    let moving = lookup(kv, msfunc, &moving_types)?;
+    ensure_moving_return_type("moving transition", msfunc, &moving, &mstype)?;
+    if let Some(minvfunc) = options.minvfunc.as_deref() {
+        let inverse = lookup(kv, minvfunc, &moving_types)?;
+        if inverse.strict() != transition_strict {
+            return Err(invalid_definition(
+                "strictness of aggregate's forward and inverse transition functions must match",
+            ));
+        }
+        ensure_moving_return_type("inverse transition", minvfunc, &inverse, &mstype)?;
+    }
+    Ok(())
+}
+
+fn ensure_moving_return_type(
+    role: &str,
+    name: &str,
+    function: &SupportRoutine,
+    expected: &RoutineType,
+) -> Result<(), ExecError> {
+    let RoutineResult::Type { ty, setof: false } = function.result() else {
+        return Err(invalid_definition(format!(
+            "return type of {role} function {name} is not {}",
+            expected.name
+        )));
+    };
+    if ty != *expected {
+        return Err(invalid_definition(format!(
+            "return type of {role} function {name} is not {}",
+            expected.name
+        )));
+    }
+    Ok(())
 }
 
 /// Find the routine `name` that an aggregate definition names for `wanted`
@@ -1105,6 +1172,22 @@ mod tests {
                 RoutineType::builtin(ColumnType::Array(ElemType::Int4)),
             ],
         ));
+    }
+
+    #[test]
+    fn builtin_support_resolves_float8_addition() {
+        let wanted = [
+            RoutineType::builtin(ColumnType::Float8),
+            RoutineType::builtin(ColumnType::Float8),
+        ];
+        assert!(crate::func::is_scalar("float8pl"));
+        assert!(builtin_support_args_match(
+            &[Datum::Int4(701), Datum::Int4(701)],
+            &wanted,
+        ));
+        assert!(builtin_support("float8pl", &wanted)
+            .expect("catalog")
+            .is_some());
     }
 }
 

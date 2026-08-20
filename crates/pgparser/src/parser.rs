@@ -15342,6 +15342,7 @@ impl Parser {
             "sfunc" | "sfunc1" => Ok(AggregateOption::SFunc(self.aggregate_function_name()?)),
             "finalfunc" => Ok(AggregateOption::FinalFunc(self.aggregate_function_name()?)),
             "stype" | "stype1" => Ok(AggregateOption::SType(self.routine_type()?)),
+            "mstype" => Ok(AggregateOption::MSType(self.routine_type()?)),
             "basetype" => Ok(AggregateOption::BaseType(self.aggregate_base_type()?)),
             "initcond" | "initcond1" => {
                 if *self.peek() == Token::Keyword(Keyword::Null) {
