@@ -428,7 +428,7 @@ fn builtin_support(
     name: &str,
     wanted: &[RoutineType],
 ) -> Result<Option<SupportRoutine>, ExecError> {
-    if !crate::func::is_scalar(name) {
+    if !crate::func::is_scalar(name) && !crate::array_fn::is_array_func(name) {
         return Ok(None);
     }
     let Some(row) = crate::routine::builtin_pg_proc_rows()?.into_iter().find(|row| {
@@ -468,21 +468,43 @@ fn builtin_support_args_match(declared: &[Datum], wanted: &[RoutineType]) -> boo
         return false;
     }
     let mut array_type = None;
+    let mut element_type = None;
     declared.iter().zip(wanted).all(|(declared, wanted)| {
         let Datum::Int4(declared) = declared else {
             return false;
         };
         match *declared as u32 {
-            2277 => {
-                let Some(column @ ColumnType::Array(_)) = wanted.column else {
+            2277 | 5078 => {
+                let Some(column @ ColumnType::Array(element)) = wanted.column else {
                     return false;
                 };
-                match array_type {
-                    Some(bound) => bound == column,
-                    None => {
+                if !matches!(array_type, Some(bound) if bound != column) {
+                    if array_type.is_none() {
                         array_type = Some(column);
-                        true
                     }
+                    match element_type {
+                        Some(bound) => bound == element.column_type(),
+                        None => true,
+                    }
+                } else {
+                    false
+                }
+            }
+            2283 | 5077 => {
+                let Some(column) = wanted.column else {
+                    return false;
+                };
+                if !matches!(element_type, Some(bound) if bound != column) {
+                    if element_type.is_none() {
+                        element_type = Some(column);
+                    }
+                    match array_type {
+                        Some(ColumnType::Array(element)) => element.column_type() == column,
+                        Some(_) => unreachable!("array binding only stores arrays"),
+                        None => true,
+                    }
+                } else {
+                    false
                 }
             }
             _ => wanted.column.is_some_and(|column| column.oid() == *declared as u32),
@@ -499,12 +521,14 @@ fn builtin_support_result_type(
     declared: &[Datum],
     wanted: &[RoutineType],
 ) -> Result<ColumnType, ExecError> {
-    if result_oid == 2277 {
+    if matches!(result_oid, 2277 | 5078) {
         return declared
             .iter()
             .zip(wanted)
             .find_map(|(declared, wanted)| {
-                matches!(declared, Datum::Int4(2277)).then_some(wanted.column).flatten()
+                matches!(declared, Datum::Int4(2277 | 5078))
+                    .then_some(wanted.column)
+                    .flatten()
             })
             .ok_or_else(|| {
                 ExecError::Unsupported("unbound anyarray built-in support result".into())
@@ -1070,6 +1094,17 @@ mod tests {
             assert!(!exists_with_call("plain", 0, true));
             assert!(exists_with_call("ordered", 1, true));
         });
+    }
+
+    #[test]
+    fn builtin_support_binds_an_element_before_its_compatible_array() {
+        assert!(builtin_support_args_match(
+            &[Datum::Int4(5077), Datum::Int4(5078)],
+            &[
+                RoutineType::builtin(ColumnType::Int4),
+                RoutineType::builtin(ColumnType::Array(ElemType::Int4)),
+            ],
+        ));
     }
 }
 

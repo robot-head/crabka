@@ -198,6 +198,23 @@ async fn array_larger_transition_defines_a_user_aggregate() {
 }
 
 #[tokio::test]
+async fn array_append_transition_resolves_an_array_element_signature() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE builtin_array_collect (int4) (SFUNC = array_append, \
+         STYPE = int4[], INITCOND = '{}')",
+    )
+    .await;
+    run(&engine, "INSERT INTO t VALUES (NULL, 'd')").await;
+
+    assert!(
+        grid(&engine, "SELECT builtin_array_collect(f1) FROM t").await
+            == vec![some(&["{1,2,3,NULL}"])]
+    );
+}
+
+#[tokio::test]
 async fn float8_accumulator_and_finalizer_define_a_user_average() {
     let engine = fixture().await;
     run(
