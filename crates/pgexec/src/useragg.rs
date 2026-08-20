@@ -1187,7 +1187,9 @@ fn compile(
         } else {
             ordered_args.to_vec()
         },
-        direct_args: direct_args.to_vec(),
+        direct_args: (definition.ordered_args > 0)
+            .then(|| direct_args.to_vec())
+            .unwrap_or_default(),
         transition,
         transition_scope,
         final_expr,

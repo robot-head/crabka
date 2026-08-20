@@ -1817,11 +1817,6 @@ impl Acc {
         row: &[Datum],
         ctx: &EvalCtx,
     ) -> Result<(), ExecError> {
-        if self.direct_args.is_none()
-            && let Some(user) = &spec.user
-        {
-            self.direct_args = Some(user.direct_values(scope, row, ctx)?);
-        }
         // FILTER comes first: PostgreSQL decides whether the row participates at
         // all before evaluating the argument, so a rejected row does not count for
         // `count(*)` and never enters the DISTINCT buffer. A predicate that is
@@ -1831,6 +1826,11 @@ impl Acc {
             if keep != Datum::Bool(true) {
                 return Ok(());
             }
+        }
+        if self.direct_args.is_none()
+            && let Some(user) = &spec.user
+        {
+            self.direct_args = Some(user.direct_values(scope, row, ctx)?);
         }
         // count(*) counts every row, ignoring NULL/DISTINCT.
         if let (AggFunc::Count, None) = (spec.func, &spec.arg) {
