@@ -168,6 +168,24 @@ async fn moving_aggregate_definition_validates_its_support_functions() {
     assert!(
         grid(&engine, "SELECT moving_sum(f1::float8) FROM t").await == vec![some(&["6"])]
     );
+    assert!(
+        grid(
+            &engine,
+            "SELECT moving_sum(f1::float8) OVER (ORDER BY f1 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) \
+             FROM t ORDER BY f1",
+        )
+        .await
+            == vec![some(&["1"]), some(&["3"]), some(&["5"])]
+    );
+    assert!(
+        grid(
+            &engine,
+            "SELECT moving_sum(f1::float8) FILTER (WHERE true) \
+             OVER (ORDER BY f1 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t ORDER BY f1",
+        )
+        .await
+            == vec![some(&["1"]), some(&["3"]), some(&["5"])]
+    );
 
     run(
         &engine,
