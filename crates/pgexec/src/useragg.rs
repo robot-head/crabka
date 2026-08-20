@@ -119,6 +119,17 @@ pub(crate) fn create(
                 existing.kind.word()
             )));
         }
+        if existing
+            .aggregate
+            .as_ref()
+            .is_some_and(|definition| definition.kind != aggregate_kind(&routine))
+        {
+            return Err(crate::routine::wrong_routine_kind(format!(
+                "cannot change routine kind\nDETAIL:  \"{}\" is an {}.",
+                existing.name,
+                aggregate_kind_word(existing.aggregate.as_ref().expect("aggregate checked").kind)
+            )));
+        }
         if existing.result != routine.result {
             return Err(invalid_definition(format!(
                 "cannot change return type of existing function\nHINT:  Use DROP AGGREGATE {} \
@@ -134,6 +145,23 @@ pub(crate) fn create(
         },
         ops,
     ))
+}
+
+fn aggregate_kind(routine: &Routine) -> char {
+    routine
+        .aggregate
+        .as_ref()
+        .expect("aggregate definition is present")
+        .kind
+}
+
+fn aggregate_kind_word(kind: char) -> &'static str {
+    match kind {
+        'n' => "ordinary aggregate function",
+        'o' => "ordered-set aggregate function",
+        'h' => "hypothetical-set aggregate function",
+        _ => "aggregate function",
+    }
 }
 
 /// The declared argument types of the aggregate being defined, in either
@@ -216,6 +244,7 @@ struct Collected {
     serialfunc: Option<String>,
     deserialfunc: Option<String>,
     finalfunc_modify: Option<String>,
+    parallel: Option<String>,
     /// `Unwritten` and an explicit `INITCOND = NULL` are different: the second
     /// is still "the state starts NULL", and both are spelled NULL, but only
     /// the first lets a strict transition function bootstrap from the first row.
@@ -288,6 +317,9 @@ impl Collected {
                 AggregateOption::Unimplemented { name, value } if name == "finalfunc_modify" => {
                     collected.finalfunc_modify = Some(value.clone());
                 }
+                AggregateOption::Unimplemented { name, value } if name == "parallel" => {
+                    collected.parallel = Some(value.clone());
+                }
                 AggregateOption::Unimplemented { name, value } if name == "msfunc" => {
                     collected.msfunc = Some(value.clone());
                     collected.unimplemented.push(format!("{name}={value}"));
@@ -311,6 +343,7 @@ impl Collected {
 fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine, ExecError> {
     let options = Collected::of(&stmt.options);
     let declared = declared_args(kv, stmt, &options)?;
+    let kind = aggregate_definition_kind(&declared, &options);
     let params = declared.params;
     let Some(sfunc) = options.sfunc.clone() else {
         return Err(invalid_definition("aggregate sfunc must be specified"));
@@ -373,7 +406,7 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
         object_file: None,
         body_form: crabka_pgcatalog::routine::BodyForm::Source,
         volatility: 'i',
-        parallel: 'u',
+        parallel: aggregate_parallel(&options)?,
         strict: false,
         security_definer: false,
         leakproof: false,
@@ -382,6 +415,7 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
         config: Vec::new(),
         owner: owner.to_string(),
         aggregate: Some(AggregateDefinition {
+            kind,
             transfn: sfunc,
             transtype,
             finalfn: options.finalfunc.clone(),
@@ -396,7 +430,28 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
             hypothetical: options.hypothetical,
             unimplemented: options.unimplemented,
         }),
-    })
+})
+}
+
+fn aggregate_definition_kind(declared: &DeclaredArgs, options: &Collected) -> char {
+    if options.hypothetical {
+        'h'
+    } else if declared.ordered_count > 0 {
+        'o'
+    } else {
+        'n'
+    }
+}
+
+fn aggregate_parallel(options: &Collected) -> Result<char, ExecError> {
+    match options.parallel.as_deref().unwrap_or("unsafe") {
+        "safe" => Ok('s'),
+        "restricted" => Ok('r'),
+        "unsafe" => Ok('u'),
+        _ => Err(invalid_definition(
+            "parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE",
+        )),
+    }
 }
 
 fn finalfunc_modify(options: &Collected) -> Result<char, ExecError> {
@@ -1220,6 +1275,7 @@ mod tests {
             config: Vec::new(),
             owner: "postgres".into(),
             aggregate: Some(AggregateDefinition {
+                kind: 'n',
                 transfn: "int8inc".into(),
                 transtype: RoutineType::builtin(ColumnType::Int8),
                 finalfn: None,
@@ -1287,6 +1343,13 @@ mod tests {
                 RoutineType::builtin(ColumnType::Int4),
             ],
         ));
+    }
+
+    #[test]
+    fn aggregate_kind_words_name_each_postgres_aggregate_family() {
+        assert_eq!(aggregate_kind_word('n'), "ordinary aggregate function");
+        assert_eq!(aggregate_kind_word('o'), "ordered-set aggregate function");
+        assert_eq!(aggregate_kind_word('h'), "hypothetical-set aggregate function");
     }
 
     #[test]
@@ -1366,8 +1429,8 @@ pub(crate) fn pg_aggregate_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
             let transtype = crate::routine::type_oid(&definition.transtype);
             Some(vec![
                 Datum::Int4(i32::try_from(routine.oid).unwrap_or(0)),
-                Datum::Text("n".into()),
-                Datum::Int2(0),
+                Datum::Text(definition.kind.to_string()),
+                Datum::Int2(i16::try_from(definition.direct_args).unwrap_or(0)),
                 Datum::Int4(oid_of(&definition.transfn)),
                 Datum::Int4(definition.finalfn.as_deref().map_or(0, oid_of)),
                 Datum::Int4(definition.combinefn.as_deref().map_or(0, oid_of)),

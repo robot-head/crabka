@@ -298,6 +298,64 @@ async fn internal_state_aggregate_preserves_parallel_support_catalog_fields() {
 }
 
 #[tokio::test]
+async fn aggregate_kind_and_parallel_attributes_are_validated_and_catalogued() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE AGGREGATE parallel_sum (int4) (SFUNC = int4pl, STYPE = int4, INITCOND = '0', \
+         PARALLEL = safe)",
+    )
+    .await;
+    assert!(
+        grid(
+            &engine,
+            "SELECT p.proparallel, a.aggkind FROM pg_proc p JOIN pg_aggregate a ON a.aggfnoid = p.oid \
+             WHERE p.oid = 'parallel_sum'::REGPROC",
+        )
+        .await
+            == vec![some(&["s", "n"])]
+    );
+    run(
+        &engine,
+        "CREATE AGGREGATE restricted_sum (int4) (SFUNC = int4pl, STYPE = int4, \
+         PARALLEL = restricted)",
+    )
+    .await;
+    assert!(
+        grid(
+            &engine,
+            "SELECT proparallel FROM pg_proc WHERE oid = 'restricted_sum'::REGPROC",
+        )
+        .await
+            == vec![some(&["r"])]
+    );
+    assert!(
+        error(
+            &engine,
+            "CREATE AGGREGATE invalid_parallel_sum (int4) (SFUNC = int4pl, STYPE = int4, \
+             PARALLEL = pear)",
+        )
+        .await
+            == "ERROR: parameter \"parallel\" must be SAFE, RESTRICTED, or UNSAFE (42P13)"
+    );
+
+    run(
+        &engine,
+        "CREATE AGGREGATE kind_change (numeric) (SFUNC = numeric_add, STYPE = numeric)",
+    )
+    .await;
+    assert!(
+        error(
+            &engine,
+            "CREATE OR REPLACE AGGREGATE kind_change (ORDER BY numeric) \
+             (SFUNC = numeric_add, STYPE = numeric)",
+        )
+        .await
+            == "ERROR: cannot change routine kind\nDETAIL:  \"kind_change\" is an ordinary aggregate function. (42809)"
+    );
+}
+
+#[tokio::test]
 async fn int4_sum_transition_defines_a_user_aggregate() {
     let engine = fixture().await;
     run(
@@ -556,6 +614,27 @@ async fn ordered_set_aggregates_sort_transition_rows_and_bind_direct_final_args(
          STYPE = text, INITCOND = '')",
     )
     .await;
+    run(
+        &engine,
+        "CREATE AGGREGATE n16_hypothetical(int4 ORDER BY int4) (SFUNC = n16_ordered_trans, \
+         STYPE = text, INITCOND = '', HYPOTHETICAL)",
+    )
+    .await;
+
+    assert!(
+        grid(
+            &engine,
+            "SELECT p.proname, a.aggkind, a.aggnumdirectargs FROM pg_proc p \
+             JOIN pg_aggregate a ON a.aggfnoid = p.oid WHERE p.proname LIKE 'n16_ordered%' \
+             OR p.proname = 'n16_hypothetical' ORDER BY p.proname",
+        )
+        .await
+            == vec![
+                some(&["n16_hypothetical", "h", "1"]),
+                some(&["n16_ordered", "o", "1"]),
+                some(&["n16_ordered_state", "o", "1"]),
+            ]
+    );
 
     assert!(
         grid(

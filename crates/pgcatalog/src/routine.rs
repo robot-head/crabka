@@ -220,6 +220,8 @@ pub enum BodyForm {
 /// [`RoutineKind`] is [`RoutineKind::Aggregate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateDefinition {
+    /// `pg_aggregate.aggkind` (`n`, `o`, or `h`).
+    pub kind: char,
     /// The transition function's name, resolved against the routine catalog
     /// when the aggregate runs.
     pub transfn: String,
@@ -451,7 +453,7 @@ pub fn drop_routine_ops(identity: &str) -> Vec<WriteOp> {
     }]
 }
 
-const ROUTINE_VERSION: u8 = 5;
+const ROUTINE_VERSION: u8 = 6;
 
 fn write_routine_type(out: &mut Vec<u8>, ty: &RoutineType) {
     match ty.column {
@@ -513,7 +515,7 @@ fn read_opt_str(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
 }
 
 /// An aggregate definition: a presence byte, and for a present definition the
-/// transition function name, the transition type, support functions, initial
+/// kind, transition function name, the transition type, support functions, initial
 /// condition, and then the recorded-but-unexecuted option list.
 fn write_aggregate(out: &mut Vec<u8>, aggregate: Option<&AggregateDefinition>) {
     let Some(aggregate) = aggregate else {
@@ -521,6 +523,7 @@ fn write_aggregate(out: &mut Vec<u8>, aggregate: Option<&AggregateDefinition>) {
         return;
     };
     out.push(1);
+    out.push(aggregate.kind as u8);
     write_str(out, &aggregate.transfn);
     write_routine_type(out, &aggregate.transtype);
     write_opt_str(out, aggregate.finalfn.as_deref());
@@ -545,6 +548,7 @@ fn read_aggregate(cur: &mut &[u8]) -> Result<Option<AggregateDefinition>, KvErro
     match take_u8(cur)? {
         0 => Ok(None),
         1 => {
+            let kind = char::from(take_u8(cur)?);
             let transfn = read_string(cur)?;
             let transtype = read_routine_type(cur)?;
             let finalfn = read_opt_str(cur)?;
@@ -563,6 +567,7 @@ fn read_aggregate(cur: &mut &[u8]) -> Result<Option<AggregateDefinition>, KvErro
                 unimplemented.push(read_string(cur)?);
             }
             Ok(Some(AggregateDefinition {
+                kind,
                 transfn,
                 transtype,
                 finalfn,
@@ -834,6 +839,7 @@ mod tests {
             body: String::new(),
             body_form: BodyForm::Source,
             aggregate: Some(AggregateDefinition {
+                kind: 'n',
                 transfn: "int4_avg_accum".into(),
                 transtype: RoutineType::named("_int8".into()),
                 finalfn: Some("int8_avg".into()),
@@ -978,6 +984,7 @@ mod tests {
     fn round_trips_aggregates_alongside_plain_routines() {
         let minimal = Routine {
             aggregate: Some(AggregateDefinition {
+                kind: 'n',
                 transfn: "int4larger".into(),
                 transtype: RoutineType::builtin(ColumnType::Int4),
                 finalfn: None,
