@@ -609,6 +609,8 @@ pub enum Statement {
         object_kind: String,
         /// Catalog name of the object; `table.column` for a column comment.
         object_name: String,
+        /// The mandatory signature for `COMMENT ON AGGREGATE`.
+        aggregate: Option<AggregateSignature>,
         comment: Option<String>,
     },
     DropIndex {

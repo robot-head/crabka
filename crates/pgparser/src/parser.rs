@@ -8825,14 +8825,24 @@ impl Parser {
         // `OPERATOR CLASS`/`OPERATOR FAMILY` name an identifier instead, so the
         // operator reading is taken only when the name starts with an operator
         // character at all.
-        let mut object_name = if object_kind == "operator"
-            && !longest_operator(&self.source[self.peek_pos()..]).is_empty()
-        {
-            self.operator_symbol()?
+        let aggregate = if object_kind == "aggregate" {
+            Some(self.aggregate_signature()?)
         } else {
-            self.expect_object_name()?
+            None
         };
-        if *self.peek() == Token::Dot {
+        let mut object_name = aggregate.as_ref().map_or_else(
+            || {
+                if object_kind == "operator"
+                    && !longest_operator(&self.source[self.peek_pos()..]).is_empty()
+                {
+                    self.operator_symbol()
+                } else {
+                    self.expect_object_name()
+                }
+            },
+            |signature| Ok(signature.name.clone()),
+        )?;
+        if aggregate.is_none() && *self.peek() == Token::Dot {
             self.bump();
             object_name.push('.');
             // A qualified operator is `schema.<symbol>`, and the symbol obeys
@@ -8847,7 +8857,7 @@ impl Parser {
             }
         }
         // A routine signature: COMMENT ON FUNCTION f(int) IS …
-        if *self.peek() == Token::LParen {
+        if aggregate.is_none() && *self.peek() == Token::LParen {
             let mut depth = 0usize;
             loop {
                 match self.bump() {
@@ -8883,6 +8893,7 @@ impl Parser {
         Ok(crate::ast::Statement::Comment {
             object_kind,
             object_name,
+            aggregate,
             comment,
         })
     }
@@ -26943,5 +26954,48 @@ mod operator_tests {
             assert!(object_kind == "operator", "{sql}");
             assert!(object_name == expected, "{sql}");
         }
+    }
+
+    #[test]
+    fn comment_on_aggregate_preserves_the_signature() {
+        let Statement::Comment {
+            object_kind,
+            object_name,
+            aggregate: Some(signature),
+            ..
+        } = parse("COMMENT ON AGGREGATE total (int4) IS 'total comment'")
+            .expect("parse")
+            .pop()
+            .expect("one statement")
+        else {
+            panic!("not an aggregate comment");
+        };
+        assert!(object_kind == "aggregate");
+        assert!(object_name == "total");
+        assert!(signature.name == "total");
+        let crate::ast::AggregateArgs::Args(args) = signature.args else {
+            panic!("ordinary aggregate signature");
+        };
+        assert!(args.len() == 1);
+        assert!(args[0].ty.name == "integer");
+    }
+
+    #[test]
+    fn comment_on_table_does_not_consume_an_absent_signature() {
+        let Statement::Comment {
+            object_kind,
+            object_name,
+            aggregate,
+            ..
+        } = parse("COMMENT ON TABLE totals IS 'table comment'")
+            .expect("parse")
+            .pop()
+            .expect("one statement")
+        else {
+            panic!("not a table comment");
+        };
+        assert!(object_kind == "table");
+        assert!(object_name == "totals");
+        assert!(aggregate.is_none());
     }
 }

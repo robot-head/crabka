@@ -79,7 +79,7 @@ fn invalid_definition(message: impl Into<String>) -> ExecError {
 /// `PostgreSQL` prints the bare line for an aggregate's support-function
 /// lookup and for a missing aggregate, because neither is a call site a cast
 /// could rescue.
-fn undefined_aggregate(message: impl Into<String>) -> ExecError {
+pub(crate) fn undefined_aggregate(message: impl Into<String>) -> ExecError {
     ExecError::FunctionError {
         sqlstate: "42883",
         message: message.into(),
@@ -674,7 +674,7 @@ pub(crate) fn alter(
     ))
 }
 
-fn resolve_signature(
+pub(crate) fn resolve_signature(
     kv: &dyn Kv,
     signature: &AggregateSignature,
 ) -> Result<Option<Routine>, ExecError> {
@@ -694,7 +694,7 @@ fn resolve_signature(
     Ok(get_routine(kv, &identity)?.filter(Routine::is_aggregate))
 }
 
-fn spelled(signature: &AggregateSignature) -> String {
+pub(crate) fn spelled(signature: &AggregateSignature) -> String {
     match &signature.args {
         AggregateArgs::Star => format!("{}(*)", signature.name),
         AggregateArgs::Args(args) => format!(

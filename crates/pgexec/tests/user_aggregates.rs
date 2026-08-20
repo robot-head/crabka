@@ -119,6 +119,36 @@ async fn a_builtin_transition_function_defines_a_user_aggregate() {
 }
 
 #[tokio::test]
+async fn comment_on_aggregate_resolves_its_signature() {
+    let engine = fixture().await;
+    assert!(
+        error(
+            &engine,
+            "COMMENT ON AGGREGATE missing_aggregate_comment (int4) IS 'missing'",
+        )
+        .await
+            == "ERROR: aggregate missing_aggregate_comment(integer) does not exist (42883)"
+    );
+
+    run(
+        &engine,
+        "CREATE AGGREGATE aggregate_with_comment (int4) (SFUNC = int4pl, STYPE = int4, \
+         INITCOND = '0')",
+    )
+    .await;
+    run(
+        &engine,
+        "COMMENT ON AGGREGATE aggregate_with_comment (int4) IS 'an aggregate comment'",
+    )
+    .await;
+    run(
+        &engine,
+        "COMMENT ON AGGREGATE aggregate_with_comment (int4) IS NULL",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn int4_sum_transition_defines_a_user_aggregate() {
     let engine = fixture().await;
     run(

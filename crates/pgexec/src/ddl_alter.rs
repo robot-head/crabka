@@ -609,8 +609,16 @@ pub(crate) fn execute_ddl(
         Statement::Comment {
             object_kind,
             object_name,
+            aggregate,
             comment,
-        } => comment_ops(kv, resolution, object_kind, object_name, comment.as_deref()),
+        } => comment_ops(
+            kv,
+            resolution,
+            object_kind,
+            object_name,
+            aggregate.as_ref(),
+            comment.as_deref(),
+        ),
         Statement::CreateView {
             name,
             definition,
@@ -6536,9 +6544,28 @@ pub(crate) fn comment_ops(
     resolution: &crate::relname::ResolutionScope,
     object_kind: &str,
     object_name: &str,
+    aggregate: Option<&crabka_pgparser::ast::AggregateSignature>,
     comment: Option<&str>,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     use crabka_pgcatalog::CommentObject;
+
+    if object_kind == "aggregate" {
+        let signature = aggregate.expect("parser records every aggregate comment signature");
+        let Some(routine) = crate::useragg::resolve_signature(kv, signature)? else {
+            return Err(crate::useragg::undefined_aggregate(format!(
+                "aggregate {} does not exist",
+                crate::useragg::spelled(signature)
+            )));
+        };
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(&routine.identity()),
+                comment,
+            )],
+        ));
+    }
 
     // `Statement::Comment` flattens a column comment's target to
     // `relation.column`, so the relation half is recovered here and resolved
