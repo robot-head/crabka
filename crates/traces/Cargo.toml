@@ -28,9 +28,9 @@ arc-swap = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.4.0" }
 crabka-broker = { path = "../broker", version = "0.4.0" }
 crabka-telemetry = { path = "../telemetry", version = "0.4.0" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.4.0" }
-crabka-client-producer = { path = "../client-producer", version = "0.4.0" }
-crabka-client-core = { path = "../client-core", version = "0.4.0" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.4.1" }
+crabka-client-producer = { path = "../client-producer", version = "0.4.1" }
+crabka-client-core = { path = "../client-core", version = "0.4.1" }
 crabka-traceql = { path = "../traceql", version = "0.4.0" }
 crabka-units = { workspace = true }
 arrow = { workspace = true }
@@ -72,7 +72,7 @@ wincode = { workspace = true }
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
-crabka-protocol = { path = "../protocol", version = "0.4.0" }
+crabka-protocol = { path = "../protocol", version = "0.4.1" }
 datatest-stable = { workspace = true }
 http-body-util = "0.1"
 # OTel stack for the `set_remote_parent_from_records` re-parenting test — mirrors

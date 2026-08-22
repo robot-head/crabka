@@ -5,6 +5,15 @@ All notable changes to `crabka-protocol` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-08-22
+
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+
+- Bound per-test wall clock in the nextest CI profile ([#1031](https://github.com/robot-head/crabka/pull/1031))
+
+
 ## [0.4.0] — 2026-08-12
 
 

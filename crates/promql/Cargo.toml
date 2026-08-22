@@ -24,7 +24,7 @@ experimental-functions = []
 [dependencies]
 assert2 = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.4.0" }
-crabka-ids = { path = "../ids", version = "0.4.0" }
+crabka-ids = { path = "../ids", version = "0.4.1" }
 crabka-metrics = { path = "../metrics", version = "0.4.0" }
 crabka-units = { workspace = true }
 arrow = { workspace = true }

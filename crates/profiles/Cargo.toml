@@ -55,10 +55,10 @@ url = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.4.0" }
 crabka-pprof = { path = "../pprof", version = "0.4.0" }
 crabka-telemetry = { path = "../telemetry", version = "0.4.0" }
-crabka-client-producer = { path = "../client-producer", version = "0.4.0" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.4.0" }
-crabka-client-admin = { path = "../client-admin", version = "0.4.0" }
-crabka-client-core = { path = "../client-core", version = "0.4.0" }
+crabka-client-producer = { path = "../client-producer", version = "0.4.1" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.4.1" }
+crabka-client-admin = { path = "../client-admin", version = "0.4.1" }
+crabka-client-core = { path = "../client-core", version = "0.4.1" }
 crabka-broker = { path = "../broker", version = "0.4.0" }
 crabka-units = { workspace = true }
 refined_type = { workspace = true }

@@ -19,7 +19,7 @@ path = "src/main.rs"
 assert2 = { workspace = true }
 crabka-operator = { version = "0.4.0", path = "../operator" }
 crabka-broker = { version = "0.4.0", path = "../broker" }
-crabka-protocol = { version = "0.4.0", path = "../protocol" }
+crabka-protocol = { version = "0.4.1", path = "../protocol" }
 crabka-raft = { version = "0.4.0", path = "../raft", features = ["scenarios"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

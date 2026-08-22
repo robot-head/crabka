@@ -21,10 +21,10 @@ default = []
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-client-consumer = { version = "0.4.0", path = "../client-consumer" }
-crabka-compression = { version = "0.4.0", path = "../compression" }
+crabka-protocol = { version = "0.4.1", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
+crabka-client-consumer = { version = "0.4.1", path = "../client-consumer" }
+crabka-compression = { version = "0.4.1", path = "../compression" }
 crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bon = { workspace = true }
