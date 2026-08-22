@@ -27,23 +27,23 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
+crabka-client-admin = { version = "0.4.1", path = "../client-admin" }
 crabka-client-core = { version = "0.4", path = "../client-core" }
-crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
+crabka-client-producer = { version = "0.4.1", path = "../client-producer" }
 crabka-broker = { version = "0.4.0", path = "../broker" }
-crabka-compression = { version = "0.4.0", path = "../compression" }
+crabka-compression = { version = "0.4.1", path = "../compression" }
 crabka-gres-control = { version = "0.4.0", path = "../gres-control" }
 crabka-gres-ranges = { version = "0.4.0", path = "../gres-ranges" }
 crabka-gres-substrate = { version = "0.4.0", path = "../gres-substrate" }
 crabka-kraft-core = { version = "0.4.0", path = "../kraft-core" }
 crabka-logfmt = { version = "0.4.0", path = "../logfmt" }
-crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-metadata = { version = "0.4.1", path = "../metadata" }
 crabka-object-store = { version = "0.4.0", path = "../object-store" }
-crabka-schema-serde = { version = "0.4.0", path = "../schema-serde" }
+crabka-schema-serde = { version = "0.4.1", path = "../schema-serde" }
 crabka-security = { workspace = true }
 crabka-units = { workspace = true }
-crabka-pgkv = { version = "0.4.0", path = "../pgkv" }
-crabka-pgexec = { version = "0.4.0", path = "../pgexec" }
+crabka-pgkv = { version = "0.4.1", path = "../pgkv" }
+crabka-pgexec = { version = "0.4.1", path = "../pgexec" }
 base64 = { workspace = true }
 bytes = { workspace = true }
 derive_more = { workspace = true }

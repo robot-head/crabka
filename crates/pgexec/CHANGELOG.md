@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.4.1] — 2026-08-22
+
+
+### <!-- 1 -->🐛 Bug Fixes
+
+
+- Repair the deterministic main failures and root-cause the flakes ([#1044](https://github.com/robot-head/crabka/pull/1044))
+
+
+### <!-- 10 -->💼 Other
+
+
+- PostgreSQL compatibility — 122,505 changed lines, 33/231 pg_regress files exact ([#985](https://github.com/robot-head/crabka/pull/985))
+
 ## [0.4.0] — 2026-08-12
 
 

@@ -19,11 +19,11 @@ workspace = true
 
 [dependencies]
 crabka-remote-storage = { version = "0.4.0", path = "../remote-storage" }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
-crabka-protocol = { version = "0.4.0", path = "../protocol" }
-crabka-ids = { version = "0.4.0", path = "../ids" }
+crabka-client-admin = { version = "0.4.1", path = "../client-admin" }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
+crabka-client-producer = { version = "0.4.1", path = "../client-producer" }
+crabka-protocol = { version = "0.4.1", path = "../protocol" }
+crabka-ids = { version = "0.4.1", path = "../ids" }
 crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }

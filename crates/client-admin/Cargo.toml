@@ -19,11 +19,11 @@ workspace = true
 [dependencies]
 assert2            = { workspace = true }
 crabka-units = { workspace = true }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-ids         = { version = "0.4.0", path = "../ids" }
-crabka-metadata    = { version = "0.4.0", path = "../metadata" }
-crabka-protocol    = { version = "0.4.0", path = "../protocol", default-features = false }
-crabka-security    = { version = "0.4.0", path = "../security" }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
+crabka-ids         = { version = "0.4.1", path = "../ids" }
+crabka-metadata    = { version = "0.4.1", path = "../metadata" }
+crabka-protocol    = { version = "0.4.1", path = "../protocol", default-features = false }
+crabka-security    = { version = "0.4.1", path = "../security" }
 async-trait        = { workspace = true }
 bytes              = { workspace = true }
 ring               = { workspace = true }

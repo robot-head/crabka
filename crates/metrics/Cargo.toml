@@ -28,10 +28,10 @@ axum = { workspace = true, features = ["json"] }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 crabka-blockstore = { path = "../blockstore", version = "0.4.0" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.4.0" }
-crabka-client-core = { path = "../client-core", version = "0.4.0" }
-crabka-client-producer = { path = "../client-producer", version = "0.4.0" }
-crabka-ids = { version = "0.4.0", path = "../ids" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.4.1" }
+crabka-client-core = { path = "../client-core", version = "0.4.1" }
+crabka-client-producer = { path = "../client-producer", version = "0.4.1" }
+crabka-ids = { version = "0.4.1", path = "../ids" }
 crabka-telemetry = { path = "../telemetry", version = "0.4.0" }
 crabka-throttle = { path = "../throttle", version = "0.4.0" }
 crabka-units = { workspace = true }
@@ -65,7 +65,7 @@ protoc-bin-vendored = { workspace = true }
 [dev-dependencies]
 assert2 = { workspace = true }
 crabka-broker = { path = "../broker", version = "0.4.0" }
-crabka-client-admin = { path = "../client-admin", version = "0.4.0" }
+crabka-client-admin = { path = "../client-admin", version = "0.4.1" }
 mutants = { workspace = true }
 proptest = { workspace = true }
 reqwest = { workspace = true }
