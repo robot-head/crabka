@@ -2291,6 +2291,42 @@ pub(crate) fn alter_table_ops(
         };
     }
 
+    if let [Action::SetSchema(schema)] = actions {
+        let table = match crabka_pgcatalog::get_table(kv, table_name) {
+            Ok(table) => table,
+            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if if_exists => {
+                return Ok((command("ALTER TABLE"), Vec::new()));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !crabka_pgcatalog::schema_exists(kv, schema)? {
+            return Err(crabka_pgcatalog::CatalogError::UndefinedSchema(schema.clone()).into());
+        }
+        crate::privilege::require_ownership(
+            kv,
+            table_name,
+            &table.owner,
+            crate::privilege::RelationKind::Table,
+            fctx.effective_role(),
+        )?;
+        if !crabka_pgcatalog::has_schema_privilege(kv, schema, fctx.effective_role(), "CREATE")? {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42501",
+                format!("permission denied for schema {schema}"),
+            )));
+        }
+        let new_name = crabka_pgcatalog::RelationName::new(schema, &table_name.name);
+        crate::usertype::ensure_relation_type_name_available(kv, &new_name)?;
+        let mut ops = crabka_pgcatalog::move_relation_to_schema_ops(kv, table_name, &new_name)?;
+        ops.extend(rename_relation_comment_ops(kv, table_name, &new_name)?);
+        ops.extend(rename_name_keyed_metadata_ops(kv, table_name, &new_name)?);
+        for mut trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)? {
+            trigger.table = new_name.clone();
+            ops.extend(crabka_pgcatalog::trigger::put_trigger_ops(kv, &trigger)?);
+        }
+        return Ok((command("ALTER TABLE"), ops));
+    }
+
     if let [Action::RenameColumn { column, new_name }] = actions
         && let Ok(mut view) = crabka_pgcatalog::get_view(kv, table_name)
     {
@@ -2790,6 +2826,7 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         // `ADD COLUMN`: one statement may add a generated column and reword its
         // expression in the same breath.
         Action::AddConstraint(_) | Action::SetDefault { .. } | Action::SetExpression { .. } => 5,
+        Action::SetSchema(_) => unreachable!("SET SCHEMA is handled before ALTER TABLE passes"),
         Action::RenameTable { .. }
         | Action::RenameColumn { .. }
         | Action::RenameConstraint { .. }
@@ -2841,6 +2878,7 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::SetStorageParameters(_) => "SET",
         Action::ResetStorageParameters(_) => "RESET",
         Action::SetTablespace(_) => "SET TABLESPACE",
+        Action::SetSchema(_) => unreachable!("SET SCHEMA is handled before ALTER TABLE passes"),
         Action::SetAccessMethod(_) => "SET ACCESS METHOD",
         Action::OwnerTo(_) => "OWNER TO",
         // `PostgreSQL` spells the exact form back, so the selector and the mode
@@ -4034,6 +4072,7 @@ pub(crate) fn alter_table_action_ops(
             Ok(())
         }
         Action::SetWithoutOids => Ok(()),
+        Action::SetSchema(_) => unreachable!("SET SCHEMA is handled before ALTER TABLE passes"),
         Action::SetReplicaIdentity(identity) => {
             let identity = replica_identity_for_action(kv, state, identity)?;
             state.ops.extend(crabka_pgcatalog::set_replica_identity_ops(

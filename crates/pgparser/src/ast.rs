@@ -2515,6 +2515,8 @@ pub enum AlterTableAction {
     /// `RESET (param, …)`.
     ResetStorageParameters(Vec<String>),
     SetTablespace(String),
+    /// `SET SCHEMA <name>` — move the relation without changing its local name.
+    SetSchema(String),
     /// `SET ACCESS METHOD <name|DEFAULT>`.
     SetAccessMethod(Option<String>),
     OwnerTo(RoleSpec),

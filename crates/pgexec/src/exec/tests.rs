@@ -9063,6 +9063,90 @@ async fn cluster_records_the_index_it_ordered_by() {
     assert!(sqlstate_of(&mut session, "CLUSTER t").await == "42704");
 }
 
+#[tokio::test]
+async fn alter_table_set_schema_moves_the_catalogued_relation() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE SCHEMA moved").await;
+    run_s(
+        &mut session,
+        "CREATE TABLE t (id int4 PRIMARY KEY, payload text)",
+    )
+    .await;
+    run_s(&mut session, "CREATE INDEX t_payload ON t (payload)").await;
+    run_s(&mut session, "INSERT INTO t VALUES (1, 'one')").await;
+
+    run_s(&mut session, "ALTER TABLE t SET SCHEMA moved").await;
+    assert!(sqlstate_of(&mut session, "SELECT * FROM t").await == "42P01");
+    assert!(
+        text_rows_of(&mut session, "SELECT id, payload FROM moved.t").await
+            == vec![text_row(&["1", "one"])]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT indexrelid::regclass::text FROM pg_index WHERE \
+             indrelid = 'moved.t'::regclass ORDER BY 1",
+        )
+        .await
+            == vec![text_row(&["moved.t_payload"]), text_row(&["moved.t_pkey"])]
+    );
+    run_s(
+        &mut session,
+        "ALTER TABLE IF EXISTS absent SET SCHEMA moved",
+    )
+    .await;
+    assert!(sqlstate_of(&mut session, "ALTER TABLE absent SET SCHEMA moved").await == "42P01");
+
+    run_s(&mut session, "ALTER TABLE moved.t CLUSTER ON t_payload").await;
+    let clustered = "SELECT indisclustered FROM pg_index \
+                     WHERE indexrelid = 'moved.t_payload'::regclass";
+    assert!(text_rows_of(&mut session, clustered).await == vec![text_row(&["t"])]);
+    run_s(&mut session, "ALTER TABLE moved.t SET WITHOUT CLUSTER").await;
+    assert!(text_rows_of(&mut session, clustered).await == vec![text_row(&["f"])]);
+
+    // ALTER TABLE applies its fixed subcommand order rather than written
+    // order: the drop must happen before the primary key puts NOT NULL back.
+    run_s(&mut session, "CREATE TABLE action_order (id int4)").await;
+    run_s(
+        &mut session,
+        "ALTER TABLE action_order ADD CONSTRAINT action_order_pkey PRIMARY KEY (id), \
+         ALTER COLUMN id DROP NOT NULL",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT is_nullable FROM information_schema.columns \
+             WHERE table_name = 'action_order' AND column_name = 'id'",
+        )
+        .await
+            == vec![text_row(&["NO"])]
+    );
+
+    run_s(
+        &mut session,
+        "CREATE MATERIALIZED VIEW action_order_mv AS SELECT 1 AS id",
+    )
+    .await;
+    let error = error_of(
+        &mut session,
+        "ALTER MATERIALIZED VIEW action_order_mv ADD COLUMN extra int4",
+    )
+    .await;
+    assert!(
+        error
+            == (
+                "42809".into(),
+                "ALTER action ADD COLUMN cannot be performed on relation \"action_order_mv\""
+                    .into(),
+            ),
+        "{error:?}"
+    );
+}
+
 /// `CLUSTER` is transactional: `ROLLBACK` restores both halves of it — the
 /// heap order, which rides MVCC, and the `indisclustered` mark, which is a
 /// catalog record and has to be undone from a before-image.

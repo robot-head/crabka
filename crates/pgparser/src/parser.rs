@@ -4568,6 +4568,9 @@ impl Parser {
                 let params = self.storage_parameter_list()?;
                 return Ok(AlterTableAction::SetStorageParameters(params));
             }
+            if self.eat_keyword(Keyword::Schema) || self.eat_ident_eq("schema") {
+                return Ok(AlterTableAction::SetSchema(self.expect_object_name()?));
+            }
             if self.eat_ident_eq("access") {
                 self.expect_ident_eq("method")?;
                 let method = (!self.eat_ident_eq("default"))
@@ -24662,12 +24665,12 @@ mod tests {
     /// `ALTER TABLE` subcommands with no counterpart in Crabka's storage model
     /// still parse and carry their source text, so the executor can name them.
     #[test]
-    fn alter_table_records_unsupported_subcommands_with_their_text() {
+    fn alter_table_records_schema_moves_and_unsupported_subcommands() {
         use assert2::assert;
         let Statement::AlterTable { actions, .. } = one("ALTER TABLE t SET SCHEMA other") else {
             panic!("expected ALTER TABLE");
         };
-        assert!(actions == vec![AlterTableAction::Unsupported("SET SCHEMA other".into())]);
+        assert!(actions == vec![AlterTableAction::SetSchema("other".into())]);
     }
 
     #[test]
@@ -27290,8 +27293,7 @@ mod q1_statement_completeness_tests {
     }
 
     /// `ALTER MATERIALIZED VIEW` shares `ALTER TABLE`'s subcommand grammar, so
-    /// it lands on the same statement — including for the subcommands Crabka
-    /// carries as [`AlterTableAction::Unsupported`](crate::ast::AlterTableAction).
+    /// it lands on the same statement, including relation moves.
     #[test]
     fn alter_materialized_view_parses_as_alter_table() {
         use crate::ast::AlterTableAction as Action;
@@ -27300,7 +27302,7 @@ mod q1_statement_completeness_tests {
             (
                 "ALTER MATERIALIZED VIEW m SET SCHEMA s",
                 relation("m"),
-                vec![Action::Unsupported("SET SCHEMA s".into())],
+                vec![Action::SetSchema("s".into())],
             ),
             (
                 "ALTER MATERIALIZED VIEW m RENAME TO m2",
