@@ -4578,15 +4578,19 @@ impl Parser {
             if self.eat_ident_eq("tablespace") {
                 return Ok(AlterTableAction::SetTablespace(self.expect_col_id()?));
             }
-            // `SET WITHOUT OIDS` shares this prefix and must stay an unsupported
-            // subcommand, so `WITHOUT` is only consumed once `CLUSTER` is in
-            // sight.
             if self.peek_ident_eq("without")
                 && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("cluster"))
             {
                 self.bump();
                 self.bump();
                 return Ok(AlterTableAction::SetWithoutCluster);
+            }
+            if self.peek_ident_eq("without")
+                && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("oids"))
+            {
+                self.bump();
+                self.bump();
+                return Ok(AlterTableAction::SetWithoutOids);
             }
             let label = self.consume_unsupported_subcommand("SET");
             return Ok(AlterTableAction::Unsupported(label));
@@ -26314,8 +26318,7 @@ mod json_array_conflict_notify_tests {
         }
     }
 
-    /// `ALTER TABLE` grew two clustering subcommands. `SET WITHOUT OIDS` shares
-    /// a prefix with one of them and has to stay an unsupported subcommand.
+    /// `ALTER TABLE` accepts three clustering/storage spellings.
     #[test]
     fn alter_table_recognizes_the_clustering_subcommands() {
         use crate::ast::AlterTableAction;
@@ -26330,10 +26333,7 @@ mod json_array_conflict_notify_tests {
 
         assert!(action("ALTER TABLE t CLUSTER ON i") == AlterTableAction::ClusterOn("i".into()));
         assert!(action("ALTER TABLE t SET WITHOUT CLUSTER") == AlterTableAction::SetWithoutCluster);
-        assert!(
-            action("ALTER TABLE t SET WITHOUT OIDS")
-                == AlterTableAction::Unsupported("SET WITHOUT OIDS".into())
-        );
+        assert!(action("ALTER TABLE t SET WITHOUT OIDS") == AlterTableAction::SetWithoutOids);
     }
 }
 

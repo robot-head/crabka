@@ -2810,6 +2810,7 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         | Action::DetachPartition { .. }
         | Action::ClusterOn(_)
         | Action::SetWithoutCluster
+        | Action::SetWithoutOids
         | Action::SetReplicaIdentity(_)
         | Action::Unsupported(_) => 6,
     }
@@ -2880,6 +2881,7 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::DetachPartition { .. } => "DETACH PARTITION",
         Action::ClusterOn(_) => "CLUSTER ON",
         Action::SetWithoutCluster => "SET WITHOUT CLUSTER",
+        Action::SetWithoutOids => "SET WITHOUT OIDS",
         Action::SetReplicaIdentity(_) => "REPLICA IDENTITY",
         Action::Unsupported(_) => "ALTER",
     }
@@ -4031,6 +4033,7 @@ pub(crate) fn alter_table_action_ops(
                 .extend(record_clustered_index_ops(kv, &state.table, None)?);
             Ok(())
         }
+        Action::SetWithoutOids => Ok(()),
         Action::SetReplicaIdentity(identity) => {
             let identity = replica_identity_for_action(kv, state, identity)?;
             state.ops.extend(crabka_pgcatalog::set_replica_identity_ops(

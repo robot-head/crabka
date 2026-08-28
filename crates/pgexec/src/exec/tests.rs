@@ -9049,6 +9049,7 @@ async fn cluster_records_the_index_it_ordered_by() {
         // The bare spelling reuses the mark without moving it.
         ("CLUSTER t", Some("t_b")),
         ("ALTER TABLE t SET WITHOUT CLUSTER", None),
+        ("ALTER TABLE t SET WITHOUT OIDS", None),
     ];
     for (sql, marked) in cases {
         run_s(&mut session, sql).await;

@@ -2550,6 +2550,8 @@ pub enum AlterTableAction {
     ClusterOn(String),
     /// `SET WITHOUT CLUSTER` — clear the recorded clustered index.
     SetWithoutCluster,
+    /// `SET WITHOUT OIDS` — accepted as the PostgreSQL compatibility no-op.
+    SetWithoutOids,
     /// `REPLICA IDENTITY { DEFAULT | FULL | NOTHING | USING INDEX name }`.
     SetReplicaIdentity(ReplicaIdentity),
     /// `SET SCHEMA name`, `SET {LOGGED|UNLOGGED}`, `{EN,DIS}ABLE TRIGGER`, … —
