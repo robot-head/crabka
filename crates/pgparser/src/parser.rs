@@ -4354,7 +4354,16 @@ impl Parser {
         }
         let table = self.relation_ref()?;
         self.eat_inheritance_star();
-        let mut actions = vec![self.alter_table_action()?];
+        let action = self.alter_table_action()?;
+        if matches!(action, crate::ast::AlterTableAction::SetSchema(_)) {
+            return Ok(Statement::AlterTable {
+                table,
+                if_exists,
+                only,
+                actions: vec![action],
+            });
+        }
+        let mut actions = vec![action];
         // Only the ALTER-subcommand form takes a comma list; RENAME and the
         // ownership/schema movers are standalone in PostgreSQL's grammar too.
         while self.eat_comma() {
@@ -24717,6 +24726,13 @@ mod tests {
             panic!("expected ALTER TABLE");
         };
         assert!(actions == vec![AlterTableAction::SetSchema("other".into())]);
+    }
+
+    #[test]
+    fn alter_table_set_schema_rejects_a_comma_list() {
+        use assert2::assert;
+
+        assert!(crate::parse("ALTER TABLE t SET SCHEMA other, ADD COLUMN a int4").is_err());
     }
 
     #[test]
