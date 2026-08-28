@@ -234,6 +234,47 @@ async fn partitioned() -> SqlSession {
     session
 }
 
+#[tokio::test]
+async fn hash_partitioning_routes_int_arrays_with_postgresqls_array_hash() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run(
+        &mut session,
+        "CREATE TABLE pph_arrpart (a int[]) PARTITION BY HASH (a); \
+         CREATE TABLE pph_arrpart1 PARTITION OF pph_arrpart \
+             FOR VALUES WITH (MODULUS 2, REMAINDER 0); \
+         CREATE TABLE pph_arrpart2 PARTITION OF pph_arrpart \
+             FOR VALUES WITH (MODULUS 2, REMAINDER 1); \
+         INSERT INTO pph_arrpart VALUES ('{1}'), ('{1,2}'), ('{4,5}')",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT count(*) FROM pph_arrpart1 WHERE a = '{1,2}'"
+        )
+        .await
+            == rows(&["1"])
+    );
+    assert!(
+        query(
+            &mut session,
+            "SELECT count(*) FROM pph_arrpart1 WHERE a = '{4,5}'"
+        )
+        .await
+            == rows(&["1"])
+    );
+    assert!(
+        query(
+            &mut session,
+            "SELECT count(*) FROM pph_arrpart2 WHERE a = '{1}'"
+        )
+        .await
+            == rows(&["1"])
+    );
+}
+
 /// Rows of each leaf, read through the leaf itself so the parent's own scan
 /// path cannot mask a leaf the statement emptied.
 async fn leaves(session: &mut SqlSession) -> (Vec<String>, Vec<String>) {

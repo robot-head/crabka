@@ -11,6 +11,8 @@
 //! name that `regprocedure` resolves, and `regoper`'s ambiguity message is the
 //! only one in the family that does not quote the name.
 
+use std::time::Duration;
+
 use assert2::assert;
 use crabka_pgexec::SqlEngine;
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
@@ -109,6 +111,33 @@ async fn every_reg_type_round_trips_a_written_name() {
         let call = format!("SELECT {ty}('{written}')::text");
         assert!(client.scalar(&call).await == Some(printed.into()), "{call}");
     }
+}
+
+#[tokio::test]
+async fn pg_proc_filter_resolves_literal_regproc_once() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for name in ["functest_a_1", "functest_a_2", "functest_a_3"] {
+        client
+            .run(&format!(
+                "CREATE FUNCTION {name}() RETURNS bool LANGUAGE sql AS 'SELECT false'"
+            ))
+            .await;
+    }
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.run(
+            "SELECT proname, prorettype::regtype, proargtypes::regtype[] FROM pg_proc
+             WHERE oid IN ('functest_a_1'::regproc, 'functest_a_2'::regproc, 'functest_a_3'::regproc)
+             ORDER BY proname",
+        ),
+    )
+    .await
+    .expect("literal regproc casts must not be re-resolved for every pg_proc row");
+    let QueryResult::Rows { rows, .. } = result else {
+        panic!("expected pg_proc rows, got {result:?}");
+    };
+    assert!(rows.len() == 3);
 }
 
 /// The cast raises; `to_reg*` answers NULL for the identical input.

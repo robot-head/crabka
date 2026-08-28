@@ -160,7 +160,7 @@ async fn uuid_roundtrip_where_catalog_and_row_description() {
         .await
         .expect("pg_type uuid");
     let typname: &str = type_rows[0].get(0);
-    let typlen: i32 = type_rows[0].get(1);
+    let typlen: i16 = type_rows[0].get(1);
     assert_eq!((typname, typlen), ("uuid", 16));
 
     let attr_rows = client
@@ -174,6 +174,163 @@ async fn uuid_roundtrip_where_catalog_and_row_description() {
         .expect("pg_attribute uuid");
     let atttypid: i32 = attr_rows[0].get(0);
     assert_eq!(atttypid, 2950);
+}
+
+#[tokio::test]
+async fn uuid_columns_coerce_bare_literals_for_comparisons() {
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TABLE t (id uuid); INSERT INTO t VALUES ('550e8400-e29b-41d4-a716-446655440000'::uuid)")
+        .await
+        .expect("fixture");
+    let rows = client
+        .query(
+            "SELECT id::text FROM t WHERE id = '550e8400e29b41d4a716446655440000'",
+            &[],
+        )
+        .await
+        .expect("uuid literal comparison");
+    assert_eq!(
+        rows[0].get::<_, &str>(0),
+        "550e8400-e29b-41d4-a716-446655440000"
+    );
+}
+
+#[tokio::test]
+async fn enum_columns_coerce_bare_literals_for_comparisons() {
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')")
+        .await
+        .expect("create enum");
+    client
+        .batch_execute(
+            "CREATE TABLE t (value mood); INSERT INTO t VALUES ('sad'), ('ok'), ('happy')",
+        )
+        .await
+        .expect("fixture");
+
+    let between = client
+        .query(
+            "SELECT count(*) FROM t WHERE value BETWEEN 'sad' AND 'ok'",
+            &[],
+        )
+        .await
+        .expect("bare enum BETWEEN literals");
+    assert_eq!(between[0].get::<_, i64>(0), 2);
+
+    let in_list = client
+        .query("SELECT value::text FROM t WHERE value IN ('happy')", &[])
+        .await
+        .expect("bare enum IN literal");
+    assert_eq!(in_list[0].get::<_, &str>(0), "happy");
+
+    let any = client
+        .query_one("SELECT 'sad' = ANY(ARRAY['sad', 'happy']::mood[])", &[])
+        .await
+        .expect("bare enum ANY literal");
+    assert!(any.get::<_, bool>(0));
+
+    let grouped_any = client
+        .query(
+            "SELECT value::text FROM t GROUP BY value HAVING 'sad' = ANY(ARRAY[value])",
+            &[],
+        )
+        .await
+        .expect("grouped bare enum ANY literal");
+    assert_eq!(grouped_any[0].get::<_, &str>(0), "sad");
+
+    client
+        .batch_execute(
+            "CREATE FUNCTION echo_mood(anyenum) RETURNS text AS $$ \
+             BEGIN RETURN $1::text || 'omg'; END $$ LANGUAGE plpgsql",
+        )
+        .await
+        .expect("create anyenum function");
+    let echoed = client
+        .query_one("SELECT echo_mood('sad'::mood)", &[])
+        .await
+        .expect("call anyenum function");
+    assert_eq!(echoed.get::<_, &str>(0), "sadomg");
+
+    client
+        .batch_execute(
+            "CREATE FUNCTION echo_mood(mood) RETURNS text AS $$ \
+             BEGIN RETURN $1::text || 'exact'; END $$ LANGUAGE plpgsql",
+        )
+        .await
+        .expect("create concrete enum overload");
+    let exact = client
+        .query_one("SELECT echo_mood('sad'::mood)", &[])
+        .await
+        .expect("prefer concrete enum overload");
+    assert_eq!(exact.get::<_, &str>(0), "sadexact");
+}
+
+#[tokio::test]
+async fn enum_support_functions_use_typed_nulls_as_bounds() {
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy')")
+        .await
+        .expect("create enum");
+
+    let row = client
+        .query_one(
+            "SELECT enum_first(NULL::mood)::text, enum_last(NULL::mood)::text, \
+                    enum_range(NULL::mood)::text, enum_range(NULL, 'ok'::mood)::text, \
+                    enum_range('ok'::mood, NULL)::text",
+            &[],
+        )
+        .await
+        .expect("enum support functions");
+    assert_eq!(row.get::<_, &str>(0), "sad");
+    assert_eq!(row.get::<_, &str>(1), "happy");
+    assert_eq!(row.get::<_, &str>(2), "{sad,ok,happy}");
+    assert_eq!(row.get::<_, &str>(3), "{sad,ok}");
+    assert_eq!(row.get::<_, &str>(4), "{ok,happy}");
+}
+
+#[tokio::test]
+async fn pg_enum_keeps_alter_type_sort_orders() {
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TYPE planets AS ENUM ('venus', 'earth', 'mars'); \
+             ALTER TYPE planets ADD VALUE 'uranus'; \
+             ALTER TYPE planets ADD VALUE 'mercury' BEFORE 'venus'; \
+             ALTER TYPE planets ADD VALUE 'saturn' BEFORE 'uranus'; \
+             ALTER TYPE planets ADD VALUE 'jupiter' AFTER 'mars'; \
+             ALTER TYPE planets ADD VALUE 'neptune'",
+        )
+        .await
+        .expect("alter enum labels");
+
+    let rows = client
+        .query(
+            "SELECT enumlabel, enumsortorder::text FROM pg_enum \
+             WHERE enumtypid = 'planets'::regtype ORDER BY enumsortorder",
+            &[],
+        )
+        .await
+        .expect("read enum catalog rows");
+    let actual = rows
+        .iter()
+        .map(|row| (row.get::<_, &str>(0), row.get::<_, &str>(1)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        [
+            ("mercury", "0"),
+            ("venus", "1"),
+            ("earth", "2"),
+            ("mars", "3"),
+            ("jupiter", "3.25"),
+            ("saturn", "3.5"),
+            ("uranus", "4"),
+            ("neptune", "5"),
+        ]
+    );
 }
 
 #[tokio::test]

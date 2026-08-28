@@ -186,6 +186,20 @@ async fn a_view_may_read_another_view() {
     );
 }
 
+#[tokio::test]
+async fn a_view_may_call_the_interpt_pp_regression_c_adapter() {
+    let (engine, _kv) = seeded().await;
+    let mut session = engine.connect();
+    run(
+        &mut session,
+        "CREATE FUNCTION interpt_pp(path, path) RETURNS point AS 'regress' LANGUAGE C STRICT;
+         CREATE VIEW crossing AS
+         SELECT interpt_pp('[(0,0),(2,2)]'::path, '[(0,2),(2,0)]'::path) AS point;",
+    )
+    .await;
+    assert!(query(&mut session, "SELECT point FROM crossing").await == rows(&["(1,1)"]));
+}
+
 /// The only bodies still refused, with the SQLSTATE each answers.
 #[tokio::test]
 async fn the_bodies_that_are_still_refused() {

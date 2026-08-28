@@ -255,18 +255,29 @@ pub fn resolve_foreign_key(
         }
     }
 
-    // The parent may be the relation being created, which no catalog read can
-    // find; anything else is looked up by name.
-    let referenced_name = crate::relname::resolve_relation(
-        catalog_kv,
-        resolution,
-        &request.reference.table,
-        crate::relname::SchemaDisposition::Utility,
-    )?;
-    let source = match request
-        .self_reference
-        .filter(|relation| *relation.name == referenced_name)
-    {
+    // A first temporary relation has no schema record yet, so an unqualified
+    // self-reference cannot go through search-path lookup.
+    let temporary_self_reference = request.self_reference.filter(|relation| {
+        request.reference.table.schema.is_none()
+            && crabka_pgcatalog::is_temp_schema(&relation.name.schema)
+            && relation.name.name == request.reference.table.name
+    });
+    let (referenced_name, self_reference) = match temporary_self_reference {
+        Some(relation) => (relation.name.clone(), Some(relation)),
+        None => {
+            let referenced_name = crate::relname::resolve_relation(
+                catalog_kv,
+                resolution,
+                &request.reference.table,
+                crate::relname::SchemaDisposition::Utility,
+            )?;
+            let self_reference = request
+                .self_reference
+                .filter(|relation| *relation.name == referenced_name);
+            (referenced_name, self_reference)
+        }
+    };
+    let source = match self_reference {
         Some(in_flight) => ParentSource::InFlight(in_flight),
         None => {
             let (table, indexes) = load_referenced_relation(catalog_kv, &referenced_name)?;

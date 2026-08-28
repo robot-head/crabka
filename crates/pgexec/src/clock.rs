@@ -6,7 +6,7 @@
 //! deterministic in tests.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -16,6 +16,16 @@ use jiff::{Timestamp, tz::TimeZone};
 /// `FixedClock`.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Timestamp;
+}
+
+/// The `xmlbinary` GUC used when SQL values enter an XML constructor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum XmlBinary {
+    /// Base64, PostgreSQL's default.
+    #[default]
+    Base64,
+    /// Hexadecimal digits without a `\\x` prefix.
+    Hex,
 }
 
 #[derive(Debug, Default)]
@@ -66,6 +76,11 @@ pub struct EvalCtx {
     /// `bytea_output`, which decides whether a `bytea` renders as `\x`-prefixed
     /// hex or in the older backslash-octal escape spelling.
     pub bytea_output: crabka_pgtypes::encoding::ByteaOutput,
+    /// The session's `xmloption`, which selects the grammar used by
+    /// `xml_is_well_formed`.
+    pub xml_option: crabka_pgtypes::xml::XmlOption,
+    /// The session's `xmlbinary` setting for `bytea` XML content.
+    pub xml_binary: XmlBinary,
     pub current_user: String,
     pub session_user: String,
     /// The session's backend process id.
@@ -76,6 +91,10 @@ pub struct EvalCtx {
     /// outside a SQL session, for example in a planning context or a unit test,
     /// where no backend id was ever assigned.
     pub(crate) backend_pid: i32,
+    /// Whether `pg_stat_activity.query_id` is computed for this session.
+    pub(crate) compute_query_id: bool,
+    /// Whether this session publishes activity details to `pg_stat_activity`.
+    pub(crate) track_activities: bool,
     /// Nesting level of the ordinary trigger that executes in this session
     /// now.
     pub(crate) trigger_depth: u32,
@@ -84,6 +103,10 @@ pub struct EvalCtx {
     /// same locked generator so `setseed()` survives executor thread changes.
     pub(crate) random: Option<Arc<Mutex<crate::math_fn::Prng>>>,
     pub(crate) sequence: Option<Arc<SequenceRuntime>>,
+    /// Transaction-local large-object writes and descriptors. Kept separately
+    /// from sequences because large-object mutations are transactional while
+    /// `nextval` is deliberately not.
+    pub(crate) largeobject: Option<Arc<LargeObjectRuntime>>,
     /// The catalog KV on its own, for a context that can read the catalog but
     /// has no sequence machinery.
     ///
@@ -109,6 +132,11 @@ pub struct EvalCtx {
     /// planning contexts and unit tests, where `pg_notify` is an error and not
     /// a silent no-op.
     pub(crate) notify: Option<Arc<Mutex<crate::session::NotifyPending>>>,
+    /// Non-error diagnostics emitted while evaluating an expression.
+    ///
+    /// The session installs this only when `client_min_messages` permits
+    /// warnings, so expression evaluators do not need to know about GUCs.
+    pub(crate) warning_tx: Option<tokio::sync::mpsc::Sender<crabka_pgwire::error::PgError>>,
     pub(crate) transition_relations: Option<Arc<Mutex<HashMap<String, TransitionRelation>>>>,
     pub(crate) event_trigger: Option<Arc<EventTriggerContext>>,
     /// The session's transaction identity, for the functions that export it.
@@ -152,6 +180,9 @@ pub(crate) struct TxnRuntime {
     /// [`SequenceRuntime::pending`] gives `nextval`, and it exists for the
     /// same reason.
     pub(crate) assigned: Arc<Mutex<Option<u64>>>,
+    /// Enum labels added to pre-existing types by this transaction. PostgreSQL
+    /// does not permit those labels to be used until commit.
+    pub(crate) unsafe_enum_values: Arc<HashSet<(u32, String)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +242,20 @@ pub(crate) struct SequenceRuntime {
     /// reason: expression evaluation is synchronous and cannot await a commit.
     /// `Durable` mode persists as it goes and leaves this field empty.
     pub(crate) pending: Arc<Mutex<crate::seq::PendingSequences>>,
+}
+
+/// The session state scalar `lo_*` functions need.
+pub(crate) struct LargeObjectRuntime {
+    /// The catalog KV that holds large-object metadata and pages.
+    pub(crate) kv: Arc<dyn crabka_pgkv::Kv>,
+    /// Compatibility switch that gives newly created objects public access.
+    pub(crate) compat_privileges: bool,
+    /// Whether `lo_import` must refuse a database mutation.
+    pub(crate) read_only: bool,
+    /// Mutations visible to this transaction but not durable until its commit.
+    pub(crate) pending: Arc<Mutex<crate::largeobject::PendingLargeObjects>>,
+    /// Session-local descriptors returned by `lo_open`.
+    pub(crate) descriptors: Arc<Mutex<crate::largeobject::Descriptors>>,
 }
 
 impl EvalCtx {
@@ -276,6 +321,18 @@ impl EvalCtx {
     pub(crate) fn database(&self) -> &str {
         &self.resolution().database
     }
+
+    pub(crate) fn warning(&self, message: String) -> Result<(), crate::error::ExecError> {
+        let Some(tx) = &self.warning_tx else {
+            return Ok(());
+        };
+        tx.try_send(crabka_pgwire::error::PgError::warning(message))
+            .map_err(|error| {
+                crate::error::ExecError::ObjectNotInPrerequisiteState(format!(
+                    "could not queue expression warning: {error}"
+                ))
+            })
+    }
 }
 
 impl EvalCtx {
@@ -313,16 +370,22 @@ impl EvalCtx {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             extra_float_digits: 1,
             bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
+            xml_option: crabka_pgtypes::xml::XmlOption::Content,
+            xml_binary: XmlBinary::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
+            compute_query_id: false,
+            track_activities: false,
             trigger_depth: 0,
             clock: Arc::new(SystemClock),
             random: None,
             sequence: None,
+            largeobject: None,
             catalog: None,
             resolution: None,
             notify: None,
+            warning_tx: None,
             transition_relations: None,
             event_trigger: None,
             txn: None,

@@ -880,7 +880,7 @@ fn requalify(expr: &Expr, from: &str, to: Option<&str>) -> Expr {
 /// subquery; returning `Some` substitutes the node and stops the descent into
 /// it, which is what keeps a substituted expression from being rewritten again
 /// by the same pass.
-fn map_expr(
+pub(crate) fn map_expr(
     expr: &Expr,
     in_subquery: bool,
     replace: &mut impl FnMut(&Expr, bool) -> Option<Expr>,
@@ -904,7 +904,10 @@ fn map_expr(
 /// The walk has to reach every expression: one it misses leaves a reference to
 /// a relation the rewritten statement no longer has in scope, which fails
 /// loudly with `missing FROM-clause entry` rather than writing the wrong row.
-fn map_query(query: &mut QueryExpr, replace: &mut impl FnMut(&Expr, bool) -> Option<Expr>) {
+pub(crate) fn map_query(
+    query: &mut QueryExpr,
+    replace: &mut impl FnMut(&Expr, bool) -> Option<Expr>,
+) {
     if let Some(with) = &mut query.with {
         for cte in &mut with.ctes {
             if let crabka_pgparser::ast::CteBody::Query(body) = &mut cte.body {
@@ -989,13 +992,18 @@ fn map_table_expr(item: &mut TableExpr, replace: &mut impl FnMut(&Expr, bool) ->
         }
         TableExpr::Function { functions, .. } => {
             for call in functions {
-                for arg in &mut call.args {
+                for arg in call.arguments_mut() {
                     *arg = map_expr(arg, true, replace);
                 }
             }
         }
         TableExpr::JsonTable(table) => {
             table.context = map_expr(&table.context, true, replace);
+        }
+        TableExpr::XmlTable(table) => {
+            for expression in table.exprs_mut() {
+                *expression = map_expr(expression, true, replace);
+            }
         }
     }
 }

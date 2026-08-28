@@ -313,6 +313,15 @@ impl PlParser<'_> {
                     .word_at(type_start)
                     .ok_or_else(|| self.error("expected variable before %TYPE"))?;
                 RoutineType::named(format!("{reference}%type"))
+            } else if type_end >= type_start + 3
+                && self.tokens[type_end - 2].0 == Token::Percent
+                && self.word_at(type_end - 1).as_deref() == Some("rowtype")
+            {
+                let reference = self.slice_tokens(type_start, type_end - 2).trim();
+                if reference.is_empty() {
+                    return Err(self.error("expected relation before %ROWTYPE"));
+                }
+                RoutineType::named(format!("{reference}%rowtype"))
             } else {
                 parse_routine_type(self.slice_tokens(type_start, type_end).trim())?
             };
@@ -906,13 +915,21 @@ impl PlParser<'_> {
     }
 
     fn parse_perform(&mut self) -> Result<PlPgSqlStatement, ParseError> {
+        let start = self.pos;
         self.expect_word("perform")?;
         let end = self.find_token(self.pos, &Token::Semicolon)?;
         let source = format!("SELECT {}", self.slice_tokens(self.pos, end));
         let query = parse_one(&source)?;
+        let line = self.source[..self.tokens[start].1]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
         self.pos = end + 1;
         Ok(PlPgSqlStatement::Perform {
             query: Box::new(query),
+            source,
+            line,
         })
     }
 

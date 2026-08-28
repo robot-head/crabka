@@ -21,7 +21,8 @@ use crabka_pgkv::{FjallKv, FjallOptions, Kv, KvScan, MemKv, RestoreKv, SnapshotK
 use crabka_pgwire::{
     engine::{
         BoundParam, CloseTarget, CopyInResponse, CopyOutStream, Engine, ExecuteOutcome,
-        Notification, PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
+        FastpathCall, Notification, PortalDescription, PreparedDescription, QueryResult, Session,
+        TxStatus,
     },
     session::{AuthMode, SessionConfig},
     telemetry::{DEFAULT_SAMPLE_RATIO, IngressTracePolicy},
@@ -2807,6 +2808,16 @@ impl Session for RuntimeSession {
         match self {
             Self::Single(session) => session.simple_query(sql).await,
             Self::Multi(session) => session.simple_query(sql).await,
+        }
+    }
+
+    async fn fastpath(
+        &mut self,
+        call: FastpathCall,
+    ) -> Result<Option<bytes::Bytes>, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.fastpath(call).await,
+            Self::Multi(session) => session.fastpath(call).await,
         }
     }
 
@@ -13407,6 +13418,22 @@ mod tests {
         .expect("config");
         let (multi, _handles) = crabka_gres_ranges::MultiRangeTenant::start(config).expect("multi");
         assert_runtime_session_v2(RuntimeEngine::Multi(Box::new(multi)).connect()).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_session_forwards_fastpath_to_the_single_engine() {
+        let mut session = RuntimeEngine::Single(Box::new(SqlEngine::new())).connect();
+        let value = session
+            .fastpath(FastpathCall {
+                function_oid: 715,
+                argument_formats: vec![1],
+                arguments: vec![Some(bytes::Bytes::copy_from_slice(&0_u32.to_be_bytes()))],
+                result_format: 1,
+            })
+            .await
+            .expect("forwarded fastpath")
+            .expect("lo_create result");
+        assert!(u32::from_be_bytes(value.as_ref().try_into().expect("OID bytes")) >= 16_384);
     }
 
     #[tokio::test]

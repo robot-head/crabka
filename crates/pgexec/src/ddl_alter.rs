@@ -6,6 +6,7 @@ pub(crate) fn execute_ddl(
     kv: &dyn Kv,
     stmt: &Statement,
     fctx: ForeignCtx,
+    check_function_bodies: bool,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let resolution = fctx.resolution;
     match stmt {
@@ -13,6 +14,32 @@ pub(crate) fn execute_ddl(
             let (tag, ops) = crate::text_search_catalog::execute(kv, ddl)?;
             Ok((command(tag), ops))
         }
+        Statement::CreateRule(rule) => crate::rewrite_rules::create(
+            kv,
+            rule,
+            resolve_relation(kv, resolution, &rule.table, SchemaDisposition::Reference)?,
+        ),
+        Statement::AlterRule {
+            name,
+            table,
+            action,
+        } => crate::rewrite_rules::alter(
+            kv,
+            name,
+            resolve_relation(kv, resolution, table, SchemaDisposition::Reference)?,
+            action,
+        ),
+        Statement::DropRule {
+            name,
+            table,
+            if_exists,
+            ..
+        } => crate::rewrite_rules::drop(
+            kv,
+            name,
+            resolve_relation(kv, resolution, table, SchemaDisposition::Reference)?,
+            *if_exists,
+        ),
         Statement::CreateTrigger(trigger) => {
             let table =
                 resolve_relation(kv, resolution, &trigger.table, SchemaDisposition::Reference)?;
@@ -84,9 +111,13 @@ pub(crate) fn execute_ddl(
         } => crate::trigger::drop_event(kv, name, *if_exists),
         // P2: SQL routines. Definition, lifecycle and catalog storage live in
         // `routine`; only the DDL routing is here.
-        Statement::CreateRoutine(routine) => {
-            crate::routine::create(kv, fctx.resolution, routine, fctx.current_user)
-        }
+        Statement::CreateRoutine(routine) => crate::routine::create(
+            kv,
+            fctx.resolution,
+            routine,
+            fctx.effective_role(),
+            check_function_bodies,
+        ),
         Statement::DropRoutine {
             object,
             if_exists,
@@ -97,7 +128,7 @@ pub(crate) fn execute_ddl(
             object,
             routine,
             action,
-        } => crate::routine::alter(kv, *object, routine, action),
+        } => crate::routine::alter(kv, *object, routine, action, fctx.effective_role()),
         // P6: user-defined aggregates. Stored as routines, so only the
         // definition-time rules and the aggregate evaluator are new.
         Statement::CreateAggregate(aggregate) => {
@@ -147,6 +178,11 @@ pub(crate) fn execute_ddl(
             if_exists,
             ..
         } => crate::usercast::drop_cast(kv, *source, *target, *if_exists),
+        Statement::CreateAccessMethod {
+            name,
+            kind,
+            handler,
+        } => create_access_method(kv, name, *kind, handler),
         Statement::CreateDomain {
             name,
             base,
@@ -189,12 +225,15 @@ pub(crate) fn execute_ddl(
             sharding,
             if_not_exists,
             temporary,
+            of_type,
+            typed_options,
             like,
             inherits,
             on_commit,
             partition_by,
             partition_of,
             tablespace,
+            access_method,
         } => {
             if (partition_by.is_some() || partition_of.is_some()) && *sharded {
                 return Err(crate::partition::reject_sharded_partitioned());
@@ -218,8 +257,74 @@ pub(crate) fn execute_ddl(
             if *if_not_exists && crabka_pgcatalog::get_table(kv, name).is_ok() {
                 return Ok((command("CREATE TABLE"), Vec::new()));
             }
+            let access_method = match access_method.as_deref() {
+                Some(method) => Some(resolve_table_access_method_oid(kv, method)?),
+                None if partition_by.is_some() => None,
+                None => Some(resolve_table_access_method_oid(
+                    kv,
+                    fctx.default_table_access_method,
+                )?),
+            };
             crate::usertype::ensure_relation_type_name_available(kv, name)?;
             let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
+            let typed_type = of_type
+                .as_ref()
+                .map(|reference| {
+                    let type_name = resolve_user_type(kv, resolution, reference)?;
+                    let ty = match crabka_pgcatalog::get_user_type(kv, &type_name)? {
+                        Some(ty) => ty,
+                        None if crabka_pgcatalog::get_table(kv, &type_name).is_ok() => {
+                            return Err(ExecError::WrongObjectType(format!(
+                                "type {type_name} is the row type of another table\nDETAIL:  A typed table must use a stand-alone composite type created with CREATE TYPE."
+                            )));
+                        }
+                        None => {
+                            return Err(ExecError::UndefinedObject(format!(
+                                "type \"{type_name}\" does not exist"
+                            )));
+                        }
+                    };
+                    ty.fields()
+                        .ok_or_else(|| {
+                            ExecError::WrongObjectType(format!(
+                                "type {type_name} is not a composite type"
+                            ))
+                        })
+                        .map(|fields| {
+                            (
+                                ty.oid,
+                                fields
+                                    .iter()
+                                    .map(|field| crabka_pgparser::ast::ColumnDef {
+                                        name: field.name.clone(),
+                                        ty: field.ty,
+                                        serial: None,
+                                        collation: None,
+                                        constraints: Vec::new(),
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                })
+                .transpose()?;
+            let (typed_type_oid, mut columns) = typed_type.map_or_else(
+                || (None, columns.clone()),
+                |(oid, columns)| (Some(oid), columns),
+            );
+            let mut seen_typed_options = std::collections::HashSet::new();
+            for option in typed_options {
+                if !seen_typed_options.insert(&option.column) {
+                    return Err(ExecError::DuplicateOutputColumn(option.column.clone()));
+                }
+                let Some(column) = columns
+                    .iter_mut()
+                    .find(|column| column.name == option.column)
+                else {
+                    return Err(ExecError::UndefinedColumn(option.column.clone()));
+                };
+                column.collation = option.collation.clone();
+                column.constraints.extend(option.constraints.clone());
+            }
             let inheritance_parents = inherits
                 .iter()
                 .map(|parent| {
@@ -237,7 +342,7 @@ pub(crate) fn execute_ddl(
                     None if inheritance_parents.is_empty() => create_table_definition(
                         kv,
                         name,
-                        columns,
+                        &columns,
                         constraints,
                         like,
                         &[],
@@ -247,7 +352,7 @@ pub(crate) fn execute_ddl(
                         kv,
                         name,
                         &inheritance_parents,
-                        columns,
+                        &columns,
                         constraints,
                         like,
                         &ddl_ctx,
@@ -298,9 +403,34 @@ pub(crate) fn execute_ddl(
                 checks.clone(),
                 fctx.table_creation(),
             )?;
+            if let Some(oid) = typed_type_oid {
+                ops.push(crabka_pgcatalog::set_typed_table_type_op(name, oid));
+            }
+            for privilege in crabka_pgcatalog::default_table_privileges_of(
+                kv,
+                fctx.effective_role(),
+                &name.schema,
+            )? {
+                if privilege.grant {
+                    ops.extend(crabka_pgcatalog::grant_table_privileges_ops(
+                        kv,
+                        name,
+                        &[privilege.grantee],
+                        &[privilege.privilege],
+                    )?);
+                } else if privilege.grantee == fctx.effective_role() {
+                    ops.push(crabka_pgcatalog::revoke_owner_table_privilege_op(
+                        name,
+                        &privilege.privilege,
+                    ));
+                }
+            }
             if let Some(tablespace) = tablespace {
                 let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
                 ops.push(crabka_pgcatalog::set_relation_tablespace_op(name, oid));
+            }
+            if let Some(oid) = access_method {
+                ops.push(crabka_pgcatalog::set_relation_access_method_op(name, oid));
             }
             let table = crabka_pgcatalog::Table {
                 id,
@@ -539,7 +669,8 @@ pub(crate) fn execute_ddl(
                     ..fctx
                 };
                 for element in &crate::schema_element::plan(&name, elements)? {
-                    let (_, element_ops) = execute_ddl(&staged, element, inner)?;
+                    let (_, element_ops) =
+                        execute_ddl(&staged, element, inner, check_function_bodies)?;
                     staged.stage(&element_ops);
                     ops.extend(element_ops);
                 }
@@ -609,18 +740,23 @@ pub(crate) fn execute_ddl(
         Statement::Comment {
             object_kind,
             object_name,
+            rule_table,
             aggregate,
+            cast,
             comment,
         } => comment_ops(
             kv,
             resolution,
             object_kind,
             object_name,
+            rule_table.as_ref(),
             aggregate.as_ref(),
+            cast.as_ref(),
             comment.as_deref(),
         ),
         Statement::CreateView {
             name,
+            recursive,
             definition,
             query,
             or_replace,
@@ -628,12 +764,17 @@ pub(crate) fn execute_ddl(
             columns: aliases,
             options,
         } => {
+            let (definition, query) = if *recursive {
+                recursive_view_definition(name, definition, aliases)?
+            } else {
+                (definition.clone(), query.clone())
+            };
             // The body is analysed before the view's own name is placed,
             // because what it reads decides where the view can go: a view over
             // a temporary relation is itself temporary whether or not `TEMP`
             // was written, so a qualifier naming an ordinary schema is refused.
             // `postgres:18.4` reports the two in that order.
-            let sources = validate_view_definition(kv, resolution, query)?;
+            let sources = validate_view_definition(kv, resolution, &query)?;
             let temporary = *temporary
                 || sources
                     .iter()
@@ -645,7 +786,7 @@ pub(crate) fn execute_ddl(
             };
             let name = &resolve_relation(kv, resolution, name, disposition)?;
             crate::usertype::ensure_relation_type_name_available(kv, name)?;
-            let described = crate::query::describe_query_expr(kv, resolution, query)?;
+            let described = crate::query::describe_query_expr(kv, resolution, &query)?;
             // `VIEW name (a, b, c)` renames the output columns positionally; too
             // many names is PostgreSQL's own 42P10.
             if let Some(aliases) = aliases
@@ -688,7 +829,7 @@ pub(crate) fn execute_ddl(
             // at CREATE time rather than leaving a view whose option can never
             // fire, and puts the disqualifying clause in the HINT.
             if options.check_option.is_some()
-                && let Some(detail) = crate::viewwrite::query_refusal(query)
+                && let Some(detail) = crate::viewwrite::query_refusal(&query)
             {
                 return Err(ExecError::CheckOptionUnsupported(detail));
             }
@@ -778,6 +919,7 @@ pub(crate) fn execute_ddl(
             definition,
             query,
             tablespace,
+            access_method,
             with_data: _,
         } => {
             let _ = tablespace;
@@ -785,6 +927,12 @@ pub(crate) fn execute_ddl(
             if *if_not_exists && crabka_pgcatalog::get_table(kv, name).is_ok() {
                 return Ok((command("CREATE MATERIALIZED VIEW"), Vec::new()));
             }
+            let access_method = Some(resolve_table_access_method_oid(
+                kv,
+                access_method
+                    .as_deref()
+                    .unwrap_or(fctx.default_table_access_method),
+            )?);
             crate::usertype::ensure_relation_type_name_available(kv, name)?;
             let described = crate::query::describe_query_expr(kv, resolution, query)?;
             if let Some(aliases) = aliases
@@ -841,6 +989,9 @@ pub(crate) fn execute_ddl(
                 },
             )?;
             ops.extend(created);
+            if let Some(oid) = access_method {
+                ops.push(crabka_pgcatalog::set_relation_access_method_op(name, oid));
+            }
             Ok((command("CREATE MATERIALIZED VIEW"), ops))
         }
         // The catalog half of `REFRESH MATERIALIZED VIEW`: the population flag,
@@ -1375,6 +1526,38 @@ pub(crate) fn execute_ddl(
                 crabka_pgcatalog::revoke_schema_privileges_ops(kv, schemas, &grantees, privileges)?;
             Ok((command("REVOKE"), ops))
         }
+        Statement::AlterDefaultTablePrivileges {
+            role,
+            schemas,
+            privileges,
+            grantees,
+            grant,
+        } => {
+            let owner = match role {
+                Some(role) => resolve_new_owner(kv, fctx, role)?,
+                None => fctx.effective_role().to_string(),
+            };
+            crate::privilege::require_role_alter(
+                kv,
+                fctx.effective_role(),
+                &owner,
+                crabka_pgparser::ast::RoleOptions::default(),
+            )?;
+            let grantees = resolve_grantees(kv, fctx, grantees)?;
+            let privileges = privileges
+                .iter()
+                .map(|privilege| privilege.name.clone())
+                .collect::<Vec<_>>();
+            let ops = crabka_pgcatalog::alter_default_table_privileges_ops(
+                kv,
+                &owner,
+                schemas,
+                &grantees,
+                &privileges,
+                *grant,
+            )?;
+            Ok((command("ALTER DEFAULT PRIVILEGES"), ops))
+        }
         Statement::CreateFdw { name, options } => {
             let ops = crabka_pgcatalog::create_fdw_ops(kv, name, options.clone())?;
             Ok((command("CREATE FOREIGN DATA WRAPPER"), ops))
@@ -1577,6 +1760,106 @@ pub(crate) fn execute_ddl(
         }
         _ => Err(ExecError::Unsupported("not a DDL statement".into())),
     }
+}
+
+fn create_access_method(
+    kv: &dyn Kv,
+    name: &str,
+    kind: crabka_pgparser::ast::AccessMethodKind,
+    handler: &str,
+) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    use crabka_pgparser::ast::AccessMethodKind;
+
+    let kind = match kind {
+        AccessMethodKind::Index => crabka_pgcatalog::AccessMethodKind::Index,
+        AccessMethodKind::Table => crabka_pgcatalog::AccessMethodKind::Table,
+    };
+    let expected = match kind {
+        crabka_pgcatalog::AccessMethodKind::Index => "index_am_handler",
+        crabka_pgcatalog::AccessMethodKind::Table => "table_am_handler",
+    };
+    let actual = match handler {
+        "bthandler" | "hashhandler" | "gisthandler" | "ginhandler" | "spghandler"
+        | "brinhandler" => "index_am_handler",
+        "heap_tableam_handler" => "table_am_handler",
+        _ => {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42883",
+                format!("function {handler}(internal) does not exist"),
+            )));
+        }
+    };
+    if actual != expected {
+        return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "42804",
+            format!("function {handler} must return type {expected}"),
+        )));
+    }
+    if matches!(
+        name,
+        "heap" | "btree" | "hash" | "gist" | "gin" | "spgist" | "brin"
+    ) {
+        return Err(ExecError::DuplicateObject(format!(
+            "access method \"{name}\" already exists"
+        )));
+    }
+    Ok((
+        command("CREATE ACCESS METHOD"),
+        crabka_pgcatalog::create_access_method_ops(kv, name, kind, handler)?,
+    ))
+}
+
+pub(crate) fn resolve_table_access_method_oid(kv: &dyn Kv, name: &str) -> Result<u32, ExecError> {
+    if name == "heap" {
+        return Ok(2);
+    }
+    if crate::catalog_rel::access_method_oid(name).is_some() {
+        return Err(ExecError::WrongObjectType(format!(
+            "access method \"{name}\" is not of type TABLE"
+        )));
+    }
+    let method = match crabka_pgcatalog::get_access_method(kv, name) {
+        Ok(method) => method,
+        Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+            return Err(ExecError::UndefinedObject(format!(
+                "access method \"{name}\" does not exist"
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if method.kind != crabka_pgcatalog::AccessMethodKind::Table {
+        return Err(ExecError::WrongObjectType(format!(
+            "access method \"{name}\" is not of type TABLE"
+        )));
+    }
+    Ok(method.oid)
+}
+
+/// `CREATE RECURSIVE VIEW name (columns) AS body` is PostgreSQL's shorthand
+/// for a view whose stored query is a recursive CTE named `name`.
+fn recursive_view_definition(
+    name: &crabka_pgparser::ast::RelationRef,
+    definition: &str,
+    columns: &Option<Vec<String>>,
+) -> Result<(String, crabka_pgparser::ast::QueryExpr), ExecError> {
+    let name = crate::catalog_fn::quote_identifier(&name.name);
+    let columns = columns.as_ref().map_or_else(String::new, |columns| {
+        format!(
+            " ({})",
+            columns
+                .iter()
+                .map(|column| crate::catalog_fn::quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    let definition =
+        format!("WITH RECURSIVE {name}{columns} AS ({definition}) SELECT * FROM {name}");
+    let statements = crabka_pgparser::parse(&definition)?;
+    let [crabka_pgparser::ast::Statement::Query(query)] = statements.as_slice() else {
+        unreachable!("a generated recursive view body is one query")
+    };
+    Ok((definition, query.clone()))
 }
 
 /// The in-progress state of one `ALTER TABLE` statement: later subcommands see
@@ -2008,6 +2291,32 @@ pub(crate) fn alter_table_ops(
         };
     }
 
+    if let [Action::RenameColumn { column, new_name }] = actions
+        && let Ok(mut view) = crabka_pgcatalog::get_view(kv, table_name)
+    {
+        let index = view
+            .columns
+            .iter()
+            .position(|candidate| candidate.name == *column)
+            .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+        crate::scope::reject_system_column_names([new_name.as_str()])?;
+        if view
+            .columns
+            .iter()
+            .any(|candidate| candidate.name == *new_name)
+        {
+            return Err(ExecError::DuplicateColumn {
+                column: new_name.clone(),
+                table: table_name.to_string(),
+            });
+        }
+        view.columns[index].name = new_name.clone();
+        return Ok((
+            command("ALTER TABLE"),
+            vec![crabka_pgcatalog::put_view_op(&view)],
+        ));
+    }
+
     let fetched = crabka_pgcatalog::get_table(kv, table_name);
     // A relation of any other kind is still a relation, so PostgreSQL reports
     // the *subcommand* as unsupported for it rather than claiming the relation
@@ -2034,6 +2343,17 @@ pub(crate) fn alter_table_ops(
         }
         Err(error) => return Err(error.into()),
     };
+    if actions
+        .iter()
+        .filter(|action| matches!(action, Action::SetAccessMethod(_)))
+        .nth(1)
+        .is_some()
+    {
+        return Err(ExecError::Syntax(
+            "cannot have multiple SET ACCESS METHOD subcommands".into(),
+        ));
+    }
+    reject_typed_table_alter(kv, &table, actions)?;
     validate_alter_constraint_columns(kv, resolution, &table, actions)?;
     if only {
         reject_only_that_would_skip_descendants(kv, &table, actions)?;
@@ -2085,6 +2405,31 @@ pub(crate) fn alter_table_ops(
     Ok((command("ALTER TABLE"), ops))
 }
 
+fn reject_typed_table_alter(
+    kv: &dyn Kv,
+    table: &Table,
+    actions: &[crabka_pgparser::ast::AlterTableAction],
+) -> Result<(), ExecError> {
+    if crabka_pgcatalog::typed_table_type(kv, &table.name)?.is_none() {
+        return Ok(());
+    }
+    use crabka_pgparser::ast::AlterTableAction as Action;
+    for action in actions {
+        let message = match action {
+            Action::AddColumn { .. } => "cannot add column to typed table",
+            Action::DropColumn { .. } => "cannot drop column from typed table",
+            Action::RenameColumn { .. } => "cannot rename column of typed table",
+            Action::SetType { .. } => "cannot alter column type of typed table",
+            Action::Unsupported(label) if label.contains("INHERIT ") => {
+                "cannot change inheritance of typed table"
+            }
+            _ => continue,
+        };
+        return Err(ExecError::WrongObjectType(message.into()));
+    }
+    Ok(())
+}
+
 /// The catalog and row writes one relation's finished [`AlterTableState`] owes.
 ///
 /// Shared by the named relation and by every descendant the statement recursed
@@ -2097,10 +2442,10 @@ pub(crate) fn alter_table_state_ops(
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let mut ops = crabka_pgcatalog::replace_table_schema_ops(kv, table_name, &state.table)?;
     if let Some(rows) = state.rows.take() {
-        for (key, xmin, xmax, row) in rows {
+        for (key, xmin, xmax, cmin, cmax, row) in rows {
             ops.push(crabka_pgkv::WriteOp::Put {
                 key,
-                value: encode_table_tuple(&state.table, xmin, xmax, &row),
+                value: encode_table_tuple(&state.table, xmin, xmax, cmin, cmax, &row),
             });
         }
     }
@@ -2388,7 +2733,7 @@ pub(crate) fn inherit_column_ops(
     let generated = inherited.generated.is_some();
     let not_null = inherited.not_null;
     let table_name = state.table.name.clone();
-    for (_, _, _, row) in state.rows_mut(kv)? {
+    for (_, _, _, _, _, row) in state.rows_mut(kv)? {
         row.push(fill.clone());
     }
     state.table.columns.push(inherited);
@@ -2453,8 +2798,10 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         | Action::SetStorageParameters(_)
         | Action::ResetStorageParameters(_)
         | Action::SetTablespace(_)
+        | Action::SetAccessMethod(_)
         | Action::OwnerTo(_)
         | Action::SetTriggerMode { .. }
+        | Action::SetRuleMode { .. }
         | Action::EnableRowSecurity
         | Action::DisableRowSecurity
         | Action::ForceRowSecurity
@@ -2463,6 +2810,7 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         | Action::DetachPartition { .. }
         | Action::ClusterOn(_)
         | Action::SetWithoutCluster
+        | Action::SetReplicaIdentity(_)
         | Action::Unsupported(_) => 6,
     }
 }
@@ -2492,6 +2840,7 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::SetStorageParameters(_) => "SET",
         Action::ResetStorageParameters(_) => "RESET",
         Action::SetTablespace(_) => "SET TABLESPACE",
+        Action::SetAccessMethod(_) => "SET ACCESS METHOD",
         Action::OwnerTo(_) => "OWNER TO",
         // `PostgreSQL` spells the exact form back, so the selector and the mode
         // both show: `ENABLE TRIGGER ALL`, `DISABLE TRIGGER` for a named one,
@@ -2511,6 +2860,16 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
                 (TriggerEnableMode::Disabled, TriggerSelector::Named(_)) => "DISABLE TRIGGER",
             }
         }
+        Action::SetRuleMode { mode, .. } => {
+            use crabka_pgparser::ast::TriggerEnableMode;
+
+            match mode {
+                TriggerEnableMode::Origin => "ENABLE RULE",
+                TriggerEnableMode::Replica => "ENABLE REPLICA RULE",
+                TriggerEnableMode::Always => "ENABLE ALWAYS RULE",
+                TriggerEnableMode::Disabled => "DISABLE RULE",
+            }
+        }
         // The statement is spelled `ROW LEVEL SECURITY`; the diagnostic drops
         // the `LEVEL`, which is how `PostgreSQL` names these four subcommands.
         Action::EnableRowSecurity => "ENABLE ROW SECURITY",
@@ -2521,6 +2880,7 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::DetachPartition { .. } => "DETACH PARTITION",
         Action::ClusterOn(_) => "CLUSTER ON",
         Action::SetWithoutCluster => "SET WITHOUT CLUSTER",
+        Action::SetReplicaIdentity(_) => "REPLICA IDENTITY",
         Action::Unsupported(_) => "ALTER",
     }
 }
@@ -2558,6 +2918,7 @@ pub(crate) fn alter_action_allows(
         | Action::ResetStorageParameters(_) => kind != "sequence",
         // Only the two kinds with storage of their own can be moved.
         Action::SetTablespace(_) => kind == "index" || kind == "materialized view",
+        Action::SetAccessMethod(_) => kind == "table" || kind == "materialized view",
         // A materialized view has a heap and can carry a clustered index; the
         // index it then names is checked after this.
         Action::ClusterOn(_) | Action::SetWithoutCluster => kind == "materialized view",
@@ -2937,7 +3298,7 @@ pub(crate) fn alter_table_action_ops(
             let added = state.table.columns.len();
             let generated = catalog_column.generated.is_some();
             let not_null = catalog_column.not_null;
-            for (_, _, _, row) in state.rows_mut(kv)? {
+            for (_, _, _, _, _, row) in state.rows_mut(kv)? {
                 row.push(fill.clone());
             }
             state.table.columns.push(catalog_column);
@@ -3037,7 +3398,8 @@ pub(crate) fn alter_table_action_ops(
             }
             let dependents = dependent_view_names(kv, &table_name, Some(column))?;
             let generated = generated_columns_reading(&state.table, column);
-            if !dependents.is_empty() || !generated.is_empty() {
+            let trigger_dependents = triggers_referencing_column(kv, &state.table, column)?;
+            if !dependents.is_empty() || !generated.is_empty() || !trigger_dependents.is_empty() {
                 if !*cascade {
                     // PostgreSQL names each blocking object on its own DETAIL
                     // line, in the order `performDeletion` reports them, and
@@ -3052,6 +3414,11 @@ pub(crate) fn alter_table_action_ops(
                         })
                         .chain(dependents.iter().map(|view| {
                             format!("view {view} depends on column {column} of table {table_name}")
+                        }))
+                        .chain(trigger_dependents.iter().map(|trigger| {
+                            format!(
+                                "trigger {trigger} on table {table_name} depends on column {column} of table {table_name}"
+                            )
                         }))
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -3081,17 +3448,18 @@ pub(crate) fn alter_table_action_ops(
         Action::SetNotNull(column) => set_column_not_null(kv, state, column, &ddl_ctx),
         Action::DropNotNull(column) => {
             let index = state.column_index(column)?;
+            if replica_identity_index_uses_column(kv, &state.table, column)? {
+                return Err(ExecError::InvalidTableDefinition(format!(
+                    "column \"{column}\" is in index used as replica identity"
+                )));
+            }
             state.table.columns[index].not_null = false;
             Ok(())
         }
         Action::SetDefault { column, expr } => {
             let index = state.column_index(column)?;
             let ty = state.table.columns[index].ty;
-            let written = eval_assignment_value(expr, ty, &Scope::empty(), &[], &ddl_ctx)?;
-            let coerced = coerce(written.clone(), ty, &ddl_ctx)?;
-            ensure_default_can_be_persisted(&coerced)?;
-            state.table.columns[index].default =
-                Some(ColumnDefault::Value(stored_default_value(written, coerced)));
+            state.table.columns[index].default = Some(default_from_expr(expr, ty, &ddl_ctx)?);
             Ok(())
         }
         Action::DropDefault(column) => {
@@ -3183,6 +3551,29 @@ pub(crate) fn alter_table_action_ops(
             ));
             Ok(())
         }
+        Action::SetAccessMethod(method) => {
+            if method.is_none() && crate::partition::scheme_of(kv, &table_name)?.is_some() {
+                state
+                    .ops
+                    .push(crabka_pgcatalog::clear_relation_access_method_op(
+                        &table_name,
+                    ));
+            } else {
+                let oid = resolve_table_access_method_oid(
+                    kv,
+                    method
+                        .as_deref()
+                        .unwrap_or(fctx.default_table_access_method),
+                )?;
+                state
+                    .ops
+                    .push(crabka_pgcatalog::set_relation_access_method_op(
+                        &table_name,
+                        oid,
+                    ));
+            }
+            Ok(())
+        }
         Action::SetType {
             column,
             ty,
@@ -3225,7 +3616,7 @@ pub(crate) fn alter_table_action_ops(
             let rewritten = state
                 .rows_mut(kv)?
                 .iter()
-                .map(|(_, xmin, xmax, row)| {
+                .map(|(_, xmin, xmax, _, _, row)| {
                     let cast = match using {
                         Some(expr) => eval_assignment_value(expr, *ty, &scope, row, &ddl_ctx)
                             .and_then(|value| coerce(value, *ty, &ddl_ctx)),
@@ -3259,7 +3650,7 @@ pub(crate) fn alter_table_action_ops(
                     }
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?;
-            for ((_, _, _, row), value) in state.rows_mut(kv)?.iter_mut().zip(rewritten) {
+            for ((_, _, _, _, _, row), value) in state.rows_mut(kv)?.iter_mut().zip(rewritten) {
                 if index < row.len() {
                     row[index] = value;
                 }
@@ -3564,6 +3955,15 @@ pub(crate) fn alter_table_action_ops(
             )?);
             Ok(())
         }
+        Action::SetRuleMode { name, mode } => {
+            state.ops.extend(crate::rewrite_rules::set_enabled(
+                kv,
+                state.table.name.clone(),
+                name,
+                *mode,
+            )?);
+            Ok(())
+        }
         Action::RenameTable { .. } => Err(ExecError::Syntax(
             "RENAME TO cannot be combined with other ALTER TABLE subcommands".into(),
         )),
@@ -3631,10 +4031,100 @@ pub(crate) fn alter_table_action_ops(
                 .extend(record_clustered_index_ops(kv, &state.table, None)?);
             Ok(())
         }
+        Action::SetReplicaIdentity(identity) => {
+            let identity = replica_identity_for_action(kv, state, identity)?;
+            state.ops.extend(crabka_pgcatalog::set_replica_identity_ops(
+                state.table.id,
+                &identity,
+            ));
+            Ok(())
+        }
         Action::Unsupported(label) => Err(ExecError::Unsupported(format!(
             "ALTER TABLE subcommand is not supported: {label}"
         ))),
     }
+}
+
+fn replica_identity_for_action(
+    kv: &dyn Kv,
+    state: &AlterTableState,
+    identity: &crabka_pgparser::ast::ReplicaIdentity,
+) -> Result<crabka_pgcatalog::ReplicaIdentity, ExecError> {
+    use crabka_pgparser::ast::ReplicaIdentity as Action;
+
+    let name = match identity {
+        Action::Default => return Ok(crabka_pgcatalog::ReplicaIdentity::Default),
+        Action::Full => return Ok(crabka_pgcatalog::ReplicaIdentity::Full),
+        Action::Nothing => return Ok(crabka_pgcatalog::ReplicaIdentity::Nothing),
+        Action::UsingIndex(name) => name,
+    };
+    let index = state
+        .current_indexes(kv)?
+        .into_iter()
+        .find(|index| index.name == *name)
+        .or_else(|| crabka_pgcatalog::get_index(kv, &state.table.name.sibling(name)).ok())
+        .ok_or_else(|| {
+            ExecError::UndefinedObject(format!(
+                "index \"{name}\" for table \"{}\" does not exist",
+                state.table.name.name
+            ))
+        })?;
+    if index.table != state.table.name {
+        return Err(ExecError::WrongObjectType(format!(
+            "\"{name}\" is not an index for table \"{}\"",
+            state.table.name.name
+        )));
+    }
+    if !index.unique {
+        return Err(ExecError::WrongObjectType(format!(
+            "cannot use non-unique index \"{name}\" as replica identity"
+        )));
+    }
+    if index.deferral.is_deferrable() {
+        return Err(ExecError::WrongObjectType(format!(
+            "cannot use non-immediate index \"{name}\" as replica identity"
+        )));
+    }
+    if index
+        .columns
+        .iter()
+        .any(|key| crabka_pgcatalog::index_key_expression(key).is_some())
+    {
+        return Err(ExecError::WrongObjectType(format!(
+            "cannot use expression index \"{name}\" as replica identity"
+        )));
+    }
+    for column in &index.columns {
+        let column = state
+            .table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == *column)
+            .ok_or_else(|| ExecError::UndefinedIndexColumn(column.clone()))?;
+        if !column.not_null {
+            return Err(ExecError::WrongObjectType(format!(
+                "index \"{name}\" cannot be used as replica identity because column \"{}\" is nullable",
+                column.name
+            )));
+        }
+    }
+    Ok(crabka_pgcatalog::ReplicaIdentity::Index(index.name))
+}
+
+fn replica_identity_index_uses_column(
+    kv: &dyn Kv,
+    table: &Table,
+    column: &str,
+) -> Result<bool, ExecError> {
+    let crabka_pgcatalog::ReplicaIdentity::Index(name) =
+        crabka_pgcatalog::replica_identity(kv, table.id)?
+    else {
+        return Ok(false);
+    };
+    Ok(crabka_pgcatalog::list_table_indexes(kv, &table.name)?
+        .iter()
+        .find(|index| index.name == name)
+        .is_some_and(|index| index.columns.iter().any(|key| key == column)))
 }
 
 /// A partitioned relation has no heap of its own, so neither of its indexes can
@@ -4646,26 +5136,8 @@ pub(crate) fn drop_table_column(
         crabka_pgcatalog::CommentObject::Column(&table_name, column),
         None,
     ));
-    let triggers = crabka_pgcatalog::trigger::triggers_for_table(kv, state.table.id)?;
-    for trigger in triggers {
-        let references_column = trigger
-            .events
-            .update_columns
-            .iter()
-            .any(|name| name == column)
-            || trigger.when.as_ref().is_some_and(|predicate| {
-                check_references_column(
-                    predicate,
-                    column,
-                    &state
-                        .table
-                        .columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect::<Vec<_>>(),
-                )
-            });
-        if references_column {
+    for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, state.table.id)? {
+        if trigger_references_column(&trigger, &state.table, column) {
             state
                 .ops
                 .extend(crabka_pgcatalog::trigger::drop_trigger_ops(
@@ -4685,7 +5157,7 @@ pub(crate) fn drop_table_column(
             }
         }
     }
-    for (_, _, _, row) in state.rows_mut(kv)? {
+    for (_, _, _, _, _, row) in state.rows_mut(kv)? {
         if index < row.len() {
             row.remove(index);
         }
@@ -4717,6 +5189,43 @@ pub(crate) fn drop_table_column(
         .checks
         .retain(|check| !check_references_column(&check.expr, column, &column_names));
     Ok(())
+}
+
+fn triggers_referencing_column(
+    kv: &dyn Kv,
+    table: &crabka_pgcatalog::Table,
+    column: &str,
+) -> Result<Vec<String>, ExecError> {
+    let mut triggers = crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)?;
+    triggers.sort_by_key(|trigger| trigger.oid);
+    Ok(triggers
+        .into_iter()
+        .filter(|trigger| trigger_references_column(trigger, table, column))
+        .map(|trigger| trigger.name)
+        .collect())
+}
+
+fn trigger_references_column(
+    trigger: &crabka_pgcatalog::trigger::Trigger,
+    table: &crabka_pgcatalog::Table,
+    column: &str,
+) -> bool {
+    trigger
+        .events
+        .update_columns
+        .iter()
+        .any(|name| name == column)
+        || trigger.when.as_ref().is_some_and(|predicate| {
+            check_references_column(
+                predicate,
+                column,
+                &table
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+        })
 }
 
 /// Drop one index and its entries, refusing when a foreign key chose it as the
@@ -5777,6 +6286,7 @@ pub(crate) fn rename_name_keyed_metadata_ops(
     let mut ops = crate::inheritance::rename_ops(kv, old_name, new_name)?;
     ops.extend(crate::partition::rename_ops(kv, old_name, new_name)?);
     ops.extend(crate::relstats::rename_ops(kv, old_name, new_name)?);
+    ops.extend(crate::attrstats::rename_ops(kv, old_name, new_name)?);
     Ok(ops)
 }
 
@@ -6544,10 +7054,27 @@ pub(crate) fn comment_ops(
     resolution: &crate::relname::ResolutionScope,
     object_kind: &str,
     object_name: &str,
+    rule_table: Option<&crabka_pgparser::ast::RelationRef>,
     aggregate: Option<&crabka_pgparser::ast::AggregateSignature>,
+    cast: Option<&(ColumnType, ColumnType)>,
     comment: Option<&str>,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     use crabka_pgcatalog::CommentObject;
+
+    if object_kind == "large object" {
+        let oid = object_name
+            .parse::<u32>()
+            .map_err(|_| ExecError::Syntax("large object comments require an OID".into()))?;
+        let _ = crabka_pgcatalog::largeobject::get_metadata(kv, oid)?;
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(object_name),
+                comment,
+            )],
+        ));
+    }
 
     if object_kind == "aggregate" {
         let signature = aggregate.expect("parser records every aggregate comment signature");
@@ -6562,6 +7089,113 @@ pub(crate) fn comment_ops(
             vec![crabka_pgcatalog::set_comment_op(
                 object_kind,
                 CommentObject::Named(&routine.identity()),
+                comment,
+            )],
+        ));
+    }
+
+    if object_kind == "cast" {
+        let &(source, target) = cast.expect("parser records every cast comment signature");
+        let cast =
+            crabka_pgcatalog::get_user_cast(kv, source.oid(), target.oid())?.ok_or_else(|| {
+                ExecError::UndefinedObject(format!(
+                    "cast from type {} to type {} does not exist",
+                    source.name(),
+                    target.name()
+                ))
+            })?;
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(&cast.oid.to_string()),
+                comment,
+            )],
+        ));
+    }
+
+    if object_kind == "access method" {
+        let oid = crate::catalog_rel::access_method_oid(object_name)
+            .map(|oid| u32::try_from(oid).expect("built-in access method oid is positive"))
+            .map_or_else(
+                || {
+                    crabka_pgcatalog::list_access_methods(kv)?
+                        .into_iter()
+                        .find(|method| method.name == object_name)
+                        .map(|method| method.oid)
+                        .ok_or_else(|| {
+                            ExecError::UndefinedObject(format!(
+                                "access method \"{object_name}\" does not exist"
+                            ))
+                        })
+                },
+                Ok,
+            )?;
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(&oid.to_string()),
+                comment,
+            )],
+        ));
+    }
+
+    if matches!(object_kind, "type" | "domain") {
+        let reference = match object_name.split_once('.') {
+            Some((schema, name)) => crabka_pgparser::ast::RelationRef::qualified(schema, name),
+            None => crabka_pgparser::ast::RelationRef::bare(object_name),
+        };
+        let name = resolve_relation(kv, resolution, &reference, SchemaDisposition::Reference)?;
+        let Some(ty) = crabka_pgcatalog::get_user_type(kv, &name)? else {
+            return Err(ExecError::UndefinedObject(format!(
+                "type \"{name}\" does not exist"
+            )));
+        };
+        if object_kind == "domain" && ty.domain().is_none() {
+            return Err(ExecError::WrongObjectType(format!(
+                "\"{name}\" is not a domain"
+            )));
+        }
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(&ty.oid.to_string()),
+                comment,
+            )],
+        ));
+    }
+
+    if matches!(object_kind, "rule" | "trigger") {
+        let table = rule_table.expect("parser records COMMENT ON RULE/TRIGGER's relation");
+        let table = resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
+        let table = crate::trigger::relation_trigger_table(kv, &table)?;
+        let oid = if object_kind == "rule" {
+            crabka_pgcatalog::rule::get_rule(kv, table.id, object_name)?
+                .ok_or_else(|| {
+                    ExecError::UndefinedObject(format!(
+                        "rule \"{object_name}\" for relation \"{}\" does not exist",
+                        table.name
+                    ))
+                })?
+                .oid
+        } else {
+            crabka_pgcatalog::trigger::get_trigger(kv, table.id, object_name)?
+                .ok_or_else(|| {
+                    ExecError::UndefinedObject(format!(
+                        "trigger \"{object_name}\" for table \"{}\" does not exist",
+                        table.name
+                    ))
+                })?
+                .oid
+        }
+        .to_string();
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(&oid),
                 comment,
             )],
         ));

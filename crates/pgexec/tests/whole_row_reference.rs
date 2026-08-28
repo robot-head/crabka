@@ -62,6 +62,11 @@ async fn a_bare_relation_name_is_the_whole_row_as_a_composite() {
     let mut s = engine.connect();
     run(&mut s, "CREATE TABLE wr (a int, b text)").await;
     run(&mut s, "INSERT INTO wr VALUES (1, 'x'), (2, NULL)").await;
+    run(
+        &mut s,
+        "CREATE FUNCTION whole_row_arg(wr) RETURNS TABLE(result text) LANGUAGE sql AS 'SELECT $1.b'",
+    )
+    .await;
 
     let cases: Vec<(&str, Vec<Option<String>>)> = vec![
         // The relation's own name, in declaration order, with a NULL field
@@ -88,6 +93,26 @@ async fn a_bare_relation_name_is_the_whole_row_as_a_composite() {
         (
             "SELECT v FROM (VALUES (1, 2)) v(a, b)",
             vec![Some("(1,2)".into())],
+        ),
+        (
+            "SELECT row_to_json(wr.*)::text FROM wr ORDER BY a",
+            vec![
+                Some(r#"{"a":1,"b":"x"}"#.into()),
+                Some(r#"{"a":2,"b":null}"#.into()),
+            ],
+        ),
+        (
+            "SELECT row_to_json(s.*)::text FROM generate_series(11, 12) WITH ORDINALITY s ORDER BY ordinality",
+            vec![
+                Some(r#"{"s":11,"ordinality":1}"#.into()),
+                Some(r#"{"s":12,"ordinality":2}"#.into()),
+            ],
+        ),
+        // A FROM function is implicitly LATERAL. Its whole-row argument must
+        // therefore be substituted from the preceding relation.
+        (
+            "SELECT result FROM wr, whole_row_arg(wr) ORDER BY a",
+            vec![Some("x".into()), None],
         ),
         // It is an ordinary value, so it aggregates, orders and groups.
         (

@@ -469,11 +469,103 @@ fn normalize_query(
     query: TsQuery,
     catalog: Catalog<'_>,
 ) -> Result<TsQuery, ExecError> {
-    let simple = validate_config(config, catalog)?;
+    let dictionaries = crate::text_search_catalog::config_dictionaries(catalog, config)?;
+    if dictionaries != ["simple"] && dictionaries != ["english_stem"] {
+        return mapped_query(query, &dictionaries, catalog);
+    }
+    let simple = dictionaries == ["simple"];
     let stemmer = Stemmer::create(Algorithm::English);
     Ok(normalize_query_inner(query, simple, &stemmer)
         .0
         .unwrap_or(TsQuery::Empty))
+}
+
+fn mapped_query(
+    query: TsQuery,
+    dictionaries: &[String],
+    catalog: Catalog<'_>,
+) -> Result<TsQuery, ExecError> {
+    Ok(match query {
+        TsQuery::Empty => TsQuery::Empty,
+        TsQuery::Term(term) => {
+            let mut groups = Vec::new();
+            for dictionary in dictionaries {
+                let template =
+                    crate::text_search_catalog::dictionary_template(catalog, dictionary)?;
+                if let crate::text_search_catalog::DictionaryTemplate::Ispell {
+                    dict_file,
+                    aff_file,
+                } = template
+                {
+                    if let Some(words) = crate::text_search_ispell::query_lexize_files(
+                        &term.text, &dict_file, &aff_file,
+                    ) {
+                        groups = words;
+                        break;
+                    }
+                } else if let crate::text_search_catalog::DictionaryTemplate::Synonym {
+                    synonyms,
+                    case_sensitive,
+                } = &template
+                {
+                    if let Some(words) =
+                        crate::text_search_synonym::lexize(&term.text, synonyms, *case_sensitive)
+                    {
+                        groups = words.into_iter().map(|word| vec![word]).collect();
+                        break;
+                    }
+                } else if let Some(words) = lexize_dictionary(dictionary, &term.text, catalog)? {
+                    groups = words.into_iter().map(|word| vec![word]).collect();
+                    break;
+                }
+            }
+            groups
+                .into_iter()
+                .map(|words| {
+                    words.into_iter().fold(TsQuery::Empty, |query, text| {
+                        let (text, synonym_prefix) = text
+                            .strip_suffix('*')
+                            .map_or((text.as_str(), false), |text| (text, true));
+                        combine_nonempty(
+                            query,
+                            TsQuery::Term(QueryTerm {
+                                text: text.into(),
+                                weights: term.weights.clone(),
+                                prefix: term.prefix || synonym_prefix,
+                            }),
+                            |left, right| TsQuery::And(Box::new(left), Box::new(right)),
+                        )
+                    })
+                })
+                .reduce(|left, right| TsQuery::Or(Box::new(left), Box::new(right)))
+                .unwrap_or(TsQuery::Empty)
+        }
+        TsQuery::Not(inner) => match mapped_query(*inner, dictionaries, catalog)? {
+            TsQuery::Empty => TsQuery::Empty,
+            query => TsQuery::Not(Box::new(query)),
+        },
+        TsQuery::And(left, right) => {
+            let left = mapped_query(*left, dictionaries, catalog)?;
+            let right = mapped_query(*right, dictionaries, catalog)?;
+            combine_nonempty(left, right, |left, right| {
+                TsQuery::And(Box::new(left), Box::new(right))
+            })
+        }
+        TsQuery::Or(left, right) => {
+            let left = mapped_query(*left, dictionaries, catalog)?;
+            let right = mapped_query(*right, dictionaries, catalog)?;
+            combine_nonempty(left, right, |left, right| {
+                TsQuery::Or(Box::new(left), Box::new(right))
+            })
+        }
+        TsQuery::Phrase(left, right, distance) => {
+            let left = mapped_query(*left, dictionaries, catalog)?;
+            let right = mapped_query(*right, dictionaries, catalog)?;
+            combine_nonempty(left, right, |left, right| {
+                TsQuery::Phrase(Box::new(left), Box::new(right), distance)
+            })
+        }
+    })
 }
 
 /// The distance a vanished operand still contributes to its parent phrase, on
@@ -654,13 +746,36 @@ pub(crate) fn plain_query(
     catalog: Catalog<'_>,
 ) -> Result<TsQuery, ExecError> {
     let terms = normalized_terms(config, source, catalog)?;
-    let mut iter = terms.into_iter();
-    let Some((first, mut last_position)) = iter.next() else {
+    let mut groups = terms
+        .into_iter()
+        .fold(
+            Vec::<(u16, Vec<String>)>::new(),
+            |mut groups, (text, position)| {
+                if let Some((last_position, texts)) = groups.last_mut()
+                    && *last_position == position
+                {
+                    texts.push(text);
+                } else {
+                    groups.push((position, vec![text]));
+                }
+                groups
+            },
+        )
+        .into_iter();
+    let Some((mut last_position, first)) = groups.next() else {
         return Ok(TsQuery::Empty);
     };
-    let mut query = term(first);
-    for (text, position) in iter {
-        let right = term(text);
+    let mut query = first
+        .into_iter()
+        .map(term)
+        .reduce(|left, right| TsQuery::And(Box::new(left), Box::new(right)))
+        .expect("a text-search position has a lexeme");
+    for (position, texts) in groups {
+        let right = texts
+            .into_iter()
+            .map(term)
+            .reduce(|left, right| TsQuery::And(Box::new(left), Box::new(right)))
+            .expect("a text-search position has a lexeme");
         query = if phrase {
             TsQuery::Phrase(
                 Box::new(query),
@@ -906,24 +1021,58 @@ fn lexize(fc: &FuncCall, values: &[Datum], catalog: Catalog<'_>) -> Result<Datum
         [got] | [got, _] => return Err(type_error("regdictionary", got)),
         _ => return Err(undefined_function(&fc.name)),
     };
+    let Some(lexemes) = lexize_dictionary(dictionary, token, catalog)? else {
+        return Ok(Datum::Null);
+    };
+    Ok(Datum::Array(ArrayValue::new(
+        ElemType::Text,
+        lexemes.into_iter().map(Datum::Text).collect(),
+    )))
+}
+
+fn lexize_dictionary(
+    dictionary: &str,
+    token: &str,
+    catalog: Catalog<'_>,
+) -> Result<Option<Vec<String>>, ExecError> {
     let template = crate::text_search_catalog::dictionary_template(catalog, dictionary)?;
     let folded = token.to_lowercase();
-    let swallowed = folded.is_empty()
-        || (template == crate::text_search_catalog::DictionaryTemplate::Snowball
-            && is_stopword(&folded));
-    let lexemes = if swallowed {
-        Vec::new()
-    } else {
-        vec![Datum::Text(match template {
-            crate::text_search_catalog::DictionaryTemplate::Simple => folded,
-            crate::text_search_catalog::DictionaryTemplate::Snowball => {
-                Stemmer::create(Algorithm::English)
-                    .stem(&folded)
-                    .into_owned()
+    Ok(match template {
+        crate::text_search_catalog::DictionaryTemplate::Ispell {
+            dict_file,
+            aff_file,
+        } => crate::text_search_ispell::lexize_files(&folded, &dict_file, &aff_file),
+        crate::text_search_catalog::DictionaryTemplate::Synonym {
+            synonyms,
+            case_sensitive,
+        } => crate::text_search_synonym::lexize(token, &synonyms, case_sensitive).map(|words| {
+            words
+                .into_iter()
+                .map(|word| word.trim_end_matches('*').into())
+                .collect()
+        }),
+        crate::text_search_catalog::DictionaryTemplate::Thesaurus { dict_file, .. } => {
+            crate::text_search_thesaurus::lexize(token, &dict_file)
+        }
+        crate::text_search_catalog::DictionaryTemplate::Simple => {
+            if folded.is_empty() {
+                Some(Vec::new())
+            } else {
+                Some(vec![folded])
             }
-        })]
-    };
-    Ok(Datum::Array(ArrayValue::new(ElemType::Text, lexemes)))
+        }
+        crate::text_search_catalog::DictionaryTemplate::Snowball => {
+            if folded.is_empty() || is_stopword(&folded) {
+                Some(Vec::new())
+            } else {
+                Some(vec![
+                    Stemmer::create(Algorithm::English)
+                        .stem(&folded)
+                        .into_owned(),
+                ])
+            }
+        }
+    })
 }
 
 fn default_config() -> Result<String, ExecError> {
@@ -1028,21 +1177,50 @@ fn normalized_terms(
     source: &str,
     catalog: Catalog<'_>,
 ) -> Result<Vec<(String, u16)>, ExecError> {
-    let simple = validate_config(config, catalog)?;
-    let stemmer = Stemmer::create(Algorithm::English);
-    Ok(words(source)
-        .enumerate()
-        .filter_map(|(index, word)| {
-            let lower = word.to_lowercase();
-            if !simple && is_stopword(&lower) {
-                return None;
+    let dictionaries = crate::text_search_catalog::config_dictionaries(catalog, config)?;
+    let thesaurus = dictionaries.iter().find_map(|dictionary| {
+        match crate::text_search_catalog::dictionary_template(catalog, dictionary).ok()? {
+            crate::text_search_catalog::DictionaryTemplate::Thesaurus {
+                dict_file,
+                dictionary,
+            } => Some((dict_file, dictionary)),
+            _ => None,
+        }
+    });
+    let source_words = words(source).collect::<Vec<_>>();
+    let mut terms = Vec::new();
+    let mut index = 0;
+    let mut output_position = 1_u16;
+    while index < source_words.len() {
+        let word = source_words[index];
+        let position = output_position.min(MAX_POSITION);
+        if let Some((dict_file, dictionary)) = &thesaurus
+            && let Some((consumed, lexemes)) =
+                crate::text_search_thesaurus::lexize_phrase(&source_words[index..], dict_file)
+        {
+            let mut produced = 0_u16;
+            for lexeme in lexemes {
+                let lexeme = lexize_dictionary(dictionary, &lexeme, catalog)?
+                    .unwrap_or_else(|| vec![lexeme]);
+                for lexeme in lexeme {
+                    terms.push((lexeme, position.saturating_add(produced).min(MAX_POSITION)));
+                    produced = produced.saturating_add(1);
+                }
             }
-            let position = u16::try_from(index + 1)
-                .unwrap_or(MAX_POSITION)
-                .min(MAX_POSITION);
-            Some((normalize_word(&lower, simple, &stemmer), position))
-        })
-        .collect())
+            index += consumed;
+            output_position = output_position.saturating_add(produced.max(1));
+            continue;
+        }
+        for dictionary in &dictionaries {
+            if let Some(lexemes) = lexize_dictionary(dictionary, word, catalog)? {
+                terms.extend(lexemes.into_iter().map(|lexeme| (lexeme, position)));
+                break;
+            }
+        }
+        index += 1;
+        output_position = output_position.saturating_add(1);
+    }
+    Ok(terms)
 }
 
 fn words(source: &str) -> impl Iterator<Item = &str> {

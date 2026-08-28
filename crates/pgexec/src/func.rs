@@ -21,6 +21,7 @@
 
 use std::{
     cmp::Ordering,
+    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     time::{Duration, Instant},
 };
 
@@ -45,6 +46,8 @@ enum ScalarFunc {
     Overlay,
     Replace,
     Concat,
+    NumNonNulls,
+    NumNulls,
     Abs,
     Mod,
     TypedAdd(ColumnType),
@@ -52,7 +55,11 @@ enum ScalarFunc {
     Int8Inc,
     Int4Sum,
     Int4Larger,
+    Int4Smaller,
     ArrayLarger,
+    EnumFirst,
+    EnumLast,
+    EnumRange,
     Int4AvgAccum,
     Int8Avg,
     Float8Accum,
@@ -136,6 +143,11 @@ enum ScalarFunc {
     IntervalHash,
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
+    UuidV4,
+    UuidV7,
+    UuidExtractVersion,
+    UuidExtractTimestamp,
+    PgGetFunctionArgDefault,
     RangeConstructor(RangeRef),
     MultirangeConstructor(MultirangeRef),
     GenericMultirangeConstructor,
@@ -152,16 +164,116 @@ enum ScalarFunc {
     RangeMerge,
     MultirangePredicate,
     PgTableIsVisible,
+    LoCreate,
+    LoOpen,
+    LoClose,
+    LoRead,
+    LoWrite,
+    LoSeek,
+    LoTell,
+    LoFromBytea,
+    LoImport,
+    LoExport,
+    LoGet,
+    LoPut,
+    LoTruncate,
+    LoUnlink,
     NextVal,
     CurrVal,
     SetVal,
     PgNotify,
+    RestoreRelationStats,
+    ClearRelationStats,
+    RestoreAttributeStats,
+    ClearAttributeStats,
+}
+
+static UUID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn uuid_v4() -> crabka_pgtypes::uuid::UuidBytes {
+    let mut bytes = UUID_SEQUENCE
+        .fetch_add(1, AtomicOrdering::Relaxed)
+        .to_be_bytes()
+        .repeat(2);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    crabka_pgtypes::uuid::UuidBytes(bytes.try_into().expect("16 UUID bytes"))
+}
+
+fn uuid_v7(timestamp: jiff::Timestamp) -> crabka_pgtypes::uuid::UuidBytes {
+    let millis = timestamp.as_millisecond();
+    let mut bytes = [0; 16];
+    bytes[..6].copy_from_slice(&(millis as u64).to_be_bytes()[2..]);
+    bytes[8..].copy_from_slice(
+        &UUID_SEQUENCE
+            .fetch_add(1, AtomicOrdering::Relaxed)
+            .to_be_bytes(),
+    );
+    bytes[6] = 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    crabka_pgtypes::uuid::UuidBytes(bytes)
+}
+
+fn uuid_bytes(value: &Datum) -> Result<crabka_pgtypes::uuid::UuidBytes, ExecError> {
+    match value {
+        Datum::Text(value) => Ok(crabka_pgtypes::uuid::UuidBytes::parse(value)?),
+        other => Err(type_error("uuid", other)),
+    }
+}
+
+fn uuid_timestamp(
+    value: crabka_pgtypes::uuid::UuidBytes,
+) -> Result<Option<jiff::Timestamp>, ExecError> {
+    let bytes = value.0;
+    if bytes[8] & 0xc0 != 0x80 {
+        return Ok(None);
+    }
+    match bytes[6] >> 4 {
+        1 => {
+            let ticks = (u64::from(bytes[6] & 0x0f) << 56)
+                | (u64::from(bytes[7]) << 48)
+                | (u64::from(u16::from_be_bytes([bytes[4], bytes[5]])) << 32)
+                | u64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+            const UUID_EPOCH_TICKS: u64 = 122_192_928_000_000_000;
+            let Some(unix_ticks) = ticks.checked_sub(UUID_EPOCH_TICKS) else {
+                return Ok(None);
+            };
+            let micros = i64::try_from(unix_ticks / 10).map_err(|_| ExecError::FunctionError {
+                sqlstate: "22008",
+                message: "timestamp out of range".into(),
+            })?;
+            Ok(Some(jiff::Timestamp::from_microsecond(micros).map_err(
+                |_| ExecError::FunctionError {
+                    sqlstate: "22008",
+                    message: "timestamp out of range".into(),
+                },
+            )?))
+        }
+        7 => {
+            let mut raw = [0; 8];
+            raw[2..].copy_from_slice(&bytes[..6]);
+            Ok(Some(
+                jiff::Timestamp::from_millisecond(i64::try_from(u64::from_be_bytes(raw)).map_err(
+                    |_| ExecError::FunctionError {
+                        sqlstate: "22008",
+                        message: "timestamp out of range".into(),
+                    },
+                )?)
+                .map_err(|_| ExecError::FunctionError {
+                    sqlstate: "22008",
+                    message: "timestamp out of range".into(),
+                })?,
+            ))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Classify a lowercased function name. The lexer lowercases unquoted idents.
 /// `None` means "not a known scalar function". The caller then tries the
 /// aggregate path or reports an undefined function.
 fn scalar_func(name: &str) -> Option<ScalarFunc> {
+    let name = name.strip_prefix("pg_catalog.").unwrap_or(name);
     Some(match name {
         "length" | "char_length" | "character_length" => ScalarFunc::Length,
         "upper" => ScalarFunc::Upper,
@@ -173,6 +285,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "overlay" => ScalarFunc::Overlay,
         "replace" => ScalarFunc::Replace,
         "concat" => ScalarFunc::Concat,
+        "num_nonnulls" => ScalarFunc::NumNonNulls,
+        "num_nulls" => ScalarFunc::NumNulls,
         "abs" => ScalarFunc::Abs,
         "mod" => ScalarFunc::Mod,
         "int2pl" => ScalarFunc::TypedAdd(ColumnType::Int2),
@@ -184,7 +298,11 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "int8inc" => ScalarFunc::Int8Inc,
         "int4_sum" => ScalarFunc::Int4Sum,
         "int4larger" => ScalarFunc::Int4Larger,
+        "int4smaller" => ScalarFunc::Int4Smaller,
         "array_larger" => ScalarFunc::ArrayLarger,
+        "enum_first" => ScalarFunc::EnumFirst,
+        "enum_last" => ScalarFunc::EnumLast,
+        "enum_range" => ScalarFunc::EnumRange,
         "int4_avg_accum" => ScalarFunc::Int4AvgAccum,
         "int8_avg" => ScalarFunc::Int8Avg,
         "float8_accum" => ScalarFunc::Float8Accum,
@@ -279,6 +397,11 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_numa_available" => ScalarFunc::PgNumaAvailable,
         "interval_hash" => ScalarFunc::IntervalHash,
         "pg_sleep" => ScalarFunc::PgSleep,
+        "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
+        "uuidv7" => ScalarFunc::UuidV7,
+        "uuid_extract_version" => ScalarFunc::UuidExtractVersion,
+        "uuid_extract_timestamp" => ScalarFunc::UuidExtractTimestamp,
+        "pg_get_function_arg_default" => ScalarFunc::PgGetFunctionArgDefault,
         "isempty" => ScalarFunc::IsEmpty,
         "lower_inc" => ScalarFunc::LowerInc,
         "lower_inf" => ScalarFunc::LowerInf,
@@ -300,10 +423,28 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         | "range_contained_by_multirange"
         | "multirange_contained_by_multirange" => ScalarFunc::MultirangePredicate,
         "pg_table_is_visible" => ScalarFunc::PgTableIsVisible,
+        "lo_create" | "lo_creat" => ScalarFunc::LoCreate,
+        "lo_open" => ScalarFunc::LoOpen,
+        "lo_close" => ScalarFunc::LoClose,
+        "loread" => ScalarFunc::LoRead,
+        "lowrite" => ScalarFunc::LoWrite,
+        "lo_lseek" | "lo_lseek64" => ScalarFunc::LoSeek,
+        "lo_tell" | "lo_tell64" => ScalarFunc::LoTell,
+        "lo_from_bytea" => ScalarFunc::LoFromBytea,
+        "lo_import" => ScalarFunc::LoImport,
+        "lo_export" => ScalarFunc::LoExport,
+        "lo_get" => ScalarFunc::LoGet,
+        "lo_put" => ScalarFunc::LoPut,
+        "lo_truncate" | "lo_truncate64" => ScalarFunc::LoTruncate,
+        "lo_unlink" => ScalarFunc::LoUnlink,
         "nextval" => ScalarFunc::NextVal,
         "currval" => ScalarFunc::CurrVal,
         "setval" => ScalarFunc::SetVal,
         "pg_notify" => ScalarFunc::PgNotify,
+        "pg_restore_relation_stats" => ScalarFunc::RestoreRelationStats,
+        "pg_clear_relation_stats" => ScalarFunc::ClearRelationStats,
+        "pg_restore_attribute_stats" => ScalarFunc::RestoreAttributeStats,
+        "pg_clear_attribute_stats" => ScalarFunc::ClearAttributeStats,
         "multirange" => ScalarFunc::GenericMultirangeConstructor,
         _ => match ColumnType::from_sql_name(name) {
             Some(ColumnType::Range(range)) => ScalarFunc::RangeConstructor(range),
@@ -572,13 +713,45 @@ fn exprs_of(fc: &FuncCall) -> Result<&[Expr], ExecError> {
 /// list. Shared front-door check for both `scalar_result_type` and
 /// `eval_scalar`.
 pub(crate) fn checked_args(fc: &FuncCall) -> Result<&[Expr], ExecError> {
+    check_scalar_modifiers(fc)?;
+    exprs_of(fc)
+}
+
+pub(crate) fn check_scalar_modifiers(fc: &FuncCall) -> Result<(), ExecError> {
     if fc.distinct {
         return Err(distinct_not_aggregate(&fc.name));
     }
     if !fc.order_by.is_empty() {
         return Err(order_by_not_aggregate(&fc.name));
     }
-    exprs_of(fc)
+    Ok(())
+}
+
+/// The values passed through SQL's `VARIADIC array_expression` syntax.
+pub(crate) enum ExpandedVariadicArgs {
+    Values(Vec<Datum>),
+    NullArray(Vec<Datum>),
+}
+
+pub(crate) fn expand_variadic_args(
+    positional: &[Expr],
+    array: &Expr,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> Result<ExpandedVariadicArgs, ExecError> {
+    let mut values = positional
+        .iter()
+        .map(&mut eval_child)
+        .collect::<Result<Vec<_>, _>>()?;
+    match eval_child(array)? {
+        Datum::Array(array) => {
+            values.extend(array.elems);
+            Ok(ExpandedVariadicArgs::Values(values))
+        }
+        Datum::Null => Ok(ExpandedVariadicArgs::NullArray(values)),
+        _ => Err(ExecError::TypeMismatch(
+            "VARIADIC argument must be an array".into(),
+        )),
+    }
 }
 
 /// Statically infer a scalar call's result type, for RowDescription.
@@ -643,6 +816,18 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
         return crate::geometry_fn::geometry_func_result_type(fc, scope);
     }
     let f = scalar_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
+    if matches!(
+        f,
+        ScalarFunc::Concat | ScalarFunc::NumNonNulls | ScalarFunc::NumNulls
+    ) && let FuncArgs::Variadic { .. } = &fc.args
+    {
+        check_scalar_modifiers(fc)?;
+        return Ok(match f {
+            ScalarFunc::Concat => ColumnType::Text,
+            ScalarFunc::NumNonNulls | ScalarFunc::NumNulls => ColumnType::Int4,
+            _ => unreachable!(),
+        });
+    }
     let args = checked_args(fc)?;
     let n = args.len();
     match f {
@@ -663,7 +848,12 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 // `length(bit)` is `bitlength` — the bit count, not a
                 // character count.
                 ty if crate::bit_fn::is_bit_type(ty) => {}
-                _ => require_text(&args[0], scope)?,
+                _ => require_text(&args[0], scope).map_err(|error| match error {
+                    ExecError::UndefinedFunction(_) => {
+                        undefined_function_spelled(&fc.name, args, scope)
+                    }
+                    other => other,
+                })?,
             }
             Ok(ColumnType::Int4)
         }
@@ -835,7 +1025,7 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 Err(undefined_function_spelled(&fc.name, args, scope))
             }
         }
-        ScalarFunc::Int4Larger => {
+        ScalarFunc::Int4Larger | ScalarFunc::Int4Smaller => {
             require_arity(fc, n == 2)?;
             if args
                 .iter()
@@ -855,6 +1045,16 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             } else {
                 Err(undefined_function_spelled(&fc.name, args, scope))
             }
+        }
+        ScalarFunc::EnumFirst | ScalarFunc::EnumLast => {
+            require_arity(fc, n == 1)?;
+            Ok(ColumnType::Enum(enum_arg_type(fc, args, scope)?))
+        }
+        ScalarFunc::EnumRange => {
+            require_arity(fc, n == 1 || n == 2)?;
+            Ok(ColumnType::Array(ElemType::User(enum_arg_type(
+                fc, args, scope,
+            )?)))
         }
         ScalarFunc::Int4AvgAccum => {
             require_arity(fc, n == 2)?;
@@ -967,6 +1167,10 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             }
             Ok(ty)
         }
+        ScalarFunc::NumNonNulls | ScalarFunc::NumNulls => {
+            require_arity(fc, n >= 1)?;
+            Ok(ColumnType::Int4)
+        }
         ScalarFunc::Floor | ScalarFunc::Ceil | ScalarFunc::Sign => {
             require_arity(fc, n == 1)?;
             // preserves the input numeric type (int2/int4/int8/numeric); `real`
@@ -1044,6 +1248,33 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             require_arity(fc, n == 1)?;
             require_numeric(&args[0], scope)?;
             Ok(crate::routine::VOID_RESULT_TYPE)
+        }
+        ScalarFunc::UuidV4 => {
+            require_arity(fc, n == 0)?;
+            Ok(ColumnType::Uuid)
+        }
+        ScalarFunc::UuidV7 => {
+            require_arity(fc, n <= 1)?;
+            if let Some(arg) = args.first()
+                && crate::eval::infer_type(arg, scope)? != ColumnType::Interval
+            {
+                return Err(no_matching_function());
+            }
+            Ok(ColumnType::Uuid)
+        }
+        ScalarFunc::UuidExtractVersion => {
+            require_arity(fc, n == 1)?;
+            require_uuid(&args[0], scope)?;
+            Ok(ColumnType::Int4)
+        }
+        ScalarFunc::UuidExtractTimestamp => {
+            require_arity(fc, n == 1)?;
+            require_uuid(&args[0], scope)?;
+            Ok(ColumnType::Timestamptz)
+        }
+        ScalarFunc::PgGetFunctionArgDefault => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Text)
         }
         // `float4send(real)` is `real`'s binary output function, and the wire
         // format is what it returns: four big-endian IEEE 754 bytes. The suite
@@ -1294,6 +1525,101 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             require_int(&args[0], scope)?;
             Ok(ColumnType::Bool)
         }
+        ScalarFunc::LoCreate => {
+            require_arity(fc, n == 1)?;
+            require_oid_or_null(&args[0], scope)?;
+            Ok(ColumnType::Oid)
+        }
+        ScalarFunc::LoOpen => {
+            require_arity(fc, n == 2)?;
+            require_oid_or_null(&args[0], scope)?;
+            require_int(&args[1], scope)?;
+            Ok(ColumnType::Int4)
+        }
+        ScalarFunc::LoClose => {
+            require_arity(fc, n == 1)?;
+            require_int(&args[0], scope)?;
+            Ok(ColumnType::Int4)
+        }
+        ScalarFunc::LoRead => {
+            require_arity(fc, n == 2)?;
+            require_int(&args[0], scope)?;
+            require_int(&args[1], scope)?;
+            Ok(ColumnType::Bytea)
+        }
+        ScalarFunc::LoWrite => {
+            require_arity(fc, n == 2)?;
+            require_int(&args[0], scope)?;
+            require_bytea(&args[1], scope)?;
+            Ok(ColumnType::Int4)
+        }
+        ScalarFunc::LoSeek => {
+            require_arity(fc, n == 3)?;
+            require_int(&args[0], scope)?;
+            require_int(&args[1], scope)?;
+            require_int(&args[2], scope)?;
+            Ok(if fc.name == "lo_lseek" {
+                ColumnType::Int4
+            } else {
+                ColumnType::Int8
+            })
+        }
+        ScalarFunc::LoTell => {
+            require_arity(fc, n == 1)?;
+            require_int(&args[0], scope)?;
+            Ok(if fc.name == "lo_tell" {
+                ColumnType::Int4
+            } else {
+                ColumnType::Int8
+            })
+        }
+        ScalarFunc::LoFromBytea => {
+            require_arity(fc, n == 2)?;
+            require_oid_or_null(&args[0], scope)?;
+            require_bytea(&args[1], scope)?;
+            Ok(ColumnType::Oid)
+        }
+        ScalarFunc::LoImport => {
+            require_arity(fc, n == 1 || n == 2)?;
+            require_text(&args[0], scope)?;
+            if n == 2 {
+                require_oid_or_null(&args[1], scope)?;
+            }
+            Ok(ColumnType::Oid)
+        }
+        ScalarFunc::LoExport => {
+            require_arity(fc, n == 2)?;
+            require_oid_or_null(&args[0], scope)?;
+            require_text(&args[1], scope)?;
+            Ok(ColumnType::Int4)
+        }
+        ScalarFunc::LoGet => {
+            require_arity(fc, n == 1 || n == 3)?;
+            require_oid_or_null(&args[0], scope)?;
+            if n == 3 {
+                require_int(&args[1], scope)?;
+                require_int(&args[2], scope)?;
+            }
+            Ok(ColumnType::Bytea)
+        }
+        ScalarFunc::LoPut => {
+            require_arity(fc, n == 3)?;
+            require_oid_or_null(&args[0], scope)?;
+            require_int(&args[1], scope)?;
+            require_bytea(&args[2], scope)?;
+            Ok(crate::routine::VOID_RESULT_TYPE)
+        }
+        ScalarFunc::LoTruncate => {
+            require_arity(fc, n == 2)?;
+            require_int(&args[0], scope)?;
+            require_int(&args[1], scope)?;
+            Ok(ColumnType::Int4)
+        }
+        ScalarFunc::LoUnlink => {
+            require_arity(fc, n == 1)?;
+            require_oid_or_null(&args[0], scope)?;
+            Ok(ColumnType::Int4)
+        }
         ScalarFunc::NextVal | ScalarFunc::CurrVal => {
             require_arity(fc, n == 1)?;
             require_text(&args[0], scope)?;
@@ -1316,6 +1642,16 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             require_arity(fc, n == 2)?;
             require_text(&args[0], scope)?;
             require_text(&args[1], scope)?;
+            Ok(ColumnType::Text)
+        }
+        ScalarFunc::RestoreRelationStats => Ok(ColumnType::Bool),
+        ScalarFunc::ClearRelationStats => {
+            require_arity(fc, n == 2)?;
+            Ok(ColumnType::Text)
+        }
+        ScalarFunc::RestoreAttributeStats => Ok(ColumnType::Bool),
+        ScalarFunc::ClearAttributeStats => {
+            require_arity(fc, n == 4)?;
             Ok(ColumnType::Text)
         }
     }
@@ -1388,8 +1724,22 @@ fn builtin_eval_scalar(
         return crate::geometry_fn::eval_geometry(fc, ctx, eval_child);
     }
     let f = scalar_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
+    if matches!(
+        f,
+        ScalarFunc::Concat | ScalarFunc::NumNonNulls | ScalarFunc::NumNulls
+    ) && let FuncArgs::Variadic { positional, array } = &fc.args
+    {
+        check_scalar_modifiers(fc)?;
+        return match expand_variadic_args(positional, array, eval_child)? {
+            ExpandedVariadicArgs::Values(values) => eval_eager(f, fc, &values, ctx),
+            ExpandedVariadicArgs::NullArray(_) => Ok(Datum::Null),
+        };
+    }
     let args = checked_args(fc)?;
-    if matches!(f, ScalarFunc::BoolState { .. } | ScalarFunc::BoolCompare { .. }) {
+    if matches!(
+        f,
+        ScalarFunc::BoolState { .. } | ScalarFunc::BoolCompare { .. }
+    ) {
         require_arity(fc, args.len() == 2)?;
         if let Some(scope) = scope {
             for arg in args {
@@ -1508,6 +1858,53 @@ fn builtin_eval_scalar(
             let channel = eval_child(&args[0])?;
             let payload = eval_child(&args[1])?;
             eval_pg_notify(&channel, &payload, ctx)
+        }
+        ScalarFunc::RestoreRelationStats => {
+            let values = args
+                .iter()
+                .map(&mut eval_child)
+                .collect::<Result<Vec<_>, _>>()?;
+            crate::routine::request_statistics(crate::stats_fn::StatisticsRequest::RestoreRelation(
+                values,
+            ))
+        }
+        ScalarFunc::ClearRelationStats => {
+            require_arity(fc, args.len() == 2)?;
+            let values = args
+                .iter()
+                .map(&mut eval_child)
+                .collect::<Result<Vec<_>, _>>()?;
+            crate::routine::request_statistics(crate::stats_fn::StatisticsRequest::ClearRelation(
+                values,
+            ))
+        }
+        ScalarFunc::RestoreAttributeStats => {
+            let values = args
+                .iter()
+                .map(&mut eval_child)
+                .collect::<Result<Vec<_>, _>>()?;
+            crate::routine::request_statistics(
+                crate::stats_fn::StatisticsRequest::RestoreAttribute(values),
+            )
+        }
+        ScalarFunc::ClearAttributeStats => {
+            require_arity(fc, args.len() == 4)?;
+            let values = args
+                .iter()
+                .map(&mut eval_child)
+                .collect::<Result<Vec<_>, _>>()?;
+            crate::routine::request_statistics(crate::stats_fn::StatisticsRequest::ClearAttribute(
+                values,
+            ))
+        }
+        ScalarFunc::EnumFirst | ScalarFunc::EnumLast | ScalarFunc::EnumRange => {
+            let scope = scope.ok_or_else(|| undefined_function(&fc.name))?;
+            let ty = enum_arg_type(fc, args, scope)?;
+            let vals = args
+                .iter()
+                .map(&mut eval_child)
+                .collect::<Result<Vec<_>, _>>()?;
+            eval_enum_support(f, fc, ty, &vals, ctx)
         }
         // Eager, strict-or-concat functions: evaluate every argument first.
         _ => {
@@ -1652,9 +2049,10 @@ fn coerce_unknown_args(
 }
 
 /// Apply an eager scalar function to its already-evaluated arguments. Every
-/// function here except `concat` and `int4_sum` is strict, and returns NULL
-/// for any NULL argument. `concat` skips NULLs and `int4_sum` initializes or
-/// preserves its aggregate state around a NULL.
+/// function here except `concat`, `num_nonnulls`, `num_nulls`, and `int4_sum`
+/// is strict and returns NULL for any NULL argument. The count functions
+/// inspect NULLs, `concat` skips them, and `int4_sum` initializes or preserves
+/// its aggregate state around one.
 fn eval_eager(
     f: ScalarFunc,
     fc: &FuncCall,
@@ -1662,16 +2060,29 @@ fn eval_eager(
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
     if let ScalarFunc::Concat = f {
-        // `concat` renders each argument via its canonical wire text encoding,
-        // using the session zone from `ctx` (so `Timestamptz` agrees with DataRow).
-        let tz = &ctx.time_zone;
+        // `concat` runs each argument through its output function in the
+        // session's styles, so DateStyle and IntervalStyle match DataRow.
         let mut s = String::new();
         for v in vals {
             if !v.is_null() {
-                s.push_str(&text_render(v, tz));
+                s.push_str(&text_render_in(v, ctx.output_style()));
             }
         }
         return Ok(Datum::Text(s));
+    }
+    if matches!(f, ScalarFunc::NumNonNulls | ScalarFunc::NumNulls) {
+        require_arity(
+            fc,
+            !vals.is_empty() || matches!(&fc.args, FuncArgs::Variadic { .. }),
+        )?;
+        let want_null = f == ScalarFunc::NumNulls;
+        return i32::try_from(
+            vals.iter()
+                .filter(|value| value.is_null() == want_null)
+                .count(),
+        )
+        .map(Datum::Int4)
+        .map_err(|_| ExecError::Type(crabka_pgtypes::TypeError::Overflow));
     }
     if let ScalarFunc::RangeConstructor(range) = f {
         return eval_range_constructor(range, fc, vals, ctx);
@@ -2038,6 +2449,13 @@ fn eval_eager(
             };
             Ok(Datum::Int4((*left).max(*right)))
         }
+        ScalarFunc::Int4Smaller => {
+            require_arity(fc, vals.len() == 2)?;
+            let (Datum::Int4(left), Datum::Int4(right)) = (&vals[0], &vals[1]) else {
+                return Err(undefined_function(&fc.name));
+            };
+            Ok(Datum::Int4((*left).min(*right)))
+        }
         ScalarFunc::ArrayLarger => {
             require_arity(fc, vals.len() == 2)?;
             let (Datum::Array(left), Datum::Array(right)) = (&vals[0], &vals[1]) else {
@@ -2131,8 +2549,11 @@ fn eval_eager(
             let Datum::Float8(value) = vals[1] else {
                 return Err(type_error(&fc.name, &vals[1]));
             };
-            let [Datum::Float8(count), Datum::Float8(sum), Datum::Float8(sum2)] =
-                state.elems.as_slice()
+            let [
+                Datum::Float8(count),
+                Datum::Float8(sum),
+                Datum::Float8(sum2),
+            ] = state.elems.as_slice()
             else {
                 unreachable!("validated float8 accumulator state");
             };
@@ -2275,6 +2696,50 @@ fn eval_eager(
             sleep_for(as_f64(&vals[0])?)?;
             Ok(crate::routine::void_result_value())
         }
+        ScalarFunc::UuidV4 => {
+            require_arity(fc, vals.is_empty())?;
+            Ok(Datum::Text(uuid_v4().to_canonical_text()))
+        }
+        ScalarFunc::UuidV7 => {
+            require_arity(fc, vals.len() <= 1)?;
+            let timestamp = match vals {
+                [] => ctx.stmt_now,
+                [Datum::Interval(interval)] => crabka_pgtypes::datetime::timestamptz_plus_interval(
+                    ctx.stmt_now,
+                    *interval,
+                    &ctx.time_zone,
+                )?,
+                _ => return Err(no_matching_function()),
+            };
+            Ok(Datum::Text(uuid_v7(timestamp).to_canonical_text()))
+        }
+        ScalarFunc::UuidExtractVersion => {
+            require_arity(fc, vals.len() == 1)?;
+            let bytes = uuid_bytes(&vals[0])?.0;
+            let version = bytes[6] >> 4;
+            Ok(if bytes[8] & 0xc0 == 0x80 && matches!(version, 1..=8) {
+                Datum::Int4(i32::from(version))
+            } else {
+                Datum::Null
+            })
+        }
+        ScalarFunc::UuidExtractTimestamp => {
+            require_arity(fc, vals.len() == 1)?;
+            Ok(uuid_timestamp(uuid_bytes(&vals[0])?)?
+                .map(Datum::Timestamptz)
+                .unwrap_or(Datum::Null))
+        }
+        ScalarFunc::PgGetFunctionArgDefault => {
+            require_arity(fc, vals.len() == 2)?;
+            let Some(kv) = ctx.catalog() else {
+                return Err(ExecError::Unsupported(
+                    "pg_get_function_arg_default requires a SQL session".into(),
+                ));
+            };
+            let oid = i32::try_from(int_arg(&vals[0])?).unwrap_or(0);
+            let default = crate::routine::function_arg_default(kv, oid, int_arg(&vals[1])?)?;
+            Ok(default.map(Datum::Text).unwrap_or(Datum::Null))
+        }
         ScalarFunc::Float4Send => {
             require_arity(fc, vals.len() == 1)?;
             let Datum::Float4(value) =
@@ -2383,6 +2848,232 @@ fn eval_eager(
             require_arity(fc, vals.is_empty())?;
             crate::session::advisory_unlock_all_runtime()?;
             Ok(Datum::Text(String::new()))
+        }
+        ScalarFunc::LoCreate => {
+            require_arity(fc, vals.len() == 1)?;
+            let requested = lo_oid(&vals[0])?;
+            let runtime = lo_runtime(ctx)?;
+            crate::largeobject::require_writable(runtime, &format!("{}()", fc.name))?;
+            let oid = runtime
+                .pending
+                .lock()
+                .expect("pending large objects")
+                .create(
+                    runtime.kv.as_ref(),
+                    requested,
+                    &ctx.current_user,
+                    runtime.compat_privileges,
+                )?;
+            Ok(Datum::Int4(
+                i32::try_from(oid).expect("PostgreSQL OID fits int4 datum"),
+            ))
+        }
+        ScalarFunc::LoOpen => {
+            require_arity(fc, vals.len() == 2)?;
+            let runtime = lo_runtime(ctx)?;
+            let descriptor = crate::largeobject::open(
+                runtime,
+                &ctx.current_user,
+                lo_oid(&vals[0])?,
+                i32::try_from(int_arg(&vals[1])?).map_err(|_| lo_offset_error())?,
+            )?;
+            Ok(Datum::Int4(descriptor))
+        }
+        ScalarFunc::LoClose => {
+            require_arity(fc, vals.len() == 1)?;
+            crate::largeobject::close(
+                lo_runtime(ctx)?,
+                i32::try_from(int_arg(&vals[0])?).map_err(|_| lo_offset_error())?,
+            )?;
+            Ok(Datum::Int4(0))
+        }
+        ScalarFunc::LoRead => {
+            require_arity(fc, vals.len() == 2)?;
+            let descriptor = i32::try_from(int_arg(&vals[0])?).map_err(|_| lo_offset_error())?;
+            let len = usize::try_from(int_arg(&vals[1])?).map_err(|_| lo_offset_error())?;
+            Ok(Datum::Bytea(crate::largeobject::read_descriptor(
+                lo_runtime(ctx)?,
+                descriptor,
+                len,
+            )?))
+        }
+        ScalarFunc::LoWrite => {
+            require_arity(fc, vals.len() == 2)?;
+            let descriptor = i32::try_from(int_arg(&vals[0])?).map_err(|_| lo_offset_error())?;
+            let bytes = bytea_arg(&vals[1], ctx)?;
+            crate::largeobject::write_descriptor(lo_runtime(ctx)?, descriptor, &bytes)?;
+            Ok(Datum::Int4(
+                i32::try_from(bytes.len()).map_err(|_| lo_offset_error())?,
+            ))
+        }
+        ScalarFunc::LoSeek => {
+            require_arity(fc, vals.len() == 3)?;
+            let position = crate::largeobject::seek_descriptor(
+                lo_runtime(ctx)?,
+                i32::try_from(int_arg(&vals[0])?).map_err(|_| lo_offset_error())?,
+                int_arg(&vals[1])?,
+                i32::try_from(int_arg(&vals[2])?).map_err(|_| lo_offset_error())?,
+            )?;
+            let position = i64::try_from(position).map_err(|_| lo_offset_error())?;
+            Ok(if fc.name == "lo_lseek" {
+                Datum::Int4(i32::try_from(position).map_err(|_| lo_offset_error())?)
+            } else {
+                Datum::Int8(position)
+            })
+        }
+        ScalarFunc::LoTell => {
+            require_arity(fc, vals.len() == 1)?;
+            let position = i64::try_from(crate::largeobject::tell_descriptor(
+                lo_runtime(ctx)?,
+                i32::try_from(int_arg(&vals[0])?).map_err(|_| lo_offset_error())?,
+            )?)
+            .map_err(|_| lo_offset_error())?;
+            Ok(if fc.name == "lo_tell" {
+                Datum::Int4(i32::try_from(position).map_err(|_| lo_offset_error())?)
+            } else {
+                Datum::Int8(position)
+            })
+        }
+        ScalarFunc::LoFromBytea => {
+            require_arity(fc, vals.len() == 2)?;
+            let requested = lo_oid(&vals[0])?;
+            let runtime = lo_runtime(ctx)?;
+            crate::largeobject::require_writable(runtime, &format!("{}()", fc.name))?;
+            let mut pending = runtime.pending.lock().expect("pending large objects");
+            let oid = pending.create(
+                runtime.kv.as_ref(),
+                requested,
+                &ctx.current_user,
+                runtime.compat_privileges,
+            )?;
+            pending.replace(
+                runtime.kv.as_ref(),
+                oid,
+                bytea_arg(&vals[1], ctx)?.into_owned(),
+            )?;
+            Ok(Datum::Int4(
+                i32::try_from(oid).expect("PostgreSQL OID fits int4 datum"),
+            ))
+        }
+        ScalarFunc::LoImport => {
+            require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
+            let runtime = lo_file_runtime(ctx, "lo_import", true)?;
+            let path = text_arg(&vals[0])?;
+            let bytes = std::fs::read(path).map_err(|error| ExecError::FunctionError {
+                sqlstate: "58P01",
+                message: format!("could not open server file \"{path}\": {error}"),
+            })?;
+            let requested = vals.get(1).map_or(Ok(0), lo_oid)?;
+            let mut pending = runtime.pending.lock().expect("pending large objects");
+            let oid = pending.create(
+                runtime.kv.as_ref(),
+                requested,
+                &ctx.current_user,
+                runtime.compat_privileges,
+            )?;
+            pending.replace(runtime.kv.as_ref(), oid, bytes)?;
+            Ok(Datum::Int4(
+                i32::try_from(oid).expect("PostgreSQL OID fits int4 datum"),
+            ))
+        }
+        ScalarFunc::LoExport => {
+            require_arity(fc, vals.len() == 2)?;
+            let runtime = lo_file_runtime(ctx, "lo_export", false)?;
+            let oid = lo_oid(&vals[0])?;
+            crate::largeobject::require_privilege(
+                runtime,
+                &ctx.current_user,
+                oid,
+                crate::largeobject::LoPrivilege::Select,
+            )?;
+            let path = text_arg(&vals[1])?;
+            let bytes = runtime
+                .pending
+                .lock()
+                .expect("pending large objects")
+                .read(runtime.kv.as_ref(), oid)?;
+            std::fs::write(path, bytes).map_err(|error| ExecError::FunctionError {
+                sqlstate: "58P01",
+                message: format!("could not write server file \"{path}\": {error}"),
+            })?;
+            Ok(Datum::Int4(1))
+        }
+        ScalarFunc::LoGet => {
+            require_arity(fc, vals.len() == 1 || vals.len() == 3)?;
+            let oid = lo_oid(&vals[0])?;
+            let runtime = lo_runtime(ctx)?;
+            crate::largeobject::require_privilege(
+                runtime,
+                &ctx.current_user,
+                oid,
+                crate::largeobject::LoPrivilege::Select,
+            )?;
+            let result = if vals.len() == 1 {
+                runtime
+                    .pending
+                    .lock()
+                    .expect("pending large objects")
+                    .read(runtime.kv.as_ref(), oid)?
+            } else {
+                let offset = usize::try_from(int_arg(&vals[1])?).map_err(|_| lo_offset_error())?;
+                let length = usize::try_from(int_arg(&vals[2])?).map_err(|_| lo_offset_error())?;
+                runtime
+                    .pending
+                    .lock()
+                    .expect("pending large objects")
+                    .read_range(runtime.kv.as_ref(), oid, offset, length)?
+            };
+            Ok(Datum::Bytea(result))
+        }
+        ScalarFunc::LoPut => {
+            require_arity(fc, vals.len() == 3)?;
+            let oid = lo_oid(&vals[0])?;
+            let offset = usize::try_from(int_arg(&vals[1])?).map_err(|_| lo_offset_error())?;
+            let runtime = lo_runtime(ctx)?;
+            crate::largeobject::require_writable(runtime, &format!("{}()", fc.name))?;
+            crate::largeobject::require_privilege(
+                runtime,
+                &ctx.current_user,
+                oid,
+                crate::largeobject::LoPrivilege::Update,
+            )?;
+            runtime
+                .pending
+                .lock()
+                .expect("pending large objects")
+                .write_at(runtime.kv.as_ref(), oid, offset, &bytea_arg(&vals[2], ctx)?)?;
+            Ok(crate::routine::void_result_value())
+        }
+        ScalarFunc::LoTruncate => {
+            require_arity(fc, vals.len() == 2)?;
+            let descriptor = i32::try_from(int_arg(&vals[0])?).map_err(|_| lo_offset_error())?;
+            let len = usize::try_from(int_arg(&vals[1])?).map_err(|_| lo_offset_error())?;
+            let runtime = lo_runtime(ctx)?;
+            crate::largeobject::truncate_descriptor(
+                runtime,
+                descriptor,
+                len,
+                &format!("{}()", fc.name),
+            )?;
+            Ok(Datum::Int4(0))
+        }
+        ScalarFunc::LoUnlink => {
+            require_arity(fc, vals.len() == 1)?;
+            let oid = lo_oid(&vals[0])?;
+            let runtime = lo_runtime(ctx)?;
+            crate::largeobject::require_writable(runtime, &format!("{}()", fc.name))?;
+            crate::largeobject::require_privilege(
+                runtime,
+                &ctx.current_user,
+                oid,
+                crate::largeobject::LoPrivilege::Update,
+            )?;
+            runtime
+                .pending
+                .lock()
+                .expect("pending large objects")
+                .unlink(runtime.kv.as_ref(), oid)?;
+            Ok(Datum::Int4(1))
         }
         ScalarFunc::NextVal => {
             require_arity(fc, vals.len() == 1)?;
@@ -2547,6 +3238,96 @@ fn eval_eager(
     }
 }
 
+fn enum_arg_type(
+    fc: &FuncCall,
+    args: &[Expr],
+    scope: &Scope,
+) -> Result<crabka_pgtypes::usertype::UserTypeRef, ExecError> {
+    let mut ty = None;
+    for arg in args {
+        if crate::eval::is_unknown_literal(arg) {
+            continue;
+        }
+        let ColumnType::Enum(candidate) = crate::eval::infer_type(arg, scope)? else {
+            return Err(undefined_function_spelled(&fc.name, args, scope));
+        };
+        if ty
+            .replace(candidate)
+            .is_some_and(|existing| existing != candidate)
+        {
+            return Err(undefined_function_spelled(&fc.name, args, scope));
+        }
+    }
+    ty.ok_or_else(|| undefined_function_spelled(&fc.name, args, scope))
+}
+
+fn eval_enum_support(
+    f: ScalarFunc,
+    fc: &FuncCall,
+    ty: crabka_pgtypes::usertype::UserTypeRef,
+    vals: &[Datum],
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let labels = crabka_pgtypes::usertype::lookup_oid(ty.oid)
+        .and_then(|user| user.labels().map(ToOwned::to_owned))
+        .ok_or_else(|| undefined_function(&fc.name))?;
+    let value = |label: &str| {
+        Datum::Enum(crabka_pgtypes::datum::EnumValue {
+            ty,
+            label: label.to_string(),
+        })
+    };
+    let bound = |datum: &Datum| -> Result<Option<usize>, ExecError> {
+        if datum.is_null() {
+            return Ok(None);
+        }
+        let datum = crate::eval::cast_operand(datum, ColumnType::Enum(ty), ctx)?;
+        let Datum::Enum(value) = datum else {
+            unreachable!("enum coercion returned a non-enum value")
+        };
+        Ok(labels.iter().position(|label| label == &value.label))
+    };
+    match f {
+        ScalarFunc::EnumFirst => {
+            require_arity(fc, vals.len() == 1)?;
+            let result = labels
+                .first()
+                .map(|label| value(label))
+                .ok_or_else(|| undefined_function(&fc.name))?;
+            crate::eval::ensure_enum_datum_safe(ctx, &result)?;
+            Ok(result)
+        }
+        ScalarFunc::EnumLast => {
+            require_arity(fc, vals.len() == 1)?;
+            let result = labels
+                .last()
+                .map(|label| value(label))
+                .ok_or_else(|| undefined_function(&fc.name))?;
+            crate::eval::ensure_enum_datum_safe(ctx, &result)?;
+            Ok(result)
+        }
+        ScalarFunc::EnumRange => {
+            require_arity(fc, vals.len() == 1 || vals.len() == 2)?;
+            let first = bound(&vals[0])?;
+            let last = vals.get(1).map(|value| bound(value)).transpose()?.flatten();
+            let lower = first.unwrap_or(0);
+            let upper = last.unwrap_or_else(|| labels.len().saturating_sub(1));
+            let elems = (lower <= upper)
+                .then(|| {
+                    labels[lower..=upper]
+                        .iter()
+                        .map(|label| value(label))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let result = Datum::Array(crabka_pgtypes::ArrayValue::new(ElemType::User(ty), elems));
+            crate::eval::ensure_enum_datum_safe(ctx, &result)?;
+            Ok(result)
+        }
+        _ => unreachable!("non-enum support function reached eval_enum_support"),
+    }
+}
+
 fn eval_multirange_predicate(name: &str, vals: &[Datum]) -> Result<Datum, ExecError> {
     if vals.len() != 2 {
         return Err(undefined_function(name));
@@ -2687,6 +3468,14 @@ pub(crate) fn no_matching_function() -> ExecError {
 /// column.
 fn require_text(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
     if crate::eval::infer_type(arg, scope)?.is_string() {
+        Ok(())
+    } else {
+        Err(no_matching_function())
+    }
+}
+
+fn require_uuid(arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
+    if is_unknown_literal(arg) || crate::eval::infer_type(arg, scope)? == ColumnType::Uuid {
         Ok(())
     } else {
         Err(no_matching_function())
@@ -3191,6 +3980,50 @@ pub(crate) fn require_arity(fc: &FuncCall, ok: bool) -> Result<(), ExecError> {
         Ok(())
     } else {
         Err(undefined_function(&fc.name))
+    }
+}
+
+fn lo_runtime(
+    ctx: &EvalCtx,
+) -> Result<&std::sync::Arc<crate::clock::LargeObjectRuntime>, ExecError> {
+    ctx.largeobject.as_ref().ok_or_else(|| {
+        ExecError::Unsupported("large-object functions require a SQL session".into())
+    })
+}
+
+fn lo_file_runtime<'a>(
+    ctx: &'a EvalCtx,
+    function: &str,
+    changes_database: bool,
+) -> Result<&'a std::sync::Arc<crate::clock::LargeObjectRuntime>, ExecError> {
+    let runtime = lo_runtime(ctx)?;
+    let role = crate::catalog_fn::effective_privilege_role(&ctx.current_user);
+    if !crate::rls::role_is_superuser(runtime.kv.as_ref(), &role)? {
+        return Err(ExecError::FunctionError {
+            sqlstate: "42501",
+            message: format!("permission denied for function {function}"),
+        });
+    }
+    if changes_database && runtime.read_only {
+        return Err(ExecError::FunctionError {
+            sqlstate: "25006",
+            message: format!("cannot execute {function}() in a read-only transaction"),
+        });
+    }
+    Ok(runtime)
+}
+
+fn lo_oid(value: &Datum) -> Result<u32, ExecError> {
+    u32::try_from(int_arg(value)?).map_err(|_| ExecError::FunctionError {
+        sqlstate: "22003",
+        message: "OID out of range".into(),
+    })
+}
+
+fn lo_offset_error() -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "22003",
+        message: "large object seek target out of range".into(),
     }
 }
 
@@ -3843,6 +4676,34 @@ mod tests {
         text_render(&ev(sql), &ctx.time_zone)
     }
 
+    #[test]
+    fn null_count_functions_are_variadic_and_non_strict() {
+        for (sql, expected) in [
+            ("num_nonnulls(NULL, 1, NULL, 2)", Datum::Int4(2)),
+            ("num_nulls(NULL, 1, NULL, 2)", Datum::Int4(2)),
+            ("num_nonnulls(NULL::int, NULL::text)", Datum::Int4(0)),
+            ("num_nulls(NULL::int, NULL::text)", Datum::Int4(2)),
+            ("num_nonnulls(VARIADIC ARRAY[1, NULL, 2])", Datum::Int4(2)),
+            ("num_nulls(VARIADIC ARRAY[1, NULL, 2])", Datum::Int4(1)),
+            ("num_nonnulls(VARIADIC ARRAY[]::int[])", Datum::Int4(0)),
+            ("num_nulls(VARIADIC ARRAY[]::int[])", Datum::Int4(0)),
+            ("num_nonnulls(VARIADIC NULL::int[])", Datum::Null),
+            ("num_nulls(VARIADIC NULL::int[])", Datum::Null),
+        ] {
+            assert!(ev(sql) == expected, "{sql}");
+        }
+        assert!(
+            crate::eval::infer_type(
+                &pexpr("num_nonnulls(NULL)").expect("parse"),
+                &Scope::empty()
+            ) == Ok(ColumnType::Int4)
+        );
+        assert!(matches!(
+            crate::eval::infer_type(&pexpr("num_nulls()").expect("parse"), &Scope::empty()),
+            Err(ExecError::UndefinedFunction(_))
+        ));
+    }
+
     /// `log(base, num)` is declared over `numeric` alone, and its result scale
     /// comes from `log_var`, not from either input on its own.
     #[test]
@@ -3915,6 +4776,42 @@ mod tests {
         // no candidate at all.
         assert!(err_code("float4send(1::float8)", None) == "42883");
         assert!(err_code("float4send('a'::text)", None) == "42883");
+    }
+
+    #[test]
+    fn uuid_generation_and_extraction_follow_rfc_bits() {
+        let v4 = ev("uuidv4()");
+        let v7 = ev("uuidv7()");
+        let bytes = |value: &Datum| match value {
+            Datum::Text(text) => crabka_pgtypes::uuid::UuidBytes::parse(text).expect("uuid"),
+            other => panic!("expected UUID text, got {other:?}"),
+        };
+        assert_eq!(bytes(&v4).0[6] >> 4, 4);
+        assert_eq!(bytes(&v4).0[8] >> 6, 2);
+        assert_eq!(bytes(&v7).0[6] >> 4, 7);
+        assert_eq!(bytes(&v7).0[8] >> 6, 2);
+        assert_eq!(ev("uuid_extract_version(uuidv4())"), Datum::Int4(4));
+        assert_eq!(ev("uuid_extract_version(uuidv7())"), Datum::Int4(7));
+        assert_ne!(v4, ev("uuidv4()"));
+        assert!(
+            text_render(&v7, &crate::clock::EvalCtx::test_default().time_zone)
+                < text_render(
+                    &ev("uuidv7()"),
+                    &crate::clock::EvalCtx::test_default().time_zone
+                )
+        );
+        assert_eq!(
+            ev("uuid_extract_version('11111111-1111-1111-1111-111111111111')"),
+            Datum::Null
+        );
+        assert_eq!(
+            ev("uuid_extract_timestamp('C232AB00-9414-11EC-B3C8-9F6BDECED846')"),
+            ev("timestamptz '2022-02-22 19:22:22+00'")
+        );
+        assert_eq!(
+            ev("uuid_extract_timestamp('11111111-1111-1111-1111-111111111111')"),
+            Datum::Null
+        );
     }
 
     #[test]
@@ -4049,6 +4946,10 @@ mod tests {
         assert_eq!(ev(r"length('\x00ff'::bytea)"), Datum::Int4(2));
         assert_eq!(ev("char_length('abc')"), Datum::Int4(3));
         assert_eq!(ev("character_length('')"), Datum::Int4(0));
+        let error = crate::eval::infer_type(&pexpr("length(42)").expect("parse"), &Scope::empty())
+            .expect_err("integer length must not resolve")
+            .into_pg();
+        assert_eq!(error.message, "function length(integer) does not exist");
         assert_eq!(err_code(r"char_length('\x00ff'::bytea)", None), "42883");
         assert_eq!(ev("upper('aBc')"), Datum::Text("ABC".into()));
         assert_eq!(ev("lower('aBc')"), Datum::Text("abc".into()));
@@ -4176,6 +5077,7 @@ mod tests {
         // type owns its oid, and this test never builds one.
         crabka_pgtypes::usertype::replace(&crabka_pgtypes::usertype::UserType {
             oid: 300_700,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(300_700),
             schema: crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA.to_string(),
             name: "range_constructor_test".to_string(),
             body: crabka_pgtypes::usertype::UserTypeBody::Range(
@@ -4316,12 +5218,12 @@ mod tests {
         assert_eq!(ev("int4larger(2, 7)"), Datum::Int4(7));
         assert_eq!(ev("int4larger(7, 2)"), Datum::Int4(7));
         assert_eq!(ev("int4larger(NULL::int4, 2)"), Datum::Null);
+        assert_eq!(ev("int4smaller(2, 7)"), Datum::Int4(2));
+        assert_eq!(ev("int4smaller(7, 2)"), Datum::Int4(2));
+        assert_eq!(ev("int4smaller(NULL::int4, 2)"), Datum::Null);
         assert_eq!(
-            crate::eval::infer_type(
-                &pexpr("int4larger(2, 7)").expect("parse"),
-                &Scope::empty(),
-            )
-            .expect("int4larger signature"),
+            crate::eval::infer_type(&pexpr("int4larger(2, 7)").expect("parse"), &Scope::empty(),)
+                .expect("int4larger signature"),
             ColumnType::Int4
         );
         assert_eq!(err_code("int4larger(2)", None), "42883");
@@ -4344,7 +5246,10 @@ mod tests {
             .is_err()
         );
         assert_eq!(ev("float8mi(5::float8, 2::float8)"), Datum::Float8(3.0));
-        assert_eq!(ev("float8mi(-0.0::float8, 0.0::float8)"), Datum::Float8(-0.0));
+        assert_eq!(
+            ev("float8mi(-0.0::float8, 0.0::float8)"),
+            Datum::Float8(-0.0)
+        );
         assert_eq!(ev("float8mi(NULL::float8, 2::float8)"), Datum::Null);
         assert_eq!(
             crate::eval::infer_type(
@@ -4402,18 +5307,12 @@ mod tests {
             err_code("int4_avg_accum(ARRAY[0::int8, 0::int8])", None),
             "42883"
         );
-        assert_eq!(
-            err_code("int4_avg_accum(ARRAY[0, 0], 2)", None),
-            "42883"
-        );
+        assert_eq!(err_code("int4_avg_accum(ARRAY[0, 0], 2)", None), "42883");
         assert_eq!(
             err_code("int4_avg_accum(ARRAY[0::int8, 0::int8], 2::int8)", None),
             "42883"
         );
-        assert_eq!(
-            err_code("int4_avg_accum(ARRAY[0::int8], 2)", None),
-            "22023"
-        );
+        assert_eq!(err_code("int4_avg_accum(ARRAY[0::int8], 2)", None), "22023");
         assert_eq!(err_code("int8_avg(ARRAY[0::int8])", None), "22023");
         assert_eq!(
             err_code("float8_accum(ARRAY[0::float8, 0::float8, 0::float8])", None),
@@ -4424,7 +5323,10 @@ mod tests {
             "42883"
         );
         assert_eq!(
-            err_code("float8_accum(ARRAY[0::float8, 0::float8, 0::float8], 2)", None),
+            err_code(
+                "float8_accum(ARRAY[0::float8, 0::float8, 0::float8], 2)",
+                None
+            ),
             "42883"
         );
         assert_eq!(
@@ -4977,13 +5879,10 @@ mod tests {
     #[test]
     fn interval_hash_uses_the_canonical_interval_span() {
         let scope = Scope::empty();
-        let ty = |sql: &str| {
-            crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type")
-        };
+        let ty =
+            |sql: &str| crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type");
         assert!(ty("interval_hash('30 days')") == ColumnType::Int4);
-        assert!(
-            ev("interval_hash('30 days') = interval_hash('1 month')") == Datum::Bool(true)
-        );
+        assert!(ev("interval_hash('30 days') = interval_hash('1 month')") == Datum::Bool(true));
         assert!(ev("interval_hash('30 days') = interval_hash('1 day')") == Datum::Bool(false));
         // PostgreSQL 18.4 values cover the fold's positive and negative halves.
         for (sql, expected) in [
@@ -5003,6 +5902,7 @@ mod tests {
         let started = Instant::now();
         assert_eq!(ev("pg_sleep(0.02)"), Datum::Text(String::new()));
         assert!(started.elapsed() >= Duration::from_millis(10));
+        assert_eq!(ev("pg_sleep('NaN'::float8)"), Datum::Text(String::new()));
         assert_eq!(
             crate::eval::infer_type(&pexpr("pg_sleep(0.02)").expect("parse"), &Scope::empty())
                 .expect("type"),

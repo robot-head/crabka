@@ -1,13 +1,12 @@
 //! DDL and catalog code carved out of `exec`.
 
 use super::{
-    AddForeignKey, AlterTableState, Column, ColumnDefault, Datum, ExecError, Expr, HashMap,
-    HashSet, IndexBuild, Kv, SchemaDisposition, Scope, Sequence, Table, TableDefinition,
-    all_committed_snapshot, coerce, column_from_ast, constraint_deferral,
-    create_table_constraint_index, create_table_primary_key_columns, eval_assignment_value,
-    expr_children, global_status, local_index_backfill_ops, no_inherit_not_null_unsupported,
-    physical_rowid, resolve_relation, stored_default_value, validate_check_predicate,
-    validate_without_overlaps_key,
+    AddForeignKey, AlterTableState, Column, Datum, ExecError, Expr, HashMap, HashSet, IndexBuild,
+    Kv, SchemaDisposition, Scope, Sequence, Table, TableDefinition, all_committed_snapshot, coerce,
+    column_from_ast, constraint_deferral, create_table_constraint_index,
+    create_table_primary_key_columns, default_from_expr, eval_assignment_value, expr_children,
+    global_status, local_index_backfill_ops, no_inherit_not_null_unsupported, physical_rowid,
+    resolve_relation, validate_check_predicate, validate_without_overlaps_key,
 };
 
 /// Build the definition of a `CREATE TABLE … PARTITION OF parent`.
@@ -58,10 +57,7 @@ pub(crate) fn partition_definition(
                 crabka_pgparser::ast::ColumnConstraintKind::NotNull => target.not_null = true,
                 crabka_pgparser::ast::ColumnConstraintKind::Null => target.not_null = false,
                 crabka_pgparser::ast::ColumnConstraintKind::Default(expr) => {
-                    let value = eval_assignment_value(expr, target.ty, &Scope::empty(), &[], ctx)?;
-                    let coerced = coerce(value.clone(), target.ty, ctx)?;
-                    target.default =
-                        Some(ColumnDefault::Value(stored_default_value(value, coerced)));
+                    target.default = Some(default_from_expr(expr, target.ty, ctx)?);
                 }
                 other => {
                     return Err(ExecError::Unsupported(format!(
@@ -1188,7 +1184,7 @@ pub(crate) fn backfill_generated_column(
     let computed = state
         .rows_mut(kv)?
         .iter()
-        .map(|(_, xmin, xmax, row)| {
+        .map(|(_, xmin, xmax, _, _, row)| {
             let value =
                 eval_assignment_value(&expr, ty, &scope, row, ctx).and_then(|v| coerce(v, ty, ctx));
             match value {
@@ -1203,7 +1199,7 @@ pub(crate) fn backfill_generated_column(
             }
         })
         .collect::<Result<Vec<_>, ExecError>>()?;
-    for ((_, _, _, row), value) in state.rows_mut(kv)?.iter_mut().zip(computed) {
+    for ((_, _, _, _, _, row), value) in state.rows_mut(kv)?.iter_mut().zip(computed) {
         if index < row.len() {
             row[index] = value;
         }
@@ -1448,10 +1444,24 @@ pub(crate) fn enforce_check_constraints(
             return Err(ExecError::CheckViolation {
                 table: table.name.name.clone(),
                 constraint: check.name.clone(),
+                row: Some(failing_row_detail(row, ctx)),
             });
         }
     }
     Ok(())
+}
+
+/// PostgreSQL's row-level constraint diagnostics show the candidate row using
+/// each datum's ordinary text output; NULL remains the unquoted word `null`.
+pub(crate) fn failing_row_detail(row: &[Datum], ctx: &crate::clock::EvalCtx) -> String {
+    let values = row
+        .iter()
+        .map(|value| match value {
+            Datum::Null => "null".to_string(),
+            value => crate::func::text_render(value, &ctx.time_zone),
+        })
+        .collect::<Vec<_>>();
+    format!("({})", values.join(", "))
 }
 
 /// Settle every `GENERATED ALWAYS AS (…)` column of one candidate row, in place.
@@ -1543,8 +1553,42 @@ pub(crate) fn stored_row<'a>(table: &Table, row: &'a [Datum]) -> std::borrow::Co
 /// [`crabka_pgmvcc::version::encode_tuple`] directly, so that "a `VIRTUAL`
 /// generated column is not stored" holds by construction instead of by each
 /// write path remembering to blank it. See [`stored_row`].
-pub(crate) fn encode_table_tuple(table: &Table, xmin: u64, xmax: u64, row: &[Datum]) -> Vec<u8> {
-    crabka_pgmvcc::version::encode_tuple(xmin, xmax, &stored_row(table, row))
+pub(crate) fn encode_table_tuple(
+    table: &Table,
+    xmin: u64,
+    xmax: u64,
+    cmin: u32,
+    cmax: u32,
+    row: &[Datum],
+) -> Vec<u8> {
+    crabka_pgmvcc::version::encode_tuple_with_command_ids(
+        xmin,
+        xmax,
+        cmin,
+        cmax,
+        &stored_row(table, row),
+    )
+}
+
+/// Encode a superseded table tuple with the physical identity of its update
+/// successor.
+pub(crate) fn encode_table_tuple_with_update_target(
+    table: &Table,
+    xmin: u64,
+    xmax: u64,
+    cmin: u32,
+    cmax: u32,
+    next_rowid: u64,
+    row: &[Datum],
+) -> Vec<u8> {
+    crabka_pgmvcc::version::encode_tuple_with_command_ids_and_update_target(
+        xmin,
+        xmax,
+        cmin,
+        cmax,
+        next_rowid,
+        &stored_row(table, row),
+    )
 }
 
 /// Fill in the `VIRTUAL` generated columns of one row read back from storage,
@@ -1609,8 +1653,8 @@ pub(crate) fn expand_virtual_generated(
     Ok(())
 }
 
-/// One decoded row version: its physical key, `xmin`, `xmax`, and column values.
-pub(crate) type RowVersion = (Vec<u8>, u64, u64, Vec<Datum>);
+/// One decoded row version: its physical key, MVCC header, and column values.
+pub(crate) type RowVersion = (Vec<u8>, u64, u64, u32, u32, Vec<Datum>);
 
 /// One table's stored row versions, decoded so a schema change can rewrite them
 /// positionally inside the DDL batch. DDL holds the global catalog lock, so no
@@ -1622,8 +1666,9 @@ pub(crate) fn scan_all_row_versions(
     kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))?
         .into_iter()
         .map(|(key, bytes)| {
-            let (xmin, xmax, row) = crabka_pgmvcc::version::decode_tuple(&bytes)?;
-            Ok((key, xmin, xmax, row))
+            let (xmin, xmax, cmin, cmax, row) =
+                crabka_pgmvcc::version::decode_tuple_with_command_ids(&bytes)?;
+            Ok((key, xmin, xmax, cmin, cmax, row))
         })
         .collect()
 }
@@ -1649,7 +1694,7 @@ pub(crate) fn live_row_versions(
     let snapshot = all_committed_snapshot();
     let status = global_status(kv, kv, &snapshot);
     let mut live: HashMap<u64, (u64, Vec<Datum>)> = HashMap::new();
-    for (key, xmin, xmax, row) in versions {
+    for (key, xmin, xmax, _, _, row) in versions {
         if !crabka_pgmvcc::visibility::satisfies_mvcc(*xmin, *xmax, &snapshot, own_xid, &status)? {
             continue;
         }

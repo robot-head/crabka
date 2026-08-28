@@ -12,6 +12,7 @@ use crate::{
         ColumnPredicate, PartialAggregateSpec, PredicateOp, PredicatePushdown, ProjectionPushdown,
         TopKSpec,
     },
+    scope::POSITION_QUALIFIER,
 };
 
 /// Statistics seam consumed by distributed join planning.
@@ -492,15 +493,26 @@ fn parse_column_literal(
     column_expr: &Expr,
     value_expr: &Expr,
 ) -> Result<Option<(usize, Datum)>, ExecError> {
-    let Expr::Column { table: None, name } = column_expr else {
+    let Expr::Column {
+        table: qualifier,
+        name,
+    } = column_expr
+    else {
         return Ok(None);
     };
-    let Some((index, column)) = table
-        .columns
-        .iter()
-        .enumerate()
-        .find(|(_, column)| column.name == *name)
-    else {
+    let column = match qualifier.as_deref() {
+        None => table
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.name == *name),
+        Some(POSITION_QUALIFIER) => name
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| table.columns.get(index).map(|column| (index, column))),
+        Some(_) => None,
+    };
+    let Some((index, column)) = column else {
         return Ok(None);
     };
     literal_for_type(value_expr, column.ty).map(|value| value.map(|value| (index, value)))
@@ -694,5 +706,47 @@ fn partial_aggregate_is_safe(table: &Table, spec: &PartialAggregateSpec) -> bool
                     ColumnType::Int4 | ColumnType::Int8 | ColumnType::Numeric(_)
                 )
             }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table() -> Table {
+        Table {
+            id: 1,
+            name: crabka_pgcatalog::RelationName::public("items"),
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
+            columns: vec![crabka_pgcatalog::Column::new("id", ColumnType::Int4)],
+            sharded: false,
+            row_security: false,
+            force_row_security: false,
+            sharding: None,
+            foreign: None,
+            materialized: None,
+            checks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn positional_bound_column_pushes_down_a_literal_predicate() {
+        let filter = Expr::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(Expr::Column {
+                table: Some(POSITION_QUALIFIER.into()),
+                name: "0".into(),
+            }),
+            right: Box::new(Expr::IntLiteral("2".into())),
+        };
+
+        assert_eq!(
+            predicate_for_filter(&table(), Some(&filter)),
+            PredicatePushdown::Conjunctive(vec![ColumnPredicate {
+                column: 0,
+                op: PredicateOp::Eq,
+                value: Datum::Int4(2),
+            }])
+        );
     }
 }

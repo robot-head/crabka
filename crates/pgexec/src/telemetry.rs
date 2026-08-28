@@ -151,6 +151,9 @@ pub fn truncate(text: &str, max: usize) -> &str {
 pub fn statement_operation(stmt: &Statement) -> &'static str {
     match stmt {
         Statement::CompatibilityRefusal(command) => command.command_name(),
+        Statement::CreateRule(_) => "CREATE RULE",
+        Statement::AlterRule { .. } => "ALTER RULE",
+        Statement::DropRule { .. } => "DROP RULE",
         Statement::CreateTrigger(_) => "CREATE TRIGGER",
         Statement::AlterTrigger { .. } => "ALTER TRIGGER",
         Statement::DropTrigger { .. } => "DROP TRIGGER",
@@ -186,6 +189,7 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::DropRole { .. } => "DROP ROLE",
         Statement::GrantTablePrivileges { .. } => "GRANT",
         Statement::RevokeTablePrivileges { .. } => "REVOKE",
+        Statement::AlterDefaultTablePrivileges { .. } => "ALTER DEFAULT PRIVILEGES",
         Statement::SetRole { .. } => "SET ROLE",
         Statement::CreateFdw { .. } => "CREATE FOREIGN DATA WRAPPER",
         Statement::DropFdw { .. } => "DROP FOREIGN DATA WRAPPER",
@@ -239,6 +243,7 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::CreateType { .. } => "CREATE TYPE",
         Statement::CreateCast { .. } => "CREATE CAST",
         Statement::DropCast { .. } => "DROP CAST",
+        Statement::CreateAccessMethod { .. } => "CREATE ACCESS METHOD",
         Statement::AlterType { .. } => "ALTER TYPE",
         Statement::DropType { .. } => "DROP TYPE",
         Statement::CreateDomain { .. } => "CREATE DOMAIN",
@@ -246,6 +251,9 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::DropDomain { .. } => "DROP DOMAIN",
         Statement::Cluster(_) => "CLUSTER",
         Statement::AlterRole { .. } => "ALTER ROLE",
+        Statement::AlterLargeObject { .. } => "ALTER LARGE OBJECT",
+        Statement::GrantLargeObjectPrivileges { .. } => "GRANT",
+        Statement::RevokeLargeObjectPrivileges { .. } => "REVOKE",
         Statement::GrantSchemaPrivileges { .. } => "GRANT",
         Statement::RevokeSchemaPrivileges { .. } => "REVOKE",
         Statement::GrantRoles { .. } => "GRANT ROLES",
@@ -362,7 +370,7 @@ fn query_relation(query: &QueryExpr) -> Option<&RelationRef> {
             TableExpr::Table { name, .. } => Some(name),
             TableExpr::Join { left, .. } => from_table_expr(left),
             TableExpr::Derived { subquery, .. } => from_set_expr(&subquery.body),
-            TableExpr::Function { .. } | TableExpr::JsonTable(_) => None,
+            TableExpr::Function { .. } | TableExpr::JsonTable(_) | TableExpr::XmlTable(_) => None,
         }
     }
 

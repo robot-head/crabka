@@ -41,6 +41,7 @@
 
 mod agg;
 mod array_fn;
+mod attrstats;
 mod bind;
 mod bit_fn;
 mod builtin_aggregates;
@@ -83,6 +84,7 @@ mod json_fn;
 mod json_record;
 mod jsonpath;
 mod jsontable;
+mod largeobject;
 mod local_sequence;
 mod lockmgr;
 mod math_fn;
@@ -104,6 +106,7 @@ mod reg_fn;
 mod regexp_fn;
 mod relname;
 mod relstats;
+mod rewrite_rules;
 pub mod rls;
 mod routine;
 mod rowexpr;
@@ -117,6 +120,7 @@ mod setops;
 mod snapshot_fn;
 mod sql92;
 mod srf;
+mod stats_fn;
 mod string_fn;
 mod subquery;
 mod sysid_fn;
@@ -124,6 +128,9 @@ pub mod telemetry;
 mod temporal_arith;
 mod text_search_catalog;
 mod text_search_fn;
+mod text_search_ispell;
+mod text_search_synonym;
+mod text_search_thesaurus;
 mod tid_fn;
 pub mod timestamp_txn;
 mod trigger;
@@ -140,11 +147,13 @@ mod visibility;
 pub mod watchdog;
 mod window;
 mod xml_fn;
+mod xmlmap;
+mod xmltable;
 
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicU64},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 /// The `pg_class` oid of a table, derived from its catalog id. Exposed because
@@ -191,7 +200,7 @@ struct EngineCoordination {
     writer_fence: Arc<WriterFence>,
     lockmgr: Arc<RowLockManager>,
     unique_index_gates: Arc<RowLockManager>,
-    next_unique_index_owner: AtomicU64,
+    session_locks: Arc<crate::lockmgr::SessionLocks>,
     /// Every statement this server currently has in flight. Shared here for the
     /// same reason the locks above are: it is one server-wide thing that each
     /// session touches, and a report is only useful if it can name every
@@ -223,7 +232,7 @@ impl EngineCoordination {
             writer_fence: Arc::new(WriterFence::new()),
             lockmgr: Arc::clone(&lockmgr),
             unique_index_gates: lockmgr,
-            next_unique_index_owner: AtomicU64::new(0),
+            session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
             statements,
         }
     }
@@ -943,7 +952,7 @@ impl SqlEngine {
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Durable)),
             lockmgr: Arc::clone(&coordination.lockmgr),
-            session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
+            session_locks: Arc::clone(&coordination.session_locks),
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
@@ -1566,7 +1575,7 @@ impl SqlEngine {
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Replicated)),
             lockmgr: Arc::clone(&coordination.lockmgr),
-            session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
+            session_locks: Arc::clone(&coordination.session_locks),
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
@@ -2061,11 +2070,15 @@ impl SqlEngine {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             extra_float_digits: 1,
             bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
+            xml_option: crabka_pgtypes::xml::XmlOption::Content,
+            xml_binary: crate::clock::XmlBinary::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             // No connection was ever opened for this write, so there is no
             // backend id to report.
             backend_pid: 0,
+            compute_query_id: false,
+            track_activities: false,
             trigger_depth: 0,
             clock: Arc::clone(&self.clock),
             random: None,
@@ -2076,6 +2089,7 @@ impl SqlEngine {
                 currvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 pending: Arc::clone(pending),
             })),
+            largeobject: None,
             // The catalog is reachable through `sequence`, which holds the same
             // handle.
             catalog: None,
@@ -2087,6 +2101,7 @@ impl SqlEngine {
             // in one reports "requires a SQL session" rather than silently
             // dropping the notification.
             notify: None,
+            warning_tx: None,
             transition_relations: None,
             event_trigger: None,
             // A scattered write carries no transaction of its own to export,
@@ -2103,7 +2118,7 @@ impl SqlEngine {
         )
     }
 
-    /// Build a timestamp write plan using TSO-leased hidden row IDs.
+    /// Build a timestamp write plan using TSO-leased successor row IDs.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -2113,17 +2128,23 @@ impl SqlEngine {
         hidden_rowids: &[u64],
     ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
         let (mut plan, sequence_ops) = self.plan_timestamp_write_parts(sql)?;
-        if plan.writes.len() != hidden_rowids.len() {
+        if plan.fresh_rowid_writes.len() != hidden_rowids.len() {
             return Err(ExecError::Unsupported(
                 "hidden row-id lease does not match timestamp write count".into(),
             ));
         }
-        for (write, rowid) in plan.writes.iter_mut().zip(hidden_rowids) {
+        for (write_index, rowid) in plan.fresh_rowid_writes.iter().zip(hidden_rowids) {
+            let write = &mut plan.writes[*write_index];
             write.rowid = *rowid;
+            for intent in &mut write.global_index_intents {
+                if !intent.delete {
+                    intent.base_rowid = *rowid;
+                }
+            }
         }
-        // The rowid counter op goes: these rowids came from the lease, so the
-        // counter was never advanced. A SQL sequence advance is not the same
-        // thing — the statement really did consume those values.
+        // The successor rowid counter op goes: these rowids came from the lease,
+        // so the counter was never advanced. A SQL sequence advance is not the
+        // same thing — the statement really did consume those values.
         plan.commit_ops.clear();
         plan.commit_ops.extend(sequence_ops);
         Ok(plan)
@@ -3284,7 +3305,8 @@ mod point_type_tests {
                 "CREATE TABLE parent_values (id int4, location point); \
                  CREATE TABLE child_values (note text) INHERITS (parent_values); \
                  CREATE TABLE sibling_values (extra text) INHERITS (parent_values); \
-                 CREATE TABLE grandchild_values () INHERITS (child_values, sibling_values); \
+                 CREATE TABLE grandchild_values (id int4, local text) \
+                 INHERITS (child_values, sibling_values); \
                  INSERT INTO parent_values VALUES (1, '(0,0)'); \
                  INSERT INTO child_values VALUES (2, '(1,1)', 'child')",
             )
@@ -3297,6 +3319,10 @@ mod point_type_tests {
         assert_eq!(
             notices.try_recv().expect("location merge notice").message,
             "merging multiple inherited definitions of column \"location\""
+        );
+        assert!(
+            notices.try_recv().is_err(),
+            "each merged column is noticed once"
         );
 
         let all = session
@@ -3313,6 +3339,68 @@ mod point_type_tests {
         };
         assert_eq!(row_count(&all), 2);
         assert_eq!(row_count(&only), 1);
+    }
+
+    #[tokio::test]
+    async fn a_local_column_already_merged_from_two_parents_is_not_noticed_twice() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        session
+            .simple_query(
+                "CREATE TABLE merge_left (id int4); \
+                 CREATE TABLE merge_right (id int4); \
+                 CREATE TABLE merge_child (id int4) INHERITS (merge_left, merge_right)",
+            )
+            .await
+            .expect("merge the shared inherited column once");
+        assert_eq!(
+            notices.try_recv().expect("one merge notice").message,
+            "merging multiple inherited definitions of column \"id\""
+        );
+        assert!(
+            notices.try_recv().is_err(),
+            "the local definition adds no second notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_can_redeclare_an_inherited_primary_key_column() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        session
+            .simple_query(
+                "CREATE TABLE inherited_key_parent (id serial PRIMARY KEY, name text); \
+                 CREATE TABLE inherited_key_child (id integer PRIMARY KEY, local text) \
+                 INHERITS (inherited_key_parent); \
+                 INSERT INTO inherited_key_child (name) VALUES ('one'), ('two')",
+            )
+            .await
+            .expect("child merges its inherited key column");
+        assert_eq!(
+            notices.try_recv().expect("key merge notice").message,
+            "merging column \"id\" with inherited definition"
+        );
+        assert!(notices.try_recv().is_err(), "local columns do not merge");
+        let rows = session
+            .simple_query("SELECT id, name FROM inherited_key_child ORDER BY id")
+            .await
+            .expect("child inherits the serial default");
+        assert_eq!(scanned_rows(&rows), 2);
+        session
+            .simple_query(
+                "CREATE TABLE inherited_not_null_parent (id int4 NOT NULL); \
+                 CREATE TABLE inherited_not_null_child (id int4) \
+                     INHERITS (inherited_not_null_parent)",
+            )
+            .await
+            .expect("child merges inherited NOT NULL");
+        let error = session
+            .simple_query("INSERT INTO inherited_not_null_child VALUES (NULL)")
+            .await
+            .expect_err("merged NOT NULL rejects nulls");
+        assert_eq!(error.code, "23502");
     }
 
     fn scanned_rows(results: &[QueryResult]) -> usize {
@@ -4132,6 +4220,7 @@ mod tests {
                 global_snapshot: &NO_GLOBAL_SNAPSHOT(),
                 snapshot: &snapshot,
                 own_xid: None,
+                command_id: None,
                 read_ts: None,
                 own_start_ts: None,
                 table: &table,

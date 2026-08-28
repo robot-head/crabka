@@ -29,6 +29,9 @@ pub(crate) struct SubCtx<'a> {
     pub gsnap: &'a crabka_pgmvcc::visibility::Snapshot,
     pub snapshot: &'a crabka_pgmvcc::visibility::Snapshot,
     pub own: Option<u64>,
+    /// Command counter for own-xid tuple visibility. `None` preserves the
+    /// legacy all-own-writes view used by write-side conflict checks.
+    pub command_id: Option<u32>,
     pub ctes: &'a crate::cte::CteContext,
     /// The session eval context (zone and clock), forwarded to the subquery's
     /// read path so a temporal expression inside a subquery evaluates in the
@@ -66,9 +69,8 @@ pub(crate) struct SubCtx<'a> {
     pub refs: Option<&'a crate::scope::StatementRefs>,
     /// Where an `EXPLAIN ANALYZE` read retains the root state its planned path
     /// executed. Ordinary reads leave this absent.
-    pub explain_plan_state: Option<
-        std::sync::Arc<std::sync::Mutex<Option<crate::plan::query::PlanState>>>,
-    >,
+    pub explain_plan_state:
+        Option<std::sync::Arc<std::sync::Mutex<Option<crate::plan::query::PlanState>>>>,
 }
 
 impl<'a> SubCtx<'a> {
@@ -83,6 +85,7 @@ impl<'a> SubCtx<'a> {
             gsnap: self.gsnap,
             snapshot: self.snapshot,
             own: self.own,
+            command_id: self.command_id,
             ctes,
             eval_ctx: self.eval_ctx,
             fctx: self.fctx,
@@ -462,14 +465,13 @@ pub(crate) fn resolve_expr_skipping(
                             })
                             .collect::<Result<_, ExecError>>()?,
                     },
-                    FuncArgs::Variadic { positional, array } => {
-                        let mut args = positional
+                    FuncArgs::Variadic { positional, array } => FuncArgs::Variadic {
+                        positional: positional
                             .iter()
                             .map(|arg| resolve_expr_skipping(ctx, arg, should_skip))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        args.push(resolve_expr_skipping(ctx, array, should_skip)?);
-                        FuncArgs::Exprs(args)
-                    }
+                            .collect::<Result<_, _>>()?,
+                        array: Box::new(resolve_expr_skipping(ctx, array, should_skip)?),
+                    },
                 },
                 // An aggregate's sort keys resolve like its arguments — they
                 // may name the very columns this pass rewrites.
@@ -497,6 +499,8 @@ pub(crate) fn resolve_expr_skipping(
                 },
             };
             let call = crate::routine::normalize_named_call(ctx.catalog_kv, &call)?.unwrap_or(call);
+            let call =
+                crate::routine::normalize_variadic_call(ctx.catalog_kv, &call)?.unwrap_or(call);
             // P2: a call of a user-defined SQL function is inlined here, the one
             // point in the rewrite where the routine catalog is reachable.
             match crate::routine::inline_scalar(ctx.catalog_kv, &call)? {
@@ -631,11 +635,19 @@ pub(crate) fn resolve_expr_skipping(
         // the order the subquery produced its rows.
         Expr::ArraySubquery(s) => {
             let (ty, values) = run_single_column(ctx, s)?;
-            let elem = ElemType::from_column_type(ty).ok_or_else(|| {
-                ExecError::Unsupported(format!("arrays of {} are not supported", ty.name()))
-            })?;
+            let (value, elem) = match ty {
+                ColumnType::Array(elem) => {
+                    (crate::array_fn::build_constructor(elem, values)?, elem)
+                }
+                ty => {
+                    let elem = ElemType::from_column_type(ty).ok_or_else(|| {
+                        ExecError::Unsupported(format!("arrays of {} are not supported", ty.name()))
+                    })?;
+                    (crate::array_fn::array_from_rows(elem, values), elem)
+                }
+            };
             Expr::Const {
-                value: crate::array_fn::array_from_rows(elem, values),
+                value,
                 ty: ColumnType::Array(elem),
             }
         }
@@ -954,14 +966,13 @@ fn resolve_types_in_call(
                     })
                     .collect::<Result<_, ExecError>>()?,
             },
-            FuncArgs::Variadic { positional, array } => {
-                let mut args = positional
+            FuncArgs::Variadic { positional, array } => FuncArgs::Variadic {
+                positional: positional
                     .iter()
                     .map(|arg| resolve_types_in_expr(catalog_kv, resolution, arg, ctes))
-                    .collect::<Result<Vec<_>, _>>()?;
-                args.push(resolve_types_in_expr(catalog_kv, resolution, array, ctes)?);
-                FuncArgs::Exprs(args)
-            }
+                    .collect::<Result<_, _>>()?,
+                array: Box::new(resolve_types_in_expr(catalog_kv, resolution, array, ctes)?),
+            },
         },
         order_by: fc
             .order_by
@@ -983,6 +994,7 @@ fn resolve_types_in_call(
         },
     };
     let call = crate::routine::normalize_named_call(catalog_kv, &call)?.unwrap_or(call);
+    let call = crate::routine::normalize_variadic_call(catalog_kv, &call)?.unwrap_or(call);
     if let Some(ty) = crate::routine::plpgsql_declared_call_type(catalog_kv, &call)? {
         return Ok(Expr::Const {
             value: Datum::Null,
@@ -1068,6 +1080,7 @@ mod tests {
             gsnap: &snapshot,
             snapshot: &snapshot,
             own: None,
+            command_id: None,
             ctes: &ctes,
             eval_ctx: &eval_ctx,
             fctx: crate::exec::ForeignCtx::none(),
@@ -1091,7 +1104,10 @@ mod tests {
             backend_id: 42,
             database: "other".into(),
         };
-        assert_eq!(ctx.with_resolution(&resolution).fctx.resolution, &resolution);
+        assert_eq!(
+            ctx.with_resolution(&resolution).fctx.resolution,
+            &resolution
+        );
     }
 
     async fn seed() -> SqlEngine {
@@ -1115,6 +1131,15 @@ mod tests {
         .await;
         assert_eq!(rowcount(&r), 1); // only id=3 (v=30 > avg 20)
         assert_eq!(cell0(&r), Some("3".into()));
+    }
+
+    #[tokio::test]
+    async fn array_subquery_stacks_array_valued_rows() {
+        let e = seed().await;
+        assert_eq!(
+            cell0(&run(&e, "SELECT ARRAY(SELECT ARRAY[id, v] FROM t ORDER BY id)",).await),
+            Some("{{1,10},{2,20},{3,30}}".into()),
+        );
     }
 
     #[tokio::test]

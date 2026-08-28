@@ -1219,3 +1219,27 @@ async fn a_merge_needs_every_privilege_its_clauses_imply() {
         "{failed:?}"
     );
 }
+
+/// A user rewrite rule blocks `MERGE` before the view's automatic rewrite,
+/// just as it does for a table.
+#[tokio::test]
+async fn merge_is_refused_when_the_view_has_a_rewrite_rule() {
+    let (engine, _kv) = engine_with(&format!(
+        "{BASE} CREATE VIEW v AS SELECT a, b FROM base_tbl; \
+         CREATE RULE merge_rule AS ON UPDATE TO v DO ALSO NOTHING"
+    ))
+    .await;
+    let mut session = engine.connect();
+    let failed = failure(
+        &mut session,
+        "MERGE INTO v USING (VALUES (1, 'x')) AS s(a,b) ON v.a = s.a \
+         WHEN MATCHED THEN UPDATE SET b = s.b",
+    )
+    .await;
+    assert!(
+        failed.code == "0A000"
+            && failed.message == "cannot execute MERGE on relation \"v\""
+            && failed.detail == Some("MERGE is not supported for relations with rules.".into()),
+        "{failed:?}"
+    );
+}

@@ -640,11 +640,6 @@ async fn refused_conflict_targets_and_their_sqlstates() {
             code: "42601",
             why: "DO UPDATE requires a conflict target",
         },
-        Case {
-            sql: "INSERT INTO t VALUES (99, 'z') ON CONFLICT (id) WHERE id > 0 DO NOTHING",
-            code: "0A000",
-            why: "inference predicates need partial indexes",
-        },
     ];
 
     for case in cases {
@@ -666,6 +661,20 @@ async fn refused_conflict_targets_and_their_sqlstates() {
             case.why
         );
     }
+
+    // A full unique index has an implicit TRUE predicate, so it remains an
+    // arbiter for a predicate-bearing inference target.
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE t (id int4 PRIMARY KEY, v text)",
+        "INSERT INTO t VALUES (1, 'a')",
+    ])
+    .await;
+    let result = run(
+        &mut s,
+        "INSERT INTO t VALUES (1, 'z') ON CONFLICT (id) WHERE false DO NOTHING",
+    )
+    .await;
+    assert!(tag_of(&result[0]) == "INSERT 0 0");
 }
 
 /// A sharded table's unique keys live on other ranges, so `ON CONFLICT` cannot

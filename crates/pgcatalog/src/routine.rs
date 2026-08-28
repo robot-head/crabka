@@ -239,6 +239,20 @@ pub struct AggregateDefinition {
     pub finalfunc_modify: char,
     /// `pg_aggregate.agginitval`: the initial state's text representation.
     pub initcond: Option<String>,
+    /// `pg_aggregate.aggmtransfn`, used while a window frame moves.
+    pub moving_transfn: Option<String>,
+    /// `pg_aggregate.aggminvtransfn`, the moving state's inverse transition.
+    pub moving_invtransfn: Option<String>,
+    /// `pg_aggregate.aggmtranstype`, if it differs from `transtype`.
+    pub moving_transtype: Option<RoutineType>,
+    /// `pg_aggregate.aggmfinalfn`, applied to the moving state when present.
+    pub moving_finalfn: Option<String>,
+    /// `pg_aggregate.aggminitval`: the moving state's initial text value.
+    pub moving_initcond: Option<String>,
+    /// Whether `MINITCOND` was written, including the explicit `NULL` spelling.
+    pub moving_initcond_specified: bool,
+    /// Whether the moving final function receives NULL input placeholders.
+    pub moving_finalfunc_extra: bool,
     /// Parameters before `ORDER BY` in an ordered-set signature. Zero for an
     /// ordinary aggregate.
     pub direct_args: usize,
@@ -277,6 +291,8 @@ pub struct Routine {
     pub volatility: char,
     /// `pg_proc.proparallel` (`s`/`r`/`u`).
     pub parallel: char,
+    /// Whether this is a `WINDOW` function.
+    pub window: bool,
     pub strict: bool,
     pub security_definer: bool,
     pub leakproof: bool,
@@ -284,6 +300,8 @@ pub struct Routine {
     pub rows: f64,
     /// `pg_proc.proconfig` entries, each already spelled `name=value`.
     pub config: Vec<String>,
+    /// Original `SET` clause text, aligned with `config` for definition deparse.
+    pub config_source: Vec<String>,
     pub owner: String,
     /// The aggregate definition, present exactly when `kind` is
     /// [`RoutineKind::Aggregate`].
@@ -453,7 +471,7 @@ pub fn drop_routine_ops(identity: &str) -> Vec<WriteOp> {
     }]
 }
 
-const ROUTINE_VERSION: u8 = 6;
+const ROUTINE_VERSION: u8 = 9;
 
 fn write_routine_type(out: &mut Vec<u8>, ty: &RoutineType) {
     match ty.column {
@@ -516,7 +534,7 @@ fn read_opt_str(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
 
 /// An aggregate definition: a presence byte, and for a present definition the
 /// kind, transition function name, the transition type, support functions, initial
-/// condition, and then the recorded-but-unexecuted option list.
+/// condition, moving-window support, and then the recorded-but-unexecuted option list.
 fn write_aggregate(out: &mut Vec<u8>, aggregate: Option<&AggregateDefinition>) {
     let Some(aggregate) = aggregate else {
         out.push(0);
@@ -532,6 +550,19 @@ fn write_aggregate(out: &mut Vec<u8>, aggregate: Option<&AggregateDefinition>) {
     write_opt_str(out, aggregate.deserialfn.as_deref());
     out.push(aggregate.finalfunc_modify as u8);
     write_opt_str(out, aggregate.initcond.as_deref());
+    write_opt_str(out, aggregate.moving_transfn.as_deref());
+    write_opt_str(out, aggregate.moving_invtransfn.as_deref());
+    match &aggregate.moving_transtype {
+        Some(ty) => {
+            out.push(1);
+            write_routine_type(out, ty);
+        }
+        None => out.push(0),
+    }
+    write_opt_str(out, aggregate.moving_finalfn.as_deref());
+    write_opt_str(out, aggregate.moving_initcond.as_deref());
+    out.push(u8::from(aggregate.moving_initcond_specified));
+    out.push(u8::from(aggregate.moving_finalfunc_extra));
     write_count(out, aggregate.direct_args);
     write_count(out, aggregate.ordered_args);
     out.push(u8::from(aggregate.finalfunc_extra));
@@ -557,6 +588,21 @@ fn read_aggregate(cur: &mut &[u8]) -> Result<Option<AggregateDefinition>, KvErro
             let deserialfn = read_opt_str(cur)?;
             let finalfunc_modify = char::from(take_u8(cur)?);
             let initcond = read_opt_str(cur)?;
+            let moving_transfn = read_opt_str(cur)?;
+            let moving_invtransfn = read_opt_str(cur)?;
+            let moving_transtype = match take_u8(cur)? {
+                0 => None,
+                1 => Some(read_routine_type(cur)?),
+                other => {
+                    return Err(KvError::CorruptRow(format!(
+                        "unknown optional routine-type tag {other}"
+                    )));
+                }
+            };
+            let moving_finalfn = read_opt_str(cur)?;
+            let moving_initcond = read_opt_str(cur)?;
+            let moving_initcond_specified = take_u8(cur)? != 0;
+            let moving_finalfunc_extra = take_u8(cur)? != 0;
             let direct_args = read_count(cur)?;
             let ordered_args = read_count(cur)?;
             let finalfunc_extra = take_u8(cur)? != 0;
@@ -576,6 +622,13 @@ fn read_aggregate(cur: &mut &[u8]) -> Result<Option<AggregateDefinition>, KvErro
                 deserialfn,
                 finalfunc_modify,
                 initcond,
+                moving_transfn,
+                moving_invtransfn,
+                moving_transtype,
+                moving_finalfn,
+                moving_initcond,
+                moving_initcond_specified,
+                moving_finalfunc_extra,
                 direct_args,
                 ordered_args,
                 finalfunc_extra,
@@ -633,6 +686,7 @@ pub fn serialize_routine(routine: &Routine) -> Vec<u8> {
     });
     out.push(routine.volatility as u8);
     out.push(routine.parallel as u8);
+    out.push(u8::from(routine.window));
     out.push(u8::from(routine.strict));
     out.push(u8::from(routine.security_definer));
     out.push(u8::from(routine.leakproof));
@@ -640,6 +694,10 @@ pub fn serialize_routine(routine: &Routine) -> Vec<u8> {
     out.extend_from_slice(&routine.rows.to_be_bytes());
     write_count(&mut out, routine.config.len());
     for entry in &routine.config {
+        write_str(&mut out, entry);
+    }
+    write_count(&mut out, routine.config_source.len());
+    for entry in &routine.config_source {
         write_str(&mut out, entry);
     }
     write_str(&mut out, &routine.owner);
@@ -725,6 +783,7 @@ pub fn deserialize_routine(bytes: &[u8]) -> Result<Routine, KvError> {
     };
     let volatility = char::from(take_u8(&mut cur)?);
     let parallel = char::from(take_u8(&mut cur)?);
+    let window = take_u8(&mut cur)? != 0;
     let strict = take_u8(&mut cur)? != 0;
     let security_definer = take_u8(&mut cur)? != 0;
     let leakproof = take_u8(&mut cur)? != 0;
@@ -742,6 +801,11 @@ pub fn deserialize_routine(bytes: &[u8]) -> Result<Routine, KvError> {
     let mut config = Vec::with_capacity(config_count.min(1024));
     for _ in 0..config_count {
         config.push(read_string(&mut cur)?);
+    }
+    let config_source_count = read_count(&mut cur)?;
+    let mut config_source = Vec::with_capacity(config_source_count.min(1024));
+    for _ in 0..config_source_count {
+        config_source.push(read_string(&mut cur)?);
     }
     let owner = read_string(&mut cur)?;
     let aggregate = read_aggregate(&mut cur)?;
@@ -762,12 +826,14 @@ pub fn deserialize_routine(bytes: &[u8]) -> Result<Routine, KvError> {
         body_form,
         volatility,
         parallel,
+        window,
         strict,
         security_definer,
         leakproof,
         cost,
         rows,
         config,
+        config_source,
         owner,
         aggregate,
     })
@@ -809,12 +875,14 @@ mod tests {
             body_form: BodyForm::Source,
             volatility: 'v',
             parallel: 'u',
+            window: false,
             strict: false,
             security_definer: false,
             leakproof: false,
             cost: 100.0,
             rows: 0.0,
             config: vec!["search_path=public".into()],
+            config_source: vec!["search_path TO public".into()],
             owner: "crab".into(),
             aggregate: None,
         }
@@ -848,6 +916,13 @@ mod tests {
                 deserialfn: None,
                 finalfunc_modify: 'r',
                 initcond: Some("{0,0}".into()),
+                moving_transfn: Some("int4_avg_accum".into()),
+                moving_invtransfn: Some("int4_avg_accum_inv".into()),
+                moving_transtype: Some(RoutineType::named("_int8".into())),
+                moving_finalfn: Some("int8_avg".into()),
+                moving_initcond: Some("{0,0}".into()),
+                moving_initcond_specified: true,
+                moving_finalfunc_extra: false,
                 direct_args: 0,
                 ordered_args: 0,
                 finalfunc_extra: false,
@@ -993,6 +1068,13 @@ mod tests {
                 deserialfn: None,
                 finalfunc_modify: 'r',
                 initcond: None,
+                moving_transfn: None,
+                moving_invtransfn: None,
+                moving_transtype: None,
+                moving_finalfn: None,
+                moving_initcond: None,
+                moving_initcond_specified: false,
+                moving_finalfunc_extra: false,
                 direct_args: 0,
                 ordered_args: 0,
                 finalfunc_extra: false,
@@ -1001,7 +1083,9 @@ mod tests {
             }),
             ..sample_aggregate()
         };
-        for routine in [sample(), sample_aggregate(), minimal] {
+        let mut window = sample();
+        window.window = true;
+        for routine in [sample(), sample_aggregate(), minimal, window] {
             let bytes = serialize_routine(&routine);
             assert!(bytes[0] == ROUTINE_VERSION);
             assert!(deserialize_routine(&bytes).expect("decodes") == routine);

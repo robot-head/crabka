@@ -197,21 +197,29 @@ fn equality_and_range_predicates_match_full_scan_filtering() {
         ScannedRow {
             rowid: 1,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(1), Datum::Text("keep".into())],
         },
         ScannedRow {
             rowid: 2,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(2), Datum::Text("keep".into())],
         },
         ScannedRow {
             rowid: 3,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(4), Datum::Text("drop".into())],
         },
         ScannedRow {
             rowid: 4,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(5), Datum::Text("keep".into())],
         },
     ];
@@ -231,6 +239,8 @@ fn projection_pushdown_returns_requested_columns_in_order() {
     let rows = vec![ScannedRow {
         rowid: 7,
         xmin: 3,
+        cmin: 0,
+        cmax: 0,
         row: vec![Datum::Int4(9), Datum::Text("nine".into())],
     }];
 
@@ -253,16 +263,22 @@ fn partial_count_pushdown_matches_full_scan_count_after_predicate() {
         ScannedRow {
             rowid: 1,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(1), Datum::Text("drop".into())],
         },
         ScannedRow {
             rowid: 2,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(2), Datum::Text("keep".into())],
         },
         ScannedRow {
             rowid: 3,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(3), Datum::Text("keep".into())],
         },
     ];
@@ -294,21 +310,29 @@ fn top_k_pushdown_matches_full_scan_order_limit_with_deterministic_ties() {
         ScannedRow {
             rowid: 4,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(10), Datum::Text("d".into())],
         },
         ScannedRow {
             rowid: 1,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(20), Datum::Text("a".into())],
         },
         ScannedRow {
             rowid: 2,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(20), Datum::Text("b".into())],
         },
         ScannedRow {
             rowid: 3,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(30), Datum::Text("c".into())],
         },
     ];
@@ -340,21 +364,29 @@ fn top_k_pushdown_supports_ascending_order() {
         ScannedRow {
             rowid: 4,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(10), Datum::Text("d".into())],
         },
         ScannedRow {
             rowid: 1,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(20), Datum::Text("a".into())],
         },
         ScannedRow {
             rowid: 2,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(20), Datum::Text("b".into())],
         },
         ScannedRow {
             rowid: 3,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(30), Datum::Text("c".into())],
         },
     ];
@@ -386,21 +418,29 @@ fn top_k_pushdown_orders_multiple_keys_before_deterministic_identity() {
         ScannedRow {
             rowid: 9,
             xmin: 2,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(1), Datum::Text("a".into())],
         },
         ScannedRow {
             rowid: 3,
             xmin: 4,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(1), Datum::Text("b".into())],
         },
         ScannedRow {
             rowid: 3,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(1), Datum::Text("b".into())],
         },
         ScannedRow {
             rowid: 2,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(2), Datum::Text("z".into())],
         },
     ];
@@ -451,21 +491,29 @@ fn top_k_pushdown_merges_uneven_range_local_results_lexicographically() {
             ScannedRow {
                 rowid: 8,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(1), Datum::Text("z".into())],
             },
             ScannedRow {
                 rowid: 1,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(1), Datum::Text("a".into())],
             },
             ScannedRow {
                 rowid: 5,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(3), Datum::Text("x".into())],
             },
             ScannedRow {
                 rowid: 7,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(4), Datum::Text("x".into())],
             },
         ],
@@ -473,11 +521,15 @@ fn top_k_pushdown_merges_uneven_range_local_results_lexicographically() {
             ScannedRow {
                 rowid: 3,
                 xmin: 2,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(1), Datum::Text("z".into())],
             },
             ScannedRow {
                 rowid: 2,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(2), Datum::Text("q".into())],
             },
         ],
@@ -520,6 +572,8 @@ fn k_way_top_k_merge_matches_global_order_and_bounds_output_for_random_streams()
             streams[stream].push(ScannedRow {
                 rowid: seed * 100 + index,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(value)],
             });
         }
@@ -540,6 +594,8 @@ fn top_k_pushdown_rejects_projection_pushdown() {
         vec![ScannedRow {
             rowid: 1,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(10), Datum::Text("ten".into())],
         }],
         &PredicatePushdown::FullScan,
@@ -569,6 +625,8 @@ fn top_k_pushdown_rejects_null_order_key() {
         vec![ScannedRow {
             rowid: 1,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Null],
         }],
         &PredicatePushdown::FullScan,
@@ -598,6 +656,8 @@ fn top_k_pushdown_rejects_missing_order_key() {
         vec![ScannedRow {
             rowid: 1,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(10)],
         }],
         &PredicatePushdown::FullScan,
@@ -627,21 +687,29 @@ fn partial_sum_count_column_min_max_preserve_null_semantics() {
         ScannedRow {
             rowid: 1,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(10), Datum::Text("drop".into())],
         },
         ScannedRow {
             rowid: 2,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Null, Datum::Text("keep".into())],
         },
         ScannedRow {
             rowid: 3,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(7), Datum::Text("keep".into())],
         },
         ScannedRow {
             rowid: 4,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int4(3), Datum::Text("keep".into())],
         },
     ];
@@ -713,11 +781,15 @@ fn grouped_partial_count_merges_range_groups_in_deterministic_key_order() {
             ScannedRow {
                 rowid: 1,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(10), Datum::Text("b".into())],
             },
             ScannedRow {
                 rowid: 2,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Null, Datum::Text("a".into())],
             },
         ],
@@ -725,11 +797,15 @@ fn grouped_partial_count_merges_range_groups_in_deterministic_key_order() {
             ScannedRow {
                 rowid: 3,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(20), Datum::Text("a".into())],
             },
             ScannedRow {
                 rowid: 4,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(30), Datum::Null],
             },
         ],
@@ -767,6 +843,8 @@ fn grouped_partials_match_single_range_for_random_whole_values() {
             .map(|index| ScannedRow {
                 rowid: index,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![
                     if (seed + index * 7).is_multiple_of(5) {
                         Datum::Null
@@ -840,11 +918,15 @@ fn partial_avg_merges_sum_count_across_uneven_ranges_and_preserves_null_semantic
             ScannedRow {
                 rowid: 1,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(10), Datum::Text("keep".into())],
             },
             ScannedRow {
                 rowid: 2,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Null, Datum::Text("keep".into())],
             },
         ],
@@ -852,16 +934,22 @@ fn partial_avg_merges_sum_count_across_uneven_ranges_and_preserves_null_semantic
             ScannedRow {
                 rowid: 3,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(7), Datum::Text("keep".into())],
             },
             ScannedRow {
                 rowid: 4,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(100), Datum::Text("keep".into())],
             },
             ScannedRow {
                 rowid: 5,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int4(1), Datum::Text("drop".into())],
             },
         ],
@@ -1816,6 +1904,8 @@ impl RangeCursor for PagingCursor {
                 ScannedRow {
                     rowid: value,
                     xmin: 1,
+                    cmin: 0,
+                    cmax: 0,
                     row: vec![Datum::Int4(i32::try_from(value).expect("test value fits"))],
                 }
             })

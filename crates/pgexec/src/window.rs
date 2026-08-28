@@ -524,7 +524,7 @@ pub(crate) fn describe_scope(s: &SelectStmt, scope: &Scope) -> Result<Scope, Exe
     let windows = resolve_window_clause(&s.windows)?;
     let mut calls = Vec::with_capacity(s.window_calls.len());
     for call in &s.window_calls {
-        calls.push(plan_call(call, &windows, scope)?);
+        calls.push(plan_call(call, &windows, &scope)?);
     }
     let names: Vec<String> = s.window_calls.iter().map(|c| c.name.clone()).collect();
     Ok(extend_scope(scope, &calls, &names))
@@ -549,31 +549,25 @@ pub(crate) fn execute_with_memory(
     ctx: &EvalCtx,
     statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<WindowOutput, ExecError> {
+    let (expanded, scope, rows) = expand_window_project_set(s, scope, rows, ctx, statement_memory)?;
+    let s = &expanded;
     let windows = resolve_window_clause(&s.windows)?;
     let mut calls = Vec::with_capacity(s.window_calls.len());
     for call in &s.window_calls {
-        calls.push(plan_call(call, &windows, scope)?);
+        calls.push(plan_call(call, &windows, &scope)?);
     }
     let names: Vec<String> = s.window_calls.iter().map(|c| c.name.clone()).collect();
 
     // Field names and types come from the ORIGINAL select list, resolved against
     // the source scope widened with this SELECT's window results.
-    let projection_scope = extend_scope(scope, &calls, &names);
+    let projection_scope = extend_scope(&scope, &calls, &names);
     let (fields, out_exprs, tys) =
         crate::exec::resolve_projection(&s.projection, &projection_scope)?;
 
     // A grouped query's window functions run over the GROUPED rows, so the whole
     // select list — and the window specs themselves — are re-expressed against
     // the aggregate output first.
-    let lowered = lower_over_grouping(
-        s,
-        scope,
-        &fields,
-        &out_exprs,
-        rows,
-        ctx,
-        statement_memory,
-    )?;
+    let lowered = lower_over_grouping(s, &scope, &fields, &out_exprs, rows, ctx, statement_memory)?;
     let calls = match &lowered.calls {
         Some(lowered_calls) => {
             let windows = resolve_window_clause(&s.windows)?;
@@ -588,13 +582,7 @@ pub(crate) fn execute_with_memory(
     let base_scope = extend_scope(&lowered.scope, &calls, &names);
 
     let mut base_rows = lowered.rows;
-    let values = evaluate_calls(
-        &calls,
-        &lowered.scope,
-        &base_rows,
-        ctx,
-        statement_memory,
-    )?;
+    let values = evaluate_calls(&calls, &lowered.scope, &base_rows, ctx, statement_memory)?;
     for (index, row) in base_rows.iter_mut().enumerate() {
         for column in &values {
             row.push(column[index].clone());
@@ -635,6 +623,57 @@ pub(crate) fn execute_with_memory(
         statement_memory,
     )?;
     Ok((fields, tys, rows))
+}
+
+/// Put a ProjectSet below WindowAgg when a window specification contains an
+/// SRF. The rewritten specs read its synthetic columns, while the expanded rows
+/// preserve every original source column for the rest of the window pipeline.
+fn expand_window_project_set(
+    s: &SelectStmt,
+    scope: &Scope,
+    rows: Vec<Vec<Datum>>,
+    ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<(SelectStmt, Scope, Vec<Vec<Datum>>), ExecError> {
+    let mut select = s.clone();
+    let mut exprs = Vec::new();
+    for window in &select.windows {
+        window_spec_exprs(&window.spec, &mut exprs);
+    }
+    for call in &select.window_calls {
+        if let WindowRef::Spec(spec) = &call.over {
+            window_spec_exprs(spec, &mut exprs);
+        }
+    }
+    if !crate::srf::exprs_contain_srf(&exprs) {
+        return Ok((select, scope.clone(), rows));
+    }
+    let (scope, rewritten, rows) =
+        crate::srf::expand_expressions_with_memory(scope, rows, &exprs, ctx, statement_memory)?;
+    let mut rewritten = rewritten.into_iter();
+    for window in &mut select.windows {
+        rewrite_window_spec(&mut window.spec, &mut rewritten);
+    }
+    for call in &mut select.window_calls {
+        if let WindowRef::Spec(spec) = &mut call.over {
+            rewrite_window_spec(spec, &mut rewritten);
+        }
+    }
+    Ok((select, scope, rows))
+}
+
+fn window_spec_exprs(spec: &WindowSpec, exprs: &mut Vec<Expr>) {
+    exprs.extend(spec.partition_by.iter().cloned());
+    exprs.extend(spec.order_by.iter().map(|item| item.expr.clone()));
+}
+
+fn rewrite_window_spec(spec: &mut WindowSpec, exprs: &mut impl Iterator<Item = Expr>) {
+    for expr in &mut spec.partition_by {
+        *expr = exprs.next().expect("rewritten window partition expression");
+    }
+    for item in &mut spec.order_by {
+        item.expr = exprs.next().expect("rewritten window ordering expression");
+    }
 }
 
 /// For each window call, the index of the FIRST call equal to it. Two spellings
@@ -795,13 +834,8 @@ fn lower_over_grouping(
     // Through `crate::grouping`, not `crate::agg`: a grouping-set clause survives
     // into the leaf select, and it is that pass which expands it. Skipping it
     // would silently drop the clause and fold the input to one group per key.
-    let leaf_rows = crate::grouping::aggregate_rows_with_memory(
-        &inner,
-        scope,
-        rows,
-        ctx,
-        statement_memory,
-    )?;
+    let leaf_rows =
+        crate::grouping::aggregate_rows_with_memory(&inner, scope, rows, ctx, statement_memory)?;
     let mut leaf_scope = Scope::empty();
     for (index, leaf) in leaves.iter().enumerate() {
         leaf_scope.columns.push(ColumnBinding {
@@ -1064,7 +1098,10 @@ fn split_call(
             array: Box::new(split(array, leaves)?),
         },
     };
-    let over = WindowRef::Spec(Box::new(split_spec(&resolve_over(&call.over, windows)?, leaves)?));
+    let over = WindowRef::Spec(Box::new(split_spec(
+        &resolve_over(&call.over, windows)?,
+        leaves,
+    )?));
     Ok(WindowCall {
         name: call.name.clone(),
         distinct: call.distinct,
@@ -1829,6 +1866,7 @@ fn evaluate_position(
         }
         _ => aggregate_over_frame(
             call,
+            frame_can_move(frame),
             partition,
             &frame_rows,
             scope,
@@ -1837,6 +1875,20 @@ fn evaluate_position(
             statement_memory,
         ),
     }
+}
+
+/// Moving support functions apply only once a frame's left edge can advance.
+/// An unbounded-preceding frame is the ordinary aggregate path in PostgreSQL.
+fn frame_can_move(frame: &ResolvedFrame) -> bool {
+    matches!(
+        frame,
+        ResolvedFrame::Explicit {
+            start: ResolvedBound::Preceding(_)
+                | ResolvedBound::CurrentRow
+                | ResolvedBound::Following(_),
+            ..
+        }
+    )
 }
 
 fn nth_frame_value(
@@ -2002,6 +2054,7 @@ fn positive_count(
 /// window with no per-aggregate code here, including its empty-input value.
 fn aggregate_over_frame(
     call: &PlannedCall,
+    use_moving: bool,
     partition: &Partition<'_>,
     frame_rows: &[usize],
     scope: &Scope,
@@ -2009,6 +2062,27 @@ fn aggregate_over_frame(
     ctx: &EvalCtx,
     statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Datum, ExecError> {
+    if use_moving
+        && let Some(user) = crate::agg::resolve_user(&call.call, scope)?
+        && user.has_moving_transition()
+    {
+        let mut state = user.moving_initial_state(ctx)?;
+        for position in frame_rows {
+            let row = &rows[partition.ordered[*position]];
+            if let Some(filter) = &call.filter
+                && crate::eval::eval(filter, scope, row, ctx)? != Datum::Bool(true)
+            {
+                continue;
+            }
+            let args = user
+                .args
+                .iter()
+                .map(|arg| crate::eval::eval(arg, scope, row, ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            user.moving_fold(&mut state, &args, ctx)?;
+        }
+        return user.moving_finish(&state, ctx);
+    }
     let mut input = Vec::with_capacity(frame_rows.len());
     for position in frame_rows {
         let row = &rows[partition.ordered[*position]];

@@ -65,6 +65,7 @@ pub enum ExecError {
     NotNullViolation {
         column: String,
         table: String,
+        row: Option<String>,
     },
     /// An existing row holds NULL in a column being constrained NOT NULL
     /// (23502), found by `ALTER TABLE … ADD PRIMARY KEY` validation over stored
@@ -83,6 +84,7 @@ pub enum ExecError {
     CheckViolation {
         table: String,
         constraint: String,
+        row: Option<String>,
     },
     /// An already-stored row fails a `CHECK` being added by `ALTER TABLE` (23514).
     CheckViolationOnExistingRows {
@@ -312,6 +314,11 @@ pub enum ExecError {
     /// family — `EXTRACT`'s unrecognised unit names the unit and the source
     /// type, and nothing else.
     InvalidParameterValueMessage(String),
+    /// A 22023 error whose PostgreSQL spelling includes DETAIL.
+    InvalidParameterValueWithDetail {
+        message: String,
+        detail: String,
+    },
     /// SP37: a `SET`/`SHOW`/`RESET` named a configuration parameter that does not
     /// exist (42704).
     UnrecognizedParameter(String),
@@ -468,6 +475,13 @@ pub enum ExecError {
     FunctionError {
         sqlstate: &'static str,
         message: String,
+    },
+    /// A scalar function diagnostic whose message names the caller's input and
+    /// whose DETAIL explains the malformed part.
+    FunctionErrorWithMessageDetail {
+        sqlstate: &'static str,
+        message: String,
+        detail: &'static str,
     },
     /// A scalar function's own error that also carries `PostgreSQL`'s `DETAIL`
     /// line — `to_number`'s `"RN" is incompatible with other formats` names the
@@ -1139,25 +1153,35 @@ impl ExecError {
                 PgError::error("0A000", message).with_detail(detail)
             }
             ExecError::TypeMismatch(m) => PgError::error("42804", m),
-            ExecError::NotNullViolation { column, table } => PgError::error(
-                "23502",
-                format!(
-                    "null value in column \"{column}\" of relation \"{table}\" \
-                     violates not-null constraint"
-                ),
-            ),
+            ExecError::NotNullViolation { column, table, row } => {
+                let error = PgError::error(
+                    "23502",
+                    format!(
+                        "null value in column \"{column}\" of relation \"{table}\" \
+                         violates not-null constraint"
+                    ),
+                );
+                row.map_or(error.clone(), |row| error.with_detail(format!("Failing row contains {row}.")))
+            }
             ExecError::ColumnContainsNullValues { column, table } => PgError::error(
                 "23502",
                 format!("column \"{column}\" of relation \"{table}\" contains null values"),
             ),
             ExecError::InvalidTableDefinition(m) => PgError::error("42P16", m),
             ExecError::InvalidSchemaDefinition(m) => PgError::error("42P15", m),
-            ExecError::CheckViolation { table, constraint } => PgError::error(
-                "23514",
-                format!(
-                    "new row for relation \"{table}\" violates check constraint \"{constraint}\""
-                ),
-            ),
+            ExecError::CheckViolation {
+                table,
+                constraint,
+                row,
+            } => {
+                let error = PgError::error(
+                    "23514",
+                    format!(
+                        "new row for relation \"{table}\" violates check constraint \"{constraint}\""
+                    ),
+                );
+                row.map_or(error.clone(), |row| error.with_detail(format!("Failing row contains {row}.")))
+            }
             ExecError::CheckViolationOnExistingRows { table, constraint } => PgError::error(
                 "23514",
                 format!(
@@ -1332,6 +1356,9 @@ impl ExecError {
                 PgError::error("22023", format!("invalid value for parameter: \"{v}\""))
             }
             ExecError::InvalidParameterValueMessage(m) => PgError::error("22023", m),
+            ExecError::InvalidParameterValueWithDetail { message, detail } => {
+                PgError::error("22023", message).with_detail(detail)
+            }
             ExecError::UnrecognizedParameter(n) => PgError::error(
                 "42704",
                 format!("unrecognized configuration parameter \"{n}\""),
@@ -1453,13 +1480,26 @@ impl ExecError {
                 detail,
             } => PgError::error(sqlstate, message).with_detail(detail),
             ExecError::FunctionError { sqlstate, message } => {
-                let hint = ambiguous_operator_hint(&message);
+                let hint = ambiguous_operator_hint(&message).or_else(|| {
+                    (message == "variadic arguments must be name/value pairs").then_some(
+                        "Provide an even number of variadic arguments that can be divided into pairs.",
+                    )
+                }).or_else(|| {
+                    (message == "unterminated format() type specifier"
+                        || message.starts_with("unrecognized format() type specifier"))
+                    .then_some("For a single \"%\" use \"%%\".")
+                });
                 let rendered = PgError::error(sqlstate, message);
                 match hint {
                     Some(hint) => rendered.with_hint(hint),
                     None => rendered,
                 }
             }
+            ExecError::FunctionErrorWithMessageDetail {
+                sqlstate,
+                message,
+                detail,
+            } => PgError::error(sqlstate, message).with_detail(detail),
             ExecError::SqlJson(error) => {
                 let mut rendered = PgError::error(error.sqlstate, error.message);
                 if let Some(detail) = error.detail {
@@ -2005,6 +2045,7 @@ mod tests {
             ExecError::CheckViolation {
                 table: "t".into(),
                 constraint: "t_a_check".into(),
+                row: None,
             },
         ];
 
@@ -2015,6 +2056,27 @@ mod tests {
                     .as_deref()
                     .is_none_or(|fields| fields.detail.is_none() && fields.hint.is_none()),
                 "unexpected secondary fields for {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_specifier_errors_suggest_escaping_percent() {
+        for message in [
+            "unterminated format() type specifier",
+            "unrecognized format() type specifier \"x\"",
+        ] {
+            let error = ExecError::FunctionError {
+                sqlstate: "22023",
+                message: message.into(),
+            }
+            .into_pg();
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|fields| fields.hint.as_deref())
+                    == Some("For a single \"%\" use \"%%\"."),
             );
         }
     }

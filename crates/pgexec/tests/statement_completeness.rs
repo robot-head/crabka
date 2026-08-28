@@ -280,10 +280,10 @@ async fn returning_old_and_new_images_follow_pg18() {
     // INSERT: the pre-image is all NULL.
     let inserted = run(
         &mut s,
-        "INSERT INTO r VALUES (1, 10) RETURNING old.v, new.v",
+        "INSERT INTO r VALUES (1, 10) RETURNING old.v, new.v, old, new",
     )
     .await;
-    assert!(grid(&inserted) == vec![vec![None, Some("10".into())]]);
+    assert!(grid(&inserted) == vec![vec![None, Some("10".into()), None, Some("(1,10)".into())]]);
 
     // UPDATE: a bare name means the post-image; `*` never expands the images.
     let updated = run(
@@ -310,13 +310,32 @@ async fn returning_old_and_new_images_follow_pg18() {
     .await;
     assert!(grid(&old_only) == vec![cells(&["13", "14"])]);
 
+    // A bare image name is the whole composite row, unless an ordinary output
+    // column of that name takes precedence.
+    let whole_images = run(
+        &mut s,
+        "UPDATE r SET v = v + 1 WHERE id = 1 RETURNING old, new",
+    )
+    .await;
+    assert!(grid(&whole_images) == vec![cells(&["(1,14)", "(1,15)"])]);
+    assert!(names(&whole_images) == vec!["old".to_string(), "new".to_string()]);
+
     // DELETE: the post-image is all NULL.
     let deleted = run(
         &mut s,
-        "DELETE FROM r WHERE id = 1 RETURNING old.id, old.v, new.v",
+        "DELETE FROM r WHERE id = 1 RETURNING old.id, old.v, new.v, old, new",
     )
     .await;
-    assert!(grid(&deleted) == vec![vec![Some("1".into()), Some("14".into()), None]]);
+    assert!(
+        grid(&deleted)
+            == vec![vec![
+                Some("1".into()),
+                Some("15".into()),
+                None,
+                Some("(1,15)".into()),
+                None,
+            ]]
+    );
 
     run(&mut s, "INSERT INTO r VALUES (2, 20)").await;
     assert!(run_err(&mut s, "UPDATE r SET v = 1 RETURNING old.nope").await == "42703");
@@ -771,9 +790,130 @@ async fn a_second_touch_from_an_upsert_or_merge_is_21000() {
         .await
             == "21000"
     );
+    run(&mut s, "CREATE TABLE merge_source (id int4)").await;
+    run(&mut s, "INSERT INTO merge_source VALUES (2), (2)").await;
+    let error = s
+        .simple_query(
+            "MERGE INTO oc USING merge_source ON oc.id = merge_source.id \
+             WHEN MATCHED THEN UPDATE SET v = 50",
+        )
+        .await
+        .expect_err("a repeated MERGE match must fail");
+    assert!(error.code == "21000");
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.hint.as_deref())
+            == Some("Ensure that not more than one source row matches any one target row.")
+    );
+    let duplicate_name = s
+        .simple_query("MERGE INTO oc USING oc ON id = id WHEN MATCHED THEN DO NOTHING")
+        .await
+        .expect_err("MERGE target and source names must not collide");
+    assert!(duplicate_name.code == "42712");
+    assert!(duplicate_name.message == "name \"oc\" specified more than once");
+    assert!(
+        duplicate_name
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.detail.as_deref())
+            == Some("The name is used both as MERGE target table and data source.")
+    );
+    let system_column = s
+        .simple_query(
+            "MERGE INTO oc t USING merge_source s ON t.id = s.id \
+             WHEN MATCHED AND t.xmin = t.xmax THEN DO NOTHING",
+        )
+        .await
+        .expect_err("MERGE WHEN may not read a target MVCC system column");
+    assert!(system_column.message == "cannot use system column \"xmin\" in MERGE WHEN condition");
+    let source_target = s
+        .simple_query(
+            "MERGE INTO oc t USING (SELECT id FROM merge_source WHERE t.id > id) s \
+             ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, 0)",
+        )
+        .await
+        .expect_err("a MERGE source query cannot reference its target");
+    assert!(source_target.code == "42P01");
+    assert!(source_target.message == "invalid reference to FROM-clause entry for table \"t\"");
+    assert!(
+        source_target
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.detail.as_deref())
+            == Some(
+                "There is an entry for table \"t\", but it cannot be referenced from this part of the query."
+            )
+    );
+    run(&mut s, "CREATE TABLE merge_unreachable_source (id int4)").await;
+    run(&mut s, "INSERT INTO merge_unreachable_source VALUES (1)").await;
+    run(
+        &mut s,
+        "MERGE INTO oc t USING merge_unreachable_source s ON t.id = s.id \
+         WHEN MATCHED AND t.tableoid >= 0 THEN UPDATE SET v = 7",
+    )
+    .await;
+    let unreachable = s
+        .simple_query(
+            "MERGE INTO oc t USING merge_unreachable_source s ON t.id = s.id \
+             WHEN MATCHED THEN DELETE WHEN MATCHED THEN UPDATE SET v = 0",
+        )
+        .await
+        .expect_err("a MERGE clause after an unconditional clause is unreachable");
+    assert!(unreachable.code == "42601");
+    assert!(
+        unreachable.message == "unreachable WHEN clause specified after unconditional WHEN clause"
+    );
+    for (sql, table) in [
+        (
+            "MERGE INTO oc t USING merge_source s ON t.id = s.id \
+             WHEN NOT MATCHED THEN INSERT (id, v) VALUES (t.id, s.id)",
+            "t",
+        ),
+        (
+            "MERGE INTO oc t USING merge_source s ON t.id = s.id \
+             WHEN NOT MATCHED BY SOURCE AND s.id = 2 THEN DELETE",
+            "s",
+        ),
+    ] {
+        let inaccessible = s
+            .simple_query(sql)
+            .await
+            .expect_err("MERGE clause must reject its absent join relation");
+        assert!(inaccessible.code == "42P01");
+        assert!(
+            inaccessible.message
+                == format!("invalid reference to FROM-clause entry for table \"{table}\"")
+        );
+        let expected_detail = format!(
+            "There is an entry for table \"{table}\", but it cannot be referenced from this part of the query."
+        );
+        assert!(
+            inaccessible
+                .diagnostics
+                .as_deref()
+                .and_then(|diagnostics| diagnostics.detail.as_deref())
+                == Some(expected_detail.as_str())
+        );
+    }
+    run(&mut s, "CREATE TABLE merge_scope_source (id int4, v int4)").await;
+    run(&mut s, "INSERT INTO merge_scope_source VALUES (3, 30)").await;
+    run(
+        &mut s,
+        "MERGE INTO oc t USING merge_scope_source s ON false \
+         WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, v)",
+    )
+    .await;
+    run(
+        &mut s,
+        "MERGE INTO oc t USING merge_scope_source s ON false \
+         WHEN NOT MATCHED BY SOURCE THEN UPDATE SET v = v + 1",
+    )
+    .await;
     assert!(
         grid(&run(&mut s, "SELECT id, v FROM oc ORDER BY id").await)
-            == vec![cells(&["1", "1"]), cells(&["2", "2"])]
+            == vec![cells(&["1", "8"]), cells(&["2", "3"]), cells(&["3", "31"]),]
     );
 }
 

@@ -38,6 +38,7 @@ const SUBCLASS_PREFIX: &[u8] = b"\0\0\0\0catalog_relstats/subclass/";
 const TUPLES_PREFIX: &[u8] = b"\0\0\0\0catalog_relstats/tuples/";
 const PAGES_PREFIX: &[u8] = b"\0\0\0\0catalog_relstats/pages/";
 const ALLVISIBLE_PREFIX: &[u8] = b"\0\0\0\0catalog_relstats/allvisible/";
+const ALLFROZEN_PREFIX: &[u8] = b"\0\0\0\0catalog_relstats/allfrozen/";
 
 /// What `pg_class.reltuples` reports for a relation no `ANALYZE` has looked at:
 /// `PostgreSQL`'s "unknown", which is a negative count rather than a null.
@@ -52,6 +53,8 @@ pub(crate) struct RelStats {
     pub(crate) relpages: i32,
     /// `pg_class.relallvisible`.
     pub(crate) relallvisible: i32,
+    /// `pg_class.relallfrozen`.
+    pub(crate) relallfrozen: i32,
     /// `pg_class.relhassubclass`.
     pub(crate) has_subclass: bool,
 }
@@ -62,6 +65,7 @@ impl Default for RelStats {
             reltuples: UNKNOWN_TUPLES,
             relpages: 0,
             relallvisible: 0,
+            relallfrozen: 0,
             has_subclass: false,
         }
     }
@@ -114,6 +118,14 @@ pub(crate) fn set_relallvisible_op(relation: &RelationName, relallvisible: i32) 
     }
 }
 
+/// The op a statistics import writes to record the all-frozen page estimate.
+pub(crate) fn set_relallfrozen_op(relation: &RelationName, relallfrozen: i32) -> WriteOp {
+    WriteOp::Put {
+        key: relation_key(ALLFROZEN_PREFIX, relation),
+        value: relallfrozen.to_be_bytes().to_vec(),
+    }
+}
+
 /// Move whichever of a relation's statistics exist from `from` to `to`.
 ///
 /// Both facts are stored, so both survive a rename in `PostgreSQL`. Presence of
@@ -136,6 +148,7 @@ pub(crate) fn rename_ops(
         TUPLES_PREFIX,
         PAGES_PREFIX,
         ALLVISIBLE_PREFIX,
+        ALLFROZEN_PREFIX,
     ] {
         if let Some(value) = kv.get(&relation_key(prefix, from)).map_err(ExecError::Kv)? {
             ops.push(WriteOp::Delete {
@@ -162,6 +175,27 @@ pub(crate) fn drop_metadata_ops(relation: &RelationName) -> Vec<WriteOp> {
         },
         WriteOp::Delete {
             key: relation_key(ALLVISIBLE_PREFIX, relation),
+        },
+        WriteOp::Delete {
+            key: relation_key(ALLFROZEN_PREFIX, relation),
+        },
+    ]
+}
+
+/// Reset the estimates `pg_clear_relation_stats` owns for one relation.
+pub(crate) fn clear_ops(relation: &RelationName) -> Vec<WriteOp> {
+    vec![
+        WriteOp::Delete {
+            key: relation_key(TUPLES_PREFIX, relation),
+        },
+        WriteOp::Delete {
+            key: relation_key(PAGES_PREFIX, relation),
+        },
+        WriteOp::Delete {
+            key: relation_key(ALLVISIBLE_PREFIX, relation),
+        },
+        WriteOp::Delete {
+            key: relation_key(ALLFROZEN_PREFIX, relation),
         },
     ]
 }
@@ -193,6 +227,11 @@ pub(crate) fn all(kv: &dyn Kv) -> Result<BTreeMap<RelationName, RelStats>, ExecE
         let relation = relation_from_key(ALLVISIBLE_PREFIX, &key)?;
         stats.entry(relation).or_default().relallvisible =
             integer(&value, "stored relallvisible is not four bytes")?;
+    }
+    for (key, value) in kv.scan_prefix(ALLFROZEN_PREFIX).map_err(ExecError::Kv)? {
+        let relation = relation_from_key(ALLFROZEN_PREFIX, &key)?;
+        stats.entry(relation).or_default().relallfrozen =
+            integer(&value, "stored relallfrozen is not four bytes")?;
     }
     Ok(stats)
 }
@@ -229,6 +268,12 @@ pub(crate) fn of(kv: &dyn Kv, relation: &RelationName) -> Result<RelStats, ExecE
             ALLVISIBLE_PREFIX,
             relation,
             "stored relallvisible is not four bytes",
+        )?,
+        relallfrozen: integer_value(
+            kv,
+            ALLFROZEN_PREFIX,
+            relation,
+            "stored relallfrozen is not four bytes",
         )?,
         has_subclass,
     })
@@ -289,7 +334,8 @@ mod tests {
 
     use super::{
         RelStats, UNKNOWN_TUPLES, all, clear_has_subclass_op, drop_metadata_ops, of, rename_ops,
-        set_has_subclass_op, set_relallvisible_op, set_relpages_op, set_reltuples_op,
+        set_has_subclass_op, set_relallfrozen_op, set_relallvisible_op, set_relpages_op,
+        set_reltuples_op,
     };
 
     fn relation(schema: &str, name: &str) -> RelationName {
@@ -327,6 +373,7 @@ mod tests {
                     reltuples: 7.0,
                     relpages: 0,
                     relallvisible: 0,
+                    relallfrozen: 0,
                     has_subclass: true,
                 }
         );
@@ -337,6 +384,7 @@ mod tests {
                     reltuples: 7.0,
                     relpages: 0,
                     relallvisible: 0,
+                    relallfrozen: 0,
                     has_subclass: false,
                 }
         );
@@ -354,6 +402,7 @@ mod tests {
                 set_reltuples_op(&counted, -0.5),
                 set_relpages_op(&counted, 17),
                 set_relallvisible_op(&counted, 3),
+                set_relallfrozen_op(&counted, 2),
             ],
         );
         let scanned = all(&kv).expect("scan");
@@ -390,6 +439,7 @@ mod tests {
                 set_reltuples_op(&name, 3.0),
                 set_relpages_op(&name, 2),
                 set_relallvisible_op(&name, 1),
+                set_relallfrozen_op(&name, 4),
             ],
         );
         apply(&kv, drop_metadata_ops(&name));

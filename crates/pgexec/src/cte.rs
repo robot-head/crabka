@@ -20,9 +20,14 @@ use crabka_pgparser::ast::{
     Cte, CteBody, Expr, JoinKind, QueryBody, QueryExpr, SelectItem, SelectStmt, SetExpr, SetOp,
     TableExpr, WithClause,
 };
-use crabka_pgtypes::Datum;
+use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, RecordValue};
 
-use crate::{error::ExecError, join::Relation, scope::Scope, subquery::SubCtx};
+use crate::{
+    error::ExecError,
+    join::Relation,
+    scope::{ColumnBinding, Exposure, Scope},
+    subquery::SubCtx,
+};
 
 /// Iteration bound for a recursive CTE.
 ///
@@ -33,6 +38,222 @@ use crate::{error::ExecError, join::Relation, scope::Scope, subquery::SubCtx};
 /// churns without growth, so a bad query fails fast and does not pin the session
 /// forever.
 const MAX_RECURSION_ITERATIONS: usize = 100_000;
+
+/// The generated columns a `SEARCH` / `CYCLE` clause carries through a
+/// recursive fixpoint. They are kept beside each working row rather than put
+/// in the recursive query's scope: PostgreSQL exposes them to the CTE consumer,
+/// not to the recursive term itself.
+struct RecursiveExtras {
+    search: Option<SearchExtra>,
+    cycle: Option<CycleExtra>,
+}
+
+struct SearchExtra {
+    depth_first: bool,
+    columns: Vec<usize>,
+    name: String,
+}
+
+struct CycleExtra {
+    columns: Vec<usize>,
+    mark_name: String,
+    path_name: String,
+    marked: Datum,
+    unmarked: Datum,
+}
+
+impl RecursiveExtras {
+    fn new(cte: &Cte, scope: &Scope, ctx: &SubCtx<'_>) -> Result<Option<Self>, ExecError> {
+        if cte.search.is_none() && cte.cycle.is_none() {
+            return Ok(None);
+        }
+        let indexes = |names: &[String]| {
+            names
+                .iter()
+                .map(|name| scope.resolve(None, name))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let search = cte
+            .search
+            .as_ref()
+            .map(|search| {
+                Ok::<_, ExecError>(SearchExtra {
+                    depth_first: search.depth_first,
+                    columns: indexes(&search.by)?,
+                    name: search.set.clone(),
+                })
+            })
+            .transpose()?;
+        let cycle = cte
+            .cycle
+            .as_ref()
+            .map(|cycle| {
+                let (marked, unmarked) = cycle.mark_values.as_ref().map_or_else(
+                    || Ok::<_, ExecError>((Datum::Bool(true), Datum::Bool(false))),
+                    |(marked, unmarked)| {
+                        let empty = Scope::empty();
+                        Ok((
+                            crate::eval::eval(marked, &empty, &[], ctx.eval_ctx)?,
+                            crate::eval::eval(unmarked, &empty, &[], ctx.eval_ctx)?,
+                        ))
+                    },
+                )?;
+                Ok::<_, ExecError>(CycleExtra {
+                    columns: indexes(&cycle.by)?,
+                    mark_name: cycle.set.clone(),
+                    path_name: cycle.using.clone(),
+                    marked,
+                    unmarked,
+                })
+            })
+            .transpose()?;
+        Ok(Some(Self { search, cycle }))
+    }
+
+    fn columns(&self) -> Result<Vec<ColumnBinding>, ExecError> {
+        let mut columns = Vec::with_capacity(
+            usize::from(self.search.is_some()) + 2 * usize::from(self.cycle.is_some()),
+        );
+        if let Some(search) = &self.search {
+            columns.push(ColumnBinding {
+                qualifier: None,
+                name: search.name.clone(),
+                ty: if search.depth_first {
+                    ColumnType::Array(ElemType::Record(None))
+                } else {
+                    ColumnType::Record(None)
+                },
+                exposure: Exposure::Output,
+            });
+        }
+        if let Some(cycle) = &self.cycle {
+            let marked = cycle.marked.column_type().ok_or_else(|| {
+                ExecError::TypeMismatch("cycle mark must have a known type".into())
+            })?;
+            columns.extend([
+                ColumnBinding {
+                    qualifier: None,
+                    name: cycle.mark_name.clone(),
+                    ty: marked,
+                    exposure: Exposure::Output,
+                },
+                ColumnBinding {
+                    qualifier: None,
+                    name: cycle.path_name.clone(),
+                    ty: ColumnType::Array(ElemType::Record(None)),
+                    exposure: Exposure::Output,
+                },
+            ]);
+        }
+        Ok(columns)
+    }
+
+    fn seed(&self, row: &[Datum]) -> Vec<Datum> {
+        let mut generated = Vec::with_capacity(
+            usize::from(self.search.is_some()) + 2 * usize::from(self.cycle.is_some()),
+        );
+        if let Some(search) = &self.search {
+            let key = record_key(row, &search.columns);
+            generated.push(if search.depth_first {
+                record_path(Vec::from([key]))
+            } else {
+                Datum::Record(RecordValue::anonymous(
+                    std::iter::once(Datum::Int4(0))
+                        .chain(record_values(&key))
+                        .collect(),
+                ))
+            });
+        }
+        if let Some(cycle) = &self.cycle {
+            let key = record_key(row, &cycle.columns);
+            generated.extend([cycle.unmarked.clone(), record_path(Vec::from([key]))]);
+        }
+        generated
+    }
+
+    fn step(&self, generated: &[Datum], row: &[Datum]) -> Result<Vec<Datum>, ExecError> {
+        let mut next = Vec::with_capacity(generated.len());
+        if let Some(search) = &self.search {
+            let key = record_key(row, &search.columns);
+            let previous = generated
+                .first()
+                .ok_or_else(|| internal_extra("search order"))?;
+            next.push(if search.depth_first {
+                append_path(previous, key)?
+            } else {
+                let Datum::Record(previous) = previous else {
+                    return Err(internal_extra("breadth-first search order"));
+                };
+                let Some(Datum::Int4(level)) = previous.values.first() else {
+                    return Err(internal_extra("breadth-first search level"));
+                };
+                // `MAX_RECURSION_ITERATIONS` is far below i32::MAX, so this
+                // cannot saturate for a row this fixpoint admitted.
+                let next_level = level.saturating_add(1);
+                Datum::Record(RecordValue::anonymous(
+                    std::iter::once(Datum::Int4(next_level))
+                        .chain(record_values(&key))
+                        .collect(),
+                ))
+            });
+        }
+        if let Some(cycle) = &self.cycle {
+            let key = record_key(row, &cycle.columns);
+            let path_index = usize::from(self.search.is_some()) + 1;
+            let path = generated
+                .get(path_index)
+                .ok_or_else(|| internal_extra("cycle path"))?;
+            let Datum::Array(path_values) = path else {
+                return Err(internal_extra("cycle path"));
+            };
+            let cyclic = path_values.elems.contains(&key);
+            next.push(if cyclic {
+                cycle.marked.clone()
+            } else {
+                cycle.unmarked.clone()
+            });
+            next.push(append_path(path, key)?);
+        }
+        Ok(next)
+    }
+
+    fn stops_recursion(&self, generated: &[Datum]) -> bool {
+        self.cycle.as_ref().is_some_and(|cycle| {
+            let index = usize::from(self.search.is_some());
+            generated.get(index) == Some(&cycle.marked)
+        })
+    }
+}
+
+fn record_key(row: &[Datum], columns: &[usize]) -> Datum {
+    Datum::Record(RecordValue::anonymous(
+        columns.iter().map(|&index| row[index].clone()).collect(),
+    ))
+}
+
+fn record_values(record: &Datum) -> impl Iterator<Item = Datum> + '_ {
+    let Datum::Record(record) = record else {
+        unreachable!("record_key always constructs a record")
+    };
+    record.values.iter().cloned()
+}
+
+fn record_path(records: Vec<Datum>) -> Datum {
+    Datum::Array(ArrayValue::new(ElemType::Record(None), records))
+}
+
+fn append_path(path: &Datum, key: Datum) -> Result<Datum, ExecError> {
+    let Datum::Array(path) = path else {
+        return Err(internal_extra("record path"));
+    };
+    let mut records = path.elems.clone();
+    records.push(key);
+    Ok(record_path(records))
+}
+
+fn internal_extra(what: &str) -> ExecError {
+    ExecError::Unsupported(format!("internal recursive CTE {what} is malformed"))
+}
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CteContext {
@@ -95,6 +316,18 @@ pub(crate) fn evaluate_cte_relation(
     recursive: bool,
     ctes: &CteContext,
 ) -> Result<Relation, ExecError> {
+    evaluate_cte_relation_limited(ctx, cte, recursive, ctes, None)
+}
+
+/// Evaluate one `WITH` item, stopping an unbounded recursive item after the
+/// number of rows a simple outer CTE scan will consume.
+fn evaluate_cte_relation_limited(
+    ctx: &SubCtx<'_>,
+    cte: &Cte,
+    recursive: bool,
+    ctes: &CteContext,
+    max_rows: Option<usize>,
+) -> Result<Relation, ExecError> {
     let cte_ctx = ctx.with_ctes(ctes);
     let query = cte.body.as_query();
     if let Some(query) = query
@@ -114,7 +347,7 @@ pub(crate) fn evaluate_cte_relation(
         return apply_cte_column_aliases(rel, &cte.name, &cte.columns);
     }
     let query = query.expect("a self-referential CTE has a query body");
-    let rel = evaluate_recursive_cte(&cte_ctx, cte, query)?;
+    let rel = evaluate_recursive_cte(&cte_ctx, cte, query, max_rows)?;
     apply_cte_column_aliases(rel, &cte.name, &cte.columns)
 }
 
@@ -188,6 +421,7 @@ fn reject_search_and_cycle(cte: &Cte) -> Result<(), ExecError> {
 pub(crate) fn evaluate_with_clause(
     ctx: &SubCtx<'_>,
     with: Option<&WithClause>,
+    limited_cte: Option<(&str, usize)>,
 ) -> Result<CteContext, ExecError> {
     let Some(with) = with else {
         return Ok(ctx.ctes.child());
@@ -195,7 +429,10 @@ pub(crate) fn evaluate_with_clause(
     let mut out = ctx.ctes.child();
     for index in evaluation_order(with)? {
         let cte = &with.ctes[index];
-        let rel = evaluate_cte_relation(ctx, cte, with.recursive, &out)?;
+        let max_rows = limited_cte
+            .filter(|(name, _)| *name == cte.name)
+            .map(|(_, max_rows)| max_rows);
+        let rel = evaluate_cte_relation_limited(ctx, cte, with.recursive, &out, max_rows)?;
         out.insert(cte.name.clone(), rel);
     }
     Ok(out)
@@ -331,6 +568,7 @@ fn evaluate_recursive_cte(
     ctx: &SubCtx<'_>,
     cte: &Cte,
     query: &QueryExpr,
+    max_rows: Option<usize>,
 ) -> Result<Relation, ExecError> {
     if !query.order_by.is_empty() || query.limit.is_some() || query.offset.is_some() {
         return Err(ExecError::Unsupported(
@@ -339,12 +577,6 @@ fn evaluate_recursive_cte(
     }
     let (non_recursive, recursive, all) = split_recursive_terms(query, &cte.name)?;
     check_recursive_term(recursive, &cte.name)?;
-    if cte.search.is_some() || cte.cycle.is_some() {
-        return Err(ExecError::Unsupported(
-            "SEARCH and CYCLE clauses are not supported".into(),
-        ));
-    }
-
     // The non-recursive term runs in a scope where the CTE name is NOT bound, so
     // a stray reference there is a plain 42P01 exactly as in PostgreSQL.
     // The CTE's column alias list names the columns the recursive term sees, so
@@ -355,11 +587,11 @@ fn evaluate_recursive_cte(
         &cte.columns,
     )?;
     let width = base.scope.width();
-    let output_scope = base.scope.clone();
-    check_recursive_term_types(ctx, cte, recursive, &output_scope)?;
+    let base_scope = base.scope.clone();
+    check_recursive_term_types(ctx, cte, recursive, &base_scope)?;
     if !all {
         for index in 0..width {
-            let ty = output_scope.ty_at(index);
+            let ty = base_scope.ty_at(index);
             // Equality first: PostgreSQL's parse-analysis error beats the
             // planner's "must be hashable" one.
             crate::eval::require_equality_operator(ty)?;
@@ -367,16 +599,37 @@ fn evaluate_recursive_cte(
         }
     }
 
+    let extras = RecursiveExtras::new(cte, &base_scope, ctx)?;
+    let mut output_scope = base_scope.clone();
+    if let Some(extras) = &extras {
+        output_scope.columns.extend(extras.columns()?);
+    }
+
     let mut result: Vec<Vec<Datum>> = Vec::new();
     let mut seen: HashSet<Vec<Datum>> = HashSet::new();
-    let mut working: Vec<Vec<Datum>> = Vec::new();
+    let mut working: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::new();
     for row in base.rows {
-        if !all && !seen.insert(row.clone()) {
+        if max_rows.is_some_and(|limit| result.len() == limit) {
+            break;
+        }
+        let generated = extras
+            .as_ref()
+            .map_or_else(Vec::new, |extras| extras.seed(&row));
+        let mut output = row.clone();
+        output.extend(generated.clone());
+        if !all && !seen.insert(output.clone()) {
             continue;
         }
-        ctx.statement_memory.charge_row(&row)?;
-        working.push(row.clone());
-        result.push(row);
+        ctx.statement_memory.charge_row(&output)?;
+        working.push((row, generated));
+        result.push(output);
+    }
+
+    if max_rows.is_some_and(|limit| result.len() == limit) {
+        return Ok(Relation {
+            scope: output_scope,
+            rows: result,
+        });
     }
 
     let mut iterations = 0usize;
@@ -385,38 +638,83 @@ fn evaluate_recursive_cte(
         if iterations > MAX_RECURSION_ITERATIONS {
             return Err(ExecError::StackDepthExceeded);
         }
-        let mut scoped = ctx.ctes.child();
-        scoped.insert(
-            cte.name.clone(),
-            Relation {
-                scope: requalify_cte(
-                    &Relation {
-                        scope: output_scope.clone(),
-                        rows: Vec::new(),
-                    },
-                    &cte.name,
-                )
-                .scope,
-                rows: std::mem::take(&mut working),
-            },
-        );
-        let step_ctx = ctx.with_ctes(&scoped);
-        let produced = crate::setops::set_expr_relation(&step_ctx, recursive)?;
-        if produced.scope.width() != width {
-            return Err(ExecError::SetOpColumnCount {
-                op: SetOp::Union,
-                left: width,
-                right: produced.scope.width(),
-            });
-        }
-        for row in produced.rows {
-            let row = coerce_row(row, &produced.scope, &output_scope, ctx)?;
-            if !all && !seen.insert(row.clone()) {
-                continue;
+        let current = std::mem::take(&mut working);
+        let batches: Vec<(Vec<Datum>, Vec<Datum>, Relation)> = if extras.is_some() {
+            current
+                .into_iter()
+                .filter(|(_, generated)| {
+                    !extras
+                        .as_ref()
+                        .is_some_and(|extras| extras.stops_recursion(generated))
+                })
+                .map(|(parent, generated)| {
+                    (
+                        parent.clone(),
+                        generated,
+                        Relation {
+                            scope: requalify_cte(
+                                &Relation {
+                                    scope: base_scope.clone(),
+                                    rows: Vec::new(),
+                                },
+                                &cte.name,
+                            )
+                            .scope,
+                            rows: vec![parent],
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            vec![(
+                Vec::new(),
+                Vec::new(),
+                Relation {
+                    scope: requalify_cte(
+                        &Relation {
+                            scope: base_scope.clone(),
+                            rows: Vec::new(),
+                        },
+                        &cte.name,
+                    )
+                    .scope,
+                    rows: current.into_iter().map(|(row, _)| row).collect(),
+                },
+            )]
+        };
+        for (_, generated, input) in batches {
+            let mut scoped = ctx.ctes.child();
+            scoped.insert(cte.name.clone(), input);
+            let step_ctx = ctx.with_ctes(&scoped);
+            let produced = crate::setops::set_expr_relation(&step_ctx, recursive)?;
+            if produced.scope.width() != width {
+                return Err(ExecError::SetOpColumnCount {
+                    op: SetOp::Union,
+                    left: width,
+                    right: produced.scope.width(),
+                });
             }
-            ctx.statement_memory.charge_row(&row)?;
-            working.push(row.clone());
-            result.push(row);
+            for row in produced.rows {
+                let row = coerce_row(row, &produced.scope, &base_scope, ctx)?;
+                let generated = match &extras {
+                    Some(extras) => extras.step(&generated, &row)?,
+                    None => Vec::new(),
+                };
+                let mut output = row.clone();
+                output.extend(generated.clone());
+                if !all && !seen.insert(output.clone()) {
+                    continue;
+                }
+                ctx.statement_memory.charge_row(&output)?;
+                working.push((row, generated));
+                result.push(output);
+                if max_rows.is_some_and(|limit| result.len() == limit) {
+                    return Ok(Relation {
+                        scope: output_scope,
+                        rows: result,
+                    });
+                }
+            }
         }
     }
 
@@ -511,17 +809,49 @@ fn coerce_row(
         .collect()
 }
 
-/// The columns `SEARCH`/`CYCLE` append to a recursive CTE's output.
-///
-/// Execution refuses both clauses, so this only has to keep the describe path
-/// consistent with that refusal, and it never adds a column.
 fn appended_columns(cte: &Cte, base: &Relation) -> Result<Relation, ExecError> {
-    if cte.search.is_some() || cte.cycle.is_some() {
-        return Err(ExecError::Unsupported(
-            "SEARCH and CYCLE clauses are not supported".into(),
-        ));
+    if cte.search.is_none() && cte.cycle.is_none() {
+        return Ok(base.clone());
     }
-    Ok(base.clone())
+    // Describe has no execution context for non-constant CYCLE marks. The
+    // grammar accepts only constant marks in the regression surface, and the
+    // executor validates their actual values before running the first step.
+    let mut out = base.clone();
+    if let Some(search) = &cte.search {
+        out.scope.columns.push(ColumnBinding {
+            qualifier: None,
+            name: search.set.clone(),
+            ty: if search.depth_first {
+                ColumnType::Array(ElemType::Record(None))
+            } else {
+                ColumnType::Record(None)
+            },
+            exposure: Exposure::Output,
+        });
+    }
+    if let Some(cycle) = &cte.cycle {
+        let mark = cycle
+            .mark_values
+            .as_ref()
+            .map(|(marked, _)| crate::eval::infer_type(marked, &Scope::empty()))
+            .transpose()?
+            .unwrap_or(ColumnType::Bool);
+        out.scope.columns.extend([
+            ColumnBinding {
+                qualifier: None,
+                name: cycle.set.clone(),
+                ty: mark,
+                exposure: Exposure::Output,
+            },
+            ColumnBinding {
+                qualifier: None,
+                name: cycle.using.clone(),
+                ty: ColumnType::Array(ElemType::Record(None)),
+                exposure: Exposure::Output,
+            },
+        ]);
+    }
+    Ok(out)
 }
 
 /// `PostgreSQL`'s well-formedness rules for a recursive term (`parse_cte.c`):
@@ -657,12 +987,17 @@ fn scan_table_expr(
         TableExpr::Derived { subquery, .. } => scan_query(subquery, name, nullable, refs),
         TableExpr::Function { functions, .. } => {
             for call in functions {
-                for arg in &call.args {
+                for arg in call.arguments() {
                     scan_expr(arg, name, refs);
                 }
             }
         }
         TableExpr::JsonTable(table) => {
+            for expr in table.exprs() {
+                scan_expr(expr, name, refs);
+            }
+        }
+        TableExpr::XmlTable(table) => {
             for expr in table.exprs() {
                 scan_expr(expr, name, refs);
             }

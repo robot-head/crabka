@@ -475,10 +475,7 @@ mod tests {
     fn input_splits_components_and_rejects_bad_separators() {
         assert_eq!(parts(""), Some(vec![]));
         assert_eq!(parts("empty  , empty"), Some(vec!["empty", "empty"]));
-        assert_eq!(
-            parts("[1,2) , [4,5)"),
-            Some(vec!["[1,2)", "[4,5)"])
-        );
+        assert_eq!(parts("[1,2) , [4,5)"), Some(vec!["[1,2)", "[4,5)"]));
         for input in ["[1,2),", "[1,2) junk", "[1,2"] {
             assert_eq!(parts(input), None, "{input}");
         }

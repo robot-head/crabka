@@ -59,12 +59,14 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
         "ALTER TABLESPACE" | "DROP TABLESPACE" => {
             &["CREATE TABLESPACE parser_commands_space LOCATION '/tmp/parser_commands_space'"]
         }
+        "ALTER LARGE OBJECT" => &["SELECT lo_create(4242)"],
         "CREATE TABLE INHERITS" => &["CREATE TABLE parser_commands_parent (id int4)"],
         "ALTER TABLE"
         | "ALTER TABLE ENABLE ROW LEVEL SECURITY"
         | "COMMENT"
         | "CREATE INDEX"
         | "CREATE POLICY"
+        | "CREATE RULE"
         | "CREATE TABLE AS"
         | "DELETE"
         | "DROP INDEX"
@@ -161,6 +163,10 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             "CREATE FUNCTION parser_commands_trigger_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
             "CREATE TRIGGER parser_commands_trigger BEFORE INSERT ON parser_commands_probe FOR EACH ROW EXECUTE FUNCTION parser_commands_trigger_fn()",
         ],
+        "ALTER RULE" | "DROP RULE" => &[
+            "CREATE TABLE parser_commands_probe (id int4)",
+            "CREATE RULE parser_commands_rule AS ON INSERT TO parser_commands_probe DO INSTEAD NOTHING",
+        ],
         "CREATE EVENT TRIGGER" => &[
             "CREATE FUNCTION parser_commands_event_trigger_fn() RETURNS event_trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
         ],
@@ -227,7 +233,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 172);
+    assert!(report.probes.len() == 173);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -263,8 +269,8 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 131);
-    assert!(refused == 41);
+    assert!(executed == 137);
+    assert!(refused == 36);
 }
 
 #[tokio::test]

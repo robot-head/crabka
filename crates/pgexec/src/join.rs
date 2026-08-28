@@ -416,41 +416,62 @@ fn join_relations_impl(
             let rw = right.scope.width();
             let want_left = matches!(kind, JoinKind::Left | JoinKind::Full);
             let want_right = matches!(kind, JoinKind::Right | JoinKind::Full);
-            let mut right_matched = vec![false; right.rows.len()];
-            for l in &left.rows {
-                let mut any = false;
-                for ri in candidate_rows(
-                    index,
-                    right.rows.len(),
-                    l,
-                    &mut key_buf,
-                    &mut candidate_buf,
-                    ctx,
-                )? {
-                    let r = &right.rows[ri];
-                    if condition.matches(l, r, ctx)? {
-                        any = true;
-                        right_matched[ri] = true;
-                        let mut row = l.clone();
-                        row.extend(r.iter().cloned());
-                        mark(&mut row, &LIVE, &LIVE);
-                        push_bounded_join_row(&mut rows, row, &statement_memory)?;
-                    }
+            // PostgreSQL's Full Join over an always-false ON clause scans the
+            // right input before the left input.  Preserve the usual left-probe
+            // order for every other outer join.
+            if matches!(
+                (kind, constraint),
+                (JoinKind::Full, JoinConstraint::On(Expr::BoolLiteral(false)))
+            ) {
+                for r in &right.rows {
+                    let mut row = vec![Datum::Null; lw];
+                    row.extend(r.iter().cloned());
+                    mark(&mut row, &Datum::Null, &LIVE);
+                    push_bounded_join_row(&mut rows, row, &statement_memory)?;
                 }
-                if !any && want_left {
+                for l in &left.rows {
                     let mut row = l.clone();
                     row.extend(vec![Datum::Null; rw]);
                     mark(&mut row, &LIVE, &Datum::Null);
                     push_bounded_join_row(&mut rows, row, &statement_memory)?;
                 }
-            }
-            if want_right {
-                for (ri, r) in right.rows.iter().enumerate() {
-                    if !right_matched[ri] {
-                        let mut row = vec![Datum::Null; lw];
-                        row.extend(r.iter().cloned());
-                        mark(&mut row, &Datum::Null, &LIVE);
+            } else {
+                let mut right_matched = vec![false; right.rows.len()];
+                for l in &left.rows {
+                    let mut any = false;
+                    for ri in candidate_rows(
+                        index,
+                        right.rows.len(),
+                        l,
+                        &mut key_buf,
+                        &mut candidate_buf,
+                        ctx,
+                    )? {
+                        let r = &right.rows[ri];
+                        if condition.matches(l, r, ctx)? {
+                            any = true;
+                            right_matched[ri] = true;
+                            let mut row = l.clone();
+                            row.extend(r.iter().cloned());
+                            mark(&mut row, &LIVE, &LIVE);
+                            push_bounded_join_row(&mut rows, row, &statement_memory)?;
+                        }
+                    }
+                    if !any && want_left {
+                        let mut row = l.clone();
+                        row.extend(vec![Datum::Null; rw]);
+                        mark(&mut row, &LIVE, &Datum::Null);
                         push_bounded_join_row(&mut rows, row, &statement_memory)?;
+                    }
+                }
+                if want_right {
+                    for (ri, r) in right.rows.iter().enumerate() {
+                        if !right_matched[ri] {
+                            let mut row = vec![Datum::Null; lw];
+                            row.extend(r.iter().cloned());
+                            mark(&mut row, &Datum::Null, &LIVE);
+                            push_bounded_join_row(&mut rows, row, &statement_memory)?;
+                        }
                     }
                 }
             }
@@ -1700,6 +1721,30 @@ mod tests {
         assert!(visible(&j).contains(&vec![Datum::Null, Datum::Int4(3)])); // unmatched right
         assert!(visible(&j).contains(&vec![Datum::Int4(2), Datum::Int4(2)])); // matched
         assert!(visible(&j).len() == 3);
+    }
+
+    #[test]
+    fn full_join_on_false_emits_the_right_side_first() {
+        let actual = visible(
+            &join_relations(
+                rel("a", &["id"], vec![vec![1], vec![2]]),
+                rel("b", &["id"], vec![vec![3], vec![4]]),
+                JoinKind::Full,
+                &JoinConstraint::On(Expr::BoolLiteral(false)),
+                &tctx(),
+            )
+            .expect("full join on false"),
+        );
+
+        assert!(
+            actual
+                == vec![
+                    vec![Datum::Null, Datum::Int4(3)],
+                    vec![Datum::Null, Datum::Int4(4)],
+                    vec![Datum::Int4(1), Datum::Null],
+                    vec![Datum::Int4(2), Datum::Null],
+                ]
+        );
     }
 
     #[test]

@@ -205,7 +205,7 @@ fn param_types(f: ArrayFunc, given: &[ArgType]) -> Result<Vec<Option<ColumnType>
 fn pair_element(array_side: ArgType, elem_side: ArgType) -> ElemType {
     array_side
         .known()
-        .and_then(ColumnType::array_element)
+        .and_then(array_element)
         .or_else(|| elem_side.known().and_then(ElemType::from_column_type))
         .unwrap_or(ElemType::Text)
 }
@@ -258,7 +258,7 @@ fn resolved_element(params: &[Option<ColumnType>], i: usize) -> ElemType {
         .get(i)
         .copied()
         .flatten()
-        .and_then(ColumnType::array_element)
+        .and_then(array_element)
         .unwrap_or(ElemType::Text)
 }
 
@@ -372,8 +372,12 @@ pub(crate) fn array_func_result_type(
 /// The element type of an array-typed argument. Reports 42883 when it is not an
 /// array.
 fn require_array_type(fc: &FuncCall, t: ColumnType) -> Result<ElemType, ExecError> {
-    t.array_element()
-        .ok_or_else(|| undefined_function(&fc.name))
+    array_element(t).ok_or_else(|| undefined_function(&fc.name))
+}
+
+/// Domains retain their base array's polymorphic identity for array functions.
+fn array_element(ty: ColumnType) -> Option<ElemType> {
+    ty.storage_type().array_element()
 }
 
 // ---- evaluation ----
@@ -428,7 +432,10 @@ pub(crate) fn eval_array(
         }
         ArrayFunc::Cat => {
             require_arity(fc, n == 2)?;
-            array_cat(&vals[0], &vals[1])
+            let array = params[0].expect("array_cat has a resolved array type");
+            let left = crate::eval::cast_value(&vals[0], array, &ctx.time_zone)?;
+            let right = crate::eval::cast_value(&vals[1], array, &ctx.time_zone)?;
+            array_cat(&left, &right)
         }
         ArrayFunc::ToString => {
             require_arity(fc, n == 2 || n == 3)?;
@@ -512,19 +519,19 @@ pub(crate) fn eval_array(
         }
         ArrayFunc::Position => {
             require_arity(fc, n == 2 || n == 3)?;
-            array_position(&vals[0], &vals[1], vals.get(2), &fc.name)
+            array_position(&vals[0], &vals[1], vals.get(2), &fc.name, ctx)
         }
         ArrayFunc::Positions => {
             require_arity(fc, n == 2)?;
-            array_positions(&vals[0], &vals[1], &fc.name)
+            array_positions(&vals[0], &vals[1], &fc.name, ctx)
         }
         ArrayFunc::Remove => {
             require_arity(fc, n == 2)?;
-            array_remove(&vals[0], &vals[1], &fc.name)
+            array_remove(&vals[0], &vals[1], &fc.name, ctx)
         }
         ArrayFunc::Replace => {
             require_arity(fc, n == 3)?;
-            array_replace(&vals[0], &vals[1], &vals[2], &fc.name)
+            array_replace(&vals[0], &vals[1], &vals[2], &fc.name, ctx)
         }
         ArrayFunc::Trim => {
             require_arity(fc, n == 2)?;
@@ -758,7 +765,7 @@ fn incompatible_arrays() -> ExecError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConcatForm {
     /// `anyarray || anyarray`.
-    ArrayArray,
+    ArrayArray(ElemType),
     /// `anyarray || anyelement`, carrying the element type the pair resolved to.
     /// So `NULL::int4[] || NULL::int4` still builds an `int4[]` `{NULL}`.
     ArrayElement(ElemType),
@@ -776,23 +783,30 @@ pub(crate) enum ConcatForm {
 /// `ARRAY[1,2] || NULL` yield `{1,2}` rather than `{1,2,NULL}`.
 pub(crate) fn concat_form(left: ColumnType, right: ColumnType) -> Option<ConcatForm> {
     match (left.array_element(), right.array_element()) {
-        (Some(a), Some(b)) if a == b => Some(ConcatForm::ArrayArray),
-        (Some(_), Some(_)) => None,
-        (Some(a), None) if ElemType::from_column_type(right) == Some(a) => {
-            Some(ConcatForm::ArrayElement(a))
-        }
-        (None, Some(b)) if ElemType::from_column_type(left) == Some(b) => {
-            Some(ConcatForm::ElementArray(b))
-        }
+        (Some(a), Some(b)) => common_concat_elem(a, b).map(ConcatForm::ArrayArray),
+        (Some(a), None) => ElemType::from_column_type(right)
+            .and_then(|b| common_concat_elem(a, b))
+            .map(ConcatForm::ArrayElement),
+        (None, Some(b)) => ElemType::from_column_type(left)
+            .and_then(|a| common_concat_elem(a, b))
+            .map(ConcatForm::ElementArray),
         _ => None,
     }
+}
+
+/// The `anycompatible` element type selected by the array concatenation family.
+fn common_concat_elem(left: ElemType, right: ElemType) -> Option<ElemType> {
+    crate::eval::unify_types(left.column_type(), right.column_type())
+        .ok()
+        .and_then(ElemType::from_column_type)
 }
 
 /// The static result type of an array `||`.
 pub(crate) fn concat_result_type(left: ColumnType, right: ColumnType) -> Option<ColumnType> {
     match concat_form(left, right)? {
-        ConcatForm::ArrayArray | ConcatForm::ArrayElement(_) => Some(left),
-        ConcatForm::ElementArray(_) => Some(right),
+        ConcatForm::ArrayArray(elem)
+        | ConcatForm::ArrayElement(elem)
+        | ConcatForm::ElementArray(elem) => Some(ColumnType::Array(elem)),
     }
 }
 
@@ -804,7 +818,12 @@ pub(crate) fn array_concat(
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
     match form {
-        ConcatForm::ArrayArray => array_cat(left, right),
+        ConcatForm::ArrayArray(elem) => {
+            let target = ColumnType::Array(elem);
+            let left = crate::eval::cast_value(left, target, &ctx.time_zone)?;
+            let right = crate::eval::cast_value(right, target, &ctx.time_zone)?;
+            array_cat(&left, &right)
+        }
         ConcatForm::ArrayElement(elem) => array_append(left, right, elem, ctx),
         ConcatForm::ElementArray(elem) => array_prepend(left, right, elem, ctx),
     }
@@ -1017,6 +1036,12 @@ pub(crate) fn array_ref(base: &Datum, subscripts: &[SubscriptArg]) -> Result<Dat
 
 /// The slice half of [`array_ref`].
 fn array_ref_slice(array: &ArrayValue, subscripts: &[SubscriptArg]) -> Result<Datum, ExecError> {
+    // A slice chain cannot reach dimensions the array does not have. PostgreSQL
+    // returns an empty array for that shape rather than ignoring the excess
+    // subscript entries.
+    if subscripts.len() > array.dims.len() {
+        return Ok(Datum::Array(ArrayValue::new(array.elem, Vec::new())));
+    }
     if array.dims.is_empty() {
         return Ok(Datum::Array(ArrayValue::new(array.elem, Vec::new())));
     }
@@ -1259,14 +1284,16 @@ fn assign_slice(
         other => return Err(not_an_array(other)),
     };
     if array.dims.is_empty() {
+        let slots = slot_count(bounds)?;
+        check_array_size(slots)?;
         let dims = bounds
             .iter()
             .map(|(lower, upper)| {
-                crabka_pgtypes::ArrayDim::new(*lower, upper.saturating_sub(*lower) + 1)
+                let len = i32::try_from(i64::from(*upper) - i64::from(*lower) + 1)
+                    .map_err(|_| ExecError::Type(TypeError::Overflow))?;
+                Ok(crabka_pgtypes::ArrayDim::new(*lower, len))
             })
-            .collect();
-        let slots = slot_count(bounds)?;
-        check_array_size(slots)?;
+            .collect::<Result<Vec<_>, ExecError>>()?;
         array = ArrayValue::with_dims(array.elem, vec![Datum::Null; slots], dims);
     } else if bounds.len() != array.dims.len() {
         return Err(wrong_number_of_subscripts());
@@ -1607,6 +1634,9 @@ fn array_fill(
         sqlstate: "22004",
         message: "dimension array or low bound array cannot be null".into(),
     });
+    if matches!(dims, Datum::Array(array) if array.dims.len() > 1) {
+        return Err(wrong_number_of_subscripts());
+    }
     let lengths = int_array_arg(dims).ok_or(null_shape)?;
     let lowers = match lower_bounds {
         None | Some(Datum::Null) if lower_bounds.is_some() => {
@@ -1617,6 +1647,9 @@ fn array_fill(
         }
         None => vec![1; lengths.len()],
         Some(d) => {
+            if matches!(d, Datum::Array(array) if array.dims.len() > 1) {
+                return Err(wrong_number_of_subscripts());
+            }
             let lowers = int_array_arg(d).ok_or_else(|| {
                 ExecError::Type(TypeError::Coded {
                     sqlstate: "22004",
@@ -1638,6 +1671,9 @@ fn array_fill(
                 crabka_pgtypes::MAX_ARRAY_DIM
             ),
         }));
+    }
+    if lengths.is_empty() {
+        return Ok(Datum::Array(ArrayValue::new(elem, Vec::new())));
     }
     let mut total = 1usize;
     let mut shape = Vec::with_capacity(lengths.len());
@@ -1678,44 +1714,58 @@ fn int_array_arg(d: &Datum) -> Option<Vec<i32>> {
         .collect()
 }
 
-/// `array_position(array, value [, start])`: the 1-based offset of the first
+/// `array_position(array, value [, start])`: the subscript of the first
 /// occurrence at or after `start`, or NULL when there is none.
 fn array_position(
     array: &Datum,
     needle: &Datum,
     start: Option<&Datum>,
     name: &str,
+    ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
     if array.is_null() {
         return Ok(Datum::Null);
     }
     let a = require_at_most_one_dimension(array_value(array, name)?, SEARCH_ACTION)?;
     require_element_equality(a)?;
+    let needle = coerce_element(needle, a.elem, ctx)?;
+    let lower = a.dims.first().map_or(1, |dim| dim.lower);
     let from = match start {
-        None => 1,
+        None => lower,
         Some(Datum::Null) => return Ok(Datum::Null),
         Some(d) => int_arg(d, name)?,
     };
-    let skip = usize::try_from(from.max(1)).unwrap_or(1).saturating_sub(1);
+    let skip = usize::try_from(i64::from(from) - i64::from(lower)).unwrap_or(0);
     for (i, e) in a.elems.iter().enumerate().skip(skip) {
-        if element_matches(e, needle)? {
-            return Ok(Datum::Int4(i32::try_from(i + 1).unwrap_or(i32::MAX)));
+        if element_matches(e, &needle)? {
+            return Ok(Datum::Int4(
+                lower.saturating_add(i32::try_from(i).unwrap_or(i32::MAX)),
+            ));
         }
     }
     Ok(Datum::Null)
 }
 
-/// `array_positions(array, value)`: every 1-based offset, as an `int[]`.
-fn array_positions(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, ExecError> {
+/// `array_positions(array, value)`: every matching subscript, as an `int[]`.
+fn array_positions(
+    array: &Datum,
+    needle: &Datum,
+    name: &str,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
     if array.is_null() {
         return Ok(Datum::Null);
     }
     let a = require_at_most_one_dimension(array_value(array, name)?, SEARCH_ACTION)?;
     require_element_equality(a)?;
+    let needle = coerce_element(needle, a.elem, ctx)?;
+    let lower = a.dims.first().map_or(1, |dim| dim.lower);
     let mut found = Vec::new();
     for (i, element) in a.elems.iter().enumerate() {
-        if element_matches(element, needle)? {
-            found.push(Datum::Int4(i32::try_from(i + 1).unwrap_or(i32::MAX)));
+        if element_matches(element, &needle)? {
+            found.push(Datum::Int4(
+                lower.saturating_add(i32::try_from(i).unwrap_or(i32::MAX)),
+            ));
         }
     }
     Ok(Datum::Array(ArrayValue::new(ElemType::Int4, found)))
@@ -1724,15 +1774,21 @@ fn array_positions(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, E
 /// `array_remove(array, value)`: every matching element dropped. A NULL `value`
 /// removes the NULL elements, which matches PostgreSQL's `IS NOT DISTINCT FROM`
 /// treatment here.
-fn array_remove(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, ExecError> {
+fn array_remove(
+    array: &Datum,
+    needle: &Datum,
+    name: &str,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
     if array.is_null() {
         return Ok(Datum::Null);
     }
     let a = require_at_most_one_dimension(array_value(array, name)?, REMOVE_ACTION)?;
     require_element_equality(a)?;
+    let needle = coerce_element(needle, a.elem, ctx)?;
     let mut kept = Vec::with_capacity(a.elems.len());
     for element in &a.elems {
-        if !element_matches(element, needle)? {
+        if !element_matches(element, &needle)? {
             kept.push(element.clone());
         }
     }
@@ -1741,17 +1797,25 @@ fn array_remove(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, Exec
 
 /// `array_replace(array, from, to)`: every matching element replaced, over any
 /// number of dimensions. The shape does not change, unlike `array_remove`.
-fn array_replace(array: &Datum, from: &Datum, to: &Datum, name: &str) -> Result<Datum, ExecError> {
+fn array_replace(
+    array: &Datum,
+    from: &Datum,
+    to: &Datum,
+    name: &str,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
     if array.is_null() {
         return Ok(Datum::Null);
     }
     let a = array_value(array, name)?;
     require_element_equality(a)?;
+    let from = coerce_element(from, a.elem, ctx)?;
+    let to = coerce_element(to, a.elem, ctx)?;
     let elems = a
         .elems
         .iter()
         .map(|e| {
-            if element_matches(e, from)? {
+            if element_matches(e, &from)? {
                 Ok(to.clone())
             } else {
                 Ok(e.clone())
@@ -1765,25 +1829,30 @@ fn array_replace(array: &Datum, from: &Datum, to: &Datum, name: &str) -> Result<
     )))
 }
 
-/// `trim_array(array, n)`: the array without its last `n` elements. `n` outside
-/// `0..=cardinality` is 2202E.
+/// `trim_array(array, n)`: the array without its last `n` outermost slices.
+/// `n` outside `0..=array_length(array, 1)` is 2202E.
 fn trim_array(array: &Datum, count: &Datum, name: &str) -> Result<Datum, ExecError> {
     if array.is_null() || count.is_null() {
         return Ok(Datum::Null);
     }
     let a = array_value(array, name)?;
     let n = int_arg(count, name)?;
-    let total = i32::try_from(a.elems.len()).unwrap_or(i32::MAX);
+    let slices = outer_slices(a);
+    let total = i32::try_from(slices.len()).unwrap_or(i32::MAX);
     if n < 0 || n > total {
         return Err(ExecError::Type(TypeError::array_subscript(format!(
             "number of elements to trim must be between 0 and {total}"
         ))));
     }
     let keep = usize::try_from(total - n).unwrap_or(0);
-    Ok(Datum::Array(ArrayValue::new(
-        a.elem,
-        a.elems[..keep].to_vec(),
-    )))
+    let order: Vec<usize> = (0..keep).collect();
+    let Datum::Array(mut trimmed) = rebuild_from_slices(a, &order, &slices) else {
+        unreachable!("array rebuild always returns an array");
+    };
+    if let Some(first) = trimmed.dims.first_mut() {
+        first.lower = 1;
+    }
+    Ok(Datum::Array(trimmed))
 }
 
 /// `array_sample(array, n)`: `n` of the outermost slices, chosen at random.
@@ -1804,7 +1873,13 @@ fn array_sample(array: &Datum, count: &Datum, name: &str) -> Result<Datum, ExecE
     let mut order: Vec<usize> = (0..slices.len()).collect();
     shuffle_in_place(&mut order);
     order.truncate(usize::try_from(n).unwrap_or(0));
-    Ok(rebuild_from_slices(a, &order, &slices))
+    let Datum::Array(mut sampled) = rebuild_from_slices(a, &order, &slices) else {
+        unreachable!("array rebuild always returns an array");
+    };
+    if let Some(first) = sampled.dims.first_mut() {
+        first.lower = 1;
+    }
+    Ok(Datum::Array(sampled))
 }
 
 /// `array_shuffle(array)`: the outermost slices in a random order.
@@ -1858,13 +1933,11 @@ fn array_sort(
     let mut order: Vec<usize> = (0..slices.len()).collect();
     let mut failure = None;
     order.sort_by(|x, y| {
-        compare_slices(&slices[*x], &slices[*y], nulls_first, &mut failure).then_with(|| x.cmp(y))
+        compare_slices(&slices[*x], &slices[*y], desc, nulls_first, &mut failure)
+            .then_with(|| x.cmp(y))
     });
     if let Some(error) = failure {
         return Err(error);
-    }
-    if desc {
-        order.reverse();
     }
     Ok(rebuild_from_slices(a, &order, &slices))
 }
@@ -1911,6 +1984,7 @@ fn rebuild_from_slices(array: &ArrayValue, order: &[usize], slices: &[Vec<Datum>
 fn compare_slices(
     left: &[Datum],
     right: &[Datum],
+    descending: bool,
     nulls_first: bool,
     failure: &mut Option<ExecError>,
 ) -> std::cmp::Ordering {
@@ -1937,7 +2011,13 @@ fn compare_slices(
                     Ordering::Equal
                 }
                 Ok(()) => match crabka_pgtypes::ops::compare(x, y) {
-                    Ok(Some(ord)) => ord,
+                    Ok(Some(ord)) => {
+                        if descending {
+                            ord.reverse()
+                        } else {
+                            ord
+                        }
+                    }
                     Ok(None) => Ordering::Equal,
                     Err(e) => {
                         failure.get_or_insert(ExecError::Type(e));
@@ -2373,7 +2453,11 @@ mod tests {
     fn concat_resolves_its_form_from_the_operand_types() {
         let int_array = ColumnType::Array(ElemType::Int4);
         let text_array = ColumnType::Array(ElemType::Text);
-        assert!(concat_form(int_array, int_array) == Some(ConcatForm::ArrayArray));
+        assert!(concat_form(int_array, int_array) == Some(ConcatForm::ArrayArray(ElemType::Int4)));
+        assert!(
+            concat_form(ColumnType::Array(ElemType::Numeric), int_array)
+                == Some(ConcatForm::ArrayArray(ElemType::Numeric))
+        );
         assert!(
             concat_form(int_array, ColumnType::Int4)
                 == Some(ConcatForm::ArrayElement(ElemType::Int4))
@@ -2382,13 +2466,17 @@ mod tests {
             concat_form(ColumnType::Int4, int_array)
                 == Some(ConcatForm::ElementArray(ElemType::Int4))
         );
-        // Mismatched element types, and two non-arrays, resolve to no array `||`.
+        // Incompatible element types, and two non-arrays, resolve to no array `||`.
         assert!(concat_form(int_array, text_array).is_none());
         assert!(concat_form(int_array, ColumnType::Text).is_none());
         assert!(concat_form(ColumnType::Text, ColumnType::Text).is_none());
         // The result type follows the array side.
         assert!(concat_result_type(int_array, ColumnType::Int4) == Some(int_array));
         assert!(concat_result_type(ColumnType::Int4, int_array) == Some(int_array));
+        assert!(
+            concat_result_type(ColumnType::Array(ElemType::Numeric), int_array)
+                == Some(ColumnType::Array(ElemType::Numeric))
+        );
     }
 
     #[test]
@@ -2396,7 +2484,7 @@ mod tests {
         let ctx = ctx();
         assert!(
             array_concat(
-                ConcatForm::ArrayArray,
+                ConcatForm::ArrayArray(ElemType::Int4),
                 &ints(&[Some(1)]),
                 &ints(&[Some(2)]),
                 &ctx
@@ -2428,7 +2516,7 @@ mod tests {
         // concatenates to nothing, a NULL *element* appends a NULL.
         assert!(
             array_concat(
-                ConcatForm::ArrayArray,
+                ConcatForm::ArrayArray(ElemType::Int4),
                 &ints(&[Some(1)]),
                 &Datum::Null,
                 &ctx
@@ -2460,6 +2548,16 @@ mod tests {
                     ElemType::Int8,
                     vec![Datum::Int8(1), Datum::Int8(2)]
                 ))
+        );
+        assert!(
+            array_concat(
+                ConcatForm::ArrayArray(ElemType::Numeric),
+                &arr("{1.1}", ElemType::Numeric),
+                &ints(&[Some(2), Some(3)]),
+                &ctx
+            )
+            .expect("compatible cat")
+                == arr("{1.1,2,3}", ElemType::Numeric)
         );
     }
 
@@ -2776,6 +2874,17 @@ mod tests {
                 vec![slice(Some(2), Some(3)), slice(Some(1), Some(2))],
                 "{{4,5},{7,8}}",
             ),
+            // Extra subscripts after a slice do not get ignored; they select
+            // no cells because the requested dimensionality does not exist.
+            (
+                "{{3,4},{4,5}}",
+                vec![
+                    slice(Some(1), Some(1)),
+                    slice(Some(1), Some(2)),
+                    slice(Some(1), Some(2)),
+                ],
+                "{}",
+            ),
             // A plain subscript inside a slice chain means `1:i`.
             (
                 "{{1,2,3},{4,5,6}}",
@@ -2841,6 +2950,12 @@ mod tests {
                 "[2:3]={1,2}",
             ),
             (
+                None,
+                vec![slice(Some(3), Some(5))],
+                int_arr("{1,2,3}"),
+                "[3:5]={1,2,3}",
+            ),
+            (
                 Some("{{1,2},{3,4}}"),
                 vec![idx(1), idx(2)],
                 Datum::Int4(9),
@@ -2884,6 +2999,12 @@ mod tests {
                 Datum::Int4(9),
                 "2202E",
             ),
+            (
+                Some("{{1,2},{3,4}}"),
+                vec![slice(Some(1), Some(3)), slice(Some(1), Some(1))],
+                int_arr("{{7},{8},{9}}"),
+                "2202E",
+            ),
             (Some("{{1,2},{3,4}}"), vec![idx(2)], Datum::Int4(5), "2202E"),
             // A slice source shorter than the slice.
             (
@@ -2897,6 +3018,12 @@ mod tests {
                 Some("{1,2,3}"),
                 vec![idx(2_147_483_647)],
                 Datum::Int4(42),
+                "54000",
+            ),
+            (
+                None,
+                vec![slice(Some(0), Some(2_147_483_647))],
+                int_arr("{4,2}"),
                 "54000",
             ),
         ];
@@ -2998,6 +3125,7 @@ mod tests {
                 "[2:4]={7,7,7}",
             ),
             ("array_fill", vec![int_expr(1), ints("{0}")], "{}"),
+            ("array_fill", vec![int_expr(1), ints("{}")], "{}"),
             (
                 "array_position",
                 vec![ints("{1,2,3,4,5}"), int_expr(4)],
@@ -3010,15 +3138,40 @@ mod tests {
                 "4",
             ),
             (
+                "array_position",
+                vec![ints("[2:4]={1,2,3}"), int_expr(1)],
+                "2",
+            ),
+            (
+                "array_position",
+                vec![array_expr("{1.0,2.1,3.3}", ElemType::Numeric), int_expr(1)],
+                "1",
+            ),
+            (
                 "array_positions",
                 vec![ints("{1,2,3,2}"), int_expr(2)],
                 "{2,4}",
             ),
+            (
+                "array_positions",
+                vec![ints("[2:4]={1,2,3}"), int_expr(1)],
+                "{2}",
+            ),
             ("array_positions", vec![ints("{1,2}"), int_expr(9)], "{}"),
+            (
+                "array_positions",
+                vec![array_expr("{1.0,2.1,1.0}", ElemType::Numeric), int_expr(1)],
+                "{1,3}",
+            ),
             (
                 "array_remove",
                 vec![ints("{1,2,2,3}"), int_expr(2)],
                 "{1,3}",
+            ),
+            (
+                "array_remove",
+                vec![array_expr("{1.0,2.1,3.3}", ElemType::Numeric), int_expr(1)],
+                "{2.1,3.3}",
             ),
             (
                 "array_replace",
@@ -3030,10 +3183,42 @@ mod tests {
                 vec![ints("{{1,2},{2,3}}"), int_expr(2), int_expr(9)],
                 "{{1,9},{9,3}}",
             ),
+            (
+                "array_replace",
+                vec![
+                    array_expr("{1.0,2.1,3.3}", ElemType::Numeric),
+                    int_expr(1),
+                    int_expr(9),
+                ],
+                "{9,2.1,3.3}",
+            ),
+            (
+                "array_cat",
+                vec![array_expr("{1.1}", ElemType::Numeric), ints("{2,3,4}")],
+                "{1.1,2,3,4}",
+            ),
             ("trim_array", vec![ints("{1,2,3}"), int_expr(2)], "{1}"),
             ("trim_array", vec![ints("{1,2,3}"), int_expr(0)], "{1,2,3}"),
             ("trim_array", vec![ints("{1,2,3}"), int_expr(3)], "{}"),
+            (
+                "trim_array",
+                vec![ints("{{1,10},{2,20},{3,30},{4,40}}"), int_expr(2)],
+                "{{1,10},{2,20}}",
+            ),
+            (
+                "trim_array",
+                vec![ints("[10:16]={1,2,3,4,5,6,7}"), int_expr(2)],
+                "{1,2,3,4,5}",
+            ),
             ("array_sort", vec![ints("{3,1,2}")], "{1,2,3}"),
+            (
+                "array_sort",
+                vec![
+                    array_expr("{1.1,3.3,5.5,2.2,NULL,4.4,6.6}", ElemType::Float8),
+                    Expr::BoolLiteral(true),
+                ],
+                "{NULL,6.6,5.5,4.4,3.3,2.2,1.1}",
+            ),
             ("array_sort", vec![ints("{{3,4},{1,2}}")], "{{1,2},{3,4}}"),
             ("array_reverse", vec![ints("{1,2,3}")], "{3,2,1}"),
             (
@@ -3054,6 +3239,44 @@ mod tests {
             };
             assert!(text == *expected, "{name} {args:?}");
         }
+        let six_dimensions = call("array_fill", vec![int_expr(1), ints("{1,1,1,1,1,1}")])
+            .expect("maximum dimensions");
+        assert!(
+            array_value(&six_dimensions, "array_fill")
+                .expect("array")
+                .dims
+                .len()
+                == crabka_pgtypes::MAX_ARRAY_DIM
+        );
+        let sampled = array_sample(
+            &int_arr("[-1:2][2:3]={{1,2},{3,NULL},{5,6},{7,8}}"),
+            &Datum::Int4(3),
+            "array_sample",
+        )
+        .expect("sample");
+        let sampled = array_value(&sampled, "array_sample").expect("array");
+        assert!(dimension(sampled, 1) == Some(crabka_pgtypes::ArrayDim::new(1, 3)));
+        assert!(dimension(sampled, 2) == Some(crabka_pgtypes::ArrayDim::new(2, 2)));
+    }
+
+    #[test]
+    fn trim_and_sample_short_circuit_nulls_and_allow_sample_boundaries() {
+        let array = int_arr("{1,2,3}");
+        for function in [trim_array, array_sample] {
+            assert!(
+                function(&Datum::Null, &Datum::Int4(0), "array function").expect("null array")
+                    == Datum::Null
+            );
+            assert!(
+                function(&array, &Datum::Null, "array function").expect("null count")
+                    == Datum::Null
+            );
+        }
+        assert!(
+            array_sample(&array, &Datum::Int4(0), "array_sample").expect("zero sample")
+                == int_arr("{}")
+        );
+        assert!(array_sample(&array, &Datum::Int4(3), "array_sample").is_ok());
     }
 
     #[test]
@@ -3069,6 +3292,21 @@ mod tests {
                 "array_fill",
                 vec![int_expr(1), ints("{2,2}"), ints("{1}")],
                 "2202E",
+            ),
+            (
+                "array_fill",
+                vec![int_expr(1), ints("{{1,2},{3,4}}")],
+                "2202E",
+            ),
+            (
+                "array_fill",
+                vec![int_expr(1), ints("{2,2}"), ints("{{1},{1}}")],
+                "2202E",
+            ),
+            (
+                "array_fill",
+                vec![int_expr(1), ints("{1,1,1,1,1,1,1}")],
+                "54000",
             ),
             ("trim_array", vec![ints("{1,2,3}"), int_expr(-1)], "2202E"),
             ("trim_array", vec![ints("{1,2,3}"), int_expr(4)], "2202E"),

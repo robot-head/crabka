@@ -102,9 +102,13 @@ pub(crate) fn virtual_catalog_rows(
         "pg_range" => pg_range_rows(catalog_kv),
         "pg_index" => pg_index_rows(catalog_kv),
         "pg_settings" => pg_settings_rows(),
+        "pg_locks" => pg_locks_rows(),
+        "pg_cursors" => pg_cursor_rows(),
         "pg_prepared_statements" => pg_prepared_statement_rows(),
         "pg_roles" => pg_roles_rows(catalog_kv),
         "pg_user" => pg_user_rows(catalog_kv),
+        "pg_statistic" => pg_statistic_rows(catalog_kv),
+        "pg_stats" => pg_stats_rows(catalog_kv),
         "information_schema.schemata" => {
             information_schema_schemata_rows(catalog_kv, ctx.database())
         }
@@ -115,19 +119,45 @@ pub(crate) fn virtual_catalog_rows(
             information_schema_columns_rows(catalog_kv, ctx.backend_pid)
         }
         "information_schema.triggers" => {
-            information_schema_trigger_rows(catalog_kv, ctx.database())
+            information_schema_trigger_rows(catalog_kv, ctx.database(), ctx.output_style())
         }
         "information_schema.triggered_update_columns" => {
             information_schema_triggered_update_column_rows(catalog_kv, ctx.database())
         }
         "pg_inherits" => pg_inherits_rows(catalog_kv),
         "pg_partitioned_table" => pg_partitioned_table_rows(catalog_kv),
+        "pg_largeobject" => {
+            let role = if ctx.current_user == crabka_pgcatalog::PUBLIC_ROLE {
+                crabka_pgcatalog::BOOTSTRAP_ROLE
+            } else {
+                &ctx.current_user
+            };
+            if !crate::rls::role_is_superuser(catalog_kv, role)? {
+                return Err(ExecError::PermissionDenied {
+                    kind: "table",
+                    relation: "pg_largeobject".into(),
+                });
+            }
+            crate::catalog_rel::rows(
+                catalog_kv,
+                name,
+                crate::catalog_rel::SessionIdent {
+                    database: ctx.database(),
+                    backend_pid: ctx.backend_pid,
+                    compute_query_id: ctx.compute_query_id,
+                    track_activities: ctx.track_activities,
+                    style: ctx.output_style(),
+                },
+            )
+        }
         _ => crate::catalog_rel::rows(
             catalog_kv,
             name,
             crate::catalog_rel::SessionIdent {
                 database: ctx.database(),
                 backend_pid: ctx.backend_pid,
+                compute_query_id: ctx.compute_query_id,
+                track_activities: ctx.track_activities,
                 style: ctx.output_style(),
             },
         ),
@@ -275,6 +305,10 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         .into_iter()
         .map(|trigger| trigger.table_id)
         .collect::<std::collections::HashSet<_>>();
+    let rule_relation_ids = crabka_pgcatalog::rule::list_rules(catalog_kv)?
+        .into_iter()
+        .map(|rule| rule.table_id)
+        .collect::<std::collections::HashSet<_>>();
     let indexes = crabka_pgcatalog::list_indexes(catalog_kv)?;
     let indexed_table_ids = indexes
         .iter()
@@ -309,6 +343,10 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             crate::catalog_rel::namespace_oid(&table.name.schema),
         );
         row.reltype = rowtype_oids.get(&table.name).map_or(0, |(oid, _)| *oid);
+        if let Some(oid) = crabka_pgcatalog::typed_table_type(catalog_kv, &table.name)? {
+            row.reloftype = i32::try_from(oid)
+                .map_err(|_| ExecError::Unsupported("typed table oid exceeds int4".into()))?;
+        }
         // A materialized view is rewritten by a rule the way an ordinary view
         // is, so PostgreSQL reports `relhasrules` for one; and its contents
         // exist only once `REFRESH` has run, which is the whole meaning of
@@ -321,6 +359,7 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         row.relnatts = table.columns.len();
         row.relchecks = table.checks.len();
         row.relhasindex = indexed_table_ids.contains(&table.id);
+        row.relhasrules |= rule_relation_ids.contains(&table.id);
         row.relhastriggers = triggered_relation_ids.contains(&table.id);
         // The same read answers both: a relation is a partition exactly when it
         // has a stored bound, and that bound is what `relpartbound` reports.
@@ -330,13 +369,24 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         }
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&table.name.schema);
         row.reltablespace = crabka_pgcatalog::relation_tablespace_oid(catalog_kv, &table.name)?;
+        if let Some(oid) = crabka_pgcatalog::relation_access_method_oid(catalog_kv, &table.name)? {
+            row.relam = i32::try_from(oid)
+                .map_err(|_| ExecError::Unsupported("access method oid exceeds int4".into()))?;
+        }
         row.relowner = role_oid_of(&role_oids, &table.owner);
         row.relrowsecurity = table.row_security;
         row.relforcerowsecurity = table.force_row_security;
+        row.relreplident = match crabka_pgcatalog::replica_identity(catalog_kv, table.id)? {
+            crabka_pgcatalog::ReplicaIdentity::Default => 'd',
+            crabka_pgcatalog::ReplicaIdentity::Full => 'f',
+            crabka_pgcatalog::ReplicaIdentity::Nothing => 'n',
+            crabka_pgcatalog::ReplicaIdentity::Index(_) => 'i',
+        };
         let stats = relstats.get(&table.name).copied().unwrap_or_default();
         row.reltuples = stats.reltuples;
         row.relpages = stats.relpages;
         row.relallvisible = stats.relallvisible;
+        row.relallfrozen = stats.relallfrozen;
         row.relhassubclass = stats.has_subclass;
         // A partitioned table holds no rows of its own, and a foreign table
         // holds none here at all, so neither carries a store. Every other
@@ -413,6 +463,7 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         row.relnatts = table.columns.len();
         row.relfilenode = relfilenode;
         row.relhasindex = builtin_catalog_oid_index(virtual_table).is_some();
+        row.relreplident = 'n';
         rows.push(row.build()?);
     }
     for index in BUILTIN_CATALOG_OID_INDEXES {
@@ -449,6 +500,24 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&index.table.schema);
         row.reltablespace =
             crabka_pgcatalog::relation_tablespace_oid(catalog_kv, &index.qualified_name())?;
+        let stats = relstats
+            .get(&index.qualified_name())
+            .copied()
+            .unwrap_or_else(|| {
+                if relkind == "i" {
+                    crate::relstats::RelStats {
+                        reltuples: 0.0,
+                        relpages: 1,
+                        ..Default::default()
+                    }
+                } else {
+                    crate::relstats::RelStats::default()
+                }
+            });
+        row.reltuples = stats.reltuples;
+        row.relpages = stats.relpages;
+        row.relallvisible = stats.relallvisible;
+        row.relallfrozen = stats.relallfrozen;
         row.relowner = table_owner_oids
             .get(&index.table)
             .copied()
@@ -478,6 +547,8 @@ pub(crate) fn virtual_pg_class_properties(name: &str, oid: i32) -> (&'static str
                 | "pg_locks"
                 | "pg_matviews"
                 | "pg_policies"
+                | "pg_prepared_xacts"
+                | "pg_cursors"
                 | "pg_prepared_statements"
                 | "pg_replication_slots"
                 | "pg_roles"
@@ -646,6 +717,7 @@ pub(crate) struct PgClassRow<'a> {
     pub(crate) relkind: &'a str,
     pub(crate) relnamespace: i32,
     pub(crate) reltype: i32,
+    pub(crate) reloftype: i32,
     pub(crate) relnatts: usize,
     pub(crate) relchecks: usize,
     pub(crate) relhasindex: bool,
@@ -663,6 +735,8 @@ pub(crate) struct PgClassRow<'a> {
     pub(crate) relpages: i32,
     /// `pg_class.relallvisible`, stored with `reltuples`.
     pub(crate) relallvisible: i32,
+    /// `pg_class.relallfrozen`, stored with the other relation statistics.
+    pub(crate) relallfrozen: i32,
     pub(crate) relam: i32,
     pub(crate) relfilenode: i32,
     pub(crate) relispartition: bool,
@@ -674,6 +748,8 @@ pub(crate) struct PgClassRow<'a> {
     /// every other relation kind holds whatever it holds the moment it exists —
     /// so this defaults true and only `relkind = 'm'` ever clears it.
     pub(crate) relispopulated: bool,
+    /// `pg_class.relreplident`, the stored relation's replica-identity mode.
+    pub(crate) relreplident: char,
     pub(crate) reltablespace: u32,
     /// The `pg_authid.oid` of the owning role. Only stored relations carry a
     /// real owner; the catalog's own relations belong to the bootstrap
@@ -705,6 +781,7 @@ impl<'a> PgClassRow<'a> {
             relkind,
             relnamespace,
             reltype: 0,
+            reloftype: 0,
             relnatts: 0,
             relchecks: 0,
             relhasindex: false,
@@ -714,6 +791,7 @@ impl<'a> PgClassRow<'a> {
             reltuples: crate::relstats::UNKNOWN_TUPLES,
             relpages: 0,
             relallvisible: 0,
+            relallfrozen: 0,
             // A materialized view's contents live in the heap exactly as a
             // table's do, so PostgreSQL gives it the heap access method too.
             relam: if matches!(relkind, "r" | "m") { 2 } else { 0 },
@@ -722,6 +800,7 @@ impl<'a> PgClassRow<'a> {
             relrowsecurity: false,
             relforcerowsecurity: false,
             relispopulated: true,
+            relreplident: 'd',
             reltablespace: 0,
             relowner: crate::catalog_fn::BOOTSTRAP_ROLE_OID,
             relpersistence: 'p',
@@ -740,7 +819,7 @@ impl<'a> PgClassRow<'a> {
             text(self.relname),
             int(self.relnamespace),
             int(self.reltype),
-            int(0),
+            int(self.reloftype),
             int(self.relowner),
             int(self.relam),
             int(self.relfilenode),
@@ -749,12 +828,10 @@ impl<'a> PgClassRow<'a> {
             int(self.relpages),
             Datum::Float4(self.reltuples),
             int(self.relallvisible),
-            int(0),
+            int(self.relallfrozen),
             int(self.reltoastrelid),
             Datum::Bool(self.relhasindex),
             Datum::Bool(false),
-            // Every crabka relation is replica-identity "default"; its
-            // persistence follows the schema holding it.
             text(&self.relpersistence.to_string()),
             text(self.relkind),
             Datum::Int2(natts),
@@ -765,7 +842,7 @@ impl<'a> PgClassRow<'a> {
             Datum::Bool(self.relrowsecurity),
             Datum::Bool(self.relforcerowsecurity),
             Datum::Bool(self.relispopulated),
-            text("d"),
+            text(&self.relreplident.to_string()),
             Datum::Bool(self.relispartition),
             int(0),
             Datum::Int8(0),
@@ -787,6 +864,15 @@ pub(crate) fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, 
     for table in crabka_pgcatalog::list_tables(catalog_kv)? {
         rows.extend(attribute_rows_for_table(
             crate::catalog_rel::table_relation_oid(table.id)?,
+            &table,
+            &acl,
+        )?);
+    }
+    for index in crabka_pgcatalog::list_indexes(catalog_kv)? {
+        let source = crabka_pgcatalog::get_table(catalog_kv, &index.table)?;
+        let table = index_attribute_table(&index, &source)?;
+        rows.extend(attribute_rows_for_table(
+            catalog_index_oid(index.id)?,
             &table,
             &acl,
         )?);
@@ -1045,6 +1131,7 @@ pub(crate) fn information_schema_column_row(
 pub(crate) fn information_schema_trigger_rows(
     catalog_kv: &dyn Kv,
     database: &str,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgcatalog::trigger::{TriggerLevel, TriggerTiming};
     let triggers = crabka_pgcatalog::trigger::list_triggers(catalog_kv)?;
@@ -1083,6 +1170,15 @@ pub(crate) fn information_schema_trigger_rows(
                 .map(|argument| format!("'{}'", argument.replace(char::from(39), "''")))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let condition = match &trigger.when {
+                Some(source) => {
+                    let predicate = crabka_pgparser::parser::parse_expression(source)?;
+                    text(&crate::viewdef::expression_text_with_qualifiers(
+                        &predicate, style,
+                    ))
+                }
+                None => Datum::Null,
+            };
             rows.push(vec![
                 text(database),
                 text(&trigger.table.schema),
@@ -1092,10 +1188,7 @@ pub(crate) fn information_schema_trigger_rows(
                 text(&trigger.table.schema),
                 text(&trigger.table.name),
                 Datum::Int4(i32::try_from(action_order).unwrap_or(i32::MAX)),
-                trigger
-                    .when
-                    .as_ref()
-                    .map_or(Datum::Null, |value| text(value)),
+                condition,
                 text(&format!("EXECUTE FUNCTION {function}({arguments})")),
                 text(match trigger.level {
                     TriggerLevel::Row => "ROW",
@@ -1171,6 +1264,7 @@ pub(crate) fn format_column_default(
         ColumnDefault::NextVal(sequence) => {
             format!("nextval('{}'::regclass)", escape_sql_string(sequence))
         }
+        ColumnDefault::Expression(source) => source.clone(),
         // Only the oid is stored, so the name is read from the catalog now —
         // the same output-time resolution `pg_get_expr` performs.
         //
@@ -1442,6 +1536,49 @@ pub(crate) fn attribute_rows_for_table(
         .collect()
 }
 
+/// The columns PostgreSQL exposes for an index relation. Expression keys have
+/// no source column name, so its catalog attribute is the conventional `expr`.
+pub(crate) fn index_attribute_table(
+    index: &crabka_pgcatalog::Index,
+    source: &Table,
+) -> Result<Table, ExecError> {
+    let scope = Scope::single(source, &source.name.name);
+    let columns = index
+        .columns
+        .iter()
+        .map(|key| {
+            if let Some(expression) = crabka_pgcatalog::index_key_expression(key) {
+                return Ok(crabka_pgcatalog::Column::new(
+                    "expr",
+                    crate::eval::infer_type(
+                        &crabka_pgparser::parser::parse_expression(expression)?,
+                        &scope,
+                    )?,
+                ));
+            }
+            source
+                .columns
+                .iter()
+                .find(|column| column.name == *key)
+                .cloned()
+                .ok_or_else(|| ExecError::UndefinedColumn(key.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Table {
+        id: source.id,
+        owner: source.owner.clone(),
+        name: index.qualified_name(),
+        columns,
+        sharded: false,
+        row_security: false,
+        force_row_security: false,
+        sharding: None,
+        foreign: None,
+        materialized: None,
+        checks: Vec::new(),
+    })
+}
+
 /// `pg_attribute.atttypmod`. [`ColumnType::typmod`] covers the string types;
 /// `numeric(p, s)` needs PostgreSQL's packed `((p << 16) | s) + 4` too, because
 /// `format_type(atttypid, atttypmod)` reconstructs `numeric(10,2)` from exactly
@@ -1634,9 +1771,7 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
                     domain_base: None,
                     range_align: match ty.name {
                         "name" => Some("c"),
-                        "aclitem" | "_aclitem" | "tsrange" | "tstzrange" | "int8range" => {
-                            Some("d")
-                        }
+                        "aclitem" | "_aclitem" | "tsrange" | "tstzrange" | "int8range" => Some("d"),
                         _ => None,
                     },
                 },
@@ -1695,6 +1830,11 @@ fn relation_type_rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for (name, (oid, array_oid)) in crate::catalog_rel::relation_rowtype_oids(catalog_kv)? {
+        let typrelid = crate::catalog_fn::relation_oid(catalog_kv, &name)?.ok_or_else(|| {
+            ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(
+                name.to_string(),
+            ))
+        })?;
         rows.push(pg_type_row(
             PgTypeRow {
                 oid,
@@ -1703,11 +1843,7 @@ fn relation_type_rows(
                 len: -1,
                 category: "C",
                 typtype: "c",
-                typrelid: crate::catalog_fn::resolve_relation_in_scope(
-                    catalog_kv,
-                    crate::relname::ResolutionScope::default_scope(),
-                    &name.to_string(),
-                )?,
+                typrelid,
                 typelem: 0,
                 typarray: array_oid,
                 typbasetype: 0,
@@ -1743,7 +1879,18 @@ fn relation_type_rows(
 fn information_schema_domain_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<Datum>> {
     let collation = crate::catalog_rel::DEFAULT_COLLATION_OID;
     let mut rows = Vec::with_capacity(10);
-    for (array_oid, array_name, oid, name, len, category, base, typcollation, align) in [
+    for (
+        array_oid,
+        array_name,
+        oid,
+        name,
+        len,
+        category,
+        base,
+        typcollation,
+        array_align,
+        domain_align,
+    ) in [
         (
             12436,
             "_cardinal_number",
@@ -1753,6 +1900,7 @@ fn information_schema_domain_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<
             "N",
             "int4",
             0,
+            None,
             None,
         ),
         (
@@ -1765,6 +1913,7 @@ fn information_schema_domain_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<
             "varchar",
             collation,
             None,
+            None,
         ),
         (
             12441,
@@ -1775,6 +1924,7 @@ fn information_schema_domain_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<
             "S",
             "name",
             collation,
+            Some("i"),
             Some("c"),
         ),
         (
@@ -1787,6 +1937,7 @@ fn information_schema_domain_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<
             "timestamptz",
             0,
             Some("d"),
+            Some("d"),
         ),
         (
             12449,
@@ -1797,6 +1948,7 @@ fn information_schema_domain_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<
             "S",
             "varchar",
             collation,
+            None,
             None,
         ),
     ] {
@@ -1814,7 +1966,7 @@ fn information_schema_domain_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<
                 typbasetype: 0,
                 typcollation,
                 domain_base: None,
-                range_align: align,
+                range_align: array_align,
             },
             proc_oids,
         ));
@@ -1838,7 +1990,7 @@ fn information_schema_domain_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<
                 },
                 typcollation,
                 domain_base: Some(base),
-                range_align: align,
+                range_align: domain_align,
             },
             proc_oids,
         ));
@@ -1880,24 +2032,20 @@ struct PgTypeRow<'a> {
 }
 
 fn pg_type_row(row: PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> Vec<Datum> {
+    pg_type_row_with_defined(row, proc_oids, true)
+}
+
+fn pg_type_row_with_defined(
+    row: PgTypeRow<'_>,
+    proc_oids: &BTreeMap<String, i32>,
+    defined: bool,
+) -> Vec<Datum> {
     let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
     let typalign = match row.name {
         "cstring" => "c",
-        "_aclitem"
-        | "_record"
-        | "_xid8"
-        | "_pg_lsn"
-        | "_int8"
-        | "_float8"
-        | "_time"
-        | "_time_stamp"
-        | "_timestamp"
-        | "_timestamptz"
-        | "_money"
-        | "_macaddr8"
-        | "_tsrange"
-        | "_tstzrange"
-        | "_int8range" => "d",
+        "_aclitem" | "_record" | "_xid8" | "_pg_lsn" | "_int8" | "_float8" | "_time"
+        | "_time_stamp" | "_timestamp" | "_timestamptz" | "_money" | "_macaddr8" | "_tsrange"
+        | "_tstzrange" | "_int8range" => "d",
         _ => row.range_align.unwrap_or(match row.len {
             1 => "c",
             2 => "s",
@@ -1921,7 +2069,7 @@ fn pg_type_row(row: PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> Vec<Dat
         Datum::InternalChar(row.typtype.as_bytes()[0]),
         Datum::InternalChar(row.category.as_bytes()[0]),
         Datum::Bool(false),
-        Datum::Bool(true),
+        Datum::Bool(defined),
         Datum::InternalChar(b','),
         oid(row.typrelid),
         routines[0].clone(),
@@ -1983,7 +2131,10 @@ fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [
         let element_name = builtin_type_rows()
             .iter()
             .find(|type_row| type_row.oid == row.typelem)
-            .map_or_else(|| row.name.trim_start_matches('_'), |type_row| type_row.name);
+            .map_or_else(
+                || row.name.trim_start_matches('_'),
+                |type_row| type_row.name,
+            );
         return [
             routine("array_subscript_handler"),
             routine("array_in"),
@@ -2132,7 +2283,9 @@ pub(crate) fn user_type_rows(
                 0,
                 "C",
             ),
-            usertype::UserTypeBody::Enum(_) => (0, 0, "E"),
+            usertype::UserTypeBody::Enum(_) | usertype::UserTypeBody::EnumOrdered { .. } => {
+                (0, 0, "E")
+            }
             usertype::UserTypeBody::Range(_) => (0, 0, "R"),
             usertype::UserTypeBody::Domain(domain) => (
                 0,
@@ -2147,7 +2300,7 @@ pub(crate) fn user_type_rows(
         // A shell is the one user type with no `ColumnType`, and `TypeShellMake`
         // gives it `sizeof(int32)` regardless.
         let shell_typlen = 4;
-        rows.push(pg_type_row(
+        rows.push(pg_type_row_with_defined(
             PgTypeRow {
                 oid: i32::try_from(ty.oid).unwrap_or(0),
                 name: &ty.name,
@@ -2157,7 +2310,7 @@ pub(crate) fn user_type_rows(
                 typtype: ty.typtype(),
                 typrelid,
                 typelem: 0,
-                typarray: 0,
+                typarray: i32::try_from(ty.array_oid).unwrap_or(0),
                 typbasetype,
                 typcollation: column_type.map_or(0, text_collation_oid),
                 domain_base: match &ty.body {
@@ -2170,10 +2323,33 @@ pub(crate) fn user_type_rows(
                 }),
             },
             proc_oids,
+            !ty.is_shell(),
         ));
+        if column_type.is_some() {
+            let array_name = format!("_{}", ty.name);
+            rows.push(pg_type_row(
+                PgTypeRow {
+                    oid: i32::try_from(ty.array_oid).unwrap_or(0),
+                    name: &array_name,
+                    namespace: crate::catalog_rel::namespace_oid(&ty.schema),
+                    len: -1,
+                    category: "A",
+                    typtype: "b",
+                    typrelid: 0,
+                    typelem: i32::try_from(ty.oid).unwrap_or(0),
+                    typarray: 0,
+                    typbasetype: 0,
+                    typcollation: 0,
+                    domain_base: None,
+                    range_align: None,
+                },
+                proc_oids,
+            ));
+        }
         if let (Some((schema, name)), Some(multirange)) =
             (ty.multirange_identity(), ty.multirange_type())
         {
+            let array_oid = usertype::user_multirange_array_oid(multirange.oid());
             rows.push(pg_type_row(
                 PgTypeRow {
                     oid: i32::try_from(ty.oid + 3).unwrap_or(0),
@@ -2184,6 +2360,25 @@ pub(crate) fn user_type_rows(
                     typtype: "m",
                     typrelid: 0,
                     typelem: 0,
+                    typarray: i32::try_from(array_oid).unwrap_or(0),
+                    typbasetype: 0,
+                    typcollation: 0,
+                    domain_base: None,
+                    range_align: None,
+                },
+                proc_oids,
+            ));
+            let array_name = format!("_{name}");
+            rows.push(pg_type_row(
+                PgTypeRow {
+                    oid: i32::try_from(array_oid).unwrap_or(0),
+                    name: &array_name,
+                    namespace: crate::catalog_rel::namespace_oid(&schema),
+                    len: -1,
+                    category: "A",
+                    typtype: "b",
+                    typrelid: 0,
+                    typelem: i32::try_from(multirange.oid()).unwrap_or(0),
                     typarray: 0,
                     typbasetype: 0,
                     typcollation: 0,
@@ -2263,13 +2458,11 @@ pub(crate) fn pg_range_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
                     oid(i32::try_from(ty.oid).unwrap_or(0)),
                     oid(i32::try_from(range.subtype.oid()).unwrap_or(0)),
                     oid(i32::try_from(ty.oid + 3).unwrap_or(0)),
-                    oid(
-                        range
-                            .collation
-                            .as_deref()
-                            .and_then(crate::catalog_rel::collation_oid)
-                            .unwrap_or_else(|| text_collation_oid(range.subtype)),
-                    ),
+                    oid(range
+                        .collation
+                        .as_deref()
+                        .and_then(crate::catalog_rel::collation_oid)
+                        .unwrap_or_else(|| text_collation_oid(range.subtype))),
                     oid(subtype_opclass),
                     absent_regproc(),
                     absent_regproc(),
@@ -2395,6 +2588,11 @@ pub(crate) const BUILTIN_CATALOG_OID_INDEXES: &[BuiltinCatalogOidIndex] = &[
         oid: 2682,
     },
     BuiltinCatalogOidIndex {
+        table: "pg_largeobject_metadata",
+        name: "pg_largeobject_metadata_oid_index",
+        oid: 2996,
+    },
+    BuiltinCatalogOidIndex {
         table: "pg_policy",
         name: "pg_policy_oid_index",
         oid: 3257,
@@ -2488,6 +2686,10 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         .into_iter()
         .map(|index| {
             let table = crabka_pgcatalog::get_table(catalog_kv, &index.table)?;
+            let is_replica_identity = matches!(
+                crabka_pgcatalog::replica_identity(catalog_kv, index.table_id)?,
+                crabka_pgcatalog::ReplicaIdentity::Index(name) if name == index.name
+            );
             // An expression key has no table column to point at: PostgreSQL
             // writes 0 in `indkey` for it and carries the expression itself in
             // `indexprs`, in key order. Looking one up as a column name instead
@@ -2550,7 +2752,7 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
                 Datum::Bool(false),
                 Datum::Bool(true),
                 Datum::Bool(true),
-                Datum::Bool(false),
+                Datum::Bool(is_replica_identity),
                 Datum::OidVector(crabka_pgtypes::ArrayValue::with_dims(
                     crabka_pgtypes::ElemType::Int4,
                     indkey,
@@ -2634,6 +2836,125 @@ pub(crate) fn pg_settings_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect()
 }
 
+/// `pg_show_all_settings()` has the same live values as `pg_settings`, with
+/// the three columns its function signature adds.
+pub(crate) fn pg_show_all_settings_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+    crate::session::guc_settings_runtime()?
+        .into_iter()
+        .map(|setting| {
+            let optional = |value: Option<&String>| value.map_or(Datum::Null, |value| text(value));
+            let enumvals = crate::session::guc_setting_enum_values(&setting.name).map_or(
+                Datum::Null,
+                |values| {
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Text,
+                        values.iter().map(|value| text(value)).collect(),
+                    ))
+                },
+            );
+            Ok(vec![
+                text(&setting.name),
+                text(&setting.value),
+                optional(setting.unit.as_ref()),
+                text(crate::session::guc_setting_category(&setting.name)),
+                text("Crabka session parameter"),
+                Datum::Null,
+                text(&setting.context),
+                text(&setting.vartype),
+                text("session"),
+                optional(setting.min_val.as_ref()),
+                optional(setting.max_val.as_ref()),
+                enumvals,
+                text(&setting.boot_val),
+                text(&setting.reset_val),
+                Datum::Null,
+                Datum::Null,
+                Datum::Bool(false),
+            ])
+        })
+        .collect()
+}
+
+/// `pg_catalog.pg_locks` over the engine's live relation and advisory holds.
+pub(crate) fn pg_locks_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+    crate::session::pg_locks_runtime()?
+        .into_iter()
+        .map(|lock| {
+            use crate::lockmgr::SessionLockSnapshot;
+
+            let nulls = || vec![Datum::Null; 16];
+            match lock {
+                SessionLockSnapshot::Relation {
+                    session,
+                    pid,
+                    target,
+                    mode,
+                } => {
+                    let mut row = nulls();
+                    row[0] = text("relation");
+                    row[1] = int(crate::catalog_rel::DATABASE_OID);
+                    row[2] = int(match target {
+                        crate::lockmgr::RelationLockTarget::Table(table) => {
+                            crate::catalog_rel::table_relation_oid(table)?
+                        }
+                        crate::lockmgr::RelationLockTarget::Index(index) => {
+                            catalog_index_oid(index)?
+                        }
+                    });
+                    row[10] = text(&format!("1/{}", session.0));
+                    row[11] = int(pid);
+                    row[12] = text(mode.name());
+                    row[13] = Datum::Bool(true);
+                    row[14] = Datum::Bool(false);
+                    Ok(row)
+                }
+                SessionLockSnapshot::Advisory {
+                    session,
+                    pid,
+                    key,
+                    shared,
+                } => {
+                    let mut row = nulls();
+                    row[0] = text("advisory");
+                    row[1] = int(crate::catalog_rel::DATABASE_OID);
+                    row[7] = int((key >> 32) as i32);
+                    row[8] = int(key as i32);
+                    row[9] = Datum::Int2(1);
+                    row[10] = text(&format!("1/{}", session.0));
+                    row[11] = int(pid);
+                    row[12] = text(if shared { "ShareLock" } else { "ExclusiveLock" });
+                    row[13] = Datum::Bool(true);
+                    row[14] = Datum::Bool(false);
+                    Ok(row)
+                }
+                SessionLockSnapshot::Tuple {
+                    session,
+                    pid,
+                    table,
+                    rowid,
+                    shared,
+                } => {
+                    let Datum::Tid(tid) = crate::scope::row_ctid(rowid) else {
+                        unreachable!("row_ctid returns tid")
+                    };
+                    let mut row = nulls();
+                    row[0] = text("tuple");
+                    row[1] = int(crate::catalog_rel::DATABASE_OID);
+                    row[2] = int(crate::catalog_rel::table_relation_oid(table)?);
+                    row[3] = int(i32::try_from(tid.block).unwrap_or(i32::MAX));
+                    row[4] = Datum::Int2(i16::try_from(tid.offset).unwrap_or(i16::MAX));
+                    row[10] = text(&format!("1/{}", session.0));
+                    row[11] = int(pid);
+                    row[12] = text(if shared { "For Share" } else { "For Update" });
+                    row[13] = Datum::Bool(true);
+                    row[14] = Datum::Bool(false);
+                    Ok(row)
+                }
+            }
+        })
+        .collect()
+}
+
 /// S2: `pg_catalog.pg_prepared_statements` over the session's prepared
 /// statements. `parameter_types`/`result_types` are rendered as `PostgreSQL`
 /// renders a `regtype[]` literal.
@@ -2650,6 +2971,23 @@ pub(crate) fn pg_prepared_statement_rows() -> Result<Vec<Vec<Datum>>, ExecError>
                 Datum::Bool(prepared.from_sql),
                 Datum::Int8(0),
                 Datum::Int8(1),
+            ]
+        })
+        .collect())
+}
+
+/// `pg_catalog.pg_cursors` over this session's open portals.
+pub(crate) fn pg_cursor_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crate::session::cursor_runtime()?
+        .into_iter()
+        .map(|cursor| {
+            vec![
+                text(&cursor.name),
+                text(&cursor.statement),
+                Datum::Bool(cursor.holdable),
+                Datum::Bool(cursor.binary),
+                Datum::Bool(cursor.scrollable),
+                Datum::Timestamptz(cursor.created_at),
             ]
         })
         .collect())
@@ -2762,6 +3100,151 @@ pub(crate) fn pg_user_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
         .collect())
 }
 
+pub(crate) fn pg_stats_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = Vec::new();
+    for (key, stats) in crate::attrstats::all(catalog_kv)? {
+        let Ok((table, _)) = statistics_relation_table(catalog_kv, &key.relation) else {
+            continue;
+        };
+        let Some(index) = key
+            .attnum
+            .checked_sub(1)
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            continue;
+        };
+        let Some(column) = table.columns.get(index) else {
+            continue;
+        };
+        rows.push(vec![
+            text(&key.relation.schema),
+            text(&key.relation.name),
+            text(&column.name),
+            Datum::Bool(key.inherited),
+            stats.null_frac.map_or(Datum::Null, Datum::Float4),
+            Datum::Int4(stats.avg_width.unwrap_or(0)),
+            Datum::Float4(stats.n_distinct.unwrap_or(0.0)),
+            stats.most_common_vals.map_or(Datum::Null, Datum::Text),
+            stats
+                .most_common_freqs
+                .map_or(Ok(Datum::Null), |value| float4_array(&value))?,
+            stats.histogram_bounds.map_or(Datum::Null, Datum::Text),
+            stats.correlation.map_or(Datum::Null, Datum::Float4),
+            stats.most_common_elems.map_or(Datum::Null, Datum::Text),
+            stats
+                .most_common_elem_freqs
+                .map_or(Ok(Datum::Null), |value| float4_array(&value))?,
+            stats
+                .elem_count_histogram
+                .map_or(Ok(Datum::Null), |value| float4_array(&value))?,
+            stats
+                .range_length_histogram
+                .map_or(Datum::Null, Datum::Text),
+            stats.range_empty_frac.map_or(Datum::Null, Datum::Float4),
+            stats
+                .range_bounds_histogram
+                .map_or(Datum::Null, Datum::Text),
+        ]);
+    }
+    Ok(rows)
+}
+
+/// `pg_statistic` is the durable form of the same records `pg_stats` projects.
+/// Slots use PostgreSQL's fixed kind ordering, which is also the ordering the
+/// restore function reconstructs from `pg_stats` during pg_dump-style copies.
+pub(crate) fn pg_statistic_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = Vec::new();
+    for (key, stats) in crate::attrstats::all(catalog_kv)? {
+        let Ok((table, relation_oid)) = statistics_relation_table(catalog_kv, &key.relation) else {
+            continue;
+        };
+        let Some(index) = key
+            .attnum
+            .checked_sub(1)
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            continue;
+        };
+        if table.columns.get(index).is_none() {
+            continue;
+        }
+        let mut slots = Vec::new();
+        if let (Some(values), Some(numbers)) = (stats.most_common_vals, stats.most_common_freqs) {
+            slots.push((1_i16, float4_array(&numbers)?, Datum::Text(values)));
+        }
+        if let Some(values) = stats.histogram_bounds {
+            slots.push((2, Datum::Null, Datum::Text(values)));
+        }
+        if let Some(number) = stats.correlation {
+            slots.push((
+                3,
+                Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Float4,
+                    vec![Datum::Float4(number)],
+                )),
+                Datum::Null,
+            ));
+        }
+        if let (Some(values), Some(numbers)) =
+            (stats.most_common_elems, stats.most_common_elem_freqs)
+        {
+            slots.push((4, float4_array(&numbers)?, Datum::Text(values)));
+        }
+        if let Some(numbers) = stats.elem_count_histogram {
+            slots.push((5, float4_array(&numbers)?, Datum::Null));
+        }
+        if let Some(values) = stats.range_length_histogram {
+            slots.push((6, Datum::Null, Datum::Text(values)));
+        }
+        if let Some(values) = stats.range_bounds_histogram {
+            slots.push((7, Datum::Null, Datum::Text(values)));
+        }
+        let mut row = vec![
+            int(relation_oid),
+            Datum::Int2(key.attnum),
+            Datum::Bool(key.inherited),
+            stats.null_frac.map_or(Datum::Null, Datum::Float4),
+            Datum::Int4(stats.avg_width.unwrap_or(0)),
+            Datum::Float4(stats.n_distinct.unwrap_or(0.0)),
+        ];
+        row.extend((0..5).map(|slot| Datum::Int2(slots.get(slot).map_or(0, |slot| slot.0))));
+        row.extend((0..5).map(|_| int(0)));
+        row.extend((0..5).map(|_| int(0)));
+        row.extend((0..5).map(|slot| slots.get(slot).map_or(Datum::Null, |slot| slot.1.clone())));
+        row.extend((0..5).map(|slot| slots.get(slot).map_or(Datum::Null, |slot| slot.2.clone())));
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn statistics_relation_table(
+    catalog_kv: &dyn Kv,
+    relation: &crabka_pgcatalog::RelationName,
+) -> Result<(Table, i32), ExecError> {
+    if let Ok(table) = crabka_pgcatalog::get_table(catalog_kv, relation) {
+        return Ok((
+            table.clone(),
+            crate::catalog_rel::table_relation_oid(table.id)?,
+        ));
+    }
+    let index = crabka_pgcatalog::get_index(catalog_kv, relation)?;
+    let source = crabka_pgcatalog::get_table(catalog_kv, &index.table)?;
+    Ok((
+        index_attribute_table(&index, &source)?,
+        catalog_index_oid(index.id)?,
+    ))
+}
+
+fn float4_array(value: &str) -> Result<Datum, ExecError> {
+    let zone = jiff::tz::TimeZone::UTC;
+    crabka_pgtypes::cast::cast_in(
+        &Datum::Text(value.into()),
+        ColumnType::Array(crabka_pgtypes::ElemType::Float4),
+        crabka_pgtypes::encoding::OutputStyle::with_zone(&zone),
+    )
+    .map_err(ExecError::from)
+}
+
 /// Every virtual relation, `exec`'s starter set followed by the F-2
 /// introspection surface. `pg_class`/`pg_attribute` describe themselves through
 /// this list, so a relation missing from it is invisible to `\d`.
@@ -2776,10 +3259,14 @@ pub(crate) fn virtual_table_names() -> &'static [&'static str] {
             "pg_ts_dict",
             "pg_range",
             "pg_index",
+            "pg_cursors",
             "pg_settings",
+            "pg_prepared_xacts",
             "pg_prepared_statements",
             "pg_roles",
             "pg_user",
+            "pg_statistic",
+            "pg_stats",
             "information_schema.schemata",
             "information_schema.tables",
             "information_schema.columns",
@@ -2895,12 +3382,17 @@ pub(crate) fn resolve_scanned_regclass(
 pub(crate) fn regclass_column_indexes(
     table: &crabka_pgcatalog::Table,
     offset: usize,
-) -> Vec<(usize, crate::reg_fn::RegKind)> {
+) -> Vec<(usize, crate::reg_fn::RegKind, bool)> {
     table
         .columns
         .iter()
         .enumerate()
-        .filter_map(|(index, column)| Some((index + offset, holds_reg(column.ty)?)))
+        .filter_map(|(index, column)| match column.ty {
+            ColumnType::Array(elem) => {
+                holds_reg(elem.column_type()).map(|kind| (index + offset, kind, true))
+            }
+            ty => holds_reg(ty).map(|kind| (index + offset, kind, false)),
+        })
         .collect()
 }
 
@@ -2909,7 +3401,7 @@ pub(crate) fn regclass_column_indexes(
 pub(crate) fn resolve_regclass_at(
     catalog_kv: &dyn Kv,
     scope: &crate::relname::ResolutionScope,
-    columns: &[(usize, crate::reg_fn::RegKind)],
+    columns: &[(usize, crate::reg_fn::RegKind, bool)],
     rows: &mut [Vec<Datum>],
 ) -> Result<(), ExecError> {
     if columns.is_empty() {
@@ -2918,22 +3410,46 @@ pub(crate) fn resolve_regclass_at(
     let mut resolved: HashMap<(i32, crate::reg_fn::RegKind), crabka_pgtypes::RegclassValue> =
         HashMap::new();
     for row in rows {
-        for &(index, kind) in columns {
+        for &(index, kind, in_array) in columns {
             // A projection that dropped the column, or a NULL, leaves nothing to
             // resolve; a value already carrying its name is left alone.
-            let Some(Datum::Int4(oid)) = row.get(index) else {
+            let Some(value) = row.get_mut(index) else {
                 continue;
             };
-            let oid = *oid;
-            let value = match resolved.entry((oid, kind)) {
-                std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
-                std::collections::hash_map::Entry::Vacant(entry) => entry
-                    .insert(crate::reg_fn::stored_value(kind, oid, catalog_kv, scope)?)
-                    .clone(),
-            };
-            row[index] = Datum::Regclass(value);
+            resolve_regclass_value(value, kind, in_array, catalog_kv, scope, &mut resolved)?;
         }
     }
+    Ok(())
+}
+
+fn resolve_regclass_value(
+    value: &mut Datum,
+    kind: crate::reg_fn::RegKind,
+    in_array: bool,
+    catalog_kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    resolved: &mut HashMap<(i32, crate::reg_fn::RegKind), crabka_pgtypes::RegclassValue>,
+) -> Result<(), ExecError> {
+    if in_array {
+        let Datum::Array(array) = value else {
+            return Ok(());
+        };
+        for value in &mut array.elems {
+            resolve_regclass_value(value, kind, false, catalog_kv, scope, resolved)?;
+        }
+        return Ok(());
+    }
+    let Datum::Int4(oid) = value else {
+        return Ok(());
+    };
+    let oid = *oid;
+    let resolved_value = match resolved.entry((oid, kind)) {
+        std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+        std::collections::hash_map::Entry::Vacant(entry) => entry
+            .insert(crate::reg_fn::stored_value(kind, oid, catalog_kv, scope)?)
+            .clone(),
+    };
+    *value = Datum::Regclass(resolved_value);
     Ok(())
 }
 
@@ -3111,6 +3627,10 @@ pub(crate) fn regtype_name(oid: i32) -> String {
                 .iter()
                 .find(|row| row.oid == oid)
                 .map(|row| {
+                    let formatted = crate::func::format_type(i64::from(row.oid), -1);
+                    if formatted != "-" {
+                        return formatted;
+                    }
                     builtin_type_rows()
                         .iter()
                         .find(|element| row.category == "A" && element.oid == row.elem)
@@ -3162,10 +3682,14 @@ pub(crate) fn virtual_relation_oid(name: &str) -> i32 {
         "pg_ts_dict" => 3600,
         "pg_range" => 3541,
         "pg_index" => 2610,
+        "pg_cursors" => 100_005,
         "pg_settings" => 100_001,
+        "pg_prepared_xacts" => 100_004,
         "pg_prepared_statements" => 100_003,
         "pg_roles" => 1261,
         "pg_user" => 100_002,
+        "pg_statistic" => 2619,
+        "pg_stats" => 100_006,
         "information_schema.schemata" => 100_010,
         "information_schema.tables" => 100_011,
         "information_schema.columns" => 100_012,
@@ -3481,7 +4005,7 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             len: 16,
             category: "G",
             elem: 0,
-            array: 0,
+            array: crabka_pgtypes::oids::POINTARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::PATH as i32,
@@ -3489,19 +4013,16 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             len: -1,
             category: "G",
             elem: 0,
-            array: 0,
+            array: crabka_pgtypes::oids::PATHARRAY as i32,
         },
         // The other five geometric types, category 'G' like `point`/`path`.
-        // `typelem`/`typarray` stay 0 for the same reason theirs do: crabka
-        // builds no array of a geometric type, and `type_sanity` treats a
-        // `typarray` pointing at a row that does not exist as a catalog error.
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::LSEG as i32,
             name: "lseg",
             len: 32,
             category: "G",
             elem: 0,
-            array: 0,
+            array: crabka_pgtypes::oids::LSEGARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::BOX as i32,
@@ -3509,7 +4030,7 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             len: 32,
             category: "G",
             elem: 0,
-            array: 0,
+            array: crabka_pgtypes::oids::BOXARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::POLYGON as i32,
@@ -3517,7 +4038,7 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             len: -1,
             category: "G",
             elem: 0,
-            array: 0,
+            array: crabka_pgtypes::oids::POLYGONARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::LINE as i32,
@@ -3525,7 +4046,7 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             len: 24,
             category: "G",
             elem: 0,
-            array: 0,
+            array: crabka_pgtypes::oids::LINEARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::CIRCLE as i32,
@@ -3533,7 +4054,7 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             len: 24,
             category: "G",
             elem: 0,
-            array: 0,
+            array: crabka_pgtypes::oids::CIRCLEARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::NUMERIC as i32,
@@ -3769,6 +4290,12 @@ pub(crate) fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
         ElemType::Int8 => "_int8",
         ElemType::Text => "_text",
         ElemType::Name => "_name",
+        ElemType::Record(None) => "_record",
+        ElemType::Record(Some(record)) => {
+            crabka_pgtypes::usertype::intern(&format!("_{}", record.name))
+        }
+        ElemType::User(user) => crabka_pgtypes::usertype::intern(&format!("_{}", user.name)),
+        ElemType::Builtin(builtin) => builtin.catalog_name(),
         ElemType::Float8 => "_float8",
         ElemType::Numeric => "_numeric",
         ElemType::Date => "_date",
@@ -3792,7 +4319,7 @@ pub(crate) fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
             crabka_pgtypes::oids::TSTZRANGE => "_tstzrange",
             crabka_pgtypes::oids::DATERANGE => "_daterange",
             crabka_pgtypes::oids::INT8RANGE => "_int8range",
-            _ => "_range",
+            _ => crabka_pgtypes::usertype::intern(&format!("_{}", range.name)),
         },
         ElemType::Multirange(multirange) => match multirange.oid {
             crabka_pgtypes::oids::INT4MULTIRANGE => "_int4multirange",
@@ -3801,7 +4328,7 @@ pub(crate) fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
             crabka_pgtypes::oids::TSTZMULTIRANGE => "_tstzmultirange",
             crabka_pgtypes::oids::DATEMULTIRANGE => "_datemultirange",
             crabka_pgtypes::oids::INT8MULTIRANGE => "_int8multirange",
-            _ => "_multirange",
+            _ => crabka_pgtypes::usertype::intern(&format!("_{}", multirange.name)),
         },
     }
 }
@@ -4171,14 +4698,22 @@ pub(crate) fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
                 array: 0,
             });
         }
-        rows.extend(crabka_pgtypes::ElemType::ALL.map(|elem| BuiltinTypeRow {
-            oid: i32::try_from(elem.array_oid()).expect("array oid fits in int4"),
-            name: array_typname(elem),
-            len: -1,
-            category: "A",
-            elem: i32::try_from(elem.oid()).expect("element oid fits in int4"),
-            array: 0,
-        }));
+        for elem in crabka_pgtypes::ElemType::ALL
+            .into_iter()
+            .chain(crabka_pgtypes::BuiltinElem::all().map(crabka_pgtypes::ElemType::Builtin))
+        {
+            let row = BuiltinTypeRow {
+                oid: i32::try_from(elem.array_oid()).expect("array oid fits in int4"),
+                name: array_typname(elem),
+                len: -1,
+                category: "A",
+                elem: i32::try_from(elem.oid()).expect("element oid fits in int4"),
+                array: 0,
+            };
+            if !rows.iter().any(|existing| existing.oid == row.oid) {
+                rows.push(row);
+            }
+        }
         rows
     });
     &ROWS
@@ -4220,7 +4755,18 @@ pub(crate) fn text(value: &str) -> Datum {
 
 #[cfg(test)]
 mod tests {
+    use crabka_pgcatalog::RelationName;
+    use crabka_pgkv::{Kv, MemKv};
+    use crabka_pgtypes::usertype::{CompositeField, RangeBody, UserTypeBody};
+
     use super::*;
+
+    #[test]
+    fn largeobject_metadata_has_its_upstream_primary_index() {
+        let index = builtin_catalog_oid_index("pg_largeobject_metadata").expect("catalog index");
+        assert_eq!(index.name, "pg_largeobject_metadata_oid_index");
+        assert_eq!(index.oid, 2996);
+    }
 
     #[test]
     fn a_zero_length_type_is_not_toastable() {
@@ -4264,5 +4810,192 @@ mod tests {
             builtin_type_collation_oid(crabka_pgtypes::oids::NAMEARRAY as i32),
             crate::catalog_rel::DEFAULT_COLLATION_OID
         );
+    }
+
+    #[test]
+    fn regclass_array_column_indexes_include_the_join_offset() {
+        let table = crabka_pgcatalog::Table {
+            id: 1,
+            name: RelationName::public("regclass_array_right"),
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
+            columns: vec![
+                crabka_pgcatalog::Column::new("id", ColumnType::Int4),
+                crabka_pgcatalog::Column::new("class", ColumnType::Regclass),
+                crabka_pgcatalog::Column::new(
+                    "classes",
+                    ColumnType::array_of(ColumnType::Regclass).expect("regclass[]"),
+                ),
+            ],
+            sharded: false,
+            row_security: false,
+            force_row_security: false,
+            sharding: None,
+            foreign: None,
+            materialized: None,
+            checks: Vec::new(),
+        };
+
+        assert_eq!(
+            regclass_column_indexes(&table, 3),
+            vec![
+                (4, crate::reg_fn::RegKind::Class, false),
+                (5, crate::reg_fn::RegKind::Class, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn user_type_array_rows_are_varlena_and_link_to_their_scalar_type() {
+        let kv = MemKv::default();
+        let name = RelationName::public("catalog_array_pair");
+        let (ty, ops) = crabka_pgcatalog::create_user_type_ops(
+            &kv,
+            &name,
+            UserTypeBody::Composite(vec![CompositeField {
+                name: "id".into(),
+                ty: ColumnType::Int4,
+            }]),
+        )
+        .expect("create type operations");
+        kv.write_batch(&ops).expect("store type");
+
+        let rows = user_type_rows(&kv, &BTreeMap::new()).expect("user type rows");
+        let scalar = rows
+            .iter()
+            .find(|row| row[0] == Datum::Oid(ty.oid))
+            .expect("scalar pg_type row");
+        let array = rows
+            .iter()
+            .find(|row| row[0] == Datum::Oid(ty.array_oid))
+            .expect("array pg_type row");
+
+        assert!(scalar[14] == Datum::Oid(ty.array_oid));
+        assert!(array[1] == Datum::Text("_catalog_array_pair".into()));
+        assert!(array[4] == Datum::Int2(-1));
+        assert!(array[6] == Datum::InternalChar(b'b'));
+        assert!(array[7] == Datum::InternalChar(b'A'));
+        assert!(array[13] == Datum::Oid(ty.oid));
+    }
+
+    #[test]
+    fn user_multirange_array_row_is_varlena_and_links_to_its_scalar_type() {
+        let kv = MemKv::default();
+        let name = RelationName::public("catalog_array_range");
+        let (range, ops) = crabka_pgcatalog::create_user_type_ops(
+            &kv,
+            &name,
+            UserTypeBody::Range(RangeBody {
+                subtype: ColumnType::Int4,
+                collation: None,
+                multirange_schema: None,
+                multirange_name: None,
+            }),
+        )
+        .expect("create range operations");
+        kv.write_batch(&ops).expect("store range");
+
+        let multirange = range.multirange_type().expect("range has a multirange");
+        let array_oid = crabka_pgtypes::usertype::user_multirange_array_oid(multirange.oid());
+        let rows = user_type_rows(&kv, &BTreeMap::new()).expect("user type rows");
+        let scalar = rows
+            .iter()
+            .find(|row| row[0] == Datum::Oid(multirange.oid()))
+            .expect("multirange pg_type row");
+        let array = rows
+            .iter()
+            .find(|row| row[0] == Datum::Oid(array_oid))
+            .expect("multirange array pg_type row");
+
+        assert!(scalar[14] == Datum::Oid(array_oid));
+        assert!(array[4] == Datum::Int2(-1));
+        assert!(array[13] == Datum::Oid(multirange.oid()));
+    }
+
+    #[test]
+    fn pg_stats_projects_the_durable_attribute_record() {
+        let kv = MemKv::new();
+        kv.write_batch(
+            &crabka_pgcatalog::create_schema_ops(&kv, "stats_import", "postgres")
+                .expect("schema ops"),
+        )
+        .expect("schema");
+        let relation = RelationName::new("stats_import", "test");
+        crabka_pgcatalog::create_table(&kv, &relation, vec![Column::new("id", ColumnType::Int4)])
+            .expect("table");
+        let key = crate::attrstats::AttributeStatsKey {
+            relation,
+            attnum: 1,
+            inherited: false,
+        };
+        kv.write_batch(&[crate::attrstats::set_op(
+            &key,
+            crate::attrstats::AttributeStats {
+                null_frac: Some(0.2),
+                avg_width: Some(5),
+                n_distinct: Some(0.6),
+                most_common_vals: Some("{1,2}".into()),
+                most_common_freqs: Some("{0.4,0.6}".into()),
+                histogram_bounds: Some("{0,5,10}".into()),
+                correlation: Some(-0.75),
+                most_common_elems: Some("{a,b}".into()),
+                most_common_elem_freqs: Some("{0.4,0.6,0.4,0.6}".into()),
+                elem_count_histogram: Some("{1,2}".into()),
+                range_length_histogram: None,
+                range_empty_frac: None,
+                range_bounds_histogram: None,
+            },
+        )])
+        .expect("statistics");
+
+        assert!(
+            pg_stats_rows(&kv).expect("pg_stats")
+                == vec![vec![
+                    Datum::Text("stats_import".into()),
+                    Datum::Text("test".into()),
+                    Datum::Text("id".into()),
+                    Datum::Bool(false),
+                    Datum::Float4(0.2),
+                    Datum::Int4(5),
+                    Datum::Float4(0.6),
+                    Datum::Text("{1,2}".into()),
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Float4,
+                        vec![Datum::Float4(0.4), Datum::Float4(0.6)],
+                    )),
+                    Datum::Text("{0,5,10}".into()),
+                    Datum::Float4(-0.75),
+                    Datum::Text("{a,b}".into()),
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Float4,
+                        vec![
+                            Datum::Float4(0.4),
+                            Datum::Float4(0.6),
+                            Datum::Float4(0.4),
+                            Datum::Float4(0.6),
+                        ],
+                    )),
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Float4,
+                        vec![Datum::Float4(1.0), Datum::Float4(2.0)],
+                    )),
+                    Datum::Null,
+                    Datum::Null,
+                    Datum::Null,
+                ]]
+        );
+        let statistic = pg_statistic_rows(&kv).expect("pg_statistic");
+        assert!(statistic.len() == 1);
+        assert!(
+            statistic[0][6..11]
+                == [
+                    Datum::Int2(1),
+                    Datum::Int2(2),
+                    Datum::Int2(3),
+                    Datum::Int2(4),
+                    Datum::Int2(5),
+                ]
+        );
+        assert!(statistic[0][26] == Datum::Text("{1,2}".into()));
+        assert!(statistic[0][29] == Datum::Text("{a,b}".into()));
     }
 }

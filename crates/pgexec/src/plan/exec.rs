@@ -10,6 +10,7 @@ use crabka_pgparser::ast::{
     DistinctClause, Expr, QueryExpr, SelectItem, SelectStmt, TableExpr, ValuesStmt,
 };
 
+use super::query::{Executor, Plan, PlanNode, PlanState, RestrictInfo, TargetEntry};
 use crate::{
     bind::{BoundExpr, bind_optional},
     error::ExecError,
@@ -17,8 +18,6 @@ use crate::{
     join::Relation,
     scope::{ColumnBinding, POSITION_QUALIFIER, Scope},
 };
-
-use super::query::{Executor, Plan, PlanNode, PlanState, RestrictInfo, TargetEntry};
 
 /// Execute the subset of SELECT that is exactly one scalar `Result` node.
 /// Returns `None` for every shape that still needs a later P0a node.
@@ -75,6 +74,9 @@ fn try_execute_nested_loop_with_state(
     read_ctx: &crate::subquery::SubCtx<'_>,
     select: &SelectStmt,
 ) -> Result<Option<(Relation, PlanState)>, ExecError> {
+    if exec::should_defer_local_join_count_plan(select) {
+        return Ok(None);
+    }
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if select.from.is_empty() {
@@ -91,9 +93,7 @@ fn try_execute_nested_loop_with_state(
             .sum::<usize>()
             > 1
         || matches!(select.distinct, DistinctClause::On(_))
-        || (window
-            && (aggregate
-                || crate::srf::projection_contains_srf(&select.projection)))
+        || (window && (aggregate || crate::srf::projection_contains_srf(&select.projection)))
     {
         return Ok(None);
     }
@@ -110,9 +110,7 @@ fn try_execute_nested_loop_with_state(
     }
     let (fields, exprs, tys) = exec::resolve_projection(&select.projection, &scope)?;
     let project_set = crate::srf::exprs_contain_srf(&exprs);
-    if project_set
-        && (aggregate || matches!(select.distinct, DistinctClause::On(_)))
-    {
+    if project_set && (aggregate || matches!(select.distinct, DistinctClause::On(_))) {
         return Ok(None);
     }
     let distinct = matches!(select.distinct, DistinctClause::Distinct);
@@ -276,7 +274,9 @@ fn execute_nested_loop_window_with_state(
     scope: &Scope,
 ) -> Result<(Relation, PlanState), ExecError> {
     let Some((sources, loop_plan)) = nested_loop_input_plan(read_ctx, select) else {
-        return Err(ExecError::Unsupported("WindowAgg had no nested-loop input".into()));
+        return Err(ExecError::Unsupported(
+            "WindowAgg had no nested-loop input".into(),
+        ));
     };
     let filter = Plan {
         target_list: Vec::new(),
@@ -357,155 +357,179 @@ impl NestedLoopTail<'_, '_> {
     fn execute(&self, state: &mut PlanState) -> Result<Relation, ExecError> {
         crate::session::check_query_canceled()?;
         match &state.plan.node {
-        PlanNode::Filter { input } => {
-            let relation = state.execute_child((**input).clone(), |child| {
-                execute_nested_loop_plan(
-                    child,
-                    self.read_ctx,
-                    &mut self.sources.iter(),
-                    self.select.filter.as_ref(),
-                    self.pruned_columns,
+            PlanNode::Filter { input } => {
+                let relation = state.execute_child((**input).clone(), |child| {
+                    execute_nested_loop_plan(
+                        child,
+                        self.read_ctx,
+                        &mut self.sources.iter(),
+                        self.select.filter.as_ref(),
+                        self.pruned_columns,
+                    )
+                })?;
+                state.begin_loop();
+                let relation = filter_relation_rows(state, relation, self.read_ctx.eval_ctx)?;
+                if state.plan.target_list.is_empty() {
+                    Ok(relation)
+                } else {
+                    project_filter_rows(
+                        state,
+                        relation,
+                        self.fields,
+                        self.tys,
+                        self.read_ctx.eval_ctx,
+                    )
+                }
+            }
+            PlanNode::Aggregate { input } => {
+                let relation =
+                    state.execute_child((**input).clone(), |child| self.execute(child))?;
+                state.begin_loop();
+                let rows = crate::grouping::aggregate_rows_with_memory(
+                    self.select,
+                    &relation.scope,
+                    relation.rows,
+                    self.read_ctx.eval_ctx,
+                    &self.read_ctx.statement_memory,
+                )?;
+                state.scope = exec::projected_scope(self.fields, self.tys);
+                for _ in &rows {
+                    state.emit_row();
+                }
+                Ok(Relation {
+                    scope: state.scope.clone(),
+                    rows,
+                })
+            }
+            PlanNode::ProjectSet { input } => {
+                let relation =
+                    state.execute_child((**input).clone(), |child| self.execute(child))?;
+                let (_, exprs, _) =
+                    exec::resolve_projection(&self.select.projection, &relation.scope)?;
+                state.begin_loop();
+                let rows = crate::srf::project_rows_ordered_with_memory(
+                    self.select,
+                    &relation.scope,
+                    self.fields,
+                    &exprs,
+                    relation.rows,
+                    self.read_ctx.eval_ctx,
+                    &self.read_ctx.statement_memory,
+                )?;
+                state.scope = exec::projected_scope(self.fields, self.tys);
+                for _ in &rows {
+                    state.emit_row();
+                }
+                Ok(Relation {
+                    scope: state.scope.clone(),
+                    rows,
+                })
+            }
+            PlanNode::Unique { input } => {
+                let relation =
+                    state.execute_child((**input).clone(), |child| self.execute(child))?;
+                state.begin_loop();
+                unique_relation_rows(state, relation, &self.read_ctx.statement_memory)
+            }
+            PlanNode::Sort { input } => {
+                let relation =
+                    state.execute_child((**input).clone(), |child| self.execute(child))?;
+                state.begin_loop();
+                sort_relation_rows(
+                    state,
+                    relation,
+                    self.order_by,
+                    self.sort_positions,
+                    &self.read_ctx.statement_memory,
                 )
-            })?;
-            state.begin_loop();
-            let relation = filter_relation_rows(state, relation, self.read_ctx.eval_ctx)?;
-            if state.plan.target_list.is_empty() {
-                Ok(relation)
-            } else {
-                project_filter_rows(state, relation, self.fields, self.tys, self.read_ctx.eval_ctx)
             }
-        }
-        PlanNode::Aggregate { input } => {
-            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
-            state.begin_loop();
-            let rows = crate::grouping::aggregate_rows_with_memory(
-                self.select,
-                &relation.scope,
-                relation.rows,
-                self.read_ctx.eval_ctx,
-                &self.read_ctx.statement_memory,
-            )?;
-            state.scope = exec::projected_scope(self.fields, self.tys);
-            for _ in &rows {
-                state.emit_row();
+            PlanNode::Limit { input } => {
+                let relation =
+                    state.execute_child((**input).clone(), |child| self.execute(child))?;
+                let offset = crate::exec::eval_row_count(
+                    self.offset,
+                    crate::exec::RowCountClause::Offset,
+                    self.read_ctx.eval_ctx,
+                )?;
+                let limit = crate::exec::eval_row_count(
+                    self.limit,
+                    crate::exec::RowCountClause::Limit,
+                    self.read_ctx.eval_ctx,
+                )?;
+                state.begin_loop();
+                Ok(limit_relation_rows_with_ties(
+                    state,
+                    relation,
+                    offset,
+                    limit,
+                    self.select.with_ties,
+                    self.order_by,
+                    self.sort_positions,
+                ))
             }
-            Ok(Relation {
-                scope: state.scope.clone(),
-                rows,
-            })
-        }
-        PlanNode::ProjectSet { input } => {
-            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
-            let (_, exprs, _) = exec::resolve_projection(&self.select.projection, &relation.scope)?;
-            state.begin_loop();
-            let rows = crate::srf::project_rows_ordered_with_memory(
-                self.select,
-                &relation.scope,
-                self.fields,
-                &exprs,
-                relation.rows,
-                self.read_ctx.eval_ctx,
-                &self.read_ctx.statement_memory,
-            )?;
-            state.scope = exec::projected_scope(self.fields, self.tys);
-            for _ in &rows {
-                state.emit_row();
-            }
-            Ok(Relation {
-                scope: state.scope.clone(),
-                rows,
-            })
-        }
-        PlanNode::Unique { input } => {
-            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
-            state.begin_loop();
-            unique_relation_rows(state, relation, &self.read_ctx.statement_memory)
-        }
-        PlanNode::Sort { input } => {
-            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
-            state.begin_loop();
-            sort_relation_rows(
-                state,
-                relation,
-                self.order_by,
-                self.sort_positions,
-                &self.read_ctx.statement_memory,
-            )
-        }
-        PlanNode::Limit { input } => {
-            let relation = state.execute_child((**input).clone(), |child| self.execute(child))?;
-            let offset = crate::exec::eval_row_count(
-                self.offset,
-                crate::exec::RowCountClause::Offset,
-                self.read_ctx.eval_ctx,
-            )?;
-            let limit = crate::exec::eval_row_count(
-                self.limit,
-                crate::exec::RowCountClause::Limit,
-                self.read_ctx.eval_ctx,
-            )?;
-            state.begin_loop();
-            Ok(limit_relation_rows_with_ties(
-                state,
-                relation,
-                offset,
-                limit,
-                self.select.with_ties,
-                self.order_by,
-                self.sort_positions,
-            ))
-        }
-        _ => Err(ExecError::Unsupported(
-            "NestedLoop tail received an unsupported plan node".into(),
-        )),
+            _ => Err(ExecError::Unsupported(
+                "NestedLoop tail received an unsupported plan node".into(),
+            )),
         }
     }
 }
 
-fn is_nested_loop_source(
-    read_ctx: &crate::subquery::SubCtx<'_>,
-    source: &TableExpr,
-) -> bool {
+fn is_nested_loop_source(read_ctx: &crate::subquery::SubCtx<'_>, source: &TableExpr) -> bool {
     match source {
         TableExpr::Table { name, .. } => {
             is_direct_stored_scan_source(read_ctx, source)
                 || (name.schema.is_none()
                     && (read_ctx.ctes.lookup(&name.name).is_some()
-                        || read_ctx
-                            .eval_ctx
-                            .transition_relations
-                            .as_ref()
-                            .is_some_and(|runtime| {
+                        || read_ctx.eval_ctx.transition_relations.as_ref().is_some_and(
+                            |runtime| {
                                 runtime
                                     .lock()
                                     .expect("transition relation mutex")
                                     .contains_key(&name.name)
-                            })))
+                            },
+                        )))
         }
         TableExpr::Function {
             lateral, functions, ..
         } => {
             !lateral
-                && functions.iter().flat_map(|function| &function.args).all(|arg| {
-                    let mut references_column = false;
-                    crate::grouping::visit_expr(arg, &mut |node| {
-                        references_column |= matches!(node, crabka_pgparser::ast::Expr::Column { .. });
-                    });
-                    !references_column
-                })
+                && functions
+                    .iter()
+                    .flat_map(|function| function.arguments())
+                    .all(|arg| {
+                        let mut references_column = false;
+                        crate::grouping::visit_expr(arg, &mut |node| {
+                            references_column |=
+                                matches!(node, crabka_pgparser::ast::Expr::Column { .. });
+                        });
+                        !references_column
+                    })
         }
         TableExpr::Derived { lateral: false, .. } => {
             matches!(plan_subquery_input(read_ctx, source), Ok(Some(_)))
         }
         TableExpr::Derived { lateral: true, .. } => false,
         TableExpr::JsonTable(table) => {
-            !table.lateral && table.exprs().into_iter().all(|expr| {
-                let mut references_column = false;
-                crate::grouping::visit_expr(expr, &mut |node| {
-                    references_column |= matches!(node, crabka_pgparser::ast::Expr::Column { .. });
-                });
-                !references_column
-            })
+            !table.lateral
+                && table.exprs().into_iter().all(|expr| {
+                    let mut references_column = false;
+                    crate::grouping::visit_expr(expr, &mut |node| {
+                        references_column |=
+                            matches!(node, crabka_pgparser::ast::Expr::Column { .. });
+                    });
+                    !references_column
+                })
+        }
+        TableExpr::XmlTable(table) => {
+            !table.lateral
+                && table.exprs().into_iter().all(|expr| {
+                    let mut references_column = false;
+                    crate::grouping::visit_expr(expr, &mut |node| {
+                        references_column |=
+                            matches!(node, crabka_pgparser::ast::Expr::Column { .. });
+                    });
+                    !references_column
+                })
         }
         TableExpr::Join {
             left,
@@ -558,7 +582,7 @@ fn is_direct_stored_scan_source(
 
 fn nested_loop_function_count(source: &TableExpr) -> usize {
     match source {
-        TableExpr::Function { .. } | TableExpr::JsonTable(_) => 1,
+        TableExpr::Function { .. } | TableExpr::JsonTable(_) | TableExpr::XmlTable(_) => 1,
         TableExpr::Join { left, right, .. } => {
             nested_loop_function_count(left) + nested_loop_function_count(right)
         }
@@ -571,7 +595,8 @@ fn collect_nested_loop_sources(source: &TableExpr, sources: &mut Vec<TableExpr>)
         TableExpr::Table { .. }
         | TableExpr::Function { .. }
         | TableExpr::Derived { .. }
-        | TableExpr::JsonTable(_) => {
+        | TableExpr::JsonTable(_)
+        | TableExpr::XmlTable(_) => {
             sources.push(source.clone());
         }
         TableExpr::Join { left, right, .. } => {
@@ -595,16 +620,14 @@ fn plan_nested_loop_source(
                 }
                 TableExpr::Table { name, .. }
                     if name.schema.is_none()
-                        && read_ctx
-                            .eval_ctx
-                            .transition_relations
-                            .as_ref()
-                            .is_some_and(|runtime| {
+                        && read_ctx.eval_ctx.transition_relations.as_ref().is_some_and(
+                            |runtime| {
                                 runtime
                                     .lock()
                                     .expect("transition relation mutex")
                                     .contains_key(&name.name)
-                            }) =>
+                            },
+                        ) =>
                 {
                     PlanNode::NamedTuplestoreScan
                 }
@@ -617,17 +640,20 @@ fn plan_nested_loop_source(
             })
         }
         TableExpr::Function {
-            functions, rows_from, ..
+            functions,
+            rows_from,
+            ..
         } => Some(Plan {
             target_list: Vec::new(),
             quals: Vec::new(),
-            node: if *rows_from || crate::routine::expands_as_table(read_ctx.catalog_kv, functions) {
+            node: if *rows_from || crate::routine::expands_as_table(read_ctx.catalog_kv, functions)
+            {
                 PlanNode::TableFunctionScan
             } else {
                 PlanNode::FunctionScan
             },
         }),
-        TableExpr::JsonTable(_) => Some(Plan {
+        TableExpr::JsonTable(_) | TableExpr::XmlTable(_) => Some(Plan {
             target_list: Vec::new(),
             quals: Vec::new(),
             node: PlanNode::TableFunctionScan,
@@ -736,31 +762,38 @@ fn execute_nested_loop_plan(
         | PlanNode::SubqueryScan { .. }
         | PlanNode::CteScan
         | PlanNode::NamedTuplestoreScan => {
-            let source = sources
-                .next()
-                .ok_or_else(|| {
-                    ExecError::Unsupported(
-                        "NestedLoop had an unknown range-table entry".into(),
-                    )
-                })?;
+            let source = sources.next().ok_or_else(|| {
+                ExecError::Unsupported("NestedLoop had an unknown range-table entry".into())
+            })?;
             let materialization = pruned_columns.map(|_| read_ctx.statement_memory.reserve());
             let relation = match &state.plan.node {
                 PlanNode::SeqScan { .. } => SeqScanExecutor {
                     read_ctx,
                     source: source.clone(),
                     pruned_columns,
+                    scan_plan: None,
                 }
                 .execute(state),
-                PlanNode::FunctionScan | PlanNode::TableFunctionScan => {
-                    FunctionScanExecutor { read_ctx, source: source.clone() }.execute(state)
+                PlanNode::FunctionScan | PlanNode::TableFunctionScan => FunctionScanExecutor {
+                    read_ctx,
+                    source: source.clone(),
                 }
-                PlanNode::SubqueryScan { .. } => {
-                    SubqueryScanExecutor { read_ctx, source: source.clone() }.execute(state)
+                .execute(state),
+                PlanNode::SubqueryScan { .. } => SubqueryScanExecutor {
+                    read_ctx,
+                    source: source.clone(),
                 }
-                PlanNode::CteScan => CteScanExecutor { read_ctx, source: source.clone() }.execute(state),
-                PlanNode::NamedTuplestoreScan => {
-                    NamedTuplestoreScanExecutor { read_ctx, source: source.clone() }.execute(state)
+                .execute(state),
+                PlanNode::CteScan => CteScanExecutor {
+                    read_ctx,
+                    source: source.clone(),
                 }
+                .execute(state),
+                PlanNode::NamedTuplestoreScan => NamedTuplestoreScanExecutor {
+                    read_ctx,
+                    source: source.clone(),
+                }
+                .execute(state),
                 _ => unreachable!("nested-loop leaf was matched above"),
             }?;
             let relation = prune_nested_loop_relation(relation, pruned_columns);
@@ -796,7 +829,9 @@ fn execute_nested_loop_plan(
                 && matches!(constraint, crabka_pgparser::ast::JoinConstraint::None)
             {
                 let mut scope = outer_relation.scope.clone();
-                scope.columns.extend(inner_relation.scope.columns.iter().cloned());
+                scope
+                    .columns
+                    .extend(inner_relation.scope.columns.iter().cloned());
                 exec::inner_join_predicate(filter, &scope)
                     .map(crabka_pgparser::ast::JoinConstraint::On)
                     .unwrap_or(constraint)
@@ -994,10 +1029,12 @@ fn plan_seq_scan(
     if matches!(source, TableExpr::Derived { .. }) {
         return plan_subquery_scan(read_ctx, select, source);
     }
-    if matches!(source, TableExpr::Table { name, .. } if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_some()) {
+    if matches!(source, TableExpr::Table { name, .. } if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_some())
+    {
         return plan_cte_scan(read_ctx, select, source);
     }
-    if matches!(source, TableExpr::Table { name, .. } if name.schema.is_none() && read_ctx.eval_ctx.transition_relations.as_ref().is_some_and(|runtime| runtime.lock().expect("transition relation mutex").contains_key(&name.name))) {
+    if matches!(source, TableExpr::Table { name, .. } if name.schema.is_none() && read_ctx.eval_ctx.transition_relations.as_ref().is_some_and(|runtime| runtime.lock().expect("transition relation mutex").contains_key(&name.name)))
+    {
         return plan_named_tuplestore_scan(read_ctx, select, source);
     }
     if !is_direct_stored_scan_source(read_ctx, source) {
@@ -1017,9 +1054,7 @@ fn plan_seq_scan(
         return Ok(None);
     }
     let window = crate::window::has_window_calls(select);
-    if window
-        && (aggregate || crate::srf::projection_contains_srf(&select.projection))
-    {
+    if window && (aggregate || crate::srf::projection_contains_srf(&select.projection)) {
         return Ok(None);
     }
 
@@ -1244,10 +1279,10 @@ fn plan_function_scan(
 ) -> Result<Option<SeqScanPlan>, ExecError> {
     let table_function = match source {
         TableExpr::Function {
-            functions, rows_from, ..
-        } => {
-            *rows_from || crate::routine::expands_as_table(read_ctx.catalog_kv, functions)
-        }
+            functions,
+            rows_from,
+            ..
+        } => *rows_from || crate::routine::expands_as_table(read_ctx.catalog_kv, functions),
         TableExpr::JsonTable(_) => true,
         _ => return Ok(None),
     };
@@ -1256,9 +1291,7 @@ fn plan_function_scan(
     if (matches!(select.distinct, DistinctClause::On(_))
         || crate::grouping::is_grouping_query(select))
         && !aggregate
-        || (window
-            && (aggregate
-                || crate::srf::projection_contains_srf(&select.projection)))
+        || (window && (aggregate || crate::srf::projection_contains_srf(&select.projection)))
     {
         return Ok(None);
     }
@@ -1272,9 +1305,13 @@ fn plan_function_scan(
     } = source
         && table_function
     {
+        let functions = functions
+            .iter()
+            .map(|call| crate::routine::normalize_table_function_call(read_ctx.catalog_kv, call))
+            .collect::<Result<Vec<_>, _>>()?;
         if *rows_from {
             let mut calls = Vec::with_capacity(functions.len());
-            for call in functions {
+            for call in &functions {
                 if let Some((_routine, columns)) =
                     crate::routine::plpgsql_table_function_schema(read_ctx.catalog_kv, call)?
                 {
@@ -1302,28 +1339,40 @@ fn plan_function_scan(
                 alias.as_deref(),
                 column_aliases,
                 functions[0].column_defs.as_deref(),
+                None,
             )?
             .scope
         } else {
-            let (query, names) =
+            let (query, _routine, names) =
                 crate::routine::table_function_expansion(read_ctx.catalog_kv, &functions[0])?;
             let scope = match &query.body {
-                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(inner)) => {
+                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
+                    inner,
+                )) => {
                     let Some(ResultPlan { fields, tys, .. }) = plan_result(inner)? else {
                         return Ok(None);
                     };
                     exec::projected_scope(&fields, &tys)
                 }
-                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(values)) => {
-                    crate::values::values_to_relation_with_ctes(read_ctx, values)?.scope
-                }
+                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(
+                    values,
+                )) => crate::values::values_to_relation_with_ctes(read_ctx, values)?.scope,
                 _ => return Ok(None),
             };
+            let relation = Relation {
+                scope,
+                rows: Vec::new(),
+            };
             crate::values::requalify_derived(
-                Relation { scope, rows: Vec::new() },
+                if *with_ordinality {
+                    crate::srf::with_ordinality(relation)
+                } else {
+                    relation
+                },
                 alias.as_deref().unwrap_or(&functions[0].name),
                 &column_aliases.clone().or(Some(names)),
-            )?.scope
+            )?
+            .scope
         }
     } else {
         crate::exec::build_from_schema_of_select(
@@ -1331,7 +1380,8 @@ fn plan_function_scan(
             read_ctx.fctx.resolution,
             select,
             read_ctx.ctes,
-        )?.scope
+        )?
+        .scope
     };
     if window {
         let quals = bind_optional(select.filter.as_ref(), &scope)?
@@ -1547,16 +1597,13 @@ fn plan_subquery_scan(
     select: &SelectStmt,
     source: &TableExpr,
 ) -> Result<Option<SeqScanPlan>, ExecError> {
-    let TableExpr::Derived { .. } = source
-    else {
+    let TableExpr::Derived { .. } = source else {
         return Ok(None);
     };
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if !aggregate && crate::grouping::is_grouping_query(select)
-        || (window
-            && (aggregate
-                || crate::srf::projection_contains_srf(&select.projection)))
+        || (window && (aggregate || crate::srf::projection_contains_srf(&select.projection)))
     {
         return Ok(None);
     }
@@ -1762,8 +1809,7 @@ fn plan_subquery_input(
     read_ctx: &crate::subquery::SubCtx<'_>,
     source: &TableExpr,
 ) -> Result<Option<Plan>, ExecError> {
-    let TableExpr::Derived { subquery, .. } = source
-    else {
+    let TableExpr::Derived { subquery, .. } = source else {
         return Ok(None);
     };
     match &subquery.body {
@@ -1772,6 +1818,9 @@ fn plan_subquery_input(
                 return Ok(None);
             }
             let inner = select_with_query_tail(subquery, inner);
+            if crate::exec::select_contains_subquery(&inner) {
+                return Ok(None);
+            }
             if let Some(ResultPlan { plan, .. }) = plan_result(&inner)? {
                 Ok(Some(plan))
             } else {
@@ -1819,20 +1868,14 @@ fn plan_cte_scan(
     select: &SelectStmt,
     source: &TableExpr,
 ) -> Result<Option<SeqScanPlan>, ExecError> {
-    let TableExpr::Table {
-        name,
-        ..
-    } = source
-    else {
+    let TableExpr::Table { name, .. } = source else {
         return Ok(None);
     };
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if name.schema.is_some()
         || (!aggregate && crate::grouping::is_grouping_query(select))
-        || (window
-            && (aggregate
-                || crate::srf::projection_contains_srf(&select.projection)))
+        || (window && (aggregate || crate::srf::projection_contains_srf(&select.projection)))
     {
         return Ok(None);
     }
@@ -2054,9 +2097,7 @@ fn plan_named_tuplestore_scan(
     let window = crate::window::has_window_calls(select);
     if name.schema.is_some()
         || (!aggregate && crate::grouping::is_grouping_query(select))
-        || (window
-            && (aggregate
-                || crate::srf::projection_contains_srf(&select.projection)))
+        || (window && (aggregate || crate::srf::projection_contains_srf(&select.projection)))
     {
         return Ok(None);
     }
@@ -2090,7 +2131,10 @@ fn plan_named_tuplestore_scan(
     };
     let scope = if let Some(columns) = columns {
         crate::values::requalify_derived(
-            Relation { scope, rows: Vec::new() },
+            Relation {
+                scope,
+                rows: Vec::new(),
+            },
             qualifier,
             &Some(columns.clone()),
         )?
@@ -2288,7 +2332,8 @@ pub(crate) fn named_tuplestore_scan_plan_for_test(
     select: &SelectStmt,
     source: &TableExpr,
 ) -> Result<Option<Plan>, ExecError> {
-    plan_named_tuplestore_scan(read_ctx, select, source).map(|plan| plan.map(|planned| planned.plan))
+    plan_named_tuplestore_scan(read_ctx, select, source)
+        .map(|plan| plan.map(|planned| planned.plan))
 }
 
 fn needs_aggregate_node(select: &SelectStmt) -> bool {
@@ -2375,6 +2420,7 @@ struct SeqScanExecutor<'a, 'b> {
     read_ctx: &'a crate::subquery::SubCtx<'b>,
     source: TableExpr,
     pruned_columns: Option<&'a [ColumnBinding]>,
+    scan_plan: Option<&'a crate::plan_dist::DistributedScanPlan>,
 }
 
 impl Executor for SeqScanExecutor<'_, '_> {
@@ -2402,11 +2448,12 @@ impl Executor for SeqScanExecutor<'_, '_> {
             &self.source,
             &name,
             None,
-            None,
+            self.scan_plan,
             self.pruned_columns,
         )?;
         let relation = if let TableExpr::Table {
-            sample: Some(sample), ..
+            sample: Some(sample),
+            ..
         } = &self.source
         {
             exec::apply_tablesample(relation, sample, self.read_ctx.eval_ctx)?
@@ -2414,7 +2461,10 @@ impl Executor for SeqScanExecutor<'_, '_> {
             relation
         };
         let relation = if let TableExpr::Table {
-            name, alias, columns, ..
+            name,
+            alias,
+            columns,
+            ..
         } = &self.source
             && let Some(columns) = columns
         {
@@ -2477,17 +2527,25 @@ impl Executor for FunctionScanExecutor<'_, '_> {
                 "FunctionScanExecutor received a non-function source".into(),
             ));
         };
+        let functions = functions
+            .iter()
+            .map(|call| {
+                crate::routine::normalize_table_function_call(self.read_ctx.catalog_kv, call)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         state.begin_loop();
         let relation = if *rows_from {
             let mut calls = Vec::with_capacity(functions.len());
-            for call in functions {
+            for call in &functions {
                 if crate::routine::plpgsql_table_function_schema(self.read_ctx.catalog_kv, call)?
                     .is_some()
                 {
                     let Some(call_rows) = crate::routine::eval_plpgsql_table_function(
                         call,
                         self.read_ctx.eval_ctx,
-                    )? else {
+                        false,
+                    )?
+                    else {
                         return Err(ExecError::Unsupported(
                             "table function requires a session executor".into(),
                         ));
@@ -2509,9 +2567,11 @@ impl Executor for FunctionScanExecutor<'_, '_> {
                 column_aliases,
             )?
         } else if matches!(state.plan.node, PlanNode::TableFunctionScan) {
-            if let Some((columns, rows)) =
-                crate::routine::eval_plpgsql_table_function(&functions[0], self.read_ctx.eval_ctx)?
-            {
+            if let Some((columns, rows)) = crate::routine::eval_plpgsql_table_function(
+                &functions[0],
+                self.read_ctx.eval_ctx,
+                true,
+            )? {
                 crate::srf::user_function_relation(
                     &functions[0].name,
                     columns,
@@ -2520,68 +2580,52 @@ impl Executor for FunctionScanExecutor<'_, '_> {
                     alias.as_deref(),
                     column_aliases,
                     functions[0].column_defs.as_deref(),
+                    Some(self.read_ctx.eval_ctx),
                 )?
             } else {
-                if *with_ordinality {
-                    return Err(ExecError::Unsupported(
-                        "WITH ORDINALITY over a user-defined function is not supported".into(),
-                    ));
-                }
-                let (query, names) = crate::routine::table_function_expansion(
+                let (query, routine, names) = crate::routine::table_function_expansion(
                     self.read_ctx.catalog_kv,
                     &functions[0],
                 )?;
-                let inner = match &query.body {
-                    crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
-                        select,
-                    )) => {
-                        let Some(ResultPlan { plan, fields, tys }) = plan_result(select)? else {
-                            return Err(ExecError::Unsupported(
-                                "TableFunctionScan requires a Result function body".into(),
-                            ));
-                        };
-                        state.execute_child(plan, |child| {
-                            ResultExecutor {
-                                ctx: self.read_ctx.eval_ctx,
-                                fields,
-                                tys,
-                            }
-                            .execute(child)
-                        })?
-                    }
-                    crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(
-                        values,
-                    )) => {
-                        let plan = Plan {
-                            target_list: Vec::new(),
-                            quals: Vec::new(),
-                            node: PlanNode::ValuesScan,
-                        };
-                        state.execute_child(plan, |child| {
-                            ValuesExecutor {
-                                ctx: self.read_ctx,
-                                query: &query,
-                                values,
-                            }
-                            .execute(child)
-                        })?
-                    }
-                    _ => {
-                        return Err(ExecError::Unsupported(
-                            "TableFunctionScan requires a simple query body".into(),
-                        ));
-                    }
-                };
-                let columns = column_aliases.clone().or(Some(names));
-                crate::values::requalify_derived(
-                    inner,
-                    alias.as_deref().unwrap_or(&functions[0].name),
-                    &columns,
-                )?
+                let inner = crate::query::query_to_relation_with_ctes(self.read_ctx, &query)?;
+                if let Some(defs) = functions[0].column_defs.as_deref() {
+                    crate::routine::validate_inlined_record_column_defs(
+                        &routine,
+                        &inner.scope.columns,
+                        defs,
+                    )?;
+                    crate::srf::user_function_relation(
+                        &functions[0].name,
+                        inner
+                            .scope
+                            .columns
+                            .iter()
+                            .map(|column| (column.name.clone(), column.ty))
+                            .collect(),
+                        crate::routine::table_function_result_rows(&routine, inner.rows),
+                        *with_ordinality,
+                        alias.as_deref(),
+                        column_aliases,
+                        Some(defs),
+                        Some(self.read_ctx.eval_ctx),
+                    )?
+                } else {
+                    let inner = if *with_ordinality {
+                        crate::srf::with_ordinality(inner)
+                    } else {
+                        inner
+                    };
+                    let columns = column_aliases.clone().or(Some(names));
+                    crate::values::requalify_derived(
+                        inner,
+                        alias.as_deref().unwrap_or(&functions[0].name),
+                        &columns,
+                    )?
+                }
             }
         } else {
             crate::srf::from_item_with_memory(
-                functions,
+                &functions,
                 *with_ordinality,
                 *rows_from,
                 alias.as_deref(),
@@ -2662,11 +2706,9 @@ impl Executor for SubqueryScanExecutor<'_, '_> {
                 values,
             }
             .execute(child),
-            _ => {
-                Err(ExecError::Unsupported(
-                    "SubqueryScanExecutor received an unsupported subquery".into(),
-                ))
-            }
+            _ => Err(ExecError::Unsupported(
+                "SubqueryScanExecutor received an unsupported subquery".into(),
+            )),
         })?;
         state.begin_loop();
         let relation = crate::values::requalify_derived(relation, alias, columns)?;
@@ -2698,8 +2740,7 @@ impl Executor for CteScanExecutor<'_, '_> {
             sample,
             ..
         } = &self.source
-        else
-        {
+        else {
             return Err(ExecError::Unsupported(
                 "CteScanExecutor received a non-table source".into(),
             ));
@@ -2709,7 +2750,9 @@ impl Executor for CteScanExecutor<'_, '_> {
             .is_none()
             .then(|| self.read_ctx.ctes.lookup(&name.name))
             .flatten()
-            .map(|relation| crate::cte::requalify_cte(relation, alias.as_deref().unwrap_or(&name.name)))
+            .map(|relation| {
+                crate::cte::requalify_cte(relation, alias.as_deref().unwrap_or(&name.name))
+            })
             .ok_or_else(|| ExecError::Unsupported("CteScanExecutor source is not a CTE".into()))?;
         let relation = if let Some(columns) = columns {
             crate::values::requalify_derived(
@@ -2754,8 +2797,7 @@ impl Executor for NamedTuplestoreScanExecutor<'_, '_> {
             sample,
             ..
         } = &self.source
-        else
-        {
+        else {
             return Err(ExecError::Unsupported(
                 "NamedTuplestoreScanExecutor received a non-table source".into(),
             ));
@@ -2773,7 +2815,9 @@ impl Executor for NamedTuplestoreScanExecutor<'_, '_> {
                     .cloned()
             })
             .ok_or_else(|| {
-                ExecError::Unsupported("NamedTuplestoreScanExecutor source is not a transition relation".into())
+                ExecError::Unsupported(
+                    "NamedTuplestoreScanExecutor source is not a transition relation".into(),
+                )
             })?;
         state.begin_loop();
         let qualifier = alias.as_deref().unwrap_or(&name.name);
@@ -2842,11 +2886,17 @@ fn execute_filter_input(
         ));
     };
     crate::session::check_query_canceled()?;
+    let scan_plan = if matches!(input.node, PlanNode::SeqScan { .. }) {
+        filter_pushdown_plan(read_ctx, &source, &state.plan.quals)?
+    } else {
+        None
+    };
     let relation = state.execute_child((**input).clone(), |child| match child.plan.node {
         PlanNode::SeqScan { .. } => SeqScanExecutor {
             read_ctx,
             source,
             pruned_columns: None,
+            scan_plan: scan_plan.as_ref(),
         }
         .execute(child),
         PlanNode::FunctionScan => FunctionScanExecutor { read_ctx, source }.execute(child),
@@ -2862,6 +2912,34 @@ fn execute_filter_input(
     })?;
     state.begin_loop();
     filter_relation_rows(state, relation, read_ctx.eval_ctx)
+}
+
+fn filter_pushdown_plan(
+    read_ctx: &crate::subquery::SubCtx<'_>,
+    source: &TableExpr,
+    quals: &[RestrictInfo],
+) -> Result<Option<crate::plan_dist::DistributedScanPlan>, ExecError> {
+    let [qual] = quals else {
+        return Ok(None);
+    };
+    let TableExpr::Table { name, .. } = source else {
+        return Ok(None);
+    };
+    let name = crate::relname::resolve_relation(
+        read_ctx.catalog_kv,
+        read_ctx.fctx.resolution,
+        name,
+        crate::relname::SchemaDisposition::Reference,
+    )?;
+    let table = crabka_pgcatalog::get_table(read_ctx.catalog_kv, &name)?;
+    let predicate = crate::plan_dist::predicate_for_filter(&table, Some(qual.clause.expr()));
+    if matches!(predicate, crate::PredicatePushdown::FullScan) {
+        return Ok(None);
+    }
+    Ok(Some(crate::plan_dist::DistributedScanPlan {
+        predicate,
+        ..Default::default()
+    }))
 }
 
 #[cfg(test)]
@@ -3285,7 +3363,10 @@ fn limit_relation_rows_with_ties(
         .rows
         .into_iter()
         .map(|row| {
-            let keys = sort_positions.iter().map(|&index| row[index].clone()).collect();
+            let keys = sort_positions
+                .iter()
+                .map(|&index| row[index].clone())
+                .collect();
             (keys, row)
         })
         .collect();
@@ -3446,27 +3527,31 @@ mod tests {
     #[test]
     fn result_executor_emits_or_rejects_its_single_row() {
         let ctx = crate::clock::EvalCtx::test_default();
-        let (emitted, emitted_state) = try_execute_result_with_state(
-            &select("SELECT 2 + 3 WHERE true"),
-            &ctx,
-        )
-            .expect("execute ok")
-            .expect("Result plan");
-        let (rejected, rejected_state) = try_execute_result_with_state(
-            &select("SELECT 2 + 3 WHERE false"),
-            &ctx,
-        )
-            .expect("execute ok")
-            .expect("Result plan");
+        let (emitted, emitted_state) =
+            try_execute_result_with_state(&select("SELECT 2 + 3 WHERE true"), &ctx)
+                .expect("execute ok")
+                .expect("Result plan");
+        let (rejected, rejected_state) =
+            try_execute_result_with_state(&select("SELECT 2 + 3 WHERE false"), &ctx)
+                .expect("execute ok")
+                .expect("Result plan");
 
         assert_eq!(emitted.rows, vec![vec![crabka_pgtypes::Datum::Int4(5)]]);
         assert!(rejected.rows.is_empty());
         assert_eq!(
-            (emitted_state.nloops, emitted_state.ntuples, emitted_state.rows_removed),
+            (
+                emitted_state.nloops,
+                emitted_state.ntuples,
+                emitted_state.rows_removed
+            ),
             (1, 1, 0)
         );
         assert_eq!(
-            (rejected_state.nloops, rejected_state.ntuples, rejected_state.rows_removed),
+            (
+                rejected_state.nloops,
+                rejected_state.ntuples,
+                rejected_state.rows_removed
+            ),
             (1, 0, 1)
         );
     }

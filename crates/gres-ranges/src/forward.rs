@@ -4016,6 +4016,10 @@ fn decode_scan_rows(
             Ok(crabka_pgexec::ScannedRow {
                 rowid: row.rowid,
                 xmin: row.xmin,
+                // ponytail: the scan RPC has no command-visibility contract;
+                // carry cids only after it includes xmax and command_id.
+                cmin: 0,
+                cmax: 0,
                 row: payload,
             })
         })
@@ -4195,6 +4199,8 @@ mod tests {
                 rows: vec![crabka_pgexec::ScannedRow {
                     rowid: u64::try_from(self.page).expect("test page fits"),
                     xmin: 1,
+                    cmin: 0,
+                    cmax: 0,
                     row: vec![Datum::Text(value)],
                 }]
                 .into_boxed_slice(),
@@ -5004,6 +5010,7 @@ mod tests {
                     global_snapshot: &snapshot,
                     snapshot: &snapshot,
                     own_xid: None,
+                    command_id: None,
                     read_ts: Some(
                         crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                     ),
@@ -5081,6 +5088,7 @@ mod tests {
                 global_snapshot: &global_snapshot,
                 snapshot: &snapshot,
                 own_xid: Some(8),
+                command_id: None,
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),
@@ -5102,6 +5110,7 @@ mod tests {
             vec![1, 2]
         );
         assert_eq!(rows[0].row, vec![Datum::Int4(10)]);
+        assert_eq!((rows[0].cmin, rows[0].cmax), (0, 0));
         let left_requests = left.requests.lock().expect("left requests");
         assert_eq!(left_requests[0].table_name, "t11");
         assert_eq!(left_requests[0].interval.start, Some(1));
@@ -5174,6 +5183,7 @@ mod tests {
                 global_snapshot: &snapshot,
                 snapshot: &snapshot,
                 own_xid: None,
+                command_id: None,
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),
@@ -5254,6 +5264,7 @@ mod tests {
                 global_snapshot: &snapshot,
                 snapshot: &snapshot,
                 own_xid: None,
+                command_id: None,
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),
@@ -5339,6 +5350,8 @@ mod tests {
                 vec![crabka_pgexec::ScannedRow {
                     rowid: 0,
                     xmin: 0,
+                    cmin: 0,
+                    cmax: 0,
                     row: expected_row,
                 }]
             );
@@ -5380,6 +5393,8 @@ mod tests {
             vec![crabka_pgexec::ScannedRow {
                 rowid: 0,
                 xmin: 0,
+                cmin: 0,
+                cmax: 0,
                 row: vec![
                     Datum::Text("a".into()),
                     Datum::Numeric(24.into()),
@@ -5910,6 +5925,7 @@ mod tests {
                 global_snapshot: &snapshot,
                 snapshot: &snapshot,
                 own_xid: None,
+                command_id: None,
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),
@@ -6504,6 +6520,7 @@ mod tests {
                 global_snapshot: &snapshot,
                 snapshot: &snapshot,
                 own_xid: None,
+                command_id: None,
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),

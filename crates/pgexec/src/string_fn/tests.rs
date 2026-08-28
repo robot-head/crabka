@@ -40,6 +40,16 @@ fn message(sql: &str) -> String {
     error_of(sql).1
 }
 
+fn detail(sql: &str) -> Option<String> {
+    let ctx = EvalCtx::test_default();
+    let expr = pexpr(sql).expect("parse");
+    crate::eval::eval(&expr, &Scope::empty(), &[], &ctx)
+        .expect_err("expected an error")
+        .into_pg()
+        .diagnostics
+        .and_then(|fields| fields.detail)
+}
+
 fn result_type(sql: &str) -> ColumnType {
     crate::eval::infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect("infer")
 }
@@ -59,6 +69,10 @@ fn format_expands_every_conversion() {
         ("format('[%10s]', 'a')", "[         a]"),
         ("format('[%-10s]', 'a')", "[a         ]"),
         ("format('[%5L]', 'a')", "[  'a']"),
+        ("format('>>%2$*1$L<<', 10, 'Hello')", ">>   'Hello'<<"),
+        ("format('>>%2$*1$L<<', -10, NULL)", ">>NULL      <<"),
+        ("format('>>%*s<<', 10, 'Hello')", ">>     Hello<<"),
+        ("format('>>%*1$s<<', 10, 'Hello')", ">>     Hello<<"),
     ];
     for (sql, expected) in cases {
         assert!(text_of(sql) == expected, "{sql}");
@@ -93,6 +107,21 @@ fn format_diagnostics_match_postgres() {
             "format('%')",
             "22023",
             "unterminated format() type specifier",
+        ),
+        (
+            "format('%*0$s', 'Hello')",
+            "22023",
+            "format specifies argument 0, but arguments are numbered from 1",
+        ),
+        (
+            "format('%*10s', 10, 'Hello')",
+            "22023",
+            "unrecognized format() type specifier \"1\"",
+        ),
+        (
+            "format('%*$s', 10, 'Hello')",
+            "22023",
+            "unrecognized format() type specifier \"$\"",
         ),
     ];
     for (sql, code, text) in cases {
@@ -222,12 +251,16 @@ fn concat_and_concat_ws_skip_nulls() {
     let cases = [
         ("concat('a')", "a"),
         ("concat(1, 2, NULL, 'a')", "12a"),
+        ("concat(VARIADIC ARRAY[1, 2, 3])", "123"),
+        ("concat(VARIADIC '{}'::int[])", ""),
         // `concat` renders through the OUTPUT function, so a bool is `t`/`f`.
         ("concat(true, false)", "tf"),
         ("concat_ws('-', 'a', 'b')", "a-b"),
         ("concat_ws('-', 1, NULL, 'a', true)", "1-a-t"),
+        ("concat_ws('-', VARIADIC ARRAY[1, 2, 3])", "1-2-3"),
         ("concat_ws('-', NULL, NULL)", ""),
         ("concat_ws(NULL, 1, 2)", "<null>"),
+        ("format('%s, %s', VARIADIC ARRAY['a', 'b'])", "a, b"),
     ];
     for (sql, expected) in cases {
         assert!(text_of(sql) == expected, "{sql}");
@@ -237,6 +270,38 @@ fn concat_and_concat_ws_skip_nulls() {
     assert!(message("concat()") == "function concat() does not exist");
     assert!(sqlstate("concat_ws('-')") == "42883");
     assert!(message("concat_ws('-')") == "function concat_ws(unknown) does not exist");
+    assert!(text_of("concat(VARIADIC NULL::int[])") == "<null>");
+    assert!(sqlstate("concat_ws('-', VARIADIC 10)") == "42804");
+    assert!(message("concat_ws('-', VARIADIC 10)") == "VARIADIC argument must be an array");
+    assert!(sqlstate("concat(DISTINCT VARIADIC ARRAY[1])") == "42809");
+}
+
+#[test]
+fn text_rendering_honors_the_session_date_style() {
+    let mut ctx = EvalCtx::test_default();
+    ctx.date_style = crabka_pgtypes::datetime::DateStyle::Postgres;
+    for (sql, expected) in [
+        ("concat(to_date('20100309', 'YYYYMMDD'))", "03-09-2010"),
+        (
+            "concat_ws(',', to_date('20100309', 'YYYYMMDD'))",
+            "03-09-2010",
+        ),
+        (
+            "format('%s', to_date('20100309', 'YYYYMMDD'))",
+            "03-09-2010",
+        ),
+        (
+            "quote_literal(to_date('20100309', 'YYYYMMDD'))",
+            "'03-09-2010'",
+        ),
+    ] {
+        let value = crate::eval::eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx)
+            .expect("eval");
+        assert!(
+            crate::func::text_render(&value, &ctx.time_zone) == expected,
+            "{sql}"
+        );
+    }
 }
 
 #[test]
@@ -262,6 +327,22 @@ fn unicode_helpers_match_postgres() {
     assert!(sqlstate("parse_ident('1abc')") == "22023");
     assert!(message("parse_ident('1abc')") == "string is not a valid identifier: \"1abc\"");
     assert!(sqlstate("parse_ident('a.b[]', true)") == "22023");
+    for sql in [
+        "parse_ident(' .aaa')",
+        "parse_ident('.')",
+        "parse_ident('.1020')",
+    ] {
+        assert!(
+            detail(sql).as_deref() == Some("No valid identifier before \".\"."),
+            "{sql}"
+        );
+    }
+    for sql in ["parse_ident(' aaa . ')", "parse_ident('xxx.1020')"] {
+        assert!(
+            detail(sql).as_deref() == Some("No valid identifier after \".\"."),
+            "{sql}"
+        );
+    }
     assert!(sqlstate("is_normalized('a', 'NFZ')") == "22023");
     assert!(message("is_normalized('a', 'NFZ')") == "invalid normalization form: NFZ");
     // crabka is UTF-8 only, so `to_ascii` always raises PostgreSQL's 0A000.

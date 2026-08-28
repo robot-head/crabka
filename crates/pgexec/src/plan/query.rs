@@ -75,17 +75,35 @@ pub(crate) struct Plan {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PlanNode {
     Result,
-    SeqScan { scanrelid: usize },
-    Filter { input: Box<Plan> },
-    Aggregate { input: Box<Plan> },
-    Sort { input: Box<Plan> },
-    Unique { input: Box<Plan> },
-    Limit { input: Box<Plan> },
-    ProjectSet { input: Box<Plan> },
-    WindowAgg { input: Box<Plan> },
+    SeqScan {
+        scanrelid: usize,
+    },
+    Filter {
+        input: Box<Plan>,
+    },
+    Aggregate {
+        input: Box<Plan>,
+    },
+    Sort {
+        input: Box<Plan>,
+    },
+    Unique {
+        input: Box<Plan>,
+    },
+    Limit {
+        input: Box<Plan>,
+    },
+    ProjectSet {
+        input: Box<Plan>,
+    },
+    WindowAgg {
+        input: Box<Plan>,
+    },
     ValuesScan,
     FunctionScan,
-    SubqueryScan { input: Box<Plan> },
+    SubqueryScan {
+        input: Box<Plan>,
+    },
     CteScan,
     NamedTuplestoreScan,
     TableFunctionScan,

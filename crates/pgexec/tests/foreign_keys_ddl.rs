@@ -377,6 +377,19 @@ async fn a_self_reference_inside_create_table_resolves_against_the_in_flight_def
     );
 }
 
+#[tokio::test]
+async fn a_temporary_self_reference_resolves_before_its_schema_exists() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TEMP TABLE temp_selfref (id int4 PRIMARY KEY, boss int4 REFERENCES temp_selfref)",
+        "INSERT INTO temp_selfref (id, boss) VALUES (1, 1)",
+    ])
+    .await;
+
+    assert!(
+        query(&mut s, "SELECT id, boss FROM temp_selfref").await == vec![text_row(&["1", "1"])]
+    );
+}
+
 /// DROP COLUMN runs before ADD CONSTRAINT inside `PostgreSQL`'s ALTER TABLE pass
 /// order. A self-reference therefore sees the referenced column as missing;
 /// CASCADE does not change that analysis error, and neither failed statement

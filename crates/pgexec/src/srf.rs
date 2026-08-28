@@ -17,14 +17,6 @@
 //!
 //! ## Deliberate divergences from PostgreSQL
 //!
-//! - A **multi-column** SRF in the select list, such as `SELECT jsonb_each(j)`,
-//!   is `0A000`. PostgreSQL returns one `record`-typed column, and crabka has no
-//!   composite type to put in it.
-//! - An SRF nested inside **another SRF's arguments**, such as
-//!   `SELECT generate_series(1, generate_series(1, 2))`, is `0A000`. PostgreSQL
-//!   lifts the inner call into its own ProjectSet level.
-//! - An SRF in an **aggregate query's** select list is `0A000`. PostgreSQL
-//!   evaluates SRFs after aggregation.
 //! - `SELECT *` over a multi-argument `unnest(a, b)` written without column
 //!   aliases is `42702`. PostgreSQL names both output columns `unnest` and
 //!   expands `*` positionally, while crabka expands a wildcard into one
@@ -41,8 +33,8 @@
 use std::borrow::Cow;
 
 use crabka_pgparser::ast::{
-    ArraySubscript, Expr, FuncArgs, FuncCall, SelectItem, SelectStmt, TableFuncCall,
-    TableFuncColumnDef,
+    ArraySubscript, AssignmentValue, Expr, FuncArgs, FuncCall, SelectItem, SelectStmt, Statement,
+    TableFuncCall, TableFuncColumnDef,
 };
 use crabka_pgtypes::{
     ArrayValue, ColumnType, Datum, ElemType, RecordValue, TypeError, numeric::NumericValue,
@@ -107,6 +99,8 @@ enum Srf {
     /// `json_populate_record` and its seven relatives — see [`RecordCall`].
     Record(RecordCall),
     PgInputErrorInfo,
+    PgListeningChannels,
+    PgShowAllSettings,
     /// `pg_snapshot_xip(pg_snapshot)` → `xid8`, and `txid_snapshot_xip`, which
     /// is the same expansion reported as `bigint`. One row per running
     /// transaction the snapshot lists, ascending, and no row at all for a
@@ -334,6 +328,8 @@ fn classify(name: &str) -> Option<Srf> {
         "json_to_recordset" => Srf::Record(RECORD_JSON_TO.into_set()),
         "jsonb_to_recordset" => Srf::Record(RECORD_JSONB_TO.into_set()),
         "pg_input_error_info" => Srf::PgInputErrorInfo,
+        "pg_listening_channels" => Srf::PgListeningChannels,
+        "pg_show_all_settings" => Srf::PgShowAllSettings,
         "pg_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Modern),
         "txid_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Legacy),
         "pg_partition_ancestors" => Srf::PgPartitionAncestors,
@@ -555,6 +551,32 @@ pub(crate) fn plan(
                 column("sql_error_code", ColumnType::Text),
             ]
         }
+        Srf::PgListeningChannels => {
+            require_arity(name, &given, (0, 0))?;
+            vec![column(&bare, ColumnType::Text)]
+        }
+        Srf::PgShowAllSettings => {
+            require_arity(name, &given, (0, 0))?;
+            vec![
+                column("name", ColumnType::Text),
+                column("setting", ColumnType::Text),
+                column("unit", ColumnType::Text),
+                column("category", ColumnType::Text),
+                column("short_desc", ColumnType::Text),
+                column("extra_desc", ColumnType::Text),
+                column("context", ColumnType::Text),
+                column("vartype", ColumnType::Text),
+                column("source", ColumnType::Text),
+                column("min_val", ColumnType::Text),
+                column("max_val", ColumnType::Text),
+                column("enumvals", ColumnType::Array(ElemType::Text)),
+                column("boot_val", ColumnType::Text),
+                column("reset_val", ColumnType::Text),
+                column("sourcefile", ColumnType::Text),
+                column("sourceline", ColumnType::Int4),
+                column("pending_restart", ColumnType::Bool),
+            ]
+        }
         Srf::PgPartitionAncestors => {
             require_arity(name, &given, (1, 1))?;
             vec![column("relid", ColumnType::Regclass)]
@@ -758,9 +780,11 @@ pub(crate) fn rows_with_memory(
         Srf::ObjectKeys(family) => expand_json(family, JsonbSrf::ObjectKeys, vals)?,
         Srf::ArrayElements(family) => expand_json(family, JsonbSrf::ArrayElements, vals)?,
         Srf::ArrayElementsText(family) => expand_json(family, JsonbSrf::ArrayElementsText, vals)?,
-        Srf::JsonbPathQuery => crate::json_fn::jsonb_path_query_rows(&plan.name, vals)?,
+        Srf::JsonbPathQuery => crate::json_fn::jsonb_path_query_rows(&plan.name, vals, ctx)?,
         Srf::Record(call) => record_rows(call, plan, vals, ctx)?,
         Srf::PgInputErrorInfo => input_error_info_rows(vals, ctx)?,
+        Srf::PgListeningChannels => pg_listening_channel_rows(ctx),
+        Srf::PgShowAllSettings => crate::exec::catalog_rows::pg_show_all_settings_rows()?,
         Srf::SnapshotXip(family) => snapshot_xip_rows(family, &plan.name, &vals[0], ctx)?,
         Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
@@ -814,6 +838,8 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
             params
         }
         Srf::PgInputErrorInfo => vec![text, text],
+        Srf::PgListeningChannels => Vec::new(),
+        Srf::PgShowAllSettings => Vec::new(),
         Srf::SnapshotXip(family) => vec![Some(family.snapshot_type())],
         // `regclass`, but resolving a *name* to a relation needs the catalog and
         // the search path, which the pure cast this drives has neither of. The
@@ -907,17 +933,8 @@ fn reshape(
 /// PostgreSQL's `tupledesc_match`: a record argument's own row type and the
 /// column-definition list must agree on width and on every column's type.
 fn check_row_type_matches(base: &RecordValue, shape: &RecordShape) -> Result<(), ExecError> {
-    let mismatch = |detail: String| {
-        ExecError::Remote(
-            crabka_pgwire::error::PgError::error(
-                "42804",
-                "function return row and query-specified return row do not match",
-            )
-            .with_detail(detail),
-        )
-    };
     if base.values.len() != shape.fields.len() {
-        return Err(mismatch(format!(
+        return Err(return_row_mismatch(format!(
             "Returned row contains {} attribute{}, but query expects {}.",
             base.values.len(),
             if base.values.len() == 1 { "" } else { "s" },
@@ -929,7 +946,7 @@ fn check_row_type_matches(base: &RecordValue, shape: &RecordShape) -> Result<(),
             continue;
         };
         if actual != *wanted {
-            return Err(mismatch(format!(
+            return Err(return_row_mismatch(format!(
                 "Returned type {} at ordinal position {}, but query expects {}.",
                 actual.name(),
                 index + 1,
@@ -938,6 +955,16 @@ fn check_row_type_matches(base: &RecordValue, shape: &RecordShape) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn return_row_mismatch(detail: String) -> ExecError {
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "42804",
+            "function return row and query-specified return row do not match",
+        )
+        .with_detail(detail),
+    )
 }
 
 fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -963,6 +990,18 @@ fn input_error_info_rows(vals: &[Datum], ctx: &EvalCtx) -> Result<Vec<Vec<Datum>
         Datum::Null,
         Datum::Text(error.code),
     ]])
+}
+
+fn pg_listening_channel_rows(ctx: &EvalCtx) -> Vec<Vec<Datum>> {
+    ctx.notify.as_ref().map_or_else(Vec::new, |pending| {
+        pending
+            .lock()
+            .expect("notify pending mutex")
+            .listening_channels()
+            .into_iter()
+            .map(|channel| vec![Datum::Text(channel)])
+            .collect()
+    })
 }
 
 /// `pg_snapshot_xip` / `txid_snapshot_xip`: one row per running transaction the
@@ -1202,13 +1241,9 @@ pub(crate) fn from_item_with_memory(
     if with_ordinality {
         reject_ordinality_with_column_defs(functions, rows_from)?;
     }
-    if let Some(relation) = scalar_builtin_relation(
-        functions,
-        with_ordinality,
-        alias,
-        column_aliases,
-        ctx,
-    )? {
+    if let Some(relation) =
+        scalar_builtin_relation(functions, with_ordinality, alias, column_aliases, ctx)?
+    {
         return Ok(relation);
     }
     let plans = plan_all(functions)?;
@@ -1248,15 +1283,7 @@ pub(crate) fn function_call_rows_with_memory(
     statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<FunctionCallRows, ExecError> {
     let item = [call.clone()];
-    let relation = from_item_with_memory(
-        &item,
-        false,
-        false,
-        None,
-        &None,
-        ctx,
-        statement_memory,
-    )?;
+    let relation = from_item_with_memory(&item, false, false, None, &None, ctx, statement_memory)?;
     Ok((
         relation
             .scope
@@ -1325,10 +1352,7 @@ pub(crate) fn rows_from_function_relation(
                 .collect()
         })
         .collect();
-    let columns = calls
-        .into_iter()
-        .flat_map(|(columns, _)| columns)
-        .collect();
+    let columns = calls.into_iter().flat_map(|(columns, _)| columns).collect();
     user_function_relation(
         function_name,
         columns,
@@ -1336,6 +1360,7 @@ pub(crate) fn rows_from_function_relation(
         with_ordinality,
         alias,
         column_aliases,
+        None,
         None,
     )
 }
@@ -1361,8 +1386,30 @@ fn scalar_builtin_relation(
     let scope = Scope::empty();
     let ty = crate::eval::infer_type(&Expr::Func(call_expr.clone()), &scope)?;
     let value = crate::eval::eval(&Expr::Func(call_expr), &scope, &[], ctx)?;
+    if let Some(defs) = call.column_defs.as_deref() {
+        let Datum::Record(record) = &value else {
+            return Err(scalar_column_defs_error());
+        };
+        check_row_type_matches(
+            record,
+            &RecordShape {
+                fields: defs.iter().map(|def| (def.name.clone(), def.ty)).collect(),
+            },
+        )?;
+        return user_function_relation(
+            &call.name,
+            Vec::new(),
+            vec![record.values.clone()],
+            with_ordinality,
+            alias,
+            column_aliases,
+            Some(defs),
+            Some(ctx),
+        )
+        .map(Some);
+    }
     Ok(Some(qualify_columns(
-        call.name.clone(),
+        alias.unwrap_or(&call.name).to_string(),
         vec![column(&call.name, ty)],
         vec![vec![value]],
         with_ordinality,
@@ -1387,8 +1434,24 @@ fn scalar_builtin_schema(
     };
     let scope = Scope::empty();
     let ty = crate::eval::infer_type(&Expr::Func(call_expr), &scope)?;
+    if let Some(defs) = call.column_defs.as_deref() {
+        if !matches!(ty, ColumnType::Record(_)) {
+            return Err(scalar_column_defs_error());
+        }
+        return user_function_relation(
+            &call.name,
+            Vec::new(),
+            Vec::new(),
+            with_ordinality,
+            alias,
+            column_aliases,
+            Some(defs),
+            None,
+        )
+        .map(Some);
+    }
     Ok(Some(qualify_columns(
-        call.name.clone(),
+        alias.unwrap_or(&call.name).to_string(),
         vec![column(&call.name, ty)],
         Vec::new(),
         with_ordinality,
@@ -1411,12 +1474,13 @@ fn scalar_builtin_call(call: &TableFuncCall) -> Result<Option<FuncCall>, ExecErr
     if !is_scalar_builtin(&call_expr) {
         return Ok(None);
     }
-    if call.column_defs.is_some() {
-        return Err(ExecError::Syntax(
-            "a column definition list is only allowed for functions returning \"record\"".into(),
-        ));
-    }
     Ok(Some(call_expr))
+}
+
+fn scalar_column_defs_error() -> ExecError {
+    ExecError::Syntax(
+        "a column definition list is only allowed for functions returning \"record\"".into(),
+    )
 }
 
 /// The scalar-function families handled by [`crate::eval::eval`].
@@ -1431,7 +1495,7 @@ fn is_scalar_builtin(call: &FuncCall) -> bool {
         || crate::func::is_scalar(&call.name)
         || crate::datetime_fn::is_datetime_func(&call.name)
         || crate::format_fn::is_format_func(&call.name)
-        || crate::json_fn::is_json_func(&call.name)
+        || (crate::json_fn::is_json_func(&call.name) && !crate::json_fn::is_record_func(&call.name))
         || crate::array_fn::is_array_func(&call.name)
 }
 
@@ -1526,6 +1590,16 @@ fn ordinality_column() -> ColumnBinding {
     column("ordinality", ColumnType::Int8)
 }
 
+/// Add the `WITH ORDINALITY` column before a FROM item's alias is applied.
+pub(crate) fn with_ordinality(mut relation: Relation) -> Relation {
+    relation.scope.columns.push(ordinality_column());
+    for (index, row) in relation.rows.iter_mut().enumerate() {
+        let ordinal = i64::try_from(index).unwrap_or(i64::MAX).saturating_add(1);
+        row.push(Datum::Int8(ordinal));
+    }
+    relation
+}
+
 /// Apply `WITH ORDINALITY`, then the FROM item's alias and column aliases.
 ///
 /// Without an explicit alias, the first function's name qualifies the item, as
@@ -1571,11 +1645,44 @@ pub(crate) fn user_function_relation(
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
     column_defs: Option<&[TableFuncColumnDef]>,
+    ctx: Option<&crate::clock::EvalCtx>,
 ) -> Result<Relation, ExecError> {
-    let columns = columns
-        .into_iter()
-        .map(|(name, ty)| column(&name, ty))
-        .collect();
+    let (columns, rows) = if let Some(defs) = column_defs {
+        let rows = rows
+            .into_iter()
+            .map(|row| {
+                if row.len() != defs.len() {
+                    return Err(return_row_mismatch(format!(
+                        "Returned row contains {} attribute{}, but query expects {}.",
+                        row.len(),
+                        if row.len() == 1 { "" } else { "s" },
+                        defs.len()
+                    )));
+                }
+                let ctx = ctx.ok_or_else(|| {
+                    ExecError::Unsupported(
+                        "table-function rows require an evaluation context".into(),
+                    )
+                })?;
+                row.into_iter()
+                    .zip(defs)
+                    .map(|(value, def)| crate::exec::coerce(value, def.ty, ctx))
+                    .collect()
+            })
+            .collect::<Result<_, _>>()?;
+        (
+            defs.iter().map(|def| column(&def.name, def.ty)).collect(),
+            rows,
+        )
+    } else {
+        (
+            columns
+                .into_iter()
+                .map(|(name, ty)| column(&name, ty))
+                .collect(),
+            rows,
+        )
+    };
     qualify_columns(
         alias.unwrap_or(function_name).to_string(),
         columns,
@@ -1600,11 +1707,15 @@ fn qualify_columns(
 ) -> Result<Relation, ExecError> {
     let function_columns = columns.len();
     if with_ordinality {
-        columns.push(ordinality_column());
-        for (index, row) in rows.iter_mut().enumerate() {
-            let ordinal = i64::try_from(index).unwrap_or(i64::MAX).saturating_add(1);
-            row.push(Datum::Int8(ordinal));
-        }
+        let relation = crate::srf::with_ordinality(Relation {
+            scope: Scope {
+                columns,
+                ..Default::default()
+            },
+            rows,
+        });
+        columns = relation.scope.columns;
+        rows = relation.rows;
     }
     if let Some(names) = column_aliases {
         if names.len() > columns.len() {
@@ -1671,15 +1782,144 @@ fn expr_contains_srf(expr: &Expr) -> bool {
     children(expr).into_iter().any(expr_contains_srf)
 }
 
-/// 0A000 for an SRF in an aggregate query's select list. PostgreSQL evaluates
-/// SRFs after aggregation, and crabka's aggregate path does not model that.
-pub(crate) fn reject_in_aggregate(exprs: &[Expr]) -> Result<(), ExecError> {
-    if exprs_contain_srf(exprs) {
+/// Reject the places where PostgreSQL requires an SRF to be a top-level
+/// ProjectSet expression rather than an ordinary scalar input.
+pub(crate) fn reject_misplaced_calls(s: &SelectStmt) -> Result<(), ExecError> {
+    for item in &s.projection {
+        if let SelectItem::Expr { expr, .. } = item {
+            reject_scalar_context(expr)?;
+        }
+    }
+    reject_clause(s.filter.as_ref(), "WHERE")?;
+    reject_clause(s.having.as_ref(), "HAVING")?;
+    reject_clause(s.limit.as_ref(), "LIMIT")?;
+    reject_clause(s.offset.as_ref(), "OFFSET")?;
+    for call in &s.window_calls {
+        if func_args_contain_srf(&call.args) || call.filter.as_ref().is_some_and(expr_contains_srf)
+        {
+            return Err(ExecError::Unsupported(
+                "window function calls cannot contain set-returning function calls".into(),
+            ));
+        }
+    }
+    reject_from_arguments(&s.from)?;
+    Ok(())
+}
+
+/// Reject update assignments that would need a `ProjectSet` below a write.
+pub(crate) fn reject_write_calls(stmt: &Statement) -> Result<(), ExecError> {
+    let Statement::Update { assignments, .. } = stmt else {
+        return Ok(());
+    };
+    if assignments
+        .iter()
+        .any(|assignment| match &assignment.value {
+            AssignmentValue::Expr(expr) => expr_contains_srf(expr),
+            AssignmentValue::Row(exprs) => exprs.iter().any(expr_contains_srf),
+            AssignmentValue::Subquery(_) => false,
+        })
+    {
         return Err(ExecError::Unsupported(
-            "set-returning functions are not supported with aggregation or GROUP BY".into(),
+            "set-returning functions are not allowed in UPDATE".into(),
         ));
     }
     Ok(())
+}
+
+fn reject_from_arguments(items: &[crabka_pgparser::ast::TableExpr]) -> Result<(), ExecError> {
+    for item in items {
+        match item {
+            crabka_pgparser::ast::TableExpr::Function { functions, .. } => {
+                if functions
+                    .iter()
+                    .flat_map(|call| call.arguments())
+                    .any(expr_contains_srf)
+                {
+                    return Err(ExecError::Unsupported(
+                        "set-returning functions must appear at top level of FROM".into(),
+                    ));
+                }
+            }
+            crabka_pgparser::ast::TableExpr::Join { left, right, .. } => {
+                reject_from_arguments(std::slice::from_ref(left))?;
+                reject_from_arguments(std::slice::from_ref(right))?;
+            }
+            crabka_pgparser::ast::TableExpr::JsonTable(table) => {
+                if table.exprs().into_iter().any(expr_contains_srf) {
+                    return Err(ExecError::Unsupported(
+                        "set-returning functions must appear at top level of FROM".into(),
+                    ));
+                }
+            }
+            crabka_pgparser::ast::TableExpr::XmlTable(table) => {
+                if table.exprs().into_iter().any(expr_contains_srf) {
+                    return Err(ExecError::Unsupported(
+                        "set-returning functions must appear at top level of FROM".into(),
+                    ));
+                }
+            }
+            crabka_pgparser::ast::TableExpr::Table { .. }
+            | crabka_pgparser::ast::TableExpr::Derived { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn reject_clause(expr: Option<&Expr>, clause: &str) -> Result<(), ExecError> {
+    if expr.is_some_and(expr_contains_srf) {
+        return Err(ExecError::Unsupported(format!(
+            "set-returning functions are not allowed in {clause}"
+        )));
+    }
+    Ok(())
+}
+
+fn reject_scalar_context(expr: &Expr) -> Result<(), ExecError> {
+    match expr {
+        Expr::Case { .. } if expr_contains_srf(expr) => {
+            return Err(ExecError::Unsupported(
+                "set-returning functions are not allowed in CASE".into(),
+            ));
+        }
+        Expr::Func(call) if call.name == "coalesce" && func_args_contain_srf(&call.args) => {
+            return Err(ExecError::Unsupported(
+                "set-returning functions are not allowed in COALESCE".into(),
+            ));
+        }
+        Expr::Func(call)
+            if crate::agg::is_aggregate_call(call)
+                && (func_args_contain_srf(&call.args)
+                    || call.filter.as_deref().is_some_and(expr_contains_srf)
+                    || call
+                        .order_by
+                        .iter()
+                        .any(|item| expr_contains_srf(&item.expr))) =>
+        {
+            return Err(ExecError::Unsupported(
+                "aggregate function calls cannot contain set-returning function calls".into(),
+            ));
+        }
+        _ => {}
+    }
+    for child in children(expr) {
+        reject_scalar_context(child)?;
+    }
+    Ok(())
+}
+
+fn func_args_contain_srf(args: &FuncArgs) -> bool {
+    match args {
+        FuncArgs::Star => false,
+        FuncArgs::Exprs(args) => args.iter().any(expr_contains_srf),
+        FuncArgs::Named { positional, named } => positional
+            .iter()
+            .chain(named.iter().map(|(_, arg)| arg))
+            .any(expr_contains_srf),
+        FuncArgs::Variadic { positional, array } => positional
+            .iter()
+            .chain(std::iter::once(array.as_ref()))
+            .any(expr_contains_srf),
+    }
 }
 
 /// An expression's immediate sub-expressions, for the SRF walks. The walks find
@@ -1758,8 +1998,14 @@ fn children(expr: &Expr) -> Vec<&Expr> {
 /// those references resolve against.
 struct ProjectSet {
     exprs: Vec<Expr>,
-    calls: Vec<SrfCall>,
+    calls: Vec<PlannedSrfCall>,
     scope: Scope,
+}
+
+struct PlannedSrfCall {
+    index: usize,
+    level: usize,
+    call: SrfCall,
 }
 
 enum SrfCall {
@@ -1781,82 +2027,88 @@ impl SrfCall {
 /// [`projection_type`] and the row expander drive this one rewrite, so a
 /// projected SRF's `RowDescription` type is the type its rows carry.
 fn rewrite(out_exprs: &[Expr], scope: &Scope) -> Result<ProjectSet, ExecError> {
-    let mut calls: Vec<SrfCall> = Vec::new();
+    let mut calls = Vec::new();
     let mut exprs = Vec::with_capacity(out_exprs.len());
     for expr in out_exprs {
         let mut rewritten = expr.clone();
         rewrite_expr(&mut rewritten, scope, &mut calls)?;
         exprs.push(rewritten);
     }
+    let extended_scope = scope_with_calls(scope, &calls);
+    Ok(ProjectSet {
+        exprs,
+        calls,
+        scope: extended_scope,
+    })
+}
+
+fn scope_with_calls(scope: &Scope, calls: &[PlannedSrfCall]) -> Scope {
     let mut extended = scope.clone();
     for (index, call) in calls.iter().enumerate() {
         extended.columns.push(ColumnBinding {
             exposure: Exposure::Output,
             qualifier: Some(SRF_QUALIFIER.to_string()),
             name: index.to_string(),
-            ty: call.projected_type(),
+            ty: call.call.projected_type(),
         });
     }
-    Ok(ProjectSet {
-        exprs,
-        calls,
-        scope: extended,
-    })
+    extended
 }
 
-fn rewrite_expr(expr: &mut Expr, scope: &Scope, calls: &mut Vec<SrfCall>) -> Result<(), ExecError> {
-    if let Expr::Func(fc) = expr {
-        let plpgsql_type = crate::routine::is_plpgsql_set_runtime(fc)
-            .then(|| crate::routine::plpgsql_set_result_type(fc, scope))
-            .flatten()
-            .transpose()?;
-        if !is_set_returning(&fc.name) && plpgsql_type.is_none() {
-            for child in children_mut(expr) {
-                rewrite_expr(child, scope, calls)?;
-            }
-            return Ok(());
+fn rewrite_expr(
+    expr: &mut Expr,
+    scope: &Scope,
+    calls: &mut Vec<PlannedSrfCall>,
+) -> Result<Option<usize>, ExecError> {
+    let is_set = matches!(
+        expr,
+        Expr::Func(fc) if is_set_returning(&fc.name) || crate::routine::is_plpgsql_set_runtime(fc)
+    );
+    if is_set {
+        let mut level = None;
+        for child in children_mut(expr) {
+            level = level.max(rewrite_expr(child, scope, calls)?);
         }
+        let Expr::Func(fc) = expr else {
+            unreachable!("the set-returning expression remains a function call");
+        };
+        let is_plpgsql_set = crate::routine::is_plpgsql_set_runtime(fc);
         let FuncArgs::Exprs(args) = &fc.args else {
             return Err(undefined_function(&fc.name, &[]));
         };
-        if exprs_contain_srf(args) {
-            return Err(ExecError::Unsupported(
-                "a set-returning function may not be nested inside another set-returning \
-                 function's arguments"
-                    .into(),
-            ));
-        }
+        let call_scope = scope_with_calls(scope, calls);
+        let plpgsql_type = is_plpgsql_set
+            .then(|| crate::routine::plpgsql_set_result_type(fc, &call_scope))
+            .flatten()
+            .transpose()?;
         // A select-list call has no FROM item to hang a column-definition list
         // on, so a record-returning one has no row type at all.
         let index = calls.len();
-        if let Some(ty) = plpgsql_type {
-            calls.push(SrfCall::PlPgSql {
+        let call = if let Some(ty) = plpgsql_type {
+            SrfCall::PlPgSql {
                 call: fc.clone(),
                 ty,
-            });
-        } else {
-            let plan = plan(&fc.name, args, CallSite::Projection, scope)?;
-            if plan.record.is_none() && plan.columns.len() != 1 {
-                return Err(ExecError::Unsupported(format!(
-                    "set-returning function {} with multiple output columns is only supported in FROM",
-                    plan.name
-                )));
             }
-            calls.push(SrfCall::Builtin {
+        } else {
+            let plan = plan(&fc.name, args, CallSite::Projection, &call_scope)?;
+            SrfCall::Builtin {
                 plan,
                 args: args.clone(),
-            });
-        }
+            }
+        };
+        let level = level.map_or(0, |level| level + 1);
+        calls.push(PlannedSrfCall { index, level, call });
         *expr = Expr::Column {
             table: Some(SRF_QUALIFIER.to_string()),
             name: index.to_string(),
         };
-        return Ok(());
+        return Ok(Some(level));
     }
+    let mut level = None;
     for child in children_mut(expr) {
-        rewrite_expr(child, scope, calls)?;
+        level = level.max(rewrite_expr(child, scope, calls)?);
     }
-    Ok(())
+    Ok(level)
 }
 
 fn children_mut(expr: &mut Expr) -> Vec<&mut Expr> {
@@ -1957,22 +2209,14 @@ pub(crate) fn project_rows_ordered_with_memory(
     ctx: &EvalCtx,
     statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
-    if s.distinct.on_exprs().is_some() {
-        // PostgreSQL runs `DISTINCT ON` over the expanded rows; that needs the ON
-        // keys evaluated per *output* row, which this ProjectSet fold does not
-        // model.
-        return Err(ExecError::Unsupported(
-            "SELECT DISTINCT ON with a set-returning function in the select list is not supported"
-                .into(),
-        ));
-    }
     let order_keys = crate::exec::resolve_select_order_keys(
         &s.order_by,
         scope,
         fields,
         out_exprs,
-        s.distinct.dedups(),
+        matches!(s.distinct, crabka_pgparser::ast::DistinctClause::Distinct),
     )?;
+    let distinct_on = crate::exec::distinct_on_plan(s, scope, fields, out_exprs, &order_keys)?;
     // An ORDER BY expression may call an SRF of its own. PostgreSQL adds such an
     // expression to the target list as a junk column, so it expands in lockstep
     // with the select list's calls and multiplies the output rows exactly as a
@@ -1995,7 +2239,7 @@ pub(crate) fn project_rows_ordered_with_memory(
         .collect();
     let set = rewrite(&set_exprs, scope)?;
 
-    let mut projected: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::new();
+    let mut projected: Vec<(Vec<Datum>, Vec<Datum>, Vec<Datum>, Vec<Datum>)> = Vec::new();
     for row in &kept {
         let source_keys = order_keys
             .iter()
@@ -2020,15 +2264,46 @@ pub(crate) fn project_rows_ordered_with_memory(
                 })
                 .collect();
             let out = expanded[..out_exprs.len()].to_vec();
+            let distinct_value = |expr: &Expr| {
+                out_exprs
+                    .iter()
+                    .position(|output| output == expr)
+                    .map(|index| Ok(out[index].clone()))
+                    .unwrap_or_else(|| crate::eval::eval(expr, &set.scope, &expanded, ctx))
+            };
+            let group = distinct_on
+                .as_ref()
+                .map(|plan| {
+                    plan.group
+                        .iter()
+                        .map(distinct_value)
+                        .collect::<Result<Vec<_>, ExecError>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let sort = distinct_on
+                .as_ref()
+                .map(|plan| {
+                    plan.sort
+                        .iter()
+                        .map(|item| distinct_value(&item.expr))
+                        .collect::<Result<Vec<_>, ExecError>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
             statement_memory.charge_row(&keys)?;
             statement_memory.charge_row(&out)?;
-            projected.push((keys, out));
+            projected.push((keys, out, group, sort));
         }
     }
 
-    if s.distinct.dedups() {
+    if matches!(s.distinct, crabka_pgparser::ast::DistinctClause::Distinct) {
         let mut seen: std::collections::HashSet<Vec<Datum>> = std::collections::HashSet::new();
-        projected.retain(|(_, out)| seen.insert(out.clone()));
+        projected.retain(|(_, out, _, _)| seen.insert(out.clone()));
+    } else if let Some(plan) = distinct_on {
+        projected.sort_by(|a, b| crate::exec::order_cmp(&a.3, &b.3, &plan.sort));
+        let mut seen: std::collections::HashSet<Vec<Datum>> = std::collections::HashSet::new();
+        projected.retain(|(_, _, group, _)| seen.insert(group.clone()));
     }
     if !s.order_by.is_empty() {
         projected.sort_by(|a, b| crate::exec::order_cmp(&a.0, &b.0, &s.order_by));
@@ -2047,7 +2322,10 @@ pub(crate) fn project_rows_ordered_with_memory(
         with_ties: s.with_ties,
     };
     Ok(crate::exec::apply_row_window(
-        projected,
+        projected
+            .into_iter()
+            .map(|(keys, out, _, _)| (keys, out))
+            .collect(),
         window,
         &s.order_by,
     ))
@@ -2060,7 +2338,8 @@ pub(crate) fn project_rows_ordered_with_memory(
 fn projected_type(plan: &SrfPlan) -> ColumnType {
     match &plan.record {
         Some(record) => ColumnType::Record(record.named),
-        None => plan.columns[0].ty,
+        None if plan.columns.len() == 1 => plan.columns[0].ty,
+        None => ColumnType::Record(None),
     }
 }
 
@@ -2077,7 +2356,14 @@ fn collapse_projection(plan: &SrfPlan, produced: Vec<Vec<Datum>>) -> Vec<Datum> 
             .collect()
     };
     let Some(record) = &plan.record else {
-        return take_first(produced);
+        return if plan.columns.len() == 1 {
+            take_first(produced)
+        } else {
+            produced
+                .into_iter()
+                .map(|row| Datum::Record(RecordValue::anonymous(row)))
+                .collect()
+        };
     };
     let RecordShapeSource::Fixed(shape) = &record.shape else {
         // `rows` already folded these; the one column is the composite.
@@ -2101,44 +2387,105 @@ fn expand_row(
     ctx: &EvalCtx,
     statement_memory: &crate::scanner::StatementMemory,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let mut values: Vec<Vec<Datum>> = Vec::with_capacity(set.calls.len());
-    for call in &set.calls {
-        match call {
-            SrfCall::Builtin { plan, args } => {
-                let mut vals = args
-                    .iter()
-                    .map(|arg| crate::eval::eval(arg, scope, row, ctx))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let produced = rows_with_memory(plan, args, &mut vals, ctx, statement_memory)?;
-                values.push(collapse_projection(plan, produced));
-            }
-            SrfCall::PlPgSql { call, .. } => {
-                let produced = crate::routine::eval_plpgsql_set_function(call, scope, row, ctx)
-                    .ok_or_else(|| {
-                    ExecError::ObjectNotInPrerequisiteState(
-                        "PL/pgSQL set function runtime disappeared".into(),
-                    )
-                })??;
-                statement_memory.charge_row(&produced)?;
+    expand_row_values(set, scope, row, ctx, statement_memory)?
+        .into_iter()
+        .map(|row| {
+            let cells = set
+                .exprs
+                .iter()
+                .map(|expr| crate::eval::eval(expr, &set.scope, &row, ctx))
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            statement_memory.charge_row(&cells)?;
+            Ok(cells)
+        })
+        .collect()
+}
+
+/// Expand `exprs` as a ProjectSet input and retain the source columns alongside
+/// the synthetic SRF columns. Nodes below a target-list projection (such as a
+/// window partition) use this to put ProjectSet at the right plan level.
+pub(crate) fn expand_expressions_with_memory(
+    scope: &Scope,
+    rows: Vec<Vec<Datum>>,
+    exprs: &[Expr],
+    ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<(Scope, Vec<Expr>, Vec<Vec<Datum>>), ExecError> {
+    let set = rewrite(exprs, scope)?;
+    let mut expanded = Vec::new();
+    for row in &rows {
+        expanded.extend(expand_row_values(&set, scope, row, ctx, statement_memory)?);
+    }
+    Ok((set.scope, set.exprs, expanded))
+}
+
+fn expand_row_values(
+    set: &ProjectSet,
+    scope: &Scope,
+    row: &[Datum],
+    ctx: &EvalCtx,
+    statement_memory: &crate::scanner::StatementMemory,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut initial = row.to_vec();
+    initial.extend(std::iter::repeat_n(Datum::Null, set.calls.len()));
+    let mut expanded = vec![initial];
+    let call_scope = scope_with_calls(scope, &set.calls);
+    let levels = set
+        .calls
+        .iter()
+        .map(|call| call.level)
+        .max()
+        .map_or(0, |level| level + 1);
+    for level in 0..levels {
+        let calls: Vec<_> = set
+            .calls
+            .iter()
+            .filter(|call| call.level == level)
+            .collect();
+        let mut next = Vec::new();
+        for input in expanded {
+            let mut values = Vec::with_capacity(calls.len());
+            for planned in &calls {
+                let produced = match &planned.call {
+                    SrfCall::Builtin { plan, args } => {
+                        let mut vals = args
+                            .iter()
+                            .map(|arg| crate::eval::eval(arg, &call_scope, &input, ctx))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let rows = rows_with_memory(plan, args, &mut vals, ctx, statement_memory)?;
+                        collapse_projection(plan, rows)
+                    }
+                    SrfCall::PlPgSql { call, .. } => {
+                        let rows = crate::routine::eval_plpgsql_set_function(
+                            call,
+                            &call_scope,
+                            &input,
+                            ctx,
+                        )
+                        .ok_or_else(|| {
+                            ExecError::ObjectNotInPrerequisiteState(
+                                "PL/pgSQL set function runtime disappeared".into(),
+                            )
+                        })??;
+                        statement_memory.charge_row(&rows)?;
+                        rows
+                    }
+                };
                 values.push(produced);
             }
+            let count = values.iter().map(Vec::len).max().unwrap_or(0);
+            for index in 0..count {
+                let mut row = input.clone();
+                for (planned, column) in calls.iter().zip(&values) {
+                    row[scope.width() + planned.index] =
+                        column.get(index).cloned().unwrap_or(Datum::Null);
+                }
+                next.push(row);
+            }
         }
+        expanded = next;
     }
-    let count = values.iter().map(Vec::len).max().unwrap_or(0);
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let mut extended = row.to_vec();
-        for column in &values {
-            extended.push(column.get(i).cloned().unwrap_or(Datum::Null));
-        }
-        let mut cells = Vec::with_capacity(set.exprs.len());
-        for expr in &set.exprs {
-            cells.push(crate::eval::eval(expr, &set.scope, &extended, ctx)?);
-        }
-        statement_memory.charge_row(&cells)?;
-        out.push(cells);
-    }
-    Ok(out)
+    Ok(expanded)
 }
 
 // ---- unnest ----
@@ -2619,6 +2966,11 @@ mod tests {
         EvalCtx::test_default()
     }
 
+    #[test]
+    fn record_call_into_set_marks_the_recordset_variant() {
+        assert!(RECORD_JSON_POPULATE.into_set().set);
+    }
+
     fn constant(value: Datum, ty: ColumnType) -> Expr {
         Expr::Const { value, ty }
     }
@@ -2680,6 +3032,42 @@ mod tests {
         let statement_memory =
             crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
         rows_with_memory(&plan, args, &mut vals, &ctx(), &statement_memory)
+    }
+
+    #[test]
+    fn user_function_record_defs_reject_wrong_row_width() {
+        let defs = [
+            TableFuncColumnDef {
+                name: "a".into(),
+                ty: ColumnType::Int4,
+            },
+            TableFuncColumnDef {
+                name: "b".into(),
+                ty: ColumnType::Text,
+            },
+        ];
+        let error = user_function_relation(
+            "record_rows",
+            vec![("value".into(), ColumnType::Int4)],
+            vec![vec![Datum::Int4(1)]],
+            false,
+            None,
+            &None,
+            Some(&defs),
+            Some(&ctx()),
+        )
+        .expect_err("a column-definition list must not truncate returned rows")
+        .into_pg();
+
+        assert!(error.code == "42804");
+        assert!(error.message == "function return row and query-specified return row do not match");
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.detail.as_deref())
+                == Some("Returned row contains 1 attribute, but query expects 2.")
+        );
     }
 
     #[test]
@@ -2750,6 +3138,8 @@ mod tests {
             "json_array_elements_text",
             "jsonb_path_query",
             "pg_input_error_info",
+            "pg_listening_channels",
+            "pg_show_all_settings",
             "pg_snapshot_xip",
             "txid_snapshot_xip",
         ] {
@@ -2910,6 +3300,8 @@ mod tests {
             let item = [TableFuncCall {
                 name: name.into(),
                 args: args.clone(),
+                named_args: Vec::new(),
+                variadic: None,
                 column_defs: None,
             }];
             let schema = from_item_schema(&item, false, false, None, &None).expect("schema");
@@ -3966,6 +4358,191 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nested_select_list_srfs_expand_one_project_set_level_at_a_time() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+
+        let r = query(&mut s, "SELECT generate_series(1, generate_series(1, 2))").await;
+        assert!(column_of(&r) == vec![Some("1".into()), Some("1".into()), Some("2".into())]);
+
+        let r = query(
+            &mut s,
+            "SELECT generate_series(1, generate_series(1, 2)), generate_series(10, 11)",
+        )
+        .await;
+        assert!(
+            shape(&r).2
+                == vec![
+                    vec![Some("1".into()), Some("10".into())],
+                    vec![Some("1".into()), Some("11".into())],
+                    vec![Some("2".into()), Some("11".into())],
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn select_list_srfs_expand_after_aggregation() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        query(&mut s, "CREATE TABLE srf_groups (a int4)").await;
+        query(&mut s, "INSERT INTO srf_groups VALUES (1), (1), (2)").await;
+
+        let result = query(
+            &mut s,
+            "SELECT generate_series(1, 2), count(*) FROM srf_groups",
+        )
+        .await;
+        assert!(
+            shape(&result).2
+                == vec![
+                    vec![Some("1".into()), Some("3".into())],
+                    vec![Some("2".into()), Some("3".into())],
+                ]
+        );
+
+        let result = query(
+            &mut s,
+            "SELECT a, generate_series(1, 2), count(*) FROM srf_groups GROUP BY a ORDER BY 1, 2",
+        )
+        .await;
+        assert!(
+            shape(&result).2
+                == vec![
+                    vec![Some("1".into()), Some("1".into()), Some("2".into())],
+                    vec![Some("1".into()), Some("2".into()), Some("2".into())],
+                    vec![Some("2".into()), Some("1".into()), Some("1".into())],
+                    vec![Some("2".into()), Some("2".into()), Some("1".into())],
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn grouping_by_a_select_list_srf_expands_before_aggregation() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        query(&mut s, "CREATE TABLE srf_group_key (a int4)").await;
+        query(&mut s, "INSERT INTO srf_group_key VALUES (1), (2), (2)").await;
+
+        let result = query(
+            &mut s,
+            "SELECT generate_series(1, a), count(*) FROM srf_group_key GROUP BY 1 ORDER BY 1",
+        )
+        .await;
+        assert!(
+            shape(&result).2
+                == vec![
+                    vec![Some("1".into()), Some("3".into())],
+                    vec![Some("2".into()), Some("2".into())],
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_on_deduplicates_expanded_srf_rows() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        query(&mut s, "CREATE TABLE srf_distinct (a int4)").await;
+        query(&mut s, "INSERT INTO srf_distinct VALUES (1), (1), (2)").await;
+
+        let result = query(
+            &mut s,
+            "SELECT DISTINCT ON (a) a, generate_series(1, 2) AS g FROM srf_distinct ORDER BY a, g DESC",
+        )
+        .await;
+        assert!(
+            shape(&result).2
+                == vec![
+                    vec![Some("1".into()), Some("2".into())],
+                    vec![Some("2".into()), Some("2".into())],
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn window_partition_by_expands_srfs_below_window_aggregation() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        query(&mut s, "CREATE TABLE srf_window (a int4)").await;
+        query(&mut s, "INSERT INTO srf_window VALUES (1), (2), (3)").await;
+
+        let result = query(
+            &mut s,
+            "SELECT a, count(*) OVER (PARTITION BY generate_series(1, 2)) FROM srf_window ORDER BY a",
+        )
+        .await;
+        assert!(
+            shape(&result).2
+                == vec![
+                    vec![Some("1".into()), Some("3".into())],
+                    vec![Some("1".into()), Some("3".into())],
+                    vec![Some("2".into()), Some("3".into())],
+                    vec![Some("2".into()), Some("3".into())],
+                    vec![Some("3".into()), Some("3".into())],
+                    vec![Some("3".into()), Some("3".into())],
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_returning_functions_are_rejected_in_scalar_only_contexts() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+
+        for (sql, message) in [
+            (
+                "SELECT CASE WHEN true THEN generate_series(1, 2) END",
+                "set-returning functions are not allowed in CASE",
+            ),
+            (
+                "SELECT COALESCE(generate_series(1, 2), 0)",
+                "set-returning functions are not allowed in COALESCE",
+            ),
+            (
+                "SELECT 1 LIMIT generate_series(1, 2)",
+                "set-returning functions are not allowed in LIMIT",
+            ),
+            (
+                "SELECT sum(generate_series(1, 2))",
+                "aggregate function calls cannot contain set-returning function calls",
+            ),
+            (
+                "SELECT lead(generate_series(1, 2)) OVER ()",
+                "window function calls cannot contain set-returning function calls",
+            ),
+        ] {
+            let error = s.simple_query(sql).await.expect_err("scalar-only context");
+            assert!(
+                (error.code.as_str(), error.message.as_str()) == ("0A000", message),
+                "{sql} gave {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn set_returning_functions_are_rejected_in_from_arguments_and_updates() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+
+        for (sql, message) in [
+            (
+                "SELECT * FROM generate_series(1, generate_series(1, 2))",
+                "set-returning functions must appear at top level of FROM",
+            ),
+            (
+                "CREATE TABLE srf_update (a int4); INSERT INTO srf_update VALUES (1); \
+                 UPDATE srf_update SET a = generate_series(1, 2)",
+                "set-returning functions are not allowed in UPDATE",
+            ),
+        ] {
+            let error = s.simple_query(sql).await.expect_err("misplaced SRF");
+            assert!(
+                (error.code.as_str(), error.message.as_str()) == ("0A000", message),
+                "{sql} gave {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn describe_reports_what_execution_returns() {
         let engine = SqlEngine::new();
         let mut s = engine.connect();
@@ -4023,6 +4600,11 @@ mod tests {
                 vec![crabka_pgtypes::oids::TEXT],
             ),
             (
+                "SELECT r.* FROM abs(-1) AS r",
+                vec!["r"],
+                vec![crabka_pgtypes::oids::INT4],
+            ),
+            (
                 "SELECT * FROM unnest(ARRAY[1], ARRAY['a']) AS t(x, y)",
                 vec!["x", "y"],
                 vec![crabka_pgtypes::oids::INT4, crabka_pgtypes::oids::TEXT],
@@ -4049,20 +4631,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliberate_divergences_are_refused_with_0a000() {
+    async fn a_multi_column_select_list_srf_returns_an_anonymous_record() {
         let engine = SqlEngine::new();
         let mut s = engine.connect();
-        for sql in [
-            // A multi-column SRF in the select list would need a record type.
-            "SELECT jsonb_each('{\"a\": 1}'::jsonb)",
-            // A nested SRF would need its own ProjectSet level.
-            "SELECT generate_series(1, generate_series(1, 2))",
-            // SRFs are evaluated after aggregation in PostgreSQL.
-            "SELECT generate_series(1, 3), count(*)",
-        ] {
-            let error = s.simple_query(sql).await.expect_err("refused");
-            assert!(error.code == "0A000", "{sql} gave {error:?}");
-        }
+        let result = query(&mut s, "SELECT jsonb_each('{\"a\": 1}'::jsonb)").await;
+        assert!(
+            shape(&result)
+                == (
+                    vec!["jsonb_each".into()],
+                    vec![crabka_pgtypes::oids::RECORD],
+                    vec![vec![Some("(a,1)".into())]]
+                )
+        );
     }
 
     #[tokio::test]

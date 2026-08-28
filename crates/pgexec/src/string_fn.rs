@@ -9,7 +9,7 @@
 //! one row's already-evaluated Datums. `func::is_scalar` routes the names in, so
 //! `eval` needs no new dispatch point.
 
-use crabka_pgparser::ast::{Expr, FuncCall};
+use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
 use unicode_normalization::{UnicodeNormalization, is_nfc, is_nfd, is_nfkc, is_nfkd};
 
@@ -17,8 +17,9 @@ use crate::{
     clock::EvalCtx,
     error::ExecError,
     func::{
-        ambiguous_function, checked_args, int_arg, is_unknown_arg, no_matching_function,
-        require_arity, text_render, type_error, undefined_function, undefined_function_spelled,
+        ExpandedVariadicArgs, ambiguous_function, check_scalar_modifiers, checked_args,
+        expand_variadic_args, int_arg, is_unknown_arg, no_matching_function, require_arity,
+        text_render_in, type_error, undefined_function, undefined_function_spelled,
     },
     scope::Scope,
 };
@@ -102,6 +103,15 @@ pub(crate) fn string_func_result_type(
     scope: &Scope,
 ) -> Result<ColumnType, ExecError> {
     let f = str_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
+    if matches!(f, StrFunc::Format | StrFunc::ConcatWs)
+        && let FuncArgs::Variadic { positional, .. } = &fc.args
+    {
+        check_scalar_modifiers(fc)?;
+        if positional.is_empty() {
+            return Err(undefined_function_spelled(&fc.name, positional, scope));
+        }
+        return Ok(ColumnType::Text);
+    }
     let args = checked_args(fc)?;
     let n = args.len();
     match f {
@@ -251,11 +261,24 @@ pub(crate) fn eval_string(
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
     let f = str_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
-    let args = checked_args(fc)?;
-    let vals = args
-        .iter()
-        .map(&mut eval_child)
-        .collect::<Result<Vec<_>, _>>()?;
+    let (vals, null_variadic_array) = match &fc.args {
+        FuncArgs::Variadic { positional, array }
+            if matches!(f, StrFunc::Format | StrFunc::ConcatWs) =>
+        {
+            check_scalar_modifiers(fc)?;
+            match expand_variadic_args(positional, array, eval_child)? {
+                ExpandedVariadicArgs::Values(values) => (values, false),
+                ExpandedVariadicArgs::NullArray(values) => (values, true),
+            }
+        }
+        _ => (
+            checked_args(fc)?
+                .iter()
+                .map(&mut eval_child)
+                .collect::<Result<Vec<_>, _>>()?,
+            false,
+        ),
+    };
     match f {
         StrFunc::Format => {
             require_arity(fc, !vals.is_empty())?;
@@ -266,7 +289,7 @@ pub(crate) fn eval_string(
         }
         // concat_ws is strict in its SEPARATOR only; NULL values are skipped.
         StrFunc::ConcatWs => {
-            require_arity(fc, vals.len() >= 2)?;
+            require_arity(fc, vals.len() >= 2 || null_variadic_array)?;
             if vals[0].is_null() {
                 return Ok(Datum::Null);
             }
@@ -274,7 +297,7 @@ pub(crate) fn eval_string(
             let parts: Vec<String> = vals[1..]
                 .iter()
                 .filter(|v| !v.is_null())
-                .map(|v| text_render(v, &ctx.time_zone))
+                .map(|v| text_render_in(v, ctx.output_style()))
                 .collect();
             Ok(Datum::Text(parts.join(sep)))
         }
@@ -347,9 +370,9 @@ fn eval_strict(
         }
         StrFunc::QuoteLiteral | StrFunc::QuoteNullable => {
             require_arity(fc, vals.len() == 1)?;
-            Ok(Datum::Text(quote_literal(&text_render(
+            Ok(Datum::Text(quote_literal(&text_render_in(
                 &vals[0],
-                &ctx.time_zone,
+                ctx.output_style(),
             ))))
         }
         StrFunc::SplitPart => {
@@ -1008,12 +1031,24 @@ fn parse_ident(s: &str, strict: bool) -> Result<Datum, ExecError> {
         sqlstate: "22023",
         message: format!("string is not a valid identifier: \"{s}\""),
     };
+    let missing_ident = |detail| ExecError::FunctionErrorWithMessageDetail {
+        sqlstate: "22023",
+        message: format!("string is not a valid identifier: \"{s}\""),
+        detail,
+    };
     let chars: Vec<char> = s.chars().collect();
     let mut parts: Vec<Datum> = Vec::new();
     let mut i = 0;
+    let mut after_dot = false;
     loop {
         while chars.get(i).is_some_and(|c| c.is_whitespace()) {
             i += 1;
+        }
+        if chars.get(i) == Some(&'.') {
+            return Err(missing_ident("No valid identifier before \".\"."));
+        }
+        if after_dot && chars.get(i).is_none_or(|c| c.is_ascii_digit()) {
+            return Err(missing_ident("No valid identifier after \".\"."));
         }
         if chars.get(i) == Some(&'"') {
             i += 1;
@@ -1050,7 +1085,10 @@ fn parse_ident(s: &str, strict: bool) -> Result<Datum, ExecError> {
             i += 1;
         }
         match chars.get(i) {
-            Some('.') => i += 1,
+            Some('.') => {
+                i += 1;
+                after_dot = true;
+            }
             None => break,
             Some(_) if strict => return Err(not_ident()),
             Some(_) => break,
@@ -1156,7 +1194,7 @@ fn format_sql(fmt: &str, args: &[Datum], ctx: &EvalCtx) -> Result<String, ExecEr
             i += 1;
         }
         let width_end = scan_digits(&chars, i);
-        let width: usize = if width_end > i {
+        let mut width: usize = if width_end > i {
             chars[i..width_end]
                 .iter()
                 .collect::<String>()
@@ -1166,6 +1204,41 @@ fn format_sql(fmt: &str, args: &[Datum], ctx: &EvalCtx) -> Result<String, ExecEr
             0
         };
         i = width_end;
+        let mut left_align = left_align;
+        if chars.get(i) == Some(&'*') {
+            i += 1;
+            let width_start = i;
+            let width_end = scan_digits(&chars, i);
+            let width_index = if width_end > width_start && chars.get(width_end) == Some(&'$') {
+                let n: usize = chars[width_start..width_end]
+                    .iter()
+                    .collect::<String>()
+                    .parse()
+                    .map_err(|_| format_error("22023", "number is out of range"))?;
+                if n == 0 {
+                    return Err(format_error(
+                        "22023",
+                        "format specifies argument 0, but arguments are numbered from 1",
+                    ));
+                }
+                i = width_end + 1;
+                next_arg = next_arg.max(n);
+                n - 1
+            } else {
+                let at = next_arg;
+                next_arg += 1;
+                at
+            };
+            let value = args
+                .get(width_index)
+                .ok_or_else(|| format_error("22023", "too few arguments for format()"))?;
+            if !value.is_null() {
+                let width_arg = i32::try_from(int_arg(value)?)
+                    .map_err(|_| ExecError::Type(crabka_pgtypes::TypeError::Overflow))?;
+                left_align |= width_arg.is_negative();
+                width = width_arg.unsigned_abs() as usize;
+            }
+        }
         let Some(conversion) = chars.get(i).copied() else {
             return Err(format_error(
                 "22023",
@@ -1186,7 +1259,7 @@ fn format_sql(fmt: &str, args: &[Datum], ctx: &EvalCtx) -> Result<String, ExecEr
                 if value.is_null() {
                     String::new()
                 } else {
-                    text_render(value, &ctx.time_zone)
+                    text_render_in(value, ctx.output_style())
                 }
             }
             'I' => {
@@ -1196,13 +1269,13 @@ fn format_sql(fmt: &str, args: &[Datum], ctx: &EvalCtx) -> Result<String, ExecEr
                         "null values cannot be formatted as an SQL identifier",
                     ));
                 }
-                quote_ident(&text_render(value, &ctx.time_zone))
+                quote_ident(&text_render_in(value, ctx.output_style()))
             }
             'L' => {
                 if value.is_null() {
                     "NULL".to_string()
                 } else {
-                    quote_literal(&text_render(value, &ctx.time_zone))
+                    quote_literal(&text_render_in(value, ctx.output_style()))
                 }
             }
             other => {

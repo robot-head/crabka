@@ -136,6 +136,166 @@ async fn every_named_catalog_relation_resolves() {
 }
 
 #[tokio::test]
+async fn pg_locks_renders_live_relation_and_advisory_holds() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect_with_pid(4242);
+    session
+        .simple_query("CREATE TABLE held (id int4)")
+        .await
+        .expect("create table");
+    let relation = result_grid(
+        session
+            .simple_query("SELECT oid FROM pg_class WHERE relname = 'held'")
+            .await
+            .expect("table oid")
+            .into_iter()
+            .next()
+            .expect("one result"),
+    )[0][0]
+        .clone()
+        .expect("relation oid");
+    session
+        .simple_query(
+            "BEGIN; LOCK TABLE held IN SHARE MODE; SELECT pg_advisory_lock(1234567890123)",
+        )
+        .await
+        .expect("take locks");
+
+    let rows = result_grid(
+        session
+            .simple_query(
+                "SELECT locktype, database, relation, classid, objid, objsubid, \
+                        virtualtransaction, pid, mode, granted, fastpath \
+                 FROM pg_locks WHERE pid = 4242 ORDER BY locktype",
+            )
+            .await
+            .expect("list locks")
+            .into_iter()
+            .next()
+            .expect("one result"),
+    );
+
+    assert!(
+        rows == vec![
+            vec![
+                Some("advisory".into()),
+                Some("5".into()),
+                None,
+                Some("287".into()),
+                Some("1912276171".into()),
+                Some("1".into()),
+                Some("1/0".into()),
+                Some("4242".into()),
+                Some("ExclusiveLock".into()),
+                Some("t".into()),
+                Some("f".into()),
+            ],
+            vec![
+                Some("relation".into()),
+                Some("5".into()),
+                Some(relation),
+                None,
+                None,
+                None,
+                Some("1/0".into()),
+                Some("4242".into()),
+                Some("ShareLock".into()),
+                Some("t".into()),
+                Some("f".into()),
+            ],
+        ],
+        "pg_locks rows: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn pg_locks_renders_a_live_tuple_lock() {
+    let engine = SqlEngine::new();
+    let mut holder = engine.connect_with_pid(4242);
+    holder
+        .simple_query("CREATE TABLE tuple_held (id int4); INSERT INTO tuple_held VALUES (7)")
+        .await
+        .expect("create tuple");
+    let relation = result_grid(
+        holder
+            .simple_query("SELECT oid FROM pg_class WHERE relname = 'tuple_held'")
+            .await
+            .expect("table oid")
+            .into_iter()
+            .next()
+            .expect("one result"),
+    )[0][0]
+        .clone()
+        .expect("relation oid");
+    holder
+        .simple_query("BEGIN; SELECT * FROM tuple_held FOR UPDATE")
+        .await
+        .expect("lock tuple");
+    let mut observer = engine.connect_with_pid(4343);
+    let rows = result_grid(
+        observer
+            .simple_query(
+                "SELECT locktype, database, relation, page, tuple, pid, mode, granted \
+                 FROM pg_locks WHERE pid = 4242 AND locktype = 'tuple'",
+            )
+            .await
+            .expect("list tuple lock")
+            .into_iter()
+            .next()
+            .expect("one result"),
+    );
+
+    assert!(
+        rows == vec![some(&[
+            "tuple",
+            "5",
+            &relation,
+            "0",
+            "1",
+            "4242",
+            "For Update",
+            "t",
+        ])],
+        "pg_locks rows: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn pg_prepared_xacts_has_postgresqls_empty_2pc_shape() {
+    let engine = SqlEngine::new();
+    let QueryResult::Rows { fields, rows, .. } = run(
+        &engine,
+        "SELECT transaction, gid, prepared, owner, database FROM pg_prepared_xacts",
+    )
+    .await
+    else {
+        panic!("pg_prepared_xacts query should return rows");
+    };
+    assert!(rows.is_empty());
+    assert!(
+        fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.type_oid))
+            .collect::<Vec<_>>()
+            == vec![
+                ("transaction", 28),
+                ("gid", 25),
+                ("prepared", 1184),
+                ("owner", 25),
+                ("database", 25),
+            ]
+    );
+    assert!(
+        grid(
+            &engine,
+            "SELECT relkind, relfilenode, oid FROM pg_class WHERE relname = 'pg_prepared_xacts'",
+        )
+        .await
+            == vec![some(&["v", "0", "100004"])]
+    );
+}
+
+#[tokio::test]
 async fn pg_am_uses_postgresql_handlers_and_oid_regproc_columns() {
     let engine = SqlEngine::new();
     let sql = "SELECT oid, amname, amhandler, amtype FROM pg_am ORDER BY oid";
@@ -251,6 +411,11 @@ async fn system_catalog_oid_indexes_keep_pg18_catalog_identity_and_links() {
                 some(&["pg_event_trigger", "3468", "pg_event_trigger_oid_index"]),
                 some(&["pg_extension", "3080", "pg_extension_oid_index"]),
                 some(&["pg_language", "2682", "pg_language_oid_index"]),
+                some(&[
+                    "pg_largeobject_metadata",
+                    "2996",
+                    "pg_largeobject_metadata_oid_index"
+                ]),
                 some(&["pg_namespace", "2685", "pg_namespace_oid_index"]),
                 some(&["pg_opclass", "2687", "pg_opclass_oid_index"]),
                 some(&["pg_operator", "2688", "pg_operator_oid_index"]),
@@ -304,12 +469,12 @@ async fn pg_aggregate_exposes_postgresql_builtin_aggregates() {
                 Some("2100".into()),
                 Some("n".into()),
                 Some("0".into()),
-                Some("2746".into()),
-                Some("3389".into()),
-                Some("2785".into()),
-                Some("2786".into()),
-                Some("2787".into()),
-                Some("2281".into()),
+                Some("int8_avg_accum".into()),
+                Some("numeric_poly_avg".into()),
+                Some("int8_avg_combine".into()),
+                Some("int8_avg_serialize".into()),
+                Some("int8_avg_deserialize".into()),
+                Some("internal".into()),
                 Some("48".into()),
                 None,
             ]]
@@ -349,7 +514,7 @@ async fn pg_proc_support_oid_join_stays_indexable() {
         "SELECT count(*) FROM pg_proc p1, pg_proc p2 WHERE p2.oid = p1.prosupport",
     )
     .await;
-    assert2::assert!(count == some(&["52"]));
+    assert2::assert!(count == some(&["53"]));
 }
 
 #[tokio::test]

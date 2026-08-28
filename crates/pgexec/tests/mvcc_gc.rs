@@ -144,7 +144,7 @@ async fn open_repeatable_read_transaction_pins_versions_until_it_ends() {
     // The RR snapshot pins the horizon at its BEGIN xmin: every superseded
     // version's deleter committed at or above that pin, so nothing is pruned
     // while the transaction stays open.
-    let pinned_versions = version_count(kv.as_ref(), table.id, 1);
+    let pinned_versions = table_version_count(kv.as_ref(), table.id);
     assert!(
         pinned_versions >= 11,
         "expected the full 11-version chain while the RR txn is open, found {pinned_versions}"
@@ -423,10 +423,10 @@ async fn vacuum_freezes_survivors_truncates_the_clog_and_updates_still_work() {
             vec![Some("2".to_owned()), Some("b".to_owned())],
         ]
     );
-    // And a second sweep reclaims the superseded frozen version.
+    // And a second sweep reclaims the superseded frozen version. The update
+    // moved it to a new physical rowid, so count the table rather than rowid 1.
     engine.vacuum().await.expect("second vacuum");
-    assert!(version_count(kv.as_ref(), table.id, 1) == 1);
-    assert!(version_count(kv.as_ref(), table.id, 2) == 1);
+    assert!(table_version_count(kv.as_ref(), table.id) == 2);
 }
 
 // ── bounded incremental sweeps (vacuum_step) ─────────────────────────────────
@@ -580,7 +580,7 @@ async fn aborted_delete_stamps_are_cleared_so_the_row_settles() {
         .catalog_table(&RelationName::public("s"))
         .expect("table");
     let (_, _) = run_steps_to_cycle_end(&engine).await;
-    assert!(version_count(engine.kv_handle().as_ref(), table.id, 1) == 1);
+    assert!(table_version_count(engine.kv_handle().as_ref(), table.id) == 1);
 }
 
 // ── vacuum advances the durable clog scan floor ──────────────────────────────

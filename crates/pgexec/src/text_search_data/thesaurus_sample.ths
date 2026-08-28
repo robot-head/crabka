@@ -1,0 +1,10 @@
+# PostgreSQL regression thesaurus sample.
+one two three : *123
+one two : *12
+one : *1
+two : *2
+
+supernovae stars : *sn
+supernovae : *sn
+booking tickets : order invitation cards
+booking ? tickets : order invitation Cards

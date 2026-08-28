@@ -34,6 +34,9 @@ use crate::datum::ColumnType;
 pub struct UserTypeRef {
     /// The type's `pg_type.oid`.
     pub oid: u32,
+    /// `pg_type.typarray`, which relation row types allocate independently of
+    /// their composite type OID.
+    pub array_oid: u32,
     /// The type's `pg_type.typname`, interned.
     pub name: &'static str,
 }
@@ -124,6 +127,7 @@ impl DomainRef {
     pub fn as_ref(self) -> UserTypeRef {
         UserTypeRef {
             oid: self.oid,
+            array_oid: user_array_oid(self.oid),
             name: self.name,
         }
     }
@@ -167,6 +171,7 @@ impl BaseRef {
     pub fn as_ref(self) -> UserTypeRef {
         UserTypeRef {
             oid: self.oid,
+            array_oid: user_array_oid(self.oid),
             name: self.name,
         }
     }
@@ -188,6 +193,8 @@ pub struct DomainCheck {
     pub name: String,
     /// The constraint's source text, with `VALUE` naming the tested value.
     pub expr: String,
+    /// Whether existing stored values have been checked against this constraint.
+    pub validated: bool,
 }
 
 /// What a user-defined type *is*.
@@ -198,6 +205,13 @@ pub enum UserTypeBody {
     /// `CREATE TYPE … AS ENUM (…)`: `pg_type.typtype = 'e'`. Labels are held in
     /// `pg_enum.enumsortorder` order, which is the order `<` uses.
     Enum(Vec<String>),
+    /// An enum whose labels were repositioned by `ALTER TYPE ... ADD VALUE`.
+    /// The bit patterns preserve PostgreSQL's `float4` sort keys across catalog
+    /// writes without making the user-type definition non-`Eq`.
+    EnumOrdered {
+        labels: Vec<String>,
+        sort_orders: Vec<u32>,
+    },
     /// `CREATE TYPE … AS RANGE` — `pg_type.typtype = 'r'`.
     Range(RangeBody),
     /// `CREATE DOMAIN … AS base …` — `pg_type.typtype = 'd'`.
@@ -255,6 +269,8 @@ pub struct DomainBody {
     pub base: ColumnType,
     /// `pg_type.typnotnull`: a `NOT NULL` domain constraint.
     pub not_null: bool,
+    /// Explicit name of the `NOT NULL` constraint, when it was added as one.
+    pub not_null_name: Option<String>,
     /// `pg_type.typdefault` source text, applied where a column of the domain
     /// has no default of its own.
     pub default: Option<String>,
@@ -267,6 +283,8 @@ pub struct DomainBody {
 pub struct UserType {
     /// `pg_type.oid`.
     pub oid: u32,
+    /// `pg_type.typarray`.
+    pub array_oid: u32,
     /// `pg_namespace.nspname` for the type.
     pub schema: String,
     /// `pg_type.typname`, always unqualified.
@@ -292,6 +310,7 @@ impl UserType {
     pub fn type_ref(&self) -> UserTypeRef {
         UserTypeRef {
             oid: self.oid,
+            array_oid: self.array_oid,
             name: intern(&self.qualified_name()),
         }
     }
@@ -306,7 +325,9 @@ impl UserType {
         let qualified_name = self.qualified_name();
         Some(match &self.body {
             UserTypeBody::Composite(_) => ColumnType::Record(Some(self.type_ref())),
-            UserTypeBody::Enum(_) => ColumnType::Enum(self.type_ref()),
+            UserTypeBody::Enum(_) | UserTypeBody::EnumOrdered { .. } => {
+                ColumnType::Enum(self.type_ref())
+            }
             UserTypeBody::Range(range) => ColumnType::Range(RangeRef {
                 oid: self.oid,
                 name: intern(&qualified_name),
@@ -368,7 +389,7 @@ impl UserType {
     pub fn typtype(&self) -> &'static str {
         match &self.body {
             UserTypeBody::Composite(_) => "c",
-            UserTypeBody::Enum(_) => "e",
+            UserTypeBody::Enum(_) | UserTypeBody::EnumOrdered { .. } => "e",
             UserTypeBody::Range(_) => "r",
             UserTypeBody::Domain(_) => "d",
             // A shell is `TYPTYPE_PSEUDO` until the base type completes it,
@@ -397,7 +418,17 @@ impl UserType {
     #[must_use]
     pub fn labels(&self) -> Option<&[String]> {
         match &self.body {
-            UserTypeBody::Enum(labels) => Some(labels),
+            UserTypeBody::Enum(labels) | UserTypeBody::EnumOrdered { labels, .. } => Some(labels),
+            _ => None,
+        }
+    }
+
+    /// The `pg_enum.enumsortorder` bit patterns when this enum has explicit
+    /// ordering metadata. Creation-order enums use consecutive integers.
+    #[must_use]
+    pub fn enum_sort_orders(&self) -> Option<&[u32]> {
+        match &self.body {
+            UserTypeBody::EnumOrdered { sort_orders, .. } => Some(sort_orders),
             _ => None,
         }
     }
@@ -1029,6 +1060,7 @@ mod tests {
     fn publish(oid: u32, name: &str, body: UserTypeBody) -> UserType {
         let ty = UserType {
             oid,
+            array_oid: user_array_oid(oid),
             schema: USER_TYPE_DEFAULT_SCHEMA.to_string(),
             name: name.to_string(),
             body,
@@ -1041,6 +1073,7 @@ mod tests {
     fn publish_in(catalog: &CatalogTypes, oid: u32, name: &str, body: UserTypeBody) -> UserType {
         let ty = UserType {
             oid,
+            array_oid: user_array_oid(oid),
             schema: USER_TYPE_DEFAULT_SCHEMA.to_string(),
             name: name.to_string(),
             body,
@@ -1160,10 +1193,12 @@ mod tests {
             UserTypeBody::Domain(DomainBody {
                 base: ColumnType::Numeric(None),
                 not_null: true,
+                not_null_name: None,
                 default: Some("0".into()),
                 checks: vec![DomainCheck {
                     name: "ut_reg_domain_check".into(),
                     expr: "VALUE > 0".into(),
+                    validated: true,
                 }],
             }),
         );
@@ -1295,10 +1330,12 @@ mod tests {
                 "record",
                 ColumnType::Record(Some(UserTypeRef {
                     oid: 300_000,
+                    array_oid: user_array_oid(300_000),
                     name: "public.zcomp",
                 })),
                 ColumnType::Record(Some(UserTypeRef {
                     oid: 300_000,
+                    array_oid: user_array_oid(300_000),
                     name: "public.zother",
                 })),
             ),
@@ -1306,10 +1343,12 @@ mod tests {
                 "enum",
                 ColumnType::Enum(UserTypeRef {
                     oid: 300_000,
+                    array_oid: user_array_oid(300_000),
                     name: "public.zenum",
                 }),
                 ColumnType::Enum(UserTypeRef {
                     oid: 300_000,
+                    array_oid: user_array_oid(300_000),
                     name: "public.zother",
                 }),
             ),

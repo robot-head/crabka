@@ -144,6 +144,43 @@ pub enum AlterTriggerAction {
     DependsOnExtension { extension: String, dependent: bool },
 }
 
+/// The event a rewrite rule intercepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleEvent {
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+/// The action a rewrite rule applies.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RuleAction {
+    Nothing,
+    Statements(Vec<Statement>),
+}
+
+/// `CREATE [OR REPLACE] RULE`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateRule {
+    pub name: String,
+    pub or_replace: bool,
+    pub event: RuleEvent,
+    pub table: RelationRef,
+    pub condition: Option<PolicyQual>,
+    pub instead: bool,
+    pub action: RuleAction,
+    /// Exact source following `DO ALSO` or `DO INSTEAD`, retained for durable
+    /// catalog storage and reparsed by the rewrite executor.
+    pub action_source: String,
+}
+
+/// The action currently accepted by `ALTER RULE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterRuleAction {
+    RenameTo(String),
+}
+
 /// A row-security policy qual, kept both parsed and exactly as written.
 ///
 /// The catalog stores the source text, so it needs no parser of its own; the
@@ -522,6 +559,18 @@ pub enum Statement {
     /// executed by the Gres architecture. Metadata lives on [`RefusalCommand`]
     /// so parser, session, and compatibility tooling share one contract.
     CompatibilityRefusal(RefusalCommand),
+    CreateRule(CreateRule),
+    AlterRule {
+        name: String,
+        table: RelationRef,
+        action: AlterRuleAction,
+    },
+    DropRule {
+        name: String,
+        table: RelationRef,
+        if_exists: bool,
+        cascade: bool,
+    },
     CreateTrigger(CreateTrigger),
     AlterTrigger {
         name: String,
@@ -568,6 +617,11 @@ pub enum Statement {
         /// `CREATE TEMP`/`TEMPORARY TABLE`: the relation lives only for the
         /// creating session.
         temporary: bool,
+        /// `OF composite_type`: copies the named composite type's fields into
+        /// the table definition.
+        of_type: Option<RelationRef>,
+        /// Qualifiers on fields copied by `OF composite_type`.
+        typed_options: Vec<PartitionColumnOption>,
         /// `(LIKE source [INCLUDING …])` clauses, in the order written.
         like: Vec<LikeClause>,
         /// `INHERITS (parent, …)` parent relation names.
@@ -582,6 +636,8 @@ pub enum Statement {
         partition_of: Option<PartitionOf>,
         /// Explicit non-default relation placement.
         tablespace: Option<String>,
+        /// `USING <method>`: the table access method name, lowercased.
+        access_method: Option<String>,
     },
     CreateIndex {
         /// An index name is never schema-qualified in `PostgreSQL`'s grammar,
@@ -609,8 +665,11 @@ pub enum Statement {
         object_kind: String,
         /// Catalog name of the object; `table.column` for a column comment.
         object_name: String,
+        rule_table: Option<RelationRef>,
         /// The mandatory signature for `COMMENT ON AGGREGATE`.
         aggregate: Option<AggregateSignature>,
+        /// The mandatory source and target types for `COMMENT ON CAST`.
+        cast: Option<(ColumnType, ColumnType)>,
         comment: Option<String>,
     },
     DropIndex {
@@ -634,6 +693,9 @@ pub enum Statement {
     },
     CreateView {
         name: RelationRef,
+        /// `CREATE RECURSIVE VIEW`: execute the definition through an implicit
+        /// recursive CTE bearing the view's name.
+        recursive: bool,
         /// Exact query text following `AS`, retained for durable catalog storage.
         definition: String,
         /// Parsed definition used by the executor to validate the view schema.
@@ -693,6 +755,8 @@ pub enum Statement {
         /// until `REFRESH` runs.
         with_data: bool,
         tablespace: Option<String>,
+        /// `USING <method>`: the table access method name, lowercased.
+        access_method: Option<String>,
     },
     /// `REFRESH MATERIALIZED VIEW [CONCURRENTLY] name [WITH [NO] DATA]` — re-run
     /// the stored query and replace the contents. `WITH NO DATA` instead empties
@@ -747,7 +811,11 @@ pub enum Statement {
     },
     Insert {
         table: RelationRef,
+        /// The target alias, which hides the relation name in `RETURNING`.
+        alias: Option<String>,
         columns: Option<Vec<String>>,
+        /// Per-target field/subscript paths, kept aligned with `columns`.
+        indirections: Option<Vec<Vec<TargetIndirection>>>,
         source: InsertSource,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
@@ -789,6 +857,9 @@ pub enum Statement {
         /// `UPDATE … FROM a, b …`: extra relations joined to the target. Empty
         /// for the plain form.
         from: Vec<TableExpr>,
+        /// `WHERE CURRENT OF cursor`: the positioned cursor whose current row
+        /// this write targets. Mutually exclusive with [`filter`](Self::Update::filter).
+        where_current_of: Option<String>,
         filter: Option<Expr>,
         returning: Option<Returning>,
     },
@@ -808,6 +879,9 @@ pub enum Statement {
         alias: Option<String>,
         /// `DELETE … USING a, b …`: `USING` is `DELETE`'s spelling of `FROM`.
         using: Vec<TableExpr>,
+        /// `WHERE CURRENT OF cursor`: the positioned cursor whose current row
+        /// this write targets. Mutually exclusive with [`filter`](Self::Delete::filter).
+        where_current_of: Option<String>,
         filter: Option<Expr>,
         returning: Option<Returning>,
     },
@@ -833,11 +907,13 @@ pub enum Statement {
         if_not_exists: bool,
         /// An explicit output column list, which renames the query's columns.
         columns: Option<Vec<String>>,
-        query: Box<QueryExpr>,
+        source: CreateAsSource,
         /// `WITH DATA` (the default) populates the table; `WITH NO DATA` creates
         /// it empty.
         with_data: bool,
         tablespace: Option<String>,
+        /// `USING <method>`: the table access method name, lowercased.
+        access_method: Option<String>,
     },
     /// `VACUUM [ ( option [, …] ) ] [FULL] [FREEZE] [VERBOSE] [ANALYZE]
     /// [ [ONLY] table [ ( column, … ) ] [, …] ]`.
@@ -893,6 +969,11 @@ pub enum Statement {
         name: String,
         options: RoleOptions,
     },
+    /// `ALTER LARGE OBJECT oid OWNER TO role`.
+    AlterLargeObject {
+        oid: u32,
+        owner: RoleSpec,
+    },
     /* SQL parity matrix row: DROP ROLE / DROP USER. */ DropRole {
         name: String,
         if_exists: bool,
@@ -911,6 +992,13 @@ pub enum Statement {
         schemas: Vec<String>,
         grantees: Vec<RoleSpec>,
     },
+    /// `GRANT … ON LARGE OBJECT oid [, …] TO role [, …] [WITH GRANT OPTION]`.
+    GrantLargeObjectPrivileges {
+        privileges: Vec<PrivilegeSpec>,
+        oids: Vec<u32>,
+        grantees: Vec<RoleSpec>,
+        grant_option: bool,
+    },
     /* SQL parity matrix row: REVOKE. */ RevokeTablePrivileges {
         /// Each privilege carries its own column list, because that is where
         /// `PostgreSQL`'s grammar attaches one. See [`PrivilegeSpec`].
@@ -924,6 +1012,20 @@ pub enum Statement {
         privileges: Vec<String>,
         schemas: Vec<String>,
         grantees: Vec<RoleSpec>,
+    },
+    /// `REVOKE [GRANT OPTION FOR] … ON LARGE OBJECT oid [, …] FROM role [, …]`.
+    RevokeLargeObjectPrivileges {
+        privileges: Vec<PrivilegeSpec>,
+        oids: Vec<u32>,
+        grantees: Vec<RoleSpec>,
+        grant_option_only: bool,
+    },
+    /* SQL parity matrix row: ALTER DEFAULT PRIVILEGES. */ AlterDefaultTablePrivileges {
+        role: Option<RoleSpec>,
+        schemas: Vec<String>,
+        privileges: Vec<PrivilegeSpec>,
+        grantees: Vec<RoleSpec>,
+        grant: bool,
     },
     /// `GRANT <role> [, …] TO <member> [, …] [WITH ADMIN OPTION]` — role
     /// membership, which shares its storage with `CREATE ROLE … IN ROLE`.
@@ -1070,6 +1172,8 @@ pub enum Statement {
         /// neither was written (`PostgreSQL`'s plan-dependent default).
         scroll: Option<bool>,
         hold: bool,
+        /// The query text `pg_cursors.statement` exposes for this portal.
+        query_source: String,
         query: Box<QueryExpr>,
     },
     /// S2: `FETCH`/`MOVE` over an open cursor. `MOVE` is the row-discarding form.
@@ -1152,6 +1256,10 @@ pub enum Statement {
     Call {
         name: String,
         args: Vec<Expr>,
+        /// Labeled arguments, resolved against the procedure signature.
+        named_args: Vec<(String, Expr)>,
+        /// An explicit final `VARIADIC array` argument.
+        variadic: Option<Box<Expr>>,
     },
     /// P2: `DO [LANGUAGE lang] <body> [LANGUAGE lang]`. The language defaults
     /// to `plpgsql`, exactly as `PostgreSQL` does.
@@ -1211,8 +1319,25 @@ pub enum Statement {
         if_exists: bool,
         cascade: bool,
     },
+    /// `CREATE ACCESS METHOD name TYPE { INDEX | TABLE } HANDLER handler`.
+    CreateAccessMethod {
+        name: String,
+        kind: AccessMethodKind,
+        handler: String,
+    },
     /// P5/D6/D8: utility statements whose whole payload is their identity.
     Utility(UtilityStatement),
+}
+
+/// The query-like source of `CREATE TABLE AS`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreateAsSource {
+    Query(Box<QueryExpr>),
+    /// `EXECUTE <prepared-name> [(arguments)]`.
+    Execute {
+        name: String,
+        args: Vec<Expr>,
+    },
 }
 
 /// What a `CREATE TYPE` creates.
@@ -1282,6 +1407,13 @@ pub enum CastMethod {
     WithInout,
 }
 
+/// The relation family an access method serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessMethodKind {
+    Index,
+    Table,
+}
+
 /// `pg_cast.castcontext`: where the cast may be applied implicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastContext {
@@ -1334,7 +1466,9 @@ pub enum EnumValuePosition {
 pub enum DomainConstraint {
     /// `DEFAULT <expr>`: the source text, which the executor evaluates.
     Default(String),
-    NotNull,
+    NotNull {
+        name: Option<String>,
+    },
     Null,
     /// `[CONSTRAINT name] CHECK (VALUE …)`.
     Check {
@@ -1353,6 +1487,8 @@ pub enum AlterDomainAction {
     DropDefault,
     /// `SET NOT NULL` / `DROP NOT NULL`.
     SetNotNull(bool),
+    /// `ADD [CONSTRAINT name] NOT NULL`.
+    AddNotNull { name: Option<String> },
     /// `ADD [CONSTRAINT name] CHECK (…) [NOT VALID]`.
     AddConstraint {
         name: Option<String>,
@@ -1683,6 +1819,9 @@ pub enum TextSearchDdl {
         name: String,
         /// `COPY` for a configuration or `TEMPLATE` for a dictionary.
         base: String,
+        /// Template-specific DDL options, retained verbatim for the catalog
+        /// and the dictionary implementation.
+        options: OptionList,
     },
     Alter {
         kind: TextSearchObjectKind,
@@ -1690,6 +1829,8 @@ pub enum TextSearchDdl {
         /// Present for `RENAME TO`; other `PostgreSQL` mapping/option alterations
         /// update the existing object in place.
         rename_to: Option<String>,
+        /// Dictionary options from `ALTER ... (...)`.
+        options: OptionList,
     },
     Drop {
         kind: TextSearchObjectKind,
@@ -1899,12 +2040,12 @@ pub struct Assignment {
     /// One name for `SET a = e`; two or more for the parenthesised
     /// `SET (a, b) = …` form.
     pub targets: Vec<String>,
-    /// The subscripts of a subscripted target (`SET j['a'][0] = e`,
-    /// `SET a[1:2] = ARRAY[…]`); empty for an ordinary column assignment. Only
-    /// the single-target form can carry them. The assignment then *updates* the
+    /// The field/subscript path of an indirect target (`SET r.field = e`,
+    /// `SET a[1].field = e`); empty for an ordinary column assignment. Only
+    /// the single-target form can carry it. The assignment then *updates* the
     /// column and does not replace it. So, unlike a plain assignment, two
-    /// subscripted entries may name the same column.
-    pub subscripts: Vec<ArraySubscript>,
+    /// indirect entries may name the same column.
+    pub indirections: Vec<TargetIndirection>,
     pub value: AssignmentValue,
 }
 
@@ -1966,8 +2107,18 @@ pub enum MergeAction {
     /// the `DEFAULT VALUES` spelling.
     Insert {
         columns: Option<Vec<String>>,
+        indirections: Option<Vec<Vec<TargetIndirection>>>,
+        /// `OVERRIDING {USER | SYSTEM} VALUE`, retained for catalog deparsing.
+        overriding: Option<InsertOverride>,
         values: Option<Vec<Expr>>,
     },
+}
+
+/// Which generated-column value a `MERGE` insert overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertOverride {
+    User,
+    System,
 }
 
 /// The parsed `ON CONFLICT` clause of an `INSERT`.
@@ -1975,6 +2126,16 @@ pub enum MergeAction {
 pub struct OnConflict {
     pub target: OnConflictTarget,
     pub action: OnConflictAction,
+}
+
+/// One column (and its optional index-decoration) in an `ON CONFLICT` inference
+/// specification.  The executor currently arbitrates by the column name, but
+/// keeping the decoration is necessary to round-trip stored rule definitions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnConflictInferenceColumn {
+    pub name: String,
+    pub collation: Option<String>,
+    pub opclass: Option<String>,
 }
 
 /// How the conflicting unique index is chosen ("arbiter inference").
@@ -1987,8 +2148,9 @@ pub enum OnConflictTarget {
     /// expression/collation/opclass inference is not accepted.
     Columns {
         columns: Vec<String>,
+        inference_columns: Vec<OnConflictInferenceColumn>,
         /// The `WHERE` inside the inference specification (partial-index
-        /// predicate). Retained for parse fidelity; the executor refuses it.
+        /// predicate). The executor uses it when selecting an arbiter.
         index_predicate: Option<Expr>,
     },
     /// `ON CONSTRAINT <name>`: arbitrate by constraint name.
@@ -2103,7 +2265,6 @@ impl Statement {
 pub enum NonGoalCommand {
     AlterConversion,
     AlterLanguage,
-    AlterLargeObject,
     AlterOperator,
     AlterOperatorClass,
     AlterOperatorFamily,
@@ -2112,7 +2273,6 @@ pub enum NonGoalCommand {
     AlterSubscription,
     AlterTextSearchParser,
     AlterTextSearchTemplate,
-    CreateAccessMethod,
     CreateConversion,
     CreateLanguage,
     CreateOperator,
@@ -2143,7 +2303,6 @@ impl NonGoalCommand {
         match self {
             Self::AlterConversion => "ALTER CONVERSION",
             Self::AlterLanguage => "ALTER LANGUAGE",
-            Self::AlterLargeObject => "ALTER LARGE OBJECT",
             Self::AlterOperator => "ALTER OPERATOR",
             Self::AlterOperatorClass => "ALTER OPERATOR CLASS",
             Self::AlterOperatorFamily => "ALTER OPERATOR FAMILY",
@@ -2152,7 +2311,6 @@ impl NonGoalCommand {
             Self::AlterSubscription => "ALTER SUBSCRIPTION",
             Self::AlterTextSearchParser => "ALTER TEXT SEARCH PARSER",
             Self::AlterTextSearchTemplate => "ALTER TEXT SEARCH TEMPLATE",
-            Self::CreateAccessMethod => "CREATE ACCESS METHOD",
             Self::CreateConversion => "CREATE CONVERSION",
             Self::CreateLanguage => "CREATE LANGUAGE",
             Self::CreateOperator => "CREATE OPERATOR",
@@ -2187,7 +2345,6 @@ impl NonGoalCommand {
             Self::AlterLanguage | Self::CreateLanguage | Self::DropLanguage => {
                 "only built-in procedural languages are available"
             }
-            Self::AlterLargeObject => "large objects are unavailable; use bytea storage",
             Self::AlterOperator
             | Self::AlterOperatorClass
             | Self::AlterOperatorFamily
@@ -2211,9 +2368,7 @@ impl NonGoalCommand {
             | Self::CreateTextSearchTemplate
             | Self::DropTextSearchParser
             | Self::DropTextSearchTemplate => "C-bound text search objects are not supported",
-            Self::CreateAccessMethod | Self::DropAccessMethod => {
-                "C-bound access methods are not supported"
-            }
+            Self::DropAccessMethod => "C-bound access methods are not supported",
             Self::CreateTransform | Self::DropTransform => {
                 "C-bound transform objects are not supported"
             }
@@ -2244,13 +2399,11 @@ macro_rules! non_goal_specs {
 non_goal_specs!(
     (AlterConversion, "ALTER CONVERSION conv RENAME TO conv2"),
     (AlterLanguage, "ALTER LANGUAGE lang RENAME TO lang2"),
-    (AlterLargeObject, "ALTER LARGE OBJECT 1 OWNER TO postgres"),
     (
         AlterOperator,
         "ALTER OPERATOR +(integer, integer) OWNER TO postgres"
     ),
     (AlterPublication, "ALTER PUBLICATION pub ADD TABLE t"),
-    (AlterRule, "ALTER RULE r ON t RENAME TO r2"),
     (AlterSubscription, "ALTER SUBSCRIPTION sub DISABLE"),
     (
         AlterTextSearchParser,
@@ -2261,19 +2414,11 @@ non_goal_specs!(
         "ALTER TEXT SEARCH TEMPLATE t RENAME TO t2"
     ),
     (
-        CreateAccessMethod,
-        "CREATE ACCESS METHOD am TYPE INDEX HANDLER handler_fn"
-    ),
-    (
         CreateConversion,
         "CREATE CONVERSION conv FOR 'UTF8' TO 'LATIN1' FROM func"
     ),
     (CreateLanguage, "CREATE LANGUAGE lang"),
     (CreatePublication, "CREATE PUBLICATION pub"),
-    (
-        CreateRule,
-        "CREATE RULE r AS ON SELECT TO t DO INSTEAD NOTHING"
-    ),
     (
         CreateSubscription,
         "CREATE SUBSCRIPTION sub CONNECTION 'host=x' PUBLICATION pub"
@@ -2294,7 +2439,6 @@ non_goal_specs!(
     (DropConversion, "DROP CONVERSION conv"),
     (DropLanguage, "DROP LANGUAGE lang"),
     (DropPublication, "DROP PUBLICATION pub"),
-    (DropRule, "DROP RULE r ON t"),
     (DropSubscription, "DROP SUBSCRIPTION sub"),
     (DropTextSearchParser, "DROP TEXT SEARCH PARSER p"),
     (DropTextSearchTemplate, "DROP TEXT SEARCH TEMPLATE t"),
@@ -2371,9 +2515,15 @@ pub enum AlterTableAction {
     /// `RESET (param, …)`.
     ResetStorageParameters(Vec<String>),
     SetTablespace(String),
+    /// `SET ACCESS METHOD <name|DEFAULT>`.
+    SetAccessMethod(Option<String>),
     OwnerTo(RoleSpec),
     SetTriggerMode {
         selector: TriggerSelector,
+        mode: TriggerEnableMode,
+    },
+    SetRuleMode {
+        name: String,
         mode: TriggerEnableMode,
     },
     /// `ATTACH PARTITION <name> <bound>`.
@@ -2400,10 +2550,21 @@ pub enum AlterTableAction {
     ClusterOn(String),
     /// `SET WITHOUT CLUSTER` — clear the recorded clustered index.
     SetWithoutCluster,
+    /// `REPLICA IDENTITY { DEFAULT | FULL | NOTHING | USING INDEX name }`.
+    SetReplicaIdentity(ReplicaIdentity),
     /// `SET SCHEMA name`, `SET {LOGGED|UNLOGGED}`, `{EN,DIS}ABLE TRIGGER`, … —
     /// the subcommands that parse but have no counterpart in Crabka's storage
     /// model. `label` is the `PostgreSQL` subcommand text for the refusal.
     Unsupported(String),
+}
+
+/// The row identity a table exposes to logical replication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplicaIdentity {
+    Default,
+    Full,
+    Nothing,
+    UsingIndex(String),
 }
 
 /// `PARTITION BY <strategy> ( <key>, … )` on a `CREATE TABLE`.
@@ -3404,6 +3565,85 @@ pub enum TableExpr {
     /// JSON document into rows. Boxed because its payload dwarfs every other
     /// variant's.
     JsonTable(Box<JsonTable>),
+    /// `XMLTABLE(… PASSING … COLUMNS (…))` — a FROM item that projects XPath
+    /// values into ordinary SQL columns.
+    XmlTable(Box<XmlTable>),
+}
+
+/// An `XMLTABLE` FROM item.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XmlTable {
+    /// Namespace URI expressions and their optional prefixes. `None` is the
+    /// `DEFAULT` namespace binding.
+    pub namespaces: Vec<(Option<String>, Expr)>,
+    /// The row XPath expression, evaluated once for each input document.
+    pub row_path: Expr,
+    /// The XML document following `PASSING`.
+    pub document: Expr,
+    pub columns: Vec<XmlTableColumn>,
+    pub alias: Option<String>,
+    pub column_aliases: Option<Vec<String>>,
+    pub lateral: bool,
+}
+
+/// One entry of `XMLTABLE`'s `COLUMNS (…)` list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum XmlTableColumn {
+    /// `name FOR ORDINALITY`.
+    Ordinality { name: String },
+    /// A typed XPath value column.
+    Value(Box<XmlTableValueColumn>),
+}
+
+/// A typed `XMLTABLE` value column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XmlTableValueColumn {
+    pub name: String,
+    pub ty: ColumnType,
+    /// `PATH expression`; omitted paths use the column name.
+    pub path: Option<Expr>,
+    pub default: Option<Expr>,
+    pub not_null: bool,
+}
+
+impl XmlTable {
+    /// Every expression evaluated by this table item.
+    #[must_use]
+    pub fn exprs(&self) -> Vec<&Expr> {
+        let mut out = Vec::with_capacity(2 + self.namespaces.len() + self.columns.len() * 2);
+        out.extend(self.namespaces.iter().map(|(_, uri)| uri));
+        out.push(&self.row_path);
+        out.push(&self.document);
+        for column in &self.columns {
+            if let XmlTableColumn::Value(column) = column {
+                out.extend(
+                    [column.path.as_ref(), column.default.as_ref()]
+                        .into_iter()
+                        .flatten(),
+                );
+            }
+        }
+        out
+    }
+
+    /// The mutable counterpart of [`XmlTable::exprs`].
+    #[must_use]
+    pub fn exprs_mut(&mut self) -> Vec<&mut Expr> {
+        let mut out = Vec::with_capacity(2 + self.namespaces.len() + self.columns.len() * 2);
+        out.extend(self.namespaces.iter_mut().map(|(_, uri)| uri));
+        out.push(&mut self.row_path);
+        out.push(&mut self.document);
+        for column in &mut self.columns {
+            if let XmlTableColumn::Value(column) = column {
+                out.extend(
+                    [column.path.as_mut(), column.default.as_mut()]
+                        .into_iter()
+                        .flatten(),
+                );
+            }
+        }
+        out
+    }
 }
 
 /// A `JSON_TABLE(…)` FROM item.
@@ -3589,10 +3829,37 @@ fn collect_column_exprs_mut<'a>(columns: &'a mut [JsonTableColumn], out: &mut Ve
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableFuncCall {
     pub name: String,
+    /// Positional arguments, before the named or `VARIADIC` form is normalized
+    /// against the catalog signature.
     pub args: Vec<Expr>,
+    /// Labeled arguments. A FROM-position function needs to retain these until
+    /// the executor can resolve user-routine parameter names.
+    pub named_args: Vec<(String, Expr)>,
+    /// `VARIADIC array_expr`, which passes the final array unchanged.
+    pub variadic: Option<Box<Expr>>,
     /// `AS (col type, …)`: a column-definition list, which `PostgreSQL` allows
     /// only for functions returning `record`.
     pub column_defs: Option<Vec<TableFuncColumnDef>>,
+}
+
+impl TableFuncCall {
+    /// Every expression the call owns, including delayed named and variadic
+    /// arguments. Walkers use this before the executor resolves them against
+    /// the routine catalog.
+    pub fn arguments(&self) -> impl Iterator<Item = &Expr> {
+        self.args
+            .iter()
+            .chain(self.named_args.iter().map(|(_, argument)| argument))
+            .chain(self.variadic.iter().map(Box::as_ref))
+    }
+
+    /// Mutable counterpart to [`Self::arguments`].
+    pub fn arguments_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
+        self.args
+            .iter_mut()
+            .chain(self.named_args.iter_mut().map(|(_, argument)| argument))
+            .chain(self.variadic.iter_mut().map(Box::as_mut))
+    }
 }
 
 /// One entry of a FROM-function column-definition list (`AS t(a int, b text)`).
@@ -3652,6 +3919,14 @@ pub enum ArraySubscript {
         lower: Option<Expr>,
         upper: Option<Expr>,
     },
+}
+
+/// One step after a write target's base column.  The sequence is preserved so
+/// `a[1].field` remains distinct from `a.field[1]`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TargetIndirection {
+    Subscript(ArraySubscript),
+    Field(String),
 }
 
 impl ArraySubscript {
@@ -4717,6 +4992,8 @@ pub enum RoutineOption {
     Set {
         name: String,
         value: Option<String>,
+        /// Original text after `SET`/`RESET`, retained for durable deparse.
+        source: String,
     },
     /// `TRANSFORM FOR TYPE …`: recorded but not otherwise interpreted.
     Transform(Vec<String>),
@@ -4814,6 +5091,8 @@ pub enum PlPgSqlStatement {
     },
     Perform {
         query: Box<Statement>,
+        source: String,
+        line: usize,
     },
     If {
         branches: Vec<(Expr, Vec<PlPgSqlStatement>)>,
@@ -5003,12 +5282,13 @@ pub enum AggregateOption {
     /// `initcond = 0` and `initcond = '0'` are the same value. `NULL` (the
     /// default) is `None`.
     InitCond(Option<String>),
+    /// `MINITCOND` — the moving state's initial value as external text.
+    MInitCond(Option<String>),
     /// Old-style `BASETYPE` — the aggregate's single argument type. `'ANY'` in
     /// any spelling or quoting is `PostgreSQL`'s way of writing "no declared
     /// argument type" and arrives as `None`.
     BaseType(Option<RoutineType>),
-    /// An option this engine records but does not execute — the moving-aggregate
-    /// family (`MSFUNC`, `MINVFUNC`, `MSTYPE`, `MINITCOND`, …), `COMBINEFUNC`,
+    /// An option this engine records but does not execute — `COMBINEFUNC`,
     /// `SERIALFUNC`, `DESERIALFUNC`, `PARALLEL`, `SORTOP`, `SSPACE`,
     /// `FINALFUNC_EXTRA`, `FINALFUNC_MODIFY` and anything else.
     ///

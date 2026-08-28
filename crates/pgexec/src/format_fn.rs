@@ -1025,7 +1025,9 @@ mod tests {
         let clobbered = pg_error("to_timestamp('1997-11-Jan-16', 'YYYY-MM-Mon-DD')");
         assert!(
             clobbered.diagnostics.and_then(|d| d.detail)
-                == Some("This value contradicts a previous setting for the same field type.".into())
+                == Some(
+                    "This value contradicts a previous setting for the same field type.".into()
+                )
         );
     }
 

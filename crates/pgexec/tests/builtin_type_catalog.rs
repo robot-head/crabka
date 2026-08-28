@@ -417,10 +417,7 @@ async fn name_is_distinct_from_text_in_catalog_rows_and_ctas() {
              FROM pg_type WHERE typname IN ('name', '_name') ORDER BY typname",
         )
         .await
-            == vec![
-                row("_name", -1, "A", 19, 0),
-                row("name", 64, "S", 0, 1003),
-            ]
+            == vec![row("_name", -1, "A", 19, 0), row("name", 64, "S", 0, 1003),]
     );
     let result = s
         .simple_query("SELECT 'name'::name, 'text'::text, ARRAY['one', 'two']::name[]")
@@ -430,7 +427,11 @@ async fn name_is_distinct_from_text_in_catalog_rows_and_ctas() {
         panic!("name query should return rows");
     };
     assert!(
-        fields.iter().map(|field| field.type_oid).collect::<Vec<_>>() == vec![19, 25, 1003]
+        fields
+            .iter()
+            .map(|field| field.type_oid)
+            .collect::<Vec<_>>()
+            == vec![19, 25, 1003]
     );
     s.simple_query("CREATE TABLE name_catalog AS SELECT 'name'::name, 'text'::text")
         .await
@@ -1157,6 +1158,28 @@ async fn a_bare_cast_is_labelled_with_the_catalog_typname() {
             "'2020-05-26 13:30:25+00'::timestamp with time zone",
             "timestamptz",
         ),
+    ];
+    for (expr, want) in cases {
+        assert!(column_label(&mut s, expr).await == *want, "for {expr}");
+    }
+}
+
+/// PostgreSQL's `FigureColname` names structural expressions after their
+/// construct, preserves a subscript's base label, and takes a scalar
+/// subquery's target-list label.
+#[tokio::test]
+async fn structural_figure_colnames_survive_subquery_resolution() {
+    let (_engine, mut s) = session();
+
+    let cases: &[(&str, &str)] = &[
+        ("CASE WHEN true THEN 1 ELSE (SELECT 2 AS x) END", "x"),
+        ("CASE WHEN true THEN 1 END", "case"),
+        ("ARRAY[1, 2]", "array"),
+        ("ROW(1, 2)", "row"),
+        ("(ARRAY[1, 2])[1]", "array"),
+        ("(SELECT x FROM (VALUES (1)) AS v(x))", "x"),
+        ("(SELECT 1 AS inner_name) AS explicit_name", "explicit_name"),
+        ("EXISTS (SELECT 1)", "exists"),
     ];
     for (expr, want) in cases {
         assert!(column_label(&mut s, expr).await == *want, "for {expr}");

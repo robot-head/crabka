@@ -305,12 +305,11 @@ fn geometric_assignment_cast(from: ColumnType, to: ColumnType) -> bool {
 ///     (length re-coercion applies at assignment);
 ///   * `date → timestamp` and `date → timestamptz`: `'i'`;
 ///   * `timestamp → timestamptz`: `'i'`; `timestamptz → timestamp`: `'a'`
-///     (both rotate through the session time zone).
+///     (both rotate through the session time zone);
+///   * every I/O conversion whose target is a string type.
 ///
 /// Deliberately NOT allowed (explicit-only in this matrix):
-///   * non-string ↔ string (PostgreSQL's I/O-conversion casts are
-///     explicit-only since 8.3, so an `INSERT` of an `int4` into a `text` column
-///     errors, and the reverse errors too);
+///   * I/O conversions from a string type to a non-string type;
 ///   * `bool ↔ int4` (`castcontext` `'e'`);
 ///   * `timestamp`/`timestamptz` → `date`/`time` (kept explicit-only here as a
 ///     conservative subset, though PostgreSQL marks these `'a'`);
@@ -321,6 +320,9 @@ pub fn assignment_cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     let to_base = to.temporal_base().map_or(to, |(base, _)| base);
     if (from, to) != (from_base, to_base) {
         return assignment_cast_allowed(from_base, to_base);
+    }
+    if to.is_string() && cast_allowed(from, to) {
+        return true;
     }
     use ColumnType::{Date, Timestamp, Timestamptz};
     let num_family = |t: ColumnType| {
@@ -516,6 +518,20 @@ fn bounded_string(value: &Datum, to: ColumnType) -> Result<Datum, TypeError> {
     }
 }
 
+/// PostgreSQL's `name` input function stores at most `NAMEDATALEN - 1` bytes.
+///
+/// Keep the cut on a UTF-8 boundary: PostgreSQL accepts a multibyte identifier
+/// and truncates it as bytes, but never exposes invalid text through `nameout`.
+fn name_input(value: &str) -> String {
+    const MAX_BYTES: usize = 63;
+
+    let mut end = value.len().min(MAX_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].into()
+}
+
 /// [`cast`] with the session's `DateStyle` field order. That order decides how
 /// the `text → date`/`timestamp`/`timestamptz` arms read an otherwise-ambiguous
 /// all-numeric date literal (`01/02/03`). Every other arm ignores it.
@@ -548,6 +564,7 @@ pub fn cast_in(
         (Datum::Int8(n), Int8) => Ok(Datum::Int8(*n)),
         (Datum::Float4(f), Float4) => Ok(Datum::Float4(*f)),
         (Datum::Float8(f), Float8) => Ok(Datum::Float8(*f)),
+        (Datum::Bytea(bytes), ColumnType::Bytea) => Ok(Datum::Bytea(bytes.clone())),
         (Datum::Point(point), ColumnType::Point) => Ok(Datum::Point(*point)),
         (Datum::Path(path), ColumnType::Path) => Ok(Datum::Path(path.clone())),
         (Datum::Lseg(lseg), ColumnType::Lseg) => Ok(Datum::Lseg(*lseg)),
@@ -676,7 +693,8 @@ pub fn cast_in(
         (Datum::Int8(n), ColumnType::Bit(len)) => Ok(Datum::BitString(
             crate::bitstring::BitString::from_int(*n, len),
         )),
-        (Datum::Text(s), Text | ColumnType::Name) => Ok(Datum::Text(s.clone())),
+        (Datum::Text(s), Text) => Ok(Datum::Text(s.clone())),
+        (Datum::Text(s), ColumnType::Name) => Ok(Datum::Text(name_input(s))),
         // The executor owns jsonpath parsing/canonicalization. Keeping only
         // identity here makes it impossible for a raw string to masquerade as
         // a validated jsonpath through a context-free type-layer call.
@@ -875,7 +893,7 @@ pub fn cast_in(
         // it prints the whole host address and always appends the netmask, so
         // `'192.168.1.226'::inet::text` is `192.168.1.226/32`.
         (Datum::Inet(value), Text) => Ok(Datum::Text(value.show())),
-        (d, ColumnType::Name) => Ok(Datum::Text(text_of(d, style))),
+        (d, ColumnType::Name) => Ok(Datum::Text(name_input(&text_of(d, style)))),
         (d, Text) => Ok(Datum::Text(text_of(d, style))),
         (d, ColumnType::Varchar(n)) => {
             crate::string::apply_varchar_typmod(&string_cast_input(d, style), n, Coercion::Explicit)
@@ -1107,7 +1125,11 @@ pub fn cast_in(
     }
 }
 
-fn apply_temporal_typmod(value: Datum, base: ColumnType, precision: u8) -> Result<Datum, TypeError> {
+fn apply_temporal_typmod(
+    value: Datum,
+    base: ColumnType,
+    precision: u8,
+) -> Result<Datum, TypeError> {
     match (value, base) {
         (Datum::Time(value), ColumnType::Time) => {
             crate::datetime::apply_time_typmod(value, Some(precision)).map(Datum::Time)
@@ -1119,7 +1141,8 @@ fn apply_temporal_typmod(value: Datum, base: ColumnType, precision: u8) -> Resul
             crate::datetime::apply_timestamp_typmod(value, Some(precision)).map(Datum::Timestamp)
         }
         (Datum::Timestamptz(value), ColumnType::Timestamptz) => {
-            crate::datetime::apply_timestamptz_typmod(value, Some(precision)).map(Datum::Timestamptz)
+            crate::datetime::apply_timestamptz_typmod(value, Some(precision))
+                .map(Datum::Timestamptz)
         }
         (Datum::Interval(value), ColumnType::Interval) => {
             crate::datetime::apply_interval_typmod(value, Some(precision)).map(Datum::Interval)
@@ -1847,6 +1870,11 @@ mod tests {
             super::cast(&Datum::Text(value.into()), ColumnType::Bytea, &utc()).expect("valid bytea")
         };
         assert_eq!(cast("ABC"), Datum::Bytea(b"ABC".to_vec()));
+        assert_eq!(
+            super::cast(&Datum::Bytea(b"ABC".to_vec()), ColumnType::Bytea, &utc())
+                .expect("bytea identity cast"),
+            Datum::Bytea(b"ABC".to_vec())
+        );
         assert_eq!(cast("\\x414243"), Datum::Bytea(b"ABC".to_vec()));
         assert_eq!(cast("\\x 41 42 43 "), Datum::Bytea(b"ABC".to_vec()));
         assert!(super::cast(&Datum::Text("\\x4 1".into()), ColumnType::Bytea, &utc()).is_err());
@@ -1884,13 +1912,9 @@ mod tests {
         }
         // NOT allowed: explicit-only pairs must keep requiring a CAST.
         for (from, to) in [
-            // I/O-conversion casts (explicit-only since PostgreSQL 8.3).
-            (Int4, Text),
+            // Only I/O conversions *from* a string type remain explicit-only.
             (Text, Int4),
-            (Float8, Text),
             (Text, Timestamp),
-            (Timestamptz, Text),
-            (Bool, Text),
             (Text, Bool),
             // bool ↔ int4 is castcontext 'e'.
             (Bool, Int4),
@@ -1921,6 +1945,20 @@ mod tests {
         assert!(
             cast(&Datum::Text("catalog_name".into()), ColumnType::Name, &tz).expect("text to name")
                 == Datum::Text("catalog_name".into())
+        );
+        assert!(
+            cast(
+                &Datum::Text(format!("{}é", "x".repeat(62))),
+                ColumnType::Name,
+                &tz,
+            )
+            .expect("name input truncates on a character boundary")
+                == Datum::Text("x".repeat(62))
+        );
+        assert!(
+            cast(&Datum::Text("x".repeat(64)), ColumnType::Name, &tz,)
+                .expect("name input truncates at 63 bytes")
+                == Datum::Text("x".repeat(63))
         );
         assert!(
             cast(
@@ -3634,12 +3672,12 @@ mod tests {
         let tz = utc();
         assert!(cast_allowed(ColumnType::Text, ColumnType::Polygon));
         assert!(cast_allowed(ColumnType::Polygon, ColumnType::Text));
-        // An I/O-conversion cast is explicit-only (PostgreSQL 8.3 onward).
+        // An I/O conversion *to* a string type is assignment-level.
         assert!(!assignment_cast_allowed(
             ColumnType::Text,
             ColumnType::Polygon
         ));
-        assert!(!assignment_cast_allowed(
+        assert!(assignment_cast_allowed(
             ColumnType::Polygon,
             ColumnType::Text
         ));
@@ -3673,8 +3711,8 @@ mod tests {
 
     #[test]
     fn temporal_typmod_casts_parse_and_round() {
-        use assert2::assert;
         use crate::TemporalType;
+        use assert2::assert;
 
         let value = cast(
             &Datum::Text("2000-01-01 00:00:00.500000".into()),

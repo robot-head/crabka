@@ -173,6 +173,39 @@ pub fn table_prefix_end(table_id: u32) -> Vec<u8> {
     k
 }
 
+/// Prefix for compact update redirects of one table's retired physical rowids.
+///
+/// Storage index zero is reserved for metadata that follows a tuple after its
+/// dead version is reclaimed; ordinary primary rows use index one and local
+/// secondary indexes start at two.
+#[must_use]
+pub fn update_target_prefix(table_id: u32) -> Vec<u8> {
+    let mut k = Vec::with_capacity(8);
+    put_u32(&mut k, table_id);
+    put_u32(&mut k, 0);
+    k
+}
+
+/// Key for the physical rowid that replaced `rowid` in an UPDATE.
+#[must_use]
+pub fn update_target_key(table_id: u32, rowid: u64) -> Vec<u8> {
+    let mut k = update_target_prefix(table_id);
+    put_u64(&mut k, rowid);
+    k
+}
+
+/// Decode the physical rowid stored in an update redirect.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] for a malformed redirect value.
+pub fn update_target_of(value: &[u8]) -> Result<u64, KvError> {
+    let bytes: [u8; 8] = value
+        .try_into()
+        .map_err(|_| KvError::CorruptRow("update target has invalid length".into()))?;
+    Ok(u64::from_be_bytes(bytes))
+}
+
 /// Full key for one row: table prefix followed by the order-preserving rowid.
 #[must_use]
 pub fn row_key(table_id: u32, rowid: u64) -> Vec<u8> {
@@ -916,6 +949,17 @@ mod tests {
         let k10 = row_key(7, 10);
         assert!(k1 < k2 && k2 < k10, "rowid order must be byte order");
         assert!(k1.starts_with(&table_prefix(7)));
+    }
+
+    #[test]
+    fn update_targets_use_the_reserved_metadata_index_and_decode_exactly() {
+        let key = update_target_key(7, 42);
+        assert!(key.starts_with(&update_target_prefix(7)));
+        assert!(
+            update_target_of(&99_u64.to_be_bytes()).expect("target") == 99,
+            "the redirect value is the successor rowid"
+        );
+        assert!(update_target_of(&[0; 7]).is_err());
     }
 
     #[test]

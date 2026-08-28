@@ -747,13 +747,22 @@ async fn set_functions_are_implicitly_lateral_to_prior_from_items() {
     );
 }
 
-#[tokio::test]
-async fn set_functions_keep_default_strict_and_recursive_call_semantics() {
-    let engine = SqlEngine::new();
-    let mut session = engine.connect();
-    execute(
-        &mut session,
-        r"
+#[test]
+fn set_functions_keep_default_strict_and_recursive_call_semantics() {
+    std::thread::Builder::new()
+        .name("plpgsql-recursion-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async {
+                    let engine = SqlEngine::new();
+                    let mut session = engine.connect();
+                    execute(
+                        &mut session,
+                        r"
         CREATE FUNCTION pl_default_rows(seed int4 DEFAULT 4) RETURNS SETOF int4
         LANGUAGE plpgsql AS $$
         BEGIN
@@ -781,19 +790,27 @@ async fn set_functions_keep_default_strict_and_recursive_call_semantics() {
         END
         $$
         ",
-    )
-    .await;
+                    )
+                    .await;
 
-    assert!(query(&mut session, "SELECT * FROM pl_default_rows()").await == vec![row(&["4"])]);
-    assert!(
-        query(&mut session, "SELECT * FROM pl_strict_rows(NULL)")
-            .await
-            .is_empty()
-    );
-    assert_eq!(
-        query(&mut session, "SELECT * FROM pl_recursive_rows(3)").await,
-        vec![row(&["3"]), row(&["2"]), row(&["1"])]
-    );
+                    assert!(
+                        query(&mut session, "SELECT * FROM pl_default_rows()").await
+                            == vec![row(&["4"])]
+                    );
+                    assert!(
+                        query(&mut session, "SELECT * FROM pl_strict_rows(NULL)")
+                            .await
+                            .is_empty()
+                    );
+                    assert_eq!(
+                        query(&mut session, "SELECT * FROM pl_recursive_rows(3)").await,
+                        vec![row(&["3"]), row(&["2"]), row(&["1"])]
+                    );
+                });
+        })
+        .expect("start recursion test")
+        .join()
+        .expect("recursion test");
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@ use tokio_postgres::{NoTls, types::Type};
 /// `_int4` / `_text`: the OIDs an array-typed result reports.
 const INT4_ARRAY_OID: u32 = 1007;
 const TEXT_ARRAY_OID: u32 = 1009;
+const RECORD_ARRAY_OID: u32 = 2287;
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -155,6 +156,125 @@ async fn array_literals_and_construction() {
     assert!(err_code(&mut s, "SELECT ARRAY[]").await == "42P18");
 }
 
+/// Anonymous composite values have PostgreSQL's `record[]` companion, so both
+/// explicit constructors and `array_agg` keep the record element type.
+#[tokio::test]
+async fn record_arrays_keep_the_record_array_type() {
+    let (_engine, mut s) = engine_with(&[]).await;
+    for expr in [
+        "ARRAY[ROW(1), ROW(2)]",
+        "array_agg(ROW(n)) FROM (VALUES (1), (2)) AS v(n)",
+    ] {
+        let (value, oid) = typed_scalar(&mut s, expr).await;
+        assert!(value.as_deref() == Some("{(1),(2)}"), "SELECT {expr}");
+        assert!(oid == RECORD_ARRAY_OID, "SELECT {expr}");
+    }
+}
+
+/// A named composite uses the `typarray` allocated alongside its own `pg_type`
+/// row, rather than the anonymous `record[]` pseudo-type.
+#[tokio::test]
+async fn named_record_arrays_keep_the_named_composite_array_type() {
+    let (_engine, mut s) = engine_with(&["CREATE TYPE array_pair AS (id int4)"]).await;
+    let type_oid = scalar(
+        &mut s,
+        "SELECT typarray FROM pg_catalog.pg_type WHERE typname = 'array_pair'",
+    )
+    .await
+    .expect("named composite array oid")
+    .parse::<u32>()
+    .expect("valid named composite array oid");
+
+    let (value, oid) = typed_scalar(&mut s, "ARRAY[ROW(1)::array_pair, ROW(2)::array_pair]").await;
+    assert!(value.as_deref() == Some("{(1),(2)}"));
+    assert!(oid == type_oid);
+}
+
+/// User-defined enum and domain elements retain their own array OIDs. A domain
+/// over a composite is the important recursive case: its array input reaches
+/// the domain's composite base type for each element.
+#[tokio::test]
+async fn enum_and_domain_over_composite_arrays_keep_their_user_type_identity() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TYPE array_mood AS ENUM ('happy', 'sad')",
+        "CREATE TYPE array_domain_pair AS (id int4)",
+        "CREATE DOMAIN array_pair_domain AS array_domain_pair",
+        "CREATE TABLE array_domain_values (pairs array_pair_domain[])",
+    ])
+    .await;
+    let enum_array_oid = scalar(
+        &mut s,
+        "SELECT typarray FROM pg_catalog.pg_type WHERE typname = 'array_mood'",
+    )
+    .await
+    .expect("enum array oid")
+    .parse::<u32>()
+    .expect("valid enum array oid");
+    let domain_array_oid = scalar(
+        &mut s,
+        "SELECT typarray FROM pg_catalog.pg_type WHERE typname = 'array_pair_domain'",
+    )
+    .await
+    .expect("domain array oid")
+    .parse::<u32>()
+    .expect("valid domain array oid");
+
+    let (enum_value, enum_oid) =
+        typed_scalar(&mut s, "ARRAY['happy'::array_mood, 'sad'::array_mood]").await;
+    assert!(enum_value.as_deref() == Some("{happy,sad}"));
+    assert!(enum_oid == enum_array_oid);
+
+    let (domain_value, domain_oid) = typed_scalar(
+        &mut s,
+        "ARRAY[ROW(1)::array_pair_domain, ROW(2)::array_pair_domain]",
+    )
+    .await;
+    assert!(domain_value.as_deref() == Some("{(1),(2)}"));
+    assert!(domain_oid == domain_array_oid);
+
+    run(
+        &mut s,
+        "INSERT INTO array_domain_values VALUES ('{(3),(4)}'::array_pair_domain[])",
+    )
+    .await;
+    assert!(
+        scalar(&mut s, "SELECT pairs FROM array_domain_values").await == Some("{(3),(4)}".into())
+    );
+}
+
+#[tokio::test]
+async fn user_defined_range_arrays_keep_their_array_type_identity() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TYPE array_int_range AS RANGE (SUBTYPE = int4)",
+        "CREATE TABLE array_range_values (ranges array_int_range[])",
+    ])
+    .await;
+    let array_oid = scalar(
+        &mut s,
+        "SELECT typarray FROM pg_catalog.pg_type WHERE typname = 'array_int_range'",
+    )
+    .await
+    .expect("range array oid")
+    .parse::<u32>()
+    .expect("valid range array oid");
+
+    let (value, oid) = typed_scalar(
+        &mut s,
+        "ARRAY['[1,3)'::array_int_range, '[5,8)'::array_int_range]",
+    )
+    .await;
+    assert!(value.as_deref() == Some("{\"[1,3)\",\"[5,8)\"}"));
+    assert!(oid == array_oid);
+    run(
+        &mut s,
+        "INSERT INTO array_range_values VALUES ('{\"[2,4)\"}'::array_int_range[])",
+    )
+    .await;
+    assert!(
+        scalar(&mut s, "SELECT ranges FROM array_range_values").await == Some("{\"[2,4)\"}".into())
+    );
+}
+
 /// Array text output quoting. The engine quotes only the elements that would
 /// otherwise be ambiguous, and it quotes the literal string `NULL` so a reader
 /// can tell it apart from a SQL NULL element.
@@ -234,6 +354,17 @@ async fn subscripting_is_one_based_and_out_of_range_is_null() {
     assert!(
         query(&mut s, "SELECT a[2] FROM t ORDER BY id").await == vec![row(&["20"]), vec![None]]
     );
+}
+
+/// A slice target's right-hand side is an array, unlike an element target's.
+#[tokio::test]
+async fn array_slice_assignments_accept_array_values_in_insert_and_update() {
+    let (_engine, mut s) = engine_with(&["CREATE TABLE t (id int4, a int4[])"]).await;
+    run(&mut s, "INSERT INTO t (id, a[1:3]) VALUES (1, '{1,2,3}')").await;
+    assert!(scalar(&mut s, "SELECT a FROM t WHERE id = 1").await == Some("{1,2,3}".into()));
+
+    run(&mut s, "UPDATE t SET a[2:3] = ARRAY[20,30] WHERE id = 1").await;
+    assert!(scalar(&mut s, "SELECT a FROM t WHERE id = 1").await == Some("{1,20,30}".into()));
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +803,56 @@ async fn every_element_type_round_trips_through_a_column() {
     assert!(query(&mut s, "SELECT v FROM b").await == vec![vec![None]]);
 }
 
+/// The open element descriptor is exercised through kinds that used to have a
+/// catalog-only array row: geometric, network, bit, system-id, and reg types.
+#[tokio::test]
+async fn uncommon_builtin_arrays_keep_their_element_and_array_identity() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE builtin_arrays (p point[], n inet[], b bit(3)[], o oid[], r regclass[])",
+        "INSERT INTO builtin_arrays VALUES (ARRAY['(1,2)'::point], ARRAY['192.168.1.2'::inet], ARRAY[B'101'::bit(3)], ARRAY[42::oid], ARRAY['pg_type'::regclass])",
+        "CREATE TABLE builtin_array_keys (id int4)",
+        "INSERT INTO builtin_array_keys VALUES (1)",
+    ])
+    .await;
+
+    assert!(
+        query(&mut s, "SELECT p, n, b, o, r FROM builtin_arrays").await
+            == vec![row(&[
+                r#"{"(1,2)"}"#,
+                "{192.168.1.2}",
+                "{101}",
+                "{42}",
+                "{pg_type}",
+            ])]
+    );
+    assert!(
+        query(
+            &mut s,
+            "SELECT k.id, a.r FROM builtin_array_keys k JOIN builtin_arrays a ON true",
+        )
+        .await
+            == vec![row(&["1", "{pg_type}"])]
+    );
+    for (column, type_name) in [
+        ("p", "point"),
+        ("n", "inet"),
+        ("b", "bit"),
+        ("o", "oid"),
+        ("r", "regclass"),
+    ] {
+        let (_, oid) = typed_scalar(&mut s, &format!("{column} FROM builtin_arrays")).await;
+        let expected = scalar(
+            &mut s,
+            &format!("SELECT typarray FROM pg_type WHERE typname = '{type_name}'"),
+        )
+        .await
+        .expect("array oid")
+        .parse::<u32>()
+        .expect("valid oid");
+        assert!(oid == expected, "{type_name}[] result oid");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Storage, ordering, unique indexes
 // ---------------------------------------------------------------------------
@@ -773,7 +954,9 @@ async fn array_column_defaults_persist_apply_and_render() {
     assert!(scalar(&mut s, "SELECT nums FROM t WHERE id = 2").await == None);
 
     assert!(column_default(&mut s, "t", "nums").await == Some("'{1,2}'::integer[]".into()));
-    assert!(column_default(&mut s, "t", "built").await == Some(r#"'{a,"b c"}'::text[]"#.into()));
+    assert!(
+        column_default(&mut s, "t", "built").await == Some("ARRAY['a'::text, 'b c'::text]".into())
+    );
     assert!(column_default(&mut s, "t", "holes").await == Some("'{1,NULL,3}'::integer[]".into()));
     assert!(column_default(&mut s, "t", "empty").await == Some("'{}'::text[]".into()));
 
@@ -871,6 +1054,135 @@ async fn multidimensional_arrays_carry_their_dimensions() {
     ] {
         assert!(err_code(&mut s, sql).await == code, "{sql}");
     }
+}
+
+#[tokio::test]
+async fn array_functions_accept_a_domain_over_an_array() {
+    let (_engine, mut s) = engine_with(&[]).await;
+    run(&mut s, "CREATE DOMAIN dimensioned_ints AS int4[]").await;
+
+    for (expr, expected) in [
+        ("array_dims('{1,2,3}'::dimensioned_ints)", "[1:3]"),
+        ("array_length('{1,2,3}'::dimensioned_ints, 1)", "3"),
+        (
+            "array_append('{1,2,3}'::dimensioned_ints, 4)::text",
+            "{1,2,3,4}",
+        ),
+    ] {
+        assert!(
+            scalar(&mut s, &format!("SELECT {expr}")).await == Some(expected.to_string()),
+            "{expr}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn adding_a_domain_constraint_rejects_existing_values_without_storing_it() {
+    let (_engine, mut s) = engine_with(&[]).await;
+    run(&mut s, "CREATE DOMAIN constrained_int AS int4").await;
+    run(
+        &mut s,
+        "CREATE TABLE constrained_values (value constrained_int)",
+    )
+    .await;
+    run(&mut s, "INSERT INTO constrained_values VALUES (1)").await;
+
+    let error = s
+        .simple_query("ALTER DOMAIN constrained_int ADD CONSTRAINT negative_only CHECK (VALUE < 0)")
+        .await
+        .expect_err("existing value rejects the new domain constraint");
+    assert!(error.code == "23514");
+    assert!(
+        error.message
+            == "column \"value\" of table \"constrained_values\" contains values that violate the new constraint"
+    );
+
+    run(&mut s, "INSERT INTO constrained_values VALUES (2)").await;
+    assert!(
+        scalar(&mut s, "SELECT count(*)::text FROM constrained_values").await == Some("2".into())
+    );
+}
+
+#[tokio::test]
+async fn a_not_valid_domain_constraint_checks_new_values_then_validates() {
+    let (_engine, mut s) = engine_with(&[]).await;
+    run(&mut s, "CREATE DOMAIN negative_int AS int4").await;
+    run(&mut s, "CREATE TABLE negative_values (value negative_int)").await;
+    run(&mut s, "INSERT INTO negative_values VALUES (1)").await;
+    run(
+        &mut s,
+        "ALTER DOMAIN negative_int ADD CONSTRAINT negative_only CHECK (VALUE < 0) NOT VALID",
+    )
+    .await;
+
+    let error = s
+        .simple_query("INSERT INTO negative_values VALUES (2)")
+        .await
+        .expect_err("NOT VALID domain constraint checks new values");
+    assert!(error.code == "23514");
+    let error = s
+        .simple_query("ALTER DOMAIN negative_int VALIDATE CONSTRAINT negative_only")
+        .await
+        .expect_err("validation checks existing values");
+    assert!(error.code == "23514");
+
+    run(&mut s, "UPDATE negative_values SET value = -1").await;
+    run(
+        &mut s,
+        "ALTER DOMAIN negative_int VALIDATE CONSTRAINT negative_only",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn adding_a_domain_not_null_constraint_back_validates_and_can_be_dropped() {
+    let (_engine, mut s) = engine_with(&[]).await;
+    run(&mut s, "CREATE DOMAIN nullable_int AS int4").await;
+    run(&mut s, "CREATE TABLE nullable_values (value nullable_int)").await;
+    run(&mut s, "INSERT INTO nullable_values VALUES (NULL)").await;
+
+    let error = s
+        .simple_query("ALTER DOMAIN nullable_int ADD NOT NULL")
+        .await
+        .expect_err("existing NULL rejects domain NOT NULL");
+    assert!(error.code == "23502");
+    assert!(error.message == "column \"value\" of table \"nullable_values\" contains null values");
+
+    run(&mut s, "UPDATE nullable_values SET value = 1").await;
+    run(
+        &mut s,
+        "ALTER DOMAIN nullable_int ADD CONSTRAINT nullable_int_nn NOT NULL",
+    )
+    .await;
+    assert!(err_code(&mut s, "INSERT INTO nullable_values VALUES (NULL)").await == "23502");
+    run(
+        &mut s,
+        "ALTER DOMAIN nullable_int DROP CONSTRAINT nullable_int_nn",
+    )
+    .await;
+    run(&mut s, "INSERT INTO nullable_values VALUES (NULL)").await;
+}
+
+#[tokio::test]
+async fn a_named_create_domain_not_null_constraint_can_be_dropped() {
+    let (_engine, mut s) = engine_with(&[]).await;
+    run(
+        &mut s,
+        "CREATE DOMAIN named_not_null AS int4 CONSTRAINT named_not_null_nn NOT NULL",
+    )
+    .await;
+    run(
+        &mut s,
+        "CREATE TABLE named_not_null_values (value named_not_null)",
+    )
+    .await;
+    assert!(err_code(&mut s, "INSERT INTO named_not_null_values VALUES (NULL)").await == "23502");
+    run(
+        &mut s,
+        "ALTER DOMAIN named_not_null DROP CONSTRAINT named_not_null_nn",
+    )
+    .await;
+    run(&mut s, "INSERT INTO named_not_null_values VALUES (NULL)").await;
 }
 
 /// An array of a bounded string carries the modifier on its element type, so the

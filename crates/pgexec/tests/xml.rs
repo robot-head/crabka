@@ -194,6 +194,9 @@ async fn xmlparse_document_and_content_accept_different_shapes() {
         // A leading doctype promotes CONTENT to the document grammar, so a
         // second root is rejected under both spellings.
         ("<!DOCTYPE a><a/><b/>", false, false),
+        // A doctype is only legal in the prologue, never after content.
+        ("<!-- hi--> oops <!DOCTYPE a><a/>", false, false),
+        ("<!-- hi--> <oops/> <!DOCTYPE a><a/>", false, false),
         // Namespaces are not checked at parse time -- only xpath cares.
         ("<nosuchprefix:tag/>", true, true),
         ("<invalidns xmlns='&lt;'/>", true, true),
@@ -714,22 +717,490 @@ async fn xml_casts_only_to_and_from_the_string_family() {
         let sql = format!("SELECT ({source})::xml");
         assert!(err(&mut s, &sql).await.0 == "42846", "{sql}");
     }
+
+    run(&mut s, "SET XML OPTION DOCUMENT").await;
+    assert!(err(&mut s, "SELECT 'plain text'::text::xml").await.0 == "2200M");
+    run(&mut s, "PREPARE xml_parameter(xml) AS SELECT $1").await;
+    assert!(err(&mut s, "EXECUTE xml_parameter('plain text')").await.0 == "2200M");
 }
 
-/// The deliberately-unimplemented XML surface keeps reporting a missing
-/// function rather than half-answering.
+/// The well-formedness predicates use the grammar named by their suffix and
+/// report malformed input as false rather than an XML parse error.
 #[tokio::test]
-async fn the_out_of_scope_xml_functions_still_report_that_they_are_missing() {
+async fn well_formedness_predicates_distinguish_documents_from_content() {
     let (_engine, mut s) = session();
 
-    for sql in [
-        "SELECT xpath('/a', '<a/>'::xml)",
-        "SELECT xpath_exists('/a', '<a/>'::xml)",
-        "SELECT xml_is_well_formed('<a/>')",
-        "SELECT xmlagg(x) FROM (VALUES ('<a/>'::xml)) t(x)",
-        "SELECT query_to_xml('SELECT 1', false, false, '')",
+    for (expr, expected) in [
+        ("xml_is_well_formed_document('<a/>')", "t"),
+        ("xml_is_well_formed_document('plain text')", "f"),
+        ("xml_is_well_formed_content('<a/><b/>')", "t"),
+        ("xml_is_well_formed_content('<a>')", "f"),
     ] {
-        let (code, _, _) = err(&mut s, sql).await;
-        assert!(code.starts_with("42") || code == "0A000", "{sql}: {code}");
+        assert!(
+            scalar(&mut s, expr).await == Some(expected.into()),
+            "{expr}"
+        );
     }
+    assert!(
+        scalar(&mut s, "xml_is_well_formed_document(NULL)")
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn well_formedness_uses_the_xmloption_setting() {
+    let (_engine, mut s) = session();
+
+    assert!(scalar(&mut s, "xml_is_well_formed('plain text')").await == Some("t".into()));
+    run(&mut s, "SET XML OPTION DOCUMENT").await;
+    assert!(scalar(&mut s, "xml_is_well_formed('plain text')").await == Some("f".into()));
+    run(&mut s, "SET XML OPTION CONTENT").await;
+    assert!(scalar(&mut s, "xml_is_well_formed('plain text')").await == Some("t".into()));
+}
+
+#[tokio::test]
+async fn xpath_selects_elements_text_attributes_and_existence() {
+    let (_engine, mut s) = session();
+
+    assert!(scalar(&mut s, "xpath(NULL, NULL) IS NULL").await == Some("t".into()));
+    assert!(scalar(&mut s, "xpath_exists(NULL, NULL) IS NULL").await == Some("t".into()));
+    assert!(
+        scalar(&mut s, "xpath('''<<invalid>>''', '<root/>')").await
+            == Some("{&lt;&lt;invalid&gt;&gt;}".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xpath('//loc:piece/@id', '<local:data xmlns:local=\"http://127.0.0.1\"><local:piece id=\"1\">number one</local:piece><local:piece id=\"2\"/></local:data>', ARRAY[ARRAY['loc', 'http://127.0.0.1']])",
+        )
+        .await
+            == Some("{1,2}".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xpath('//loc:piece', '<local:data xmlns:local=\"http://127.0.0.1\" xmlns=\"http://127.0.0.2\"><local:piece id=\"1\"><internal>number one</internal><internal2/></local:piece><local:piece id=\"2\"/></local:data>', ARRAY[ARRAY['loc', 'http://127.0.0.1']])",
+        )
+        .await
+            == Some("{\"<local:piece xmlns:local=\\\"http://127.0.0.1\\\" xmlns=\\\"http://127.0.0.2\\\" id=\\\"1\\\"><internal>number one</internal><internal2/></local:piece>\",\"<local:piece xmlns:local=\\\"http://127.0.0.1\\\" id=\\\"2\\\"/>\"}".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xpath('/root/item', '<root><item>a</item><item>b</item></root>')"
+        )
+        .await
+            == Some("{<item>a</item>,<item>b</item>}".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xpath('//item/text()', '<root><item>a</item><item>b</item></root>')"
+        )
+        .await
+            == Some("{a,b}".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xpath('//@id', '<root><item id=\"a\"/><item id=\"b\"/></root>')"
+        )
+        .await
+            == Some("{a,b}".into())
+    );
+    assert!(
+        scalar(&mut s, "xpath_exists('//item', '<root><item/></root>')").await == Some("t".into())
+    );
+    assert!(
+        rows(
+            &mut s,
+            "SELECT xpath_exists('//town', '<towns><town>Bidford</town><town>Cwmbran</town></towns>'), xpath_exists('//town[text() = ''Cwmbran'']', '<towns><town>Bidford</town><town>Cwmbran</town></towns>'), xpath_exists('//town[text()=''Cwmbran'']', '<towns><town>Bidford</town><town>Cwmbran</town></towns>')",
+        )
+        .await
+            == vec![vec![Some("t".into()), Some("t".into()), Some("t".into())]]
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xmlexists('//town[text() = ''Cwmbran'']' PASSING BY REF '<towns><town>Bidford</town><town>Cwmbran</town></towns>' BY REF)",
+        )
+        .await
+            == Some("t".into())
+    );
+    assert!(
+        scalar(&mut s, "xpath_exists('//missing', '<root><item/></root>')").await
+            == Some("f".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xpath_exists('//town[text() = ''Cwmbran'']', '<towns><town>Bidford</town><town>Cwmbran</town></towns>')",
+        )
+        .await
+            == Some("t".into())
+    );
+    assert!(
+        scalar(&mut s, "xpath('count(//*)', '<root><item/><item/></root>')").await
+            == Some("{3}".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xpath('count(//*)=3', '<root><item/><item/></root>')"
+        )
+        .await
+            == Some("{true}".into())
+    );
+    assert!(
+        scalar(&mut s, "xpath('name(/*)', '<root><item/></root>')").await == Some("{root}".into())
+    );
+    let (code, message, _) = err(&mut s, "SELECT xpath('/*', '<invalidns xmlns=''&lt;''/>')").await;
+    assert!(code == "2200M" && message == "could not parse XML document");
+    let (code, message, detail) = err(&mut s, "SELECT xpath('/*', '<nosuchprefix:tag/>')").await;
+    assert!(code == "2200M" && message == "could not parse XML document");
+    assert!(detail.as_deref().is_some_and(|detail| {
+        detail.starts_with("line 1: Namespace prefix nosuchprefix on tag is not defined")
+    }));
+    assert!(
+        scalar(&mut s, "xpath('/*', '<relativens xmlns=''relative''/>')").await
+            == Some("{\"<relativens xmlns=\\\"relative\\\"/>\"}".into())
+    );
+}
+
+#[tokio::test]
+async fn xmltable_projects_xpath_values_into_typed_columns() {
+    let (_engine, mut s) = session();
+
+    assert!(
+        rows(
+            &mut s,
+            "SELECT * FROM XMLTABLE('/rows/row' PASSING '<rows><row id=\"1\"><name>one</name></row><row id=\"2\"><name>two</name></row></rows>' COLUMNS id int PATH '@id', ordinal FOR ORDINALITY, name text, missing text DEFAULT 'fallback')",
+        )
+        .await
+            == vec![
+                vec![Some("1".into()), Some("1".into()), Some("one".into()), Some("fallback".into())],
+                vec![Some("2".into()), Some("2".into()), Some("two".into()), Some("fallback".into())],
+            ]
+    );
+}
+
+#[tokio::test]
+async fn xmltable_accepts_not_null_and_child_predicates() {
+    let (_engine, mut s) = session();
+
+    assert!(
+        rows(
+            &mut s,
+            "SELECT * FROM XMLTABLE('/rows/row[name=\"one\" or name=\"two\"]' PASSING '<rows><row><name>one</name></row><row><name>skip</name></row><row><name>two</name></row></rows>' COLUMNS name text NOT NULL, raw xml PATH './*')",
+        )
+        .await
+            == vec![
+                vec![Some("one".into()), Some("<name>one</name>".into())],
+                vec![Some("two".into()), Some("<name>two</name>".into())],
+            ]
+    );
+}
+
+#[tokio::test]
+async fn xmltable_rejects_default_namespaces_and_multiple_values() {
+    let (_engine, mut s) = session();
+
+    let (code, message, _) = err(
+        &mut s,
+        "SELECT * FROM XMLTABLE(XMLNAMESPACES(DEFAULT 'urn:test'), '/rows/row' PASSING '<rows xmlns=\"urn:test\"><row/></rows>' COLUMNS value text PATH 'value')",
+    )
+    .await;
+    assert!(code == "0A000" && message == "DEFAULT namespace is not supported");
+
+    let (_, message, _) = err(
+        &mut s,
+        "SELECT * FROM XMLTABLE('/rows/row' PASSING '<rows><row><value>a</value><value>b</value></row></rows>' COLUMNS value text)",
+    )
+    .await;
+    assert!(message == "more than one value returned by column XPath expression");
+
+    let (code, message, _) = err(
+        &mut s,
+        "SELECT * FROM XMLTABLE('/rows/row' PASSING '<rows><row/></rows>' COLUMNS value text NOT NULL)",
+    )
+    .await;
+    assert!(code == "22004" && message == "null is not allowed in column \"value\"");
+
+    let (_, message, _) = err(
+        &mut s,
+        "SELECT * FROM XMLTABLE(ROW () PASSING null COLUMNS value timestamp) AS f (value, extra)",
+    )
+    .await;
+    assert!(message == "XMLTABLE function has 1 columns available but 2 columns specified");
+
+    let (_, message, _) = err(
+        &mut s,
+        "SELECT * FROM XMLTABLE(ROW () PASSING null COLUMNS value timestamp __pg__is_not_null 1) AS f (value)",
+    )
+    .await;
+    assert!(message == "option name \"__pg__is_not_null\" cannot be used in XMLTABLE");
+}
+
+#[tokio::test]
+async fn xmltable_supports_xpath_scalars_root_namespace_and_xml_sequences() {
+    let (_engine, mut s) = session();
+
+    assert!(
+        rows(
+            &mut s,
+            "SELECT * FROM XMLTABLE('*' PASSING '<a>a</a>' COLUMNS literal text PATH '\"hi\"', equal boolean PATH '. = \"a\"', length int PATH 'string-length(.)', root xml PATH '/')",
+        )
+        .await
+            == vec![vec![
+                Some("hi".into()),
+                Some("t".into()),
+                Some("1".into()),
+                Some("<a>a</a>".into()),
+            ]]
+    );
+    assert!(
+        rows(
+            &mut s,
+            "SELECT * FROM XMLTABLE('.' PASSING '<foo/>' COLUMNS uri text PATH 'foo/namespace::node()')",
+        )
+        .await
+            == vec![vec![Some("http://www.w3.org/XML/1998/namespace".into())]]
+    );
+    assert!(
+        rows(
+            &mut s,
+            "SELECT * FROM XMLTABLE('/rows/row' PASSING '<rows><row><a/><b/></row></rows>' COLUMNS value xml PATH './*')",
+        )
+        .await
+            == vec![vec![Some("<a/><b/>".into())]]
+    );
+}
+
+#[tokio::test]
+async fn xmlagg_concatenates_xml_values_and_is_null_over_no_rows() {
+    let (_engine, mut s) = session();
+    run(&mut s, "CREATE TABLE xmlagg_test (id int, value xml)").await;
+    run(
+        &mut s,
+        "INSERT INTO xmlagg_test VALUES (2, '<b/>'::xml), (1, '<a/>'::xml)",
+    )
+    .await;
+
+    assert!(
+        scalar(&mut s, "xmlagg(value ORDER BY id) FROM xmlagg_test").await
+            == Some("<a/><b/>".into())
+    );
+    assert!(scalar(&mut s, "xmlagg('<c/>')").await == Some("<c/>".into()));
+    assert!(
+        scalar(&mut s, "xmlagg(value) FROM xmlagg_test WHERE false")
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn xmlelement_escapes_scalar_content_and_keeps_nested_xml() {
+    let (_engine, mut s) = session();
+
+    assert!(scalar(&mut s, "xmlelement(name empty)").await == Some("<empty/>".into()));
+    assert!(
+        scalar(&mut s, "xmlelement(name foo, 'b<a/>r')").await
+            == Some("<foo>b&lt;a/&gt;r</foo>".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xmlelement(name outer, xmlelement(name inner, 'stuff'))",
+        )
+        .await
+            == Some("<outer><inner>stuff</inner></outer>".into())
+    );
+}
+
+#[tokio::test]
+async fn xml_constructors_render_named_attributes_and_forests() {
+    let (_engine, mut s) = session();
+
+    assert!(
+        scalar(
+            &mut s,
+            "xmlelement(name element, xmlattributes(1 as one, '<>&\"''' as two), 'content')",
+        )
+        .await
+            == Some("<element one=\"1\" two=\"&lt;&gt;&amp;&quot;'\">content</element>".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xmlelement(name \"123\", xmlattributes(1 as \"_xabc\"))",
+        )
+        .await
+            == Some("<_x0031_23 _x005F_xabc=\"1\"/>".into())
+    );
+    assert!(scalar(&mut s, "xmlelement(name foo, true)").await == Some("<foo>true</foo>".into()));
+    run(&mut s, "SET xmlbinary TO base64").await;
+    assert!(
+        scalar(&mut s, "xmlelement(name foo, bytea 'bar')").await == Some("<foo>YmFy</foo>".into())
+    );
+    run(&mut s, "SET xmlbinary TO hex").await;
+    assert!(
+        scalar(&mut s, "xmlelement(name foo, bytea 'bar')").await
+            == Some("<foo>626172</foo>".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xmlelement(name foo, '2009-04-09 00:24:37'::timestamp)"
+        )
+        .await
+            == Some("<foo>2009-04-09T00:24:37</foo>".into())
+    );
+    run(
+        &mut s,
+        "CREATE TABLE xmlforest_test (name text, age int, salary int)",
+    )
+    .await;
+    run(
+        &mut s,
+        "INSERT INTO xmlforest_test VALUES ('sharon', 25, 1000), (NULL, NULL, 5)",
+    )
+    .await;
+    assert!(
+        rows(
+            &mut s,
+            "SELECT xmlelement(name employee, xmlforest(name, age, salary as pay)) FROM xmlforest_test ORDER BY salary",
+        )
+        .await
+            == vec![
+                vec![Some("<employee><pay>5</pay></employee>".into())],
+                vec![Some("<employee><name>sharon</name><age>25</age><pay>1000</pay></employee>".into())],
+            ]
+    );
+    let (_, message, _) = err(
+        &mut s,
+        "SELECT xmlelement(name duplicate, xmlattributes(1 as a, 2 as a))",
+    )
+    .await;
+    assert!(message == "XML attribute name \"a\" appears more than once");
+}
+
+#[tokio::test]
+async fn xmlpi_and_xmlroot_build_processing_instructions_and_declarations() {
+    let (_engine, mut s) = session();
+
+    assert!(scalar(&mut s, "xmlpi(name foo)").await == Some("<?foo?>".into()));
+    assert!(
+        scalar(&mut s, "xmlpi(name \":::_xml_abc135.%-&_\")").await
+            == Some("<?_x003A_::_x005F_xml_abc135._x0025_-_x0026__?>".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xmlpi(name \"xml-stylesheet\", '  href=\"style.css\"')"
+        )
+        .await
+            == Some("<?xml-stylesheet href=\"style.css\"?>".into())
+    );
+    assert!(scalar(&mut s, "xmlpi(name foo, null)").await.is_none());
+    assert!(
+        scalar(&mut s, "xmlroot(xml '<foo/>', version '2.0')").await
+            == Some("<?xml version=\"2.0\"?><foo/>".into())
+    );
+    assert!(
+        scalar(
+            &mut s,
+            "xmlroot(xml '<foo/>', version no value, standalone yes)"
+        )
+        .await
+            == Some("<?xml version=\"1.0\" standalone=\"yes\"?><foo/>".into())
+    );
+}
+
+#[tokio::test]
+async fn table_to_xml_reads_relations_with_null_and_forest_modes() {
+    let (_engine, mut s) = session();
+    run(&mut s, "CREATE TABLE xmlmap (id int, value text)").await;
+    run(&mut s, "INSERT INTO xmlmap VALUES (1, 'one'), (2, NULL)").await;
+
+    assert!(scalar(&mut s, "table_to_xml('xmlmap', false, false, '')").await
+        == Some("<xmlmap xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n\n<row>\n  <id>1</id>\n  <value>one</value>\n</row>\n\n<row>\n  <id>2</id>\n</row>\n\n</xmlmap>\n".into()));
+    assert!(scalar(&mut s, "table_to_xml('xmlmap', true, true, 'urn:test')").await
+        == Some("<xmlmap xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns=\"urn:test\">\n  <id>1</id>\n  <value>one</value>\n</xmlmap>\n\n<xmlmap xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns=\"urn:test\">\n  <id>2</id>\n  <value xsi:nil=\"true\"/>\n</xmlmap>\n\n".into()));
+    assert!(scalar(&mut s, "query_to_xml('SELECT value, id FROM xmlmap ORDER BY id', true, false, '')").await
+        == Some("<table xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n\n<row>\n  <value>one</value>\n  <id>1</id>\n</row>\n\n<row>\n  <value xsi:nil=\"true\"/>\n  <id>2</id>\n</row>\n\n</table>\n".into()));
+    assert!(scalar(&mut s, "query_to_xml('SELECT value, id FROM xmlmap ORDER BY id', false, true, '')").await
+        == Some("<row xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n  <value>one</value>\n  <id>1</id>\n</row>\n\n<row xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n  <id>2</id>\n</row>\n\n".into()));
+    run(
+        &mut s,
+        "DECLARE xml_cursor CURSOR WITH HOLD FOR SELECT id, value FROM xmlmap ORDER BY id",
+    )
+    .await;
+    assert!(scalar(&mut s, "cursor_to_xml('xml_cursor'::refcursor, 5, true, false, '')").await
+        == Some("<table xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n\n<row>\n  <id>1</id>\n  <value>one</value>\n</row>\n\n<row>\n  <id>2</id>\n  <value xsi:nil=\"true\"/>\n</row>\n\n</table>\n".into()));
+    assert!(scalar(&mut s, "table_to_xmlschema('xmlmap', true, false, '')").await
+        == Some("<xsd:schema\n    xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">\n\n<xsd:simpleType name=\"INTEGER\">\n  <xsd:restriction base=\"xsd:int\">\n    <xsd:maxInclusive value=\"2147483647\"/>\n    <xsd:minInclusive value=\"-2147483648\"/>\n  </xsd:restriction>\n</xsd:simpleType>\n\n<xsd:simpleType name=\"UDT.postgres.pg_catalog.text\">\n  <xsd:restriction base=\"xsd:string\">\n  </xsd:restriction>\n</xsd:simpleType>\n\n<xsd:complexType name=\"RowType.postgres.public.xmlmap\">\n  <xsd:sequence>\n    <xsd:element name=\"id\" type=\"INTEGER\" nillable=\"true\"></xsd:element>\n    <xsd:element name=\"value\" type=\"UDT.postgres.pg_catalog.text\" nillable=\"true\"></xsd:element>\n  </xsd:sequence>\n</xsd:complexType>\n\n<xsd:complexType name=\"TableType.postgres.public.xmlmap\">\n  <xsd:sequence>\n    <xsd:element name=\"row\" type=\"RowType.postgres.public.xmlmap\" minOccurs=\"0\" maxOccurs=\"unbounded\"/>\n  </xsd:sequence>\n</xsd:complexType>\n\n<xsd:element name=\"xmlmap\" type=\"TableType.postgres.public.xmlmap\"/>\n\n</xsd:schema>".into()));
+    assert!(scalar(&mut s, "query_to_xmlschema('SELECT id, value FROM xmlmap ORDER BY id', false, true, '')").await
+        == Some("<xsd:schema\n    xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">\n\n<xsd:simpleType name=\"INTEGER\">\n  <xsd:restriction base=\"xsd:int\">\n    <xsd:maxInclusive value=\"2147483647\"/>\n    <xsd:minInclusive value=\"-2147483648\"/>\n  </xsd:restriction>\n</xsd:simpleType>\n\n<xsd:simpleType name=\"UDT.postgres.pg_catalog.text\">\n  <xsd:restriction base=\"xsd:string\">\n  </xsd:restriction>\n</xsd:simpleType>\n\n<xsd:complexType name=\"RowType\">\n  <xsd:sequence>\n    <xsd:element name=\"id\" type=\"INTEGER\" minOccurs=\"0\"></xsd:element>\n    <xsd:element name=\"value\" type=\"UDT.postgres.pg_catalog.text\" minOccurs=\"0\"></xsd:element>\n  </xsd:sequence>\n</xsd:complexType>\n\n<xsd:element name=\"row\" type=\"RowType\"/>\n\n</xsd:schema>".into()));
+    run(
+        &mut s,
+        "DECLARE xml_schema_cursor CURSOR WITH HOLD FOR SELECT id, value FROM xmlmap ORDER BY id",
+    )
+    .await;
+    assert!(scalar(&mut s, "cursor_to_xmlschema('xml_schema_cursor'::refcursor, true, false, '')").await
+        == Some("<xsd:schema\n    xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">\n\n<xsd:simpleType name=\"INTEGER\">\n  <xsd:restriction base=\"xsd:int\">\n    <xsd:maxInclusive value=\"2147483647\"/>\n    <xsd:minInclusive value=\"-2147483648\"/>\n  </xsd:restriction>\n</xsd:simpleType>\n\n<xsd:simpleType name=\"UDT.postgres.pg_catalog.text\">\n  <xsd:restriction base=\"xsd:string\">\n  </xsd:restriction>\n</xsd:simpleType>\n\n<xsd:complexType name=\"RowType\">\n  <xsd:sequence>\n    <xsd:element name=\"id\" type=\"INTEGER\" nillable=\"true\"></xsd:element>\n    <xsd:element name=\"value\" type=\"UDT.postgres.pg_catalog.text\" nillable=\"true\"></xsd:element>\n  </xsd:sequence>\n</xsd:complexType>\n\n<xsd:complexType name=\"TableType\">\n  <xsd:sequence>\n    <xsd:element name=\"row\" type=\"RowType\" minOccurs=\"0\" maxOccurs=\"unbounded\"/>\n  </xsd:sequence>\n</xsd:complexType>\n\n<xsd:element name=\"table\" type=\"TableType\"/>\n\n</xsd:schema>".into()));
+    assert!(scalar(&mut s, "schema_to_xml('public', true, false, '')").await
+        == Some("<public xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n\n<xmlmap>\n\n<row>\n  <id>1</id>\n  <value>one</value>\n</row>\n\n<row>\n  <id>2</id>\n  <value xsi:nil=\"true\"/>\n</row>\n\n</xmlmap>\n\n</public>\n".into()));
+    assert!(scalar(&mut s, "schema_to_xmlschema('public', false, true, '')").await
+        == Some("<xsd:schema\n    xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">\n\n<xsd:simpleType name=\"INTEGER\">\n  <xsd:restriction base=\"xsd:int\">\n    <xsd:maxInclusive value=\"2147483647\"/>\n    <xsd:minInclusive value=\"-2147483648\"/>\n  </xsd:restriction>\n</xsd:simpleType>\n\n<xsd:simpleType name=\"UDT.postgres.pg_catalog.text\">\n  <xsd:restriction base=\"xsd:string\">\n  </xsd:restriction>\n</xsd:simpleType>\n\n<xsd:complexType name=\"SchemaType.postgres.public\">\n  <xsd:sequence>\n    <xsd:element name=\"xmlmap\" type=\"RowType.postgres.public.xmlmap\" minOccurs=\"0\" maxOccurs=\"unbounded\"/>\n  </xsd:sequence>\n</xsd:complexType>\n\n<xsd:element name=\"public\" type=\"SchemaType.postgres.public\"/>\n\n</xsd:schema>".into()));
+    let combined = scalar(
+        &mut s,
+        "schema_to_xml_and_xmlschema('public', true, true, 'urn:test')",
+    )
+    .await
+    .expect("schema XML result");
+    assert!(combined.starts_with("<public xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns=\"urn:test\" xsi:schemaLocation=\"urn:test #\">\n\n<xsd:schema"));
+    assert!(combined.ends_with("\n\n</public>\n"));
+}
+
+#[tokio::test]
+async fn xml_maps_use_xml_scalar_spelling_not_session_wire_text() {
+    let (_engine, mut s) = session();
+    run(&mut s, "SET DateStyle TO 'SQL, MDY'").await;
+    run(&mut s, "SET TIME ZONE 'America/Los_Angeles'").await;
+    run(
+        &mut s,
+        "CREATE TABLE xmlmap_scalar (flag bool, bytes bytea, day date, stamp timestamp, stamp_tz timestamptz)",
+    )
+    .await;
+    run(
+        &mut s,
+        "INSERT INTO xmlmap_scalar VALUES (true, 'XYZ', '2009-06-08', '2009-06-08 21:07:30', '2009-06-08 21:07:30 -07')",
+    )
+    .await;
+
+    let expected = "<xmlmap_scalar xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n\n<row>\n  <flag>true</flag>\n  <bytes>WFla</bytes>\n  <day>2009-06-08</day>\n  <stamp>2009-06-08T21:07:30</stamp>\n  <stamp_tz>2009-06-08T21:07:30-07:00</stamp_tz>\n</row>\n\n</xmlmap_scalar>\n";
+    assert!(
+        scalar(&mut s, "table_to_xml('xmlmap_scalar', false, false, '')").await
+            == Some(expected.into())
+    );
+    assert!(scalar(
+        &mut s,
+        "query_to_xml('SELECT flag, bytes, day, stamp, stamp_tz FROM xmlmap_scalar', false, false, '')",
+    )
+    .await
+        == Some(expected.replace("xmlmap_scalar", "table")));
+    run(
+        &mut s,
+        "DECLARE xmlmap_scalar_cursor CURSOR WITH HOLD FOR SELECT flag, bytes, day, stamp, stamp_tz FROM xmlmap_scalar",
+    )
+    .await;
+    assert!(
+        scalar(
+            &mut s,
+            "cursor_to_xml('xmlmap_scalar_cursor'::refcursor, 1, false, false, '')",
+        )
+        .await
+            == Some(expected.replace("xmlmap_scalar", "table"))
+    );
 }

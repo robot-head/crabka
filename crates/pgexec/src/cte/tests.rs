@@ -1,7 +1,10 @@
 use assert2::assert;
 use crabka_pgwire::engine::{Engine, QueryResult, Session};
 
-use crate::SqlEngine;
+use crate::{
+    SqlEngine,
+    cte::{CycleExtra, RecursiveExtras},
+};
 
 async fn rows(setup: &[&str], sql: &str) -> Vec<Vec<Option<String>>> {
     let engine = SqlEngine::new();
@@ -48,6 +51,28 @@ const TREE: &[&str] = &[
     "CREATE TABLE tree (id int4, parent int4)",
     "INSERT INTO tree VALUES (1,NULL),(2,1),(3,1),(4,2),(5,3)",
 ];
+
+#[test]
+fn a_marked_cycle_row_does_not_recur() {
+    let extras = RecursiveExtras {
+        search: None,
+        cycle: Some(CycleExtra {
+            columns: Vec::new(),
+            mark_name: "is_cycle".into(),
+            path_name: "path".into(),
+            marked: crabka_pgtypes::Datum::Bool(true),
+            unmarked: crabka_pgtypes::Datum::Bool(false),
+        }),
+    };
+    assert!(extras.stops_recursion(&[
+        crabka_pgtypes::Datum::Bool(true),
+        crabka_pgtypes::Datum::Null,
+    ]));
+    assert!(!extras.stops_recursion(&[
+        crabka_pgtypes::Datum::Bool(false),
+        crabka_pgtypes::Datum::Null,
+    ]));
+}
 
 #[tokio::test]
 async fn recursive_union_all_counts_up() {

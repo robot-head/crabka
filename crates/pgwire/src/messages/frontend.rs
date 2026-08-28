@@ -5,7 +5,7 @@
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::error::PgError;
+use crate::{engine::FastpathCall, error::PgError};
 
 pub const PROTOCOL_3_0: i32 = 0x0003_0000; // 196608
 pub const SSL_REQUEST_CODE: i32 = 80_877_103;
@@ -150,9 +150,8 @@ pub enum FrontendMessage {
     CopyData(Bytes),
     CopyDone,
     CopyFail(String),
-    /// Legacy fastpath function call. The wire layer rejects these after
-    /// consuming the complete frame so the connection stays synchronized.
-    FunctionCall,
+    /// Legacy fastpath function call.
+    FunctionCall(FastpathCall),
     Terminate,
 }
 
@@ -222,10 +221,7 @@ pub fn decode_message_with_max_len(
         }
         b'c' => FrontendMessage::CopyDone,
         b'f' => FrontendMessage::CopyFail(get_cstr(&mut body)?),
-        b'F' => {
-            body.advance(body.len());
-            FrontendMessage::FunctionCall
-        }
+        b'F' => FrontendMessage::FunctionCall(decode_fastpath_call(&mut body)?),
         b'p' => {
             let payload = body.clone();
             body.advance(body.len());
@@ -302,6 +298,55 @@ pub fn decode_message_with_max_len(
         )));
     }
     Ok(Some(msg))
+}
+
+fn decode_fastpath_call(body: &mut Bytes) -> Result<FastpathCall, PgError> {
+    let function_oid = u32::try_from(get_i32(body)?)
+        .map_err(|_| PgError::protocol("negative fastpath function OID"))?;
+    let format_count = usize::try_from(get_i16(body)?)
+        .map_err(|_| PgError::protocol("negative fastpath format count"))?;
+    let mut argument_formats = Vec::with_capacity(format_count);
+    for _ in 0..format_count {
+        let format = get_i16(body)?;
+        if !matches!(format, 0 | 1) {
+            return Err(PgError::protocol("invalid fastpath argument format"));
+        }
+        argument_formats.push(format);
+    }
+    let argument_count = usize::try_from(get_i16(body)?)
+        .map_err(|_| PgError::protocol("negative fastpath argument count"))?;
+    if !matches!(format_count, 0 | 1) && format_count != argument_count {
+        return Err(PgError::protocol(
+            "fastpath format count does not match argument count",
+        ));
+    }
+    let mut arguments = Vec::with_capacity(argument_count);
+    for _ in 0..argument_count {
+        let length = get_i32(body)?;
+        if length == -1 {
+            arguments.push(None);
+            continue;
+        }
+        let length = usize::try_from(length)
+            .map_err(|_| PgError::protocol("negative fastpath argument length"))?;
+        if body.remaining() < length {
+            return Err(PgError::protocol("truncated fastpath argument"));
+        }
+        arguments.push(Some(body.copy_to_bytes(length)));
+    }
+    let result_format = get_i16(body)?;
+    if !matches!(result_format, 0 | 1) {
+        return Err(PgError::protocol("invalid fastpath result format"));
+    }
+    if body.has_remaining() {
+        return Err(PgError::protocol("trailing bytes in fastpath call"));
+    }
+    Ok(FastpathCall {
+        function_oid,
+        argument_formats,
+        arguments,
+        result_format,
+    })
 }
 
 fn decode_i16_vec(body: &mut Bytes) -> Result<Vec<i16>, PgError> {
@@ -382,6 +427,37 @@ mod tests {
                 sql: "SELECT 1".into()
             }
         );
+    }
+
+    #[test]
+    fn decodes_binary_fastpath_call() {
+        let mut body = BytesMut::new();
+        body.put_i32(952);
+        body.put_i16(1);
+        body.put_i16(1);
+        body.put_i16(2);
+        body.put_i32(4);
+        body.put_i32(42);
+        body.put_i32(4);
+        body.put_i32(0x60_000);
+        body.put_i16(1);
+        let mut frame = tagged(b'F', &body);
+        let FrontendMessage::FunctionCall(call) = decode_message(&mut frame)
+            .expect("fastpath frame")
+            .expect("complete frame")
+        else {
+            panic!("function call");
+        };
+        assert_eq!(call.function_oid, 952);
+        assert_eq!(call.argument_formats, vec![1]);
+        assert_eq!(
+            call.arguments,
+            vec![
+                Some(Bytes::copy_from_slice(&42_i32.to_be_bytes())),
+                Some(Bytes::copy_from_slice(&0x60_000_i32.to_be_bytes())),
+            ]
+        );
+        assert_eq!(call.result_format, 1);
     }
 
     #[test]

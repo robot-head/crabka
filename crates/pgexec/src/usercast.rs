@@ -16,12 +16,9 @@
 //! would have read a form the representation type does not, the conversion
 //! fails loudly rather than producing some other value.
 //!
-//! `WITH FUNCTION` is refused. It needs the cast path to call a routine, which
-//! the evaluator has no seam for, and recording the cast would leave it inert.
-
 use crabka_pgcatalog::UserCast;
 use crabka_pgkv::{Kv, WriteOp};
-use crabka_pgparser::ast::{CastContext, CastMethod, Expr};
+use crabka_pgparser::ast::{CastContext, CastMethod, Expr, FuncArgs, FuncCall};
 use crabka_pgtypes::{ColumnType, Datum, encoding::encode_binary};
 use crabka_pgwire::engine::QueryResult;
 
@@ -46,19 +43,45 @@ pub(crate) fn hydrate(kv: &dyn Kv) -> Result<(), ExecError> {
 ///
 /// Propagates catalog read errors.
 pub(crate) fn publish(kv: &dyn Kv) -> Result<(), ExecError> {
-    let declared = crabka_pgcatalog::list_user_casts(kv)?
-        .into_iter()
+    let declared = declared_casts(kv)?;
+    crabka_pgtypes::usercast::publish(declared);
+    Ok(())
+}
+
+/// Apply the current catalog's cast change to the process registry.
+///
+/// # Errors
+///
+/// Propagates catalog read errors.
+pub(crate) fn publish_delta(
+    before: &[crabka_pgcatalog::UserCast],
+    kv: &dyn Kv,
+) -> Result<(), ExecError> {
+    let before = declared_from(before);
+    let after = declared_casts(kv)?;
+    crabka_pgtypes::usercast::publish_catalog_delta(&before, &after);
+    Ok(())
+}
+
+fn declared_casts(kv: &dyn Kv) -> Result<Vec<crabka_pgtypes::usercast::DeclaredCast>, ExecError> {
+    Ok(declared_from(&crabka_pgcatalog::list_user_casts(kv)?))
+}
+
+fn declared_from(
+    casts: &[crabka_pgcatalog::UserCast],
+) -> Vec<crabka_pgtypes::usercast::DeclaredCast> {
+    casts
+        .iter()
         .map(|cast| crabka_pgtypes::usercast::DeclaredCast {
             source: cast.source,
             target: cast.target,
-            method: if cast.method == 'i' {
-                crabka_pgtypes::usercast::CastMethod::InOut
-            } else {
-                crabka_pgtypes::usercast::CastMethod::Binary
+            method: match cast.method {
+                'i' => crabka_pgtypes::usercast::CastMethod::InOut,
+                'f' => crabka_pgtypes::usercast::CastMethod::Function,
+                _ => crabka_pgtypes::usercast::CastMethod::Binary,
             },
-        });
-    crabka_pgtypes::usercast::publish(declared);
-    Ok(())
+        })
+        .collect()
 }
 
 /// The type whose bytes a value of `ty` actually is.
@@ -178,23 +201,97 @@ pub(crate) fn coerce_declared(
             coerce_binary(value, source, target, &ctx.time_zone).map(Some)
         }
         crabka_pgtypes::usercast::CastMethod::InOut => coerce_inout(value, target, ctx).map(Some),
+        crabka_pgtypes::usercast::CastMethod::Function => {
+            coerce_function(expr, value, source, target, ctx).map(Some)
+        }
     }
 }
 
-/// `CREATE CAST (source AS target) { WITHOUT FUNCTION | WITH INOUT }`.
+fn coerce_function(
+    expr: &Expr,
+    value: &Datum,
+    source: ColumnType,
+    target: ColumnType,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let catalog = crate::routine::scalar_runtime_catalog().ok_or_else(|| {
+        ExecError::Unsupported("function-backed casts require a statement runtime".into())
+    })?;
+    let cast = crabka_pgcatalog::get_user_cast(catalog.as_ref(), source.oid(), target.oid())?
+        .ok_or_else(|| ExecError::UndefinedObject("function-backed cast disappeared".into()))?;
+    let oid = cast.function.parse::<i32>().map_err(|_| {
+        ExecError::InvalidObjectDefinition("function-backed cast has an invalid routine oid".into())
+    })?;
+    let routine = crate::routine::routine_by_oid(catalog.as_ref(), oid)?.ok_or_else(|| {
+        ExecError::UndefinedFunction(format!("cast function with oid {oid} does not exist"))
+    })?;
+    let call = FuncCall {
+        name: routine.name.clone(),
+        distinct: false,
+        args: FuncArgs::Exprs(vec![expr.clone()]),
+        order_by: Vec::new(),
+        within_group: false,
+        filter: None,
+        sql_syntax: false,
+    };
+    let value = crate::routine::eval_plpgsql_scalar_with(&call, ctx, |_| Ok(value.clone()))
+        .ok_or_else(|| {
+            ExecError::Unsupported("cast function is not available to the scalar runtime".into())
+        })??;
+    let returned = crate::routine::declared_scalar_result_type(&routine).ok_or_else(|| {
+        ExecError::InvalidObjectDefinition("cast function must return a scalar type".into())
+    })?;
+    coerce_implicit_result(catalog.as_ref(), value, returned, target, ctx)
+}
+
+fn coerce_implicit_result(
+    kv: &dyn Kv,
+    value: Datum,
+    source: ColumnType,
+    target: ColumnType,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    if source == target {
+        return Ok(value);
+    }
+    if let Some(cast) = crabka_pgcatalog::get_user_cast(kv, source.oid(), target.oid())?
+        && cast.context == 'i'
+    {
+        return match cast.method {
+            'b' => coerce_binary(&value, source, target, &ctx.time_zone),
+            'i' => coerce_inout(&value, target, ctx),
+            _ => Err(ExecError::Unsupported(
+                "an implicit cast function result cannot use another function-backed cast".into(),
+            )),
+        };
+    }
+    if crate::routine::implicitly_coercible(source, target) {
+        let converted = crate::eval::cast_value_in_at(&value, target, ctx.output_style(), ctx.now)?;
+        crate::usertype::check_domain(target, &converted, ctx)?;
+        return Ok(converted);
+    }
+    Err(ExecError::TypeMismatch(format!(
+        "cast function result is of type {} but target type is {}",
+        source.name(),
+        target.name()
+    )))
+}
+
+/// `CREATE CAST (source AS target) { WITH FUNCTION | WITHOUT FUNCTION | WITH INOUT }`.
 ///
 /// Mirrors `CreateCast`'s branches. `WITHOUT FUNCTION` requires the two types
 /// to share a physical representation, and neither may be a container type, an
 /// enum or a domain — all of those embed an oid or carry constraints that a
 /// pass-through would silently discard; see [`reject_non_coercible`] for where
 /// gres's physical test differs from PostgreSQL's. `WITH INOUT` goes through
-/// the text form and so carries none of those requirements, exactly as
-/// `CreateCast` has it.
+/// the text form. `WITH FUNCTION` persists the chosen routine oid and invokes
+/// it through the statement's scalar-routine runtime.
 ///
 /// # Errors
 ///
 /// 42710 when the pair already has a cast, 42P17 for every physical
-/// incompatibility PostgreSQL rejects, and 0A000 for `WITH FUNCTION`.
+/// incompatibility PostgreSQL rejects, plus ordinary function-resolution errors
+/// for `WITH FUNCTION`.
 pub(crate) fn create_cast(
     kv: &dyn Kv,
     source: ColumnType,
@@ -202,18 +299,12 @@ pub(crate) fn create_cast(
     method: &CastMethod,
     context: CastContext,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
-    let recorded = match method {
-        CastMethod::WithoutFunction => 'b',
-        CastMethod::WithInout => 'i',
-        // Recording this one would be a promise the cast path cannot keep: it
-        // has no seam for calling a routine mid-conversion, so the cast would
-        // exist in `pg_cast` and do nothing at the point of use.
-        CastMethod::WithFunction { .. } => {
-            return Err(ExecError::Unsupported(
-                "CREATE CAST … WITH FUNCTION is not supported: the cast path cannot call a \
-                 routine, and recording the cast would leave it inert"
-                    .into(),
-            ));
+    let (recorded, function) = match method {
+        CastMethod::WithoutFunction => ('b', String::new()),
+        CastMethod::WithInout => ('i', String::new()),
+        CastMethod::WithFunction { name, .. } => {
+            let routine = resolve_cast_function(kv, name, source, target)?;
+            ('f', routine.oid.to_string())
         }
     };
     if source == target {
@@ -244,7 +335,7 @@ pub(crate) fn create_cast(
             CastContext::Assignment => 'a',
             CastContext::Implicit => 'i',
         },
-        function: String::new(),
+        function,
     };
     Ok((
         QueryResult::Command {
@@ -252,6 +343,45 @@ pub(crate) fn create_cast(
         },
         crabka_pgcatalog::create_user_cast_ops(kv, &cast)?,
     ))
+}
+
+fn resolve_cast_function(
+    kv: &dyn Kv,
+    name: &str,
+    source: ColumnType,
+    target: ColumnType,
+) -> Result<crabka_pgcatalog::routine::Routine, ExecError> {
+    let routine = crate::routine::resolve_call(kv, name, &[crate::eval::ArgType::Known(source)])?
+        .ok_or_else(|| {
+        ExecError::UndefinedFunction(format!("function {name}({}) does not exist", source.name()))
+    })?;
+    let params: Vec<_> = routine.input_params().collect();
+    if params.len() != 1 || params[0].ty.column != Some(source) {
+        return Err(ExecError::InvalidObjectDefinition(format!(
+            "cast function {} must take exactly one {} argument",
+            routine.identity(),
+            source.name()
+        )));
+    }
+    let returned = crate::routine::declared_scalar_result_type(&routine).ok_or_else(|| {
+        ExecError::InvalidObjectDefinition(format!(
+            "cast function {} must return a scalar type",
+            routine.identity()
+        ))
+    })?;
+    if returned != target
+        && !crate::routine::implicitly_coercible(returned, target)
+        && !crabka_pgcatalog::get_user_cast(kv, returned.oid(), target.oid())?
+            .is_some_and(|cast| cast.context == 'i' && cast.method != 'f')
+    {
+        return Err(ExecError::InvalidObjectDefinition(format!(
+            "cast function {} returns {}, not {}",
+            routine.identity(),
+            returned.name(),
+            target.name()
+        )));
+    }
+    Ok(routine)
 }
 
 /// `DROP CAST [IF EXISTS] (source AS target)`.
@@ -268,7 +398,7 @@ pub(crate) fn drop_cast(
     let tag = QueryResult::Command {
         tag: "DROP CAST".to_string(),
     };
-    if crabka_pgcatalog::get_user_cast(kv, source.oid(), target.oid())?.is_none() {
+    let Some(cast) = crabka_pgcatalog::get_user_cast(kv, source.oid(), target.oid())? else {
         if if_exists {
             return Ok((tag, Vec::new()));
         }
@@ -277,11 +407,14 @@ pub(crate) fn drop_cast(
             source.name(),
             target.name()
         )));
-    }
-    Ok((
-        tag,
-        crabka_pgcatalog::drop_user_cast_ops(source.oid(), target.oid()),
-    ))
+    };
+    let mut ops = crabka_pgcatalog::drop_user_cast_ops(source.oid(), target.oid());
+    ops.push(crabka_pgcatalog::set_comment_op(
+        "cast",
+        crabka_pgcatalog::CommentObject::Named(&cast.oid.to_string()),
+        None,
+    ));
+    Ok((tag, ops))
 }
 
 /// Every rejection `CreateCast` applies to a `WITHOUT FUNCTION` pair, in

@@ -48,6 +48,14 @@ async fn err_message(s: &mut SqlSession, sql: &str) -> String {
         .message
 }
 
+async fn err_detail(s: &mut SqlSession, sql: &str) -> Option<String> {
+    s.simple_query(sql)
+        .await
+        .expect_err("expected error")
+        .diagnostics
+        .and_then(|fields| fields.detail)
+}
+
 async fn engine_with(setup: &[&str]) -> (SqlEngine, SqlSession) {
     let engine = SqlEngine::new();
     let mut s = engine.connect();
@@ -97,6 +105,23 @@ async fn every_table_level_spelling_makes_the_column_not_null() {
         );
         run(&mut s, "INSERT INTO t (a) VALUES (1)").await;
     }
+}
+
+#[tokio::test]
+async fn write_constraint_errors_include_the_failing_row() {
+    let (_engine, mut s) = engine_with(&[
+        "CREATE TABLE nn (a int NOT NULL, b text)",
+        "CREATE TABLE chk (a int CHECK (a > 0))",
+    ])
+    .await;
+    assert!(
+        err_detail(&mut s, "INSERT INTO nn VALUES (NULL, 'text')").await
+            == Some("Failing row contains (null, text).".into())
+    );
+    assert!(
+        err_detail(&mut s, "INSERT INTO chk VALUES (0)").await
+            == Some("Failing row contains (0).".into())
+    );
 }
 
 // `ADD [CONSTRAINT n] NOT NULL c` is `ALTER COLUMN c SET NOT NULL` in another

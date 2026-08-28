@@ -7,16 +7,8 @@
 //! the one built-in that asks a question about *storage identity* rather than
 //! about a value.
 //!
-//! **In Gres the chain never moves.** A row's rowid is the key every version of
-//! it hangs under, so an `UPDATE` writes the new version under the same rowid
-//! and the row keeps its `ctid` — see [`crate::scope::row_ctid`], which
-//! [`crate::exec`] pins on the write path. The last link of the chain that
-//! starts at a live `tid` is therefore that same `tid`, and answering with the
-//! argument is the correct answer for this storage model rather than a stub.
-//! `CLUSTER` is the one statement that moves a row's `ctid`, and it moves it in
-//! `PostgreSQL` too: both engines document a `ctid` as valid only until the row
-//! is updated or the relation is rewritten, so a caller that asks across a
-//! rewrite was already outside the contract in both.
+//! Gres records each update's successor rowid in the superseded tuple, so this
+//! function follows the same physical update chain that PostgreSQL does.
 //!
 //! What is *not* trivial is everything around that answer, and it is what
 //! `tid.sql` tests: the name resolves like any written relation name, an index
@@ -50,6 +42,7 @@ use crabka_pgcatalog::{RelationName, Table};
 use crabka_pgkv::Kv;
 use crabka_pgparser::ast::{Expr, FuncCall, QueryBody, SelectItem, SetExpr, Statement, TableExpr};
 use crabka_pgtypes::{ColumnType, Datum, Tid};
+use std::collections::BTreeSet;
 
 use crate::{
     clock::EvalCtx,
@@ -198,7 +191,36 @@ fn table_latest_tid(
         ));
     }
     valid_in_relation(data, table, tid)?;
-    Ok(tid)
+    let mut latest = tid;
+    let mut seen = BTreeSet::new();
+    while let Some(rowid) = crate::scope::ctid_identity(latest) {
+        if !seen.insert(rowid) {
+            return Err(ExecError::Unsupported(
+                "currtid2 encountered a cyclic update chain".into(),
+            ));
+        }
+        let versions = data.scan_prefix(&crabka_pgkv::key::row_key(table.id, rowid))?;
+        let tuple_target = versions.into_iter().try_fold(None, |target, (_, bytes)| {
+            let (_, _, _, _, _, update_target) =
+                crabka_pgmvcc::version::decode_tuple_with_command_ids_and_update_target(&bytes)?;
+            Ok::<_, crabka_pgkv::KvError>(update_target.or(target))
+        })?;
+        let next_rowid = match tuple_target {
+            Some(target) => Some(target),
+            None => data
+                .get(&crabka_pgkv::key::update_target_key(table.id, rowid))?
+                .map(|value| crabka_pgkv::key::update_target_of(&value))
+                .transpose()?,
+        };
+        let Some(next_rowid) = next_rowid else {
+            break;
+        };
+        latest = match crate::scope::row_ctid(next_rowid) {
+            Datum::Tid(tid) => tid,
+            _ => unreachable!("row_ctid always returns a tid"),
+        };
+    }
+    Ok(latest)
 }
 
 /// Follow a view's `ctid` column to the relation it is a column of, and answer
@@ -444,9 +466,7 @@ mod tests {
         }
     }
 
-    /// The claim the whole module rests on: the row's `ctid` is the answer, and
-    /// it stays the answer across the `UPDATE` that would move it in
-    /// `PostgreSQL`.
+    /// `currtid2` follows each physical update successor.
     #[tokio::test]
     async fn answers_the_rows_own_tid_across_an_update() {
         let engine = SqlEngine::new();
@@ -460,10 +480,17 @@ mod tests {
                 == Some("(0,2)".to_string())
         );
         run(&engine, "UPDATE t SET b = 'changed' WHERE a = 2").await;
-        assert!(cell0(&run(&engine, "SELECT ctid FROM t WHERE a = 2").await) == before);
+        assert!(
+            cell0(&run(&engine, "SELECT ctid FROM t WHERE a = 2").await) == Some("(0,3)".into())
+        );
         assert!(
             cell0(&run(&engine, "SELECT currtid2('t', '(0,2)'::tid)").await)
-                == Some("(0,2)".to_string())
+                == Some("(0,3)".to_string())
+        );
+        run(&engine, "UPDATE t SET b = 'changed twice' WHERE a = 2").await;
+        assert!(
+            cell0(&run(&engine, "SELECT currtid2('t', '(0,2)'::tid)").await)
+                == Some("(0,4)".to_string())
         );
     }
 
@@ -502,6 +529,16 @@ mod tests {
         run(&engine, "INSERT INTO t VALUES (1)").await;
         run(&engine, "CREATE INDEX t_a ON t (a)").await;
         run(&engine, "CREATE TABLE p (a int) PARTITION BY RANGE (a)").await;
+        run(
+            &engine,
+            "CREATE SERVER k FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'b:9092')",
+        )
+        .await;
+        run(
+            &engine,
+            "CREATE FOREIGN TABLE f (a int) SERVER k OPTIONS (topic 'topic')",
+        )
+        .await;
         run(&engine, "CREATE SEQUENCE s").await;
         run(&engine, "CREATE VIEW v_no_ctid AS SELECT a FROM t").await;
         run(&engine, "CREATE VIEW v_ctid AS SELECT ctid, a FROM t").await;
@@ -530,6 +567,11 @@ mod tests {
                 "p",
                 "0A000",
                 "cannot look at latest visible tid for relation \"public.p\"",
+            ),
+            (
+                "f",
+                "0A000",
+                "cannot look at latest visible tid for relation \"public.f\"",
             ),
             (
                 "v_no_ctid",

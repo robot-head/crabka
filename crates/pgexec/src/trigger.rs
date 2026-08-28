@@ -141,17 +141,20 @@ pub(crate) fn invoke(
     let (reply, response) = std::sync::mpsc::channel();
     runtime
         .try_send(crate::routine::ScalarFunctionRequest {
-            routine,
+            routine: Some(routine),
             values: Vec::new(),
             kind: crate::routine::FunctionRequestKind::Trigger(Box::new(invocation)),
+            command_row_claims: crate::routine::scalar_runtime_command_row_claims(),
             reply,
         })
         .map_err(|_| {
             ExecError::ObjectNotInPrerequisiteState("trigger function executor stopped".into())
         })?;
-    match response.recv().map_err(|_| {
+    let (result, mutations) = response.recv().map_err(|_| {
         ExecError::ObjectNotInPrerequisiteState("trigger function executor stopped".into())
-    })?? {
+    })??;
+    crate::session::apply_guc_runtime_mutations(mutations)?;
+    match result {
         crate::routine::FunctionRequestResult::Scalar(value) => Ok(value),
         crate::routine::FunctionRequestResult::Table(_) => Err(
             ExecError::ObjectNotInPrerequisiteState("trigger function returned a table".into()),
@@ -173,6 +176,23 @@ fn trigger_error(sqlstate: &'static str, message: impl Into<String>) -> ExecErro
         sqlstate,
         message: message.into(),
     }
+}
+
+fn trigger_error_detail(
+    sqlstate: &'static str,
+    message: impl Into<String>,
+    detail: impl Into<String>,
+) -> ExecError {
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error(sqlstate, message.into()).with_detail(detail.into()),
+    )
+}
+
+fn trigger_relation_kind_error(relation: &RelationName, kind: &str, detail: &str) -> ExecError {
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error("42809", format!("\"{}\" is a {kind}", relation.name))
+            .with_detail(detail),
+    )
 }
 
 fn relation_target(kv: &dyn Kv, name: &RelationName) -> Result<(u32, Option<Table>), ExecError> {
@@ -289,24 +309,20 @@ fn map_events(
                 let already = std::mem::replace(&mut mapped.update, true);
                 for column in columns {
                     if let Some(table) = table {
-                        let Some(definition) =
-                            table.columns.iter().find(|item| item.name == *column)
-                        else {
+                        if !table.columns.iter().any(|item| item.name == *column) {
                             return Err(ExecError::UndefinedTableColumn {
                                 column: column.clone(),
                                 table: table.name.to_string(),
                             });
-                        };
-                        if definition.generated.is_some() {
-                            return Err(trigger_error(
-                                "42P17",
-                                "trigger on column that is a generated column is not supported",
-                            ));
                         }
                     }
-                    if !mapped.update_columns.contains(column) {
-                        mapped.update_columns.push(column.clone());
+                    if mapped.update_columns.contains(column) {
+                        return Err(trigger_error(
+                            "42701",
+                            format!("column \"{column}\" specified more than once"),
+                        ));
                     }
+                    mapped.update_columns.push(column.clone());
                 }
                 already
             }
@@ -334,6 +350,7 @@ pub(crate) fn create(
     let timing = map_timing(stmt.timing);
     let level = map_level(stmt.level);
     let events = map_events(&stmt.events, table.as_ref())?;
+    validate_when_references(stmt, table.as_ref(), timing, level, &events)?;
 
     if stmt.constraint && (timing != TriggerTiming::After || level != TriggerLevel::Row || is_view)
     {
@@ -356,16 +373,31 @@ pub(crate) fn create(
             "FROM and deferrability clauses are only valid for constraint triggers",
         ));
     }
-    if timing == TriggerTiming::InsteadOf && (!is_view || level != TriggerLevel::Row) {
-        return Err(trigger_error(
-            "42P17",
-            "INSTEAD OF triggers must be FOR EACH ROW on views",
+    if timing == TriggerTiming::InsteadOf && !is_view {
+        return Err(trigger_relation_kind_error(
+            &table_name,
+            "table",
+            "Tables cannot have INSTEAD OF triggers.",
         ));
     }
     if timing != TriggerTiming::InsteadOf && is_view && level != TriggerLevel::Statement {
+        return Err(trigger_relation_kind_error(
+            &table_name,
+            "view",
+            "Views cannot have row-level BEFORE or AFTER triggers.",
+        ));
+    }
+    if is_view && events.truncate {
+        return Err(trigger_relation_kind_error(
+            &table_name,
+            "view",
+            "Views cannot have TRUNCATE triggers.",
+        ));
+    }
+    if timing == TriggerTiming::InsteadOf && level != TriggerLevel::Row {
         return Err(trigger_error(
             "42P17",
-            "BEFORE and AFTER triggers on views must be FOR EACH STATEMENT",
+            "INSTEAD OF triggers must be FOR EACH ROW",
         ));
     }
     if level == TriggerLevel::Row && events.truncate {
@@ -374,16 +406,22 @@ pub(crate) fn create(
             "TRUNCATE FOR EACH ROW triggers are not supported",
         ));
     }
-    if timing == TriggerTiming::InsteadOf && (events.truncate || stmt.when.is_some()) {
+    if timing == TriggerTiming::InsteadOf && stmt.when.is_some() {
         return Err(trigger_error(
             "42P17",
-            "INSTEAD OF triggers cannot have WHEN conditions or TRUNCATE events",
+            "INSTEAD OF triggers cannot have WHEN conditions",
+        ));
+    }
+    if timing == TriggerTiming::InsteadOf && events.truncate {
+        return Err(trigger_error(
+            "42P17",
+            "INSTEAD OF triggers cannot have TRUNCATE events",
         ));
     }
     if timing == TriggerTiming::InsteadOf && !events.update_columns.is_empty() {
         return Err(trigger_error(
             "42P17",
-            "INSTEAD OF UPDATE triggers cannot specify a column list",
+            "INSTEAD OF triggers cannot have column lists",
         ));
     }
     if !stmt.transitions.is_empty() {
@@ -552,6 +590,98 @@ pub(crate) fn create(
         );
     }
     Ok(command("CREATE TRIGGER", ops))
+}
+
+fn validate_when_references(
+    stmt: &parsed::CreateTrigger,
+    table: Option<&Table>,
+    timing: TriggerTiming,
+    level: TriggerLevel,
+    events: &TriggerEvents,
+) -> Result<(), ExecError> {
+    let Some(condition) = &stmt.when else {
+        return Ok(());
+    };
+    let old = when_references(condition, "old", None);
+    let new = when_references(condition, "new", None);
+    if level == TriggerLevel::Statement && (old || new) {
+        return Err(trigger_error(
+            "42P17",
+            "statement trigger's WHEN condition cannot reference column values",
+        ));
+    }
+    if events.insert && old {
+        return Err(trigger_error(
+            "42P17",
+            "INSERT trigger's WHEN condition cannot reference OLD values",
+        ));
+    }
+    if events.delete && new {
+        return Err(trigger_error(
+            "42P17",
+            "DELETE trigger's WHEN condition cannot reference NEW values",
+        ));
+    }
+    if timing == TriggerTiming::Before
+        && ["tableoid", "ctid", "xmin", "xmax", "cmin", "cmax"]
+            .iter()
+            .any(|column| when_references(condition, "new", Some(column)))
+    {
+        return Err(trigger_error(
+            "42P17",
+            "BEFORE trigger's WHEN condition cannot reference NEW system columns",
+        ));
+    }
+    if timing == TriggerTiming::Before
+        && let Some(detail) =
+            table.and_then(|table| when_references_new_generated(condition, table))
+    {
+        return Err(trigger_error_detail(
+            "42P17",
+            "BEFORE trigger's WHEN condition cannot reference NEW generated columns",
+            detail,
+        ));
+    }
+    Ok(())
+}
+
+fn when_references(expr: &parsed::Expr, image: &str, column: Option<&str>) -> bool {
+    matches!(expr, parsed::Expr::Column { table: Some(table), name }
+        if table.eq_ignore_ascii_case(image)
+            && column.is_none_or(|column| name.eq_ignore_ascii_case(column)))
+        || crate::exec::expr_children(expr)
+            .into_iter()
+            .any(|child| when_references(child, image, column))
+}
+
+fn when_references_new_generated(expr: &parsed::Expr, table: &Table) -> Option<String> {
+    if let parsed::Expr::Column {
+        table: Some(image),
+        name,
+    } = expr
+        && image.eq_ignore_ascii_case("new")
+    {
+        if name == "*"
+            && table
+                .columns
+                .iter()
+                .any(|column| column.generated.is_some())
+        {
+            return Some(
+                "A whole-row reference is used and the table contains generated columns.".into(),
+            );
+        }
+        if table
+            .columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case(name) && column.generated.is_some())
+        {
+            return Some(format!("Column \"{name}\" is a generated column."));
+        }
+    }
+    crate::exec::expr_children(expr)
+        .into_iter()
+        .find_map(|child| when_references_new_generated(child, table))
 }
 
 pub(crate) fn alter(
@@ -988,6 +1118,7 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
         Statement::GrantSchemaPrivileges { .. } => "GRANT",
         Statement::RevokeTablePrivileges { .. } => "REVOKE",
         Statement::RevokeSchemaPrivileges { .. } => "REVOKE",
+        Statement::AlterDefaultTablePrivileges { .. } => "ALTER DEFAULT PRIVILEGES",
         Statement::ImportForeignSchema { .. } => "IMPORT FOREIGN SCHEMA",
         Statement::Utility(parsed::UtilityStatement::CreateOperator(_)) => "CREATE OPERATOR",
         Statement::Utility(parsed::UtilityStatement::DropOperator { .. }) => "DROP OPERATOR",
@@ -1340,7 +1471,12 @@ pub(crate) enum DmlEvent {
     Truncate,
 }
 
-fn trigger_matches_event(trigger: &Trigger, event: DmlEvent, updated: &[String]) -> bool {
+fn trigger_matches_event(
+    trigger: &Trigger,
+    table: Option<&Table>,
+    event: DmlEvent,
+    updated: &[String],
+) -> bool {
     match event {
         DmlEvent::Insert => trigger.events.insert,
         DmlEvent::Delete => trigger.events.delete,
@@ -1348,13 +1484,36 @@ fn trigger_matches_event(trigger: &Trigger, event: DmlEvent, updated: &[String])
         DmlEvent::Update => {
             trigger.events.update
                 && (trigger.events.update_columns.is_empty()
-                    || trigger
-                        .events
-                        .update_columns
-                        .iter()
-                        .any(|column| updated.contains(column)))
+                    || trigger.events.update_columns.iter().any(|column| {
+                        updated.contains(column)
+                            || table.is_some_and(|table| {
+                                generated_column_depends_on(table, column, updated)
+                            })
+                    }))
         }
     }
+}
+
+fn generated_column_depends_on(table: &Table, column: &str, updated: &[String]) -> bool {
+    let Some(expression) = table
+        .columns
+        .iter()
+        .find(|candidate| candidate.name == column)
+        .and_then(|column| column.generated.as_ref())
+        .and_then(|generated| crabka_pgparser::parser::parse_expression(&generated.expr).ok())
+    else {
+        return false;
+    };
+    updated
+        .iter()
+        .any(|column| expression_references_column(&expression, column))
+}
+
+fn expression_references_column(expr: &parsed::Expr, column: &str) -> bool {
+    matches!(expr, parsed::Expr::Column { table: None, name } if name == column)
+        || crate::exec::expr_children(expr)
+            .into_iter()
+            .any(|child| expression_references_column(child, column))
 }
 
 pub(crate) fn has_instead_row_trigger(
@@ -1369,7 +1528,7 @@ pub(crate) fn has_instead_row_trigger(
             .any(|trigger| {
                 trigger.timing == TriggerTiming::InsteadOf
                     && trigger.level == TriggerLevel::Row
-                    && trigger_matches_event(&trigger, event, updated)
+                    && trigger_matches_event(&trigger, None, event, updated)
                     && trigger_is_enabled(&trigger)
             }),
     )
@@ -1417,12 +1576,16 @@ fn when_matches(
     };
     let expr = crabka_pgparser::parser::parse_expression(source)?;
     let mut scope = crate::scope::Scope::single(table, "old");
-    scope
-        .columns
-        .extend(crate::scope::Scope::single(table, "new").columns);
+    scope.push_tableoid("old");
+    let mut new_scope = crate::scope::Scope::single(table, "new");
+    new_scope.push_tableoid("new");
+    scope.columns.extend(new_scope.columns);
+    let tableoid = crabka_pgtypes::Datum::Int4(crate::catalog_rel::table_relation_oid(table.id)?);
     let nulls = vec![crabka_pgtypes::Datum::Null; table.columns.len()];
     let mut values = old.unwrap_or(&nulls).to_vec();
+    values.push(tableoid.clone());
     values.extend_from_slice(new.unwrap_or(&nulls));
+    values.push(tableoid);
     Ok(matches!(
         crate::eval::eval(&expr, &scope, &values, ctx)?,
         crabka_pgtypes::Datum::Bool(true)
@@ -1472,6 +1635,11 @@ fn invoke_catalog_trigger(
         .ok_or_else(|| {
             ExecError::UndefinedFunction(format!("function {}() does not exist", trigger.function))
         })?;
+    if routine.language == "c" && routine.body == "trigger_return_old" {
+        // The regression module's trigger returns PostgreSQL's `tg_trigtuple`:
+        // OLD for UPDATE/DELETE and NEW for INSERT.
+        return Ok(record(table, old.or(new)));
+    }
     invoke(
         routine,
         TriggerInvocation {
@@ -1797,7 +1965,7 @@ pub(crate) fn fire_before_row(
     for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)? {
         if trigger.timing != TriggerTiming::Before
             || trigger.level != TriggerLevel::Row
-            || !trigger_matches_event(&trigger, event, updated)
+            || !trigger_matches_event(&trigger, Some(table), event, updated)
             || !trigger_is_enabled(&trigger)
             || !when_matches(&trigger, table, old, new.as_deref(), ctx)?
         {
@@ -1872,7 +2040,7 @@ pub(crate) fn fire_instead_row(
     for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, view.id)? {
         if trigger.timing == TriggerTiming::InsteadOf
             && trigger.level == TriggerLevel::Row
-            && trigger_matches_event(&trigger, event, updated)
+            && trigger_matches_event(&trigger, None, event, updated)
             && trigger_is_enabled(&trigger)
         {
             let invocation_new = (event != DmlEvent::Delete)
@@ -1974,7 +2142,7 @@ pub(crate) fn fire_after_row(
     for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)? {
         if trigger.timing == TriggerTiming::After
             && trigger.level == TriggerLevel::Row
-            && trigger_matches_event(&trigger, event, updated)
+            && trigger_matches_event(&trigger, Some(table), event, updated)
             && trigger_is_enabled(&trigger)
             && when_matches(&trigger, table, old, new, ctx)?
         {
@@ -2001,7 +2169,7 @@ pub(crate) fn fire_statement(
     for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, table.id)? {
         if trigger.timing == timing
             && trigger.level == TriggerLevel::Statement
-            && trigger_matches_event(&trigger, event, updated)
+            && trigger_matches_event(&trigger, Some(table), event, updated)
             && trigger_is_enabled(&trigger)
             && when_matches(&trigger, table, None, None, ctx)?
         {

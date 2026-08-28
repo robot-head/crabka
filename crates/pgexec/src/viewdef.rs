@@ -159,6 +159,54 @@ pub(crate) fn write_query(
     write_query_at(out, query, names, ctx);
 }
 
+/// Write a query while retaining explicitly qualified columns such as a rule
+/// action's `OLD` and `NEW` pseudo-relations.
+pub(crate) fn write_query_with_qualifiers(
+    out: &mut String,
+    query: &QueryExpr,
+    names: &[String],
+    pretty: bool,
+    wrap: Option<usize>,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) {
+    let ctx = Ctx {
+        pretty,
+        qualify: true,
+        qualifier: None,
+        wrap,
+        colnames: true,
+        window_calls: &[],
+        indent: 0,
+        style,
+    };
+    write_query_at(out, query, names, ctx);
+}
+
+/// Write a rule action's query after the rule-utils action prefix.
+pub(crate) fn write_rule_query_with_qualifiers(
+    out: &mut String,
+    query: &QueryExpr,
+    names: &[String],
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) {
+    write_query_at(
+        out,
+        query,
+        names,
+        Ctx {
+            pretty,
+            qualify: true,
+            qualifier: None,
+            wrap: None,
+            colnames: true,
+            window_calls: &[],
+            indent: INDENT_STEP,
+            style,
+        },
+    );
+}
+
 /// One whole query at this context's indent — its `WITH` list, its body, and
 /// the `ORDER BY`/`LIMIT`/`OFFSET` that belong to the query rather than to any
 /// one set-operation arm.
@@ -226,6 +274,44 @@ fn write_with_clause(out: &mut String, query: &QueryExpr, ctx: Ctx<'_>) {
         }
         out.push_str(&clause_break(body.indent, 0));
         out.push(')');
+        if let Some(search) = &cte.search {
+            out.push_str(" SEARCH ");
+            out.push_str(if search.depth_first {
+                "DEPTH FIRST BY "
+            } else {
+                "BREADTH FIRST BY "
+            });
+            out.push_str(
+                &search
+                    .by
+                    .iter()
+                    .map(|name| quote_identifier(name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            let _ = write!(out, " SET {}", quote_identifier(&search.set));
+        }
+        if let Some(cycle) = &cte.cycle {
+            out.push_str(" CYCLE ");
+            out.push_str(
+                &cycle
+                    .by
+                    .iter()
+                    .map(|name| quote_identifier(name))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            let _ = write!(out, " SET {}", quote_identifier(&cycle.set));
+            if let Some((marked, unmarked)) = &cycle.mark_values {
+                let _ = write!(
+                    out,
+                    " TO {} DEFAULT {}",
+                    expr_text(marked, body),
+                    expr_text(unmarked, body),
+                );
+            }
+            let _ = write!(out, " USING {}", quote_identifier(&cycle.using));
+        }
     }
     out.push_str(&clause_break(ctx.indent, 0));
 }
@@ -250,6 +336,51 @@ pub(crate) fn expression_text(
             pretty: false,
             qualify: false,
             qualifier: None,
+            wrap: None,
+            colnames: false,
+            window_calls: &[],
+            indent: 0,
+            style,
+        },
+    )
+}
+
+/// Render one stored expression while retaining explicitly qualified columns.
+///
+/// Rule actions use `OLD` and `NEW` pseudo-relations, so their qualifiers are
+/// semantic rather than optional display noise.
+pub(crate) fn expression_text_with_qualifiers(
+    expr: &Expr,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    expr_text(
+        expr,
+        Ctx {
+            pretty: false,
+            qualify: true,
+            qualifier: None,
+            wrap: None,
+            colnames: false,
+            window_calls: &[],
+            indent: 0,
+            style,
+        },
+    )
+}
+
+/// Render an expression in a DML target's column scope.
+pub(crate) fn expression_text_with_qualifier(
+    expr: &Expr,
+    qualifier: &str,
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    expr_text(
+        expr,
+        Ctx {
+            pretty,
+            qualify: true,
+            qualifier: Some(qualifier),
             wrap: None,
             colnames: false,
             window_calls: &[],
@@ -296,7 +427,7 @@ fn write_query_tail(out: &mut String, query: &QueryExpr, ctx: Ctx<'_>) {
 fn write_set_expr(out: &mut String, body: &SetExpr, names: &[String], ctx: Ctx<'_>) {
     match body {
         SetExpr::Query(QueryBody::Select(select)) => write_select(out, select, names, ctx),
-        SetExpr::Query(QueryBody::Values(values)) => write_values(out, values, ctx),
+        SetExpr::Query(QueryBody::Values(values)) => write_values(out, values, names, ctx),
         SetExpr::Query(QueryBody::Nested(query)) => {
             write_query_at(out, query, names, ctx.nested());
         }
@@ -337,7 +468,7 @@ fn write_set_expr(out: &mut String, body: &SetExpr, names: &[String], ctx: Ctx<'
     }
 }
 
-fn write_values(out: &mut String, values: &ValuesStmt, ctx: Ctx<'_>) {
+fn write_values(out: &mut String, values: &ValuesStmt, names: &[String], ctx: Ctx<'_>) {
     // PostgreSQL separates the columns of one row with a bare comma and the
     // rows themselves with a comma and a space.
     let rows = values
@@ -353,7 +484,30 @@ fn write_values(out: &mut String, values: &ValuesStmt, ctx: Ctx<'_>) {
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let _ = write!(out, " VALUES {rows}");
+    let width = values.rows.first().map_or(0, Vec::len);
+    if names
+        .iter()
+        .take(width)
+        .enumerate()
+        .all(|(index, name)| name == &format!("column{}", index + 1))
+    {
+        let _ = write!(out, " VALUES {rows}");
+        return;
+    }
+    let columns = (0..width)
+        .map(|index| {
+            let source = format!("column{}", index + 1);
+            match names.get(index) {
+                Some(name) if name != &source => format!("{source} AS {}", quote_identifier(name)),
+                _ => source,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",\n    ");
+    let _ = write!(
+        out,
+        " SELECT {columns}\n   FROM (VALUES {rows}) \"*VALUES*\""
+    );
 }
 
 fn write_select(out: &mut String, select: &SelectStmt, names: &[String], ctx: Ctx<'_>) {
@@ -532,15 +686,20 @@ fn window_call_text(call: &WindowCall, ctx: Ctx<'_>) -> String {
         FuncArgs::Named { positional, named } => positional
             .iter()
             .map(|argument| expr_text(argument, ctx))
-            .chain(named.iter().map(|(label, argument)| {
-                format!("{label} => {}", expr_text(argument, ctx))
-            }))
+            .chain(
+                named
+                    .iter()
+                    .map(|(label, argument)| format!("{label} => {}", expr_text(argument, ctx))),
+            )
             .collect::<Vec<_>>()
             .join(", "),
         FuncArgs::Variadic { positional, array } => positional
             .iter()
             .map(|argument| expr_text(argument, ctx))
-            .chain(std::iter::once(format!("VARIADIC {}", expr_text(array, ctx))))
+            .chain(std::iter::once(format!(
+                "VARIADIC {}",
+                expr_text(array, ctx)
+            )))
             .collect::<Vec<_>>()
             .join(", "),
     };
@@ -644,6 +803,35 @@ fn range_table_len_of(item: &TableExpr) -> usize {
 fn target_list(select: &SelectStmt, names: &[String], ctx: Ctx<'_>) -> Vec<String> {
     let mut out = Vec::new();
     let mut next = names.iter();
+    let derived_columns = select.from.as_slice().first().and_then(|item| match item {
+        TableExpr::Derived {
+            subquery, columns, ..
+        } => Some(columns.clone().unwrap_or_else(|| {
+            match &subquery.body {
+                SetExpr::Query(QueryBody::Values(values)) => {
+                    values.rows.first().map_or_else(Vec::new, |row| {
+                        (0..row.len())
+                            .map(|index| format!("column{}", index + 1))
+                            .collect()
+                    })
+                }
+                SetExpr::Query(QueryBody::Select(inner)) => inner
+                    .projection
+                    .iter()
+                    .filter_map(|item| match item {
+                        SelectItem::Expr { expr, alias } => Some(
+                            alias
+                                .clone()
+                                .unwrap_or_else(|| crate::exec::derived_name(expr)),
+                        ),
+                        SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        })),
+        _ => None,
+    });
     for item in &select.projection {
         match item {
             // `*` expands to the view's own column list; the qualifier is the
@@ -653,12 +841,22 @@ fn target_list(select: &SelectStmt, names: &[String], ctx: Ctx<'_>) -> Vec<Strin
                     SelectItem::QualifiedWildcard(name) => Some(name.as_str()),
                     _ => ctx.qualifier,
                 };
-                for name in next.by_ref() {
+                for (index, name) in next.by_ref().enumerate() {
+                    let source = derived_columns
+                        .as_ref()
+                        .and_then(|columns| columns.get(index))
+                        .cloned()
+                        .unwrap_or_else(|| name.clone());
                     out.push(match (qualifier, ctx.qualify) {
                         (Some(prefix), true) => {
-                            format!("{}.{}", quote_identifier(prefix), quote_identifier(name))
+                            format!("{}.{}", quote_identifier(prefix), quote_identifier(&source))
                         }
-                        _ => quote_identifier(name),
+                        _ if source == *name => quote_identifier(name),
+                        _ => format!(
+                            "{} AS {}",
+                            quote_identifier(&source),
+                            quote_identifier(name)
+                        ),
                     });
                 }
             }
@@ -868,6 +1066,7 @@ fn from_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
             text
         }
         TableExpr::JsonTable(table) => json_table_text(table, ctx),
+        TableExpr::XmlTable(table) => xml_table_text(table, ctx),
     }
 }
 
@@ -883,12 +1082,20 @@ fn func_item_text(
     with_defs: bool,
     ctx: Ctx<'_>,
 ) -> String {
-    let args = call
-        .args
-        .iter()
-        .map(|arg| expr_text(arg, ctx))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let args =
+        call.args
+            .iter()
+            .map(|arg| expr_text(arg, ctx))
+            .chain(call.named_args.iter().map(|(name, arg)| {
+                format!("{} => {}", quote_identifier(name), expr_text(arg, ctx))
+            }))
+            .chain(
+                call.variadic
+                    .iter()
+                    .map(|arg| format!("VARIADIC {}", expr_text(arg, ctx))),
+            )
+            .collect::<Vec<_>>()
+            .join(", ");
     let mut text = format!("{}({args})", call.name);
     if with_defs && let Some(defs) = &call.column_defs {
         text.push_str(" AS (");
@@ -936,6 +1143,70 @@ fn json_table_text(table: &crabka_pgparser::ast::JsonTable, ctx: Ctx<'_>) -> Str
         out.push_str(" ERROR ON ERROR");
     }
     out.push(')');
+    if let Some(alias) = &table.alias {
+        let _ = write!(out, " {}", quote_identifier(alias));
+        if let Some(columns) = &table.column_aliases {
+            let names = columns
+                .iter()
+                .map(|name| quote_identifier(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(out, "({names})");
+        }
+    }
+    out
+}
+
+/// An `XMLTABLE(…)` FROM item, rendered in a compact form that round-trips.
+fn xml_table_text(table: &crabka_pgparser::ast::XmlTable, ctx: Ctx<'_>) -> String {
+    use crabka_pgparser::ast::XmlTableColumn;
+
+    let mut out = String::from("XMLTABLE(");
+    if !table.namespaces.is_empty() {
+        let namespaces = table
+            .namespaces
+            .iter()
+            .map(|(prefix, uri)| {
+                prefix.as_ref().map_or_else(
+                    || format!("DEFAULT {}", expr_text(uri, ctx)),
+                    |prefix| format!("{} AS {}", expr_text(uri, ctx), quote_identifier(prefix)),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(out, "XMLNAMESPACES({namespaces}), ");
+    }
+    let _ = write!(
+        out,
+        "{} PASSING {} COLUMNS (",
+        expr_text(&table.row_path, ctx),
+        expr_text(&table.document, ctx)
+    );
+    let columns = table
+        .columns
+        .iter()
+        .map(|column| match column {
+            XmlTableColumn::Ordinality { name } => {
+                format!("{} FOR ORDINALITY", quote_identifier(name))
+            }
+            XmlTableColumn::Value(column) => {
+                let mut text = format!("{} {}", quote_identifier(&column.name), column.ty.name());
+                if let Some(path) = &column.path {
+                    let _ = write!(text, " PATH {}", expr_text(path, ctx));
+                }
+                if let Some(default) = &column.default {
+                    let _ = write!(text, " DEFAULT {}", expr_text(default, ctx));
+                }
+                if column.not_null {
+                    text.push_str(" NOT NULL");
+                }
+                text
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&columns);
+    out.push_str(")");
     if let Some(alias) = &table.alias {
         let _ = write!(out, " {}", quote_identifier(alias));
         if let Some(columns) = &table.column_aliases {
@@ -1124,8 +1395,14 @@ fn expr_text(expr: &Expr, ctx: Ctx<'_>) -> String {
         }
         Expr::Column { table, name } => match (table.as_deref().or(ctx.qualifier), ctx.qualify) {
             (Some(prefix), true) => {
-                format!("{}.{}", quote_identifier(prefix), quote_identifier(name))
+                let field = if name == "*" {
+                    "*".into()
+                } else {
+                    quote_identifier(name)
+                };
+                format!("{}.{}", quote_identifier(prefix), field)
             }
+            _ if name == "*" => "*".into(),
             _ => quote_identifier(name),
         },
         Expr::Const { value, ty } => const_text(value, *ty, ctx.style),
@@ -1512,15 +1789,20 @@ fn func_text(call: &FuncCall, ctx: Ctx<'_>) -> String {
         FuncArgs::Named { positional, named } => positional
             .iter()
             .map(|arg| expr_text(arg, ctx))
-            .chain(named.iter().map(|(label, arg)| {
-                format!("{label} => {}", expr_text(arg, ctx))
-            }))
+            .chain(
+                named
+                    .iter()
+                    .map(|(label, arg)| format!("{label} => {}", expr_text(arg, ctx))),
+            )
             .collect::<Vec<_>>()
             .join(", "),
         FuncArgs::Variadic { positional, array } => positional
             .iter()
             .map(|arg| expr_text(arg, ctx))
-            .chain(std::iter::once(format!("VARIADIC {}", expr_text(array, ctx))))
+            .chain(std::iter::once(format!(
+                "VARIADIC {}",
+                expr_text(array, ctx)
+            )))
             .collect::<Vec<_>>()
             .join(", "),
     };
@@ -1685,7 +1967,10 @@ fn cast_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> String {
     } else {
         format!("({inner})")
     };
-    format!("{operand}::{}", ty.name())
+    format!(
+        "{operand}::{}",
+        crate::func::format_type_given(i64::from(ty.oid()), i64::from(ty.typmod()))
+    )
 }
 
 /// `'…'::T`, printed the way `PostgreSQL` prints it: as one constant of type
@@ -1711,6 +1996,12 @@ fn cast_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> String {
 /// * a clock-relative spelling, which upstream froze when the view was created
 ///   and this would re-read now.
 fn resolved_literal_text(expr: &Expr, ty: ColumnType, ctx: Ctx<'_>) -> Option<String> {
+    if matches!(expr, Expr::NullLiteral) {
+        return Some(format!(
+            "NULL::{}",
+            crate::func::format_type_given(i64::from(ty.oid()), i64::from(ty.typmod()))
+        ));
+    }
     let Expr::StringLiteral(literal) = expr else {
         return None;
     };
@@ -1817,10 +2108,8 @@ pub(crate) fn const_text(
             let rendered = crate::func::text_render_in(other, style);
             // `bit` is a reserved word, so `pg_get_expr` double-quotes it:
             // `'1001'::"bit"`, but plain `'1001'::bit varying`.
-            let type_name = match ty {
-                ColumnType::Bit(_) => "\"bit\"",
-                other => other.name(),
-            };
+            let type_name =
+                crate::func::format_type_given(i64::from(ty.oid()), i64::from(ty.typmod()));
             format!("'{}'::{type_name}", rendered.replace('\'', "''"))
         }
     }
@@ -2070,7 +2359,7 @@ mod tests {
     /// further in than the query holding it, and the step compounds with depth.
     #[test]
     fn deparses_the_nested_shapes_at_postgres_indents() {
-        let cases: [(&str, &[&str], &str); 12] = [
+        let cases: [(&str, &[&str], &str); 14] = [
             (
                 "WITH s AS (SELECT a FROM t WHERE a > 1) SELECT a FROM s",
                 &["a"],
@@ -2096,6 +2385,24 @@ mod tests {
                 &["i"],
                 " WITH RECURSIVE n(i) AS (\n         SELECT 1 AS \"?column?\"\n        UNION ALL\
                  \n         SELECT 2\n        )\n SELECT i\n   FROM n;",
+            ),
+            (
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT 2) \
+                 SEARCH DEPTH FIRST BY i SET seq CYCLE i SET is_cycle USING path \
+                 SELECT i FROM n",
+                &["i", "seq", "is_cycle", "path"],
+                " WITH RECURSIVE n(i) AS (\n         SELECT 1 AS \"?column?\"\n        UNION ALL\
+                 \n         SELECT 2\n        ) SEARCH DEPTH FIRST BY i SET seq CYCLE i SET is_cycle USING path\
+                 \n SELECT i\n   FROM n;",
+            ),
+            (
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT 2) \
+                 SEARCH BREADTH FIRST BY i SET seq CYCLE i SET is_cycle \
+                 TO 'yes' DEFAULT 'no' USING path SELECT i FROM n",
+                &["i", "seq", "is_cycle", "path"],
+                " WITH RECURSIVE n(i) AS (\n         SELECT 1 AS \"?column?\"\n        UNION ALL\
+                 \n         SELECT 2\n        ) SEARCH BREADTH FIRST BY i SET seq CYCLE i SET is_cycle TO \
+                 'yes'::text DEFAULT 'no'::text USING path\n SELECT i\n   FROM n;",
             ),
             (
                 "SELECT a, b FROM (SELECT a, b FROM t WHERE a > 1) s",
@@ -2154,6 +2461,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn deparses_named_and_variadic_call_syntax() {
+        let definition = view_definition_text(
+            &view(
+                "SELECT make_interval(days => 2) AS interval, \
+                 concat(VARIADIC ARRAY['a']) AS text FROM t",
+                &["interval", "text"],
+            ),
+            false,
+        );
+        assert!(
+            definition
+                == " SELECT make_interval(0, 0, 0, 2) AS \"interval\",\n    \
+                    concat(VARIADIC ARRAY['a'::text]) AS text\n   FROM t;"
+        );
+    }
+
     /// A typed literal is one constant of that type, printed in the type's own
     /// output spelling. Neither the `::text` of an unresolved string nor the
     /// text the query wrote survives.
@@ -2203,6 +2527,31 @@ mod tests {
                 "{definition}"
             );
         }
+    }
+
+    #[test]
+    fn a_typed_null_is_one_constant() {
+        let utc = jiff::tz::TimeZone::UTC;
+        let expression = crabka_pgparser::ast::Expr::Cast {
+            expr: Box::new(crabka_pgparser::ast::Expr::NullLiteral),
+            ty: ColumnType::Int4,
+        };
+        assert!(
+            super::expression_text(
+                &expression,
+                crabka_pgtypes::encoding::OutputStyle::with_zone(&utc),
+            ) == "NULL::integer"
+        );
+        let modified_string = crabka_pgparser::ast::Expr::Cast {
+            expr: Box::new(crabka_pgparser::ast::Expr::StringLiteral("a".into())),
+            ty: ColumnType::Varchar(Some(2)),
+        };
+        assert!(
+            super::expression_text(
+                &modified_string,
+                crabka_pgtypes::encoding::OutputStyle::with_zone(&utc),
+            ) == "('a'::text)::character varying(2)"
+        );
     }
 
     /// The type's output function reads the session, so the same stored

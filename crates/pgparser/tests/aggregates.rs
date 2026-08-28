@@ -384,11 +384,14 @@ fn records_the_options_this_engine_does_not_execute() {
         ),
         (
             "mstype = float8",
-            unimplemented("mstype", "double precision"),
+            AggregateOption::MSType(builtin(ColumnType::Float8)),
         ),
         ("msfunc = float8pl", unimplemented("msfunc", "float8pl")),
         ("minvfunc = float8mi", unimplemented("minvfunc", "float8mi")),
-        ("minitcond = 'MI'", unimplemented("minitcond", "MI")),
+        (
+            "minitcond = 'MI'",
+            AggregateOption::MInitCond(Some("MI".into())),
+        ),
         (
             "combinefunc = numeric_avg_combine",
             unimplemented("combinefunc", "numeric_avg_combine"),
@@ -405,14 +408,13 @@ fn records_the_options_this_engine_does_not_execute() {
     ];
     for (written, expected) in cases {
         let sql = format!("CREATE AGGREGATE a (int4) (sfunc = f, stype = int4, {written})");
-        assert!(
-            options(&sql)
-                == vec![
-                    AggregateOption::SFunc("f".into()),
-                    AggregateOption::SType(builtin(ColumnType::Int4)),
-                    expected,
-                ]
-        );
+        let parsed = options(&sql);
+        assert!(matches!(parsed[0], AggregateOption::SFunc(ref name) if name == "f"));
+        assert!(matches!(
+            parsed[1],
+            AggregateOption::SType(ref ty) if ty.resolved == Some(ColumnType::Int4)
+        ));
+        assert!(parsed[2] == expected);
     }
 }
 
@@ -635,10 +637,13 @@ fn parses_ordered_and_hypothetical_set_signatures() {
            stype = internal, sfunc = ordered_set_transition,
            finalfunc = percentile_disc_final, finalfunc_extra = true)",
     );
-    assert!(ordered.args == Some(AggregateArgs::Ordered {
-        direct: vec![arg(builtin(ColumnType::Float8))],
-        ordered: vec![arg(named("anyelement"))],
-    }));
+    assert!(
+        ordered.args
+            == Some(AggregateArgs::Ordered {
+                direct: vec![arg(builtin(ColumnType::Float8))],
+                ordered: vec![arg(named("anyelement"))],
+            })
+    );
     assert!(ordered.options.contains(&AggregateOption::Unimplemented {
         name: "finalfunc_extra".into(),
         value: "true".into(),
@@ -648,21 +653,28 @@ fn parses_ordered_and_hypothetical_set_signatures() {
         "CREATE AGGREGATE my_rank(VARIADIC \"any\" ORDER BY VARIADIC \"any\") (
            stype = internal, sfunc = ordered_set_transition_multi, hypothetical)",
     );
-    assert!(hypothetical.args == Some(AggregateArgs::Ordered {
-        direct: vec![RoutineArg {
-            name: None,
-            mode: RoutineArgMode::Variadic,
-            ty: named("any"),
-            default: None,
-        }],
-        ordered: vec![RoutineArg {
-            name: None,
-            mode: RoutineArgMode::Variadic,
-            ty: named("any"),
-            default: None,
-        }],
-    }));
-    assert!(hypothetical.options.contains(&AggregateOption::Hypothetical));
+    assert!(
+        hypothetical.args
+            == Some(AggregateArgs::Ordered {
+                direct: vec![RoutineArg {
+                    name: None,
+                    mode: RoutineArgMode::Variadic,
+                    ty: named("any"),
+                    default: None,
+                }],
+                ordered: vec![RoutineArg {
+                    name: None,
+                    mode: RoutineArgMode::Variadic,
+                    ty: named("any"),
+                    default: None,
+                }],
+            })
+    );
+    assert!(
+        hypothetical
+            .options
+            .contains(&AggregateOption::Hypothetical)
+    );
 }
 
 #[test]
@@ -670,8 +682,7 @@ fn parses_within_group_as_an_ordered_set_call() {
     let Expr::Func(call) = crabka_pgparser::parser::parse_expression(
         "n16_ordered(0.5) WITHIN GROUP (ORDER BY value DESC)",
     )
-    .expect("parses")
-    else {
+    .expect("parses") else {
         panic!("expected a function call");
     };
     assert!(call.name == "n16_ordered");

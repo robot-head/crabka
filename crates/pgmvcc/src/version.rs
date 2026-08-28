@@ -7,7 +7,8 @@
 use crabka_pgkv::KvError;
 use crabka_pgtypes::Datum;
 use zerocopy::{
-    FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, byteorder::big_endian::U64,
+    FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned,
+    byteorder::big_endian::{U32, U64},
 };
 
 use crate::xid::{FROZEN_XID, Xid};
@@ -72,7 +73,19 @@ pub fn xid_of_key(key: &[u8]) -> Result<u64, KvError> {
     Ok(xid.get())
 }
 
-/// Fixed 17-byte tuple header: tag plus big-endian xmin/xmax. `#[repr(C)]`
+/// Legacy fixed 17-byte tuple header: tag plus big-endian xmin/xmax. `#[repr(C)]`
+///
+/// Released xid-MVCC rows use this format. It remains readable so an upgraded
+/// server can vacuum and rewrite an existing store.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct LegacyTupleHeader {
+    tag: u8,
+    xmin: U64,
+    xmax: U64,
+}
+
+/// Fixed 25-byte tuple header: tag plus big-endian xmin/xmax/cmin/cmax. `#[repr(C)]`
 /// with alignment-1 fields packs with no padding, which matches the on-disk
 /// layout.
 #[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
@@ -81,9 +94,26 @@ struct TupleHeader {
     tag: u8,
     xmin: U64,
     xmax: U64,
+    cmin: U32,
+    cmax: U32,
 }
 
-const T_TUPLE: u8 = 1;
+/// A superseded tuple records the physical identity of the tuple that replaced
+/// it, so storage-identity callers can follow an UPDATE chain.
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct UpdateTupleHeader {
+    tag: u8,
+    xmin: U64,
+    xmax: U64,
+    cmin: U32,
+    cmax: U32,
+    next_rowid: U64,
+}
+
+const T_TUPLE_LEGACY: u8 = 1;
+const T_TUPLE_UPDATED: u8 = 3;
+const T_TUPLE: u8 = 4;
 const T_TS_TUPLE: u8 = 2;
 const TS_STATE_INTENT: u8 = 1;
 const TS_STATE_COMMITTED: u8 = 2;
@@ -137,17 +167,63 @@ struct TsTupleHeader {
     commit_ts: U64,
 }
 
-/// Encodes a tuple version: a 1-byte tag, the `xmin`/`xmax` header, then the
+/// Encodes a tuple version: a 1-byte tag, the `xmin`/`xmax`/command header, then the
 /// row. `xmax == INVALID_XID` (0) marks a live version. A delete keeps the row
 /// bytes and sets `xmax`, because Postgres retains the tuple until vacuum.
 #[must_use]
 pub fn encode_tuple(xmin: u64, xmax: u64, row: &[Datum]) -> Vec<u8> {
-    let header = TupleHeader {
-        tag: T_TUPLE,
+    let header = LegacyTupleHeader {
+        tag: T_TUPLE_LEGACY,
         xmin: U64::new(xmin),
         xmax: U64::new(xmax),
     };
     let mut out = Vec::with_capacity(17 + row.len() * 8);
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(&crabka_pgkv::rowenc::encode_row(row));
+    out
+}
+
+/// Encodes a tuple version with the creating and deleting command IDs.
+#[must_use]
+pub fn encode_tuple_with_command_ids(
+    xmin: u64,
+    xmax: u64,
+    cmin: u32,
+    cmax: u32,
+    row: &[Datum],
+) -> Vec<u8> {
+    let header = TupleHeader {
+        tag: T_TUPLE,
+        xmin: U64::new(xmin),
+        xmax: U64::new(xmax),
+        cmin: U32::new(cmin),
+        cmax: U32::new(cmax),
+    };
+    let mut out = Vec::with_capacity(25 + row.len() * 8);
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(&crabka_pgkv::rowenc::encode_row(row));
+    out
+}
+
+/// Encodes a superseded tuple with the physical identity of its replacement.
+#[must_use]
+pub fn encode_tuple_with_command_ids_and_update_target(
+    xmin: u64,
+    xmax: u64,
+    cmin: u32,
+    cmax: u32,
+    next_rowid: u64,
+    row: &[Datum],
+) -> Vec<u8> {
+    let header = UpdateTupleHeader {
+        tag: T_TUPLE_UPDATED,
+        xmin: U64::new(xmin),
+        xmax: U64::new(xmax),
+        cmin: U32::new(cmin),
+        cmax: U32::new(cmax),
+        next_rowid: U64::new(next_rowid),
+    };
+    let mut out = Vec::with_capacity(33 + row.len() * 8);
     out.extend_from_slice(header.as_bytes());
     out.extend_from_slice(&crabka_pgkv::rowenc::encode_row(row));
     out
@@ -181,13 +257,90 @@ pub fn encode_ts_tuple(start_ts: u64, state: TsVersionState, row: &[Datum]) -> V
 /// Returns [`KvError::CorruptRow`] when the tuple header or row payload is
 /// invalid.
 pub fn decode_tuple(bytes: &[u8]) -> Result<(u64, u64, Vec<Datum>), KvError> {
-    let (header, rest) = TupleHeader::ref_from_prefix(bytes)
-        .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
-    if header.tag != T_TUPLE {
-        return Err(KvError::CorruptRow("bad tuple header".into()));
+    let (xmin, xmax, _, _, row) = decode_tuple_with_command_ids(bytes)?;
+    Ok((xmin, xmax, row))
+}
+
+/// Decodes a tuple version into its transaction and command IDs plus row.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the tuple header or row payload is
+/// invalid.
+pub fn decode_tuple_with_command_ids(
+    bytes: &[u8],
+) -> Result<(u64, u64, u32, u32, Vec<Datum>), KvError> {
+    let (xmin, xmax, cmin, cmax, row, _) = decode_tuple_with_command_ids_and_update_target(bytes)?;
+    Ok((xmin, xmax, cmin, cmax, row))
+}
+
+/// Decodes a tuple version and, for a superseded tuple, its replacement rowid.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the tuple header, update target, or row
+/// payload is invalid.
+pub fn decode_tuple_with_command_ids_and_update_target(
+    bytes: &[u8],
+) -> Result<(u64, u64, u32, u32, Vec<Datum>, Option<u64>), KvError> {
+    match bytes.first().copied() {
+        Some(T_TUPLE_LEGACY) => {
+            let (header, rest) = LegacyTupleHeader::ref_from_prefix(bytes)
+                .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
+            Ok((
+                header.xmin.get(),
+                header.xmax.get(),
+                0,
+                0,
+                crabka_pgkv::rowenc::decode_row(rest)?,
+                None,
+            ))
+        }
+        Some(T_TUPLE) => {
+            let (header, rest) = TupleHeader::ref_from_prefix(bytes)
+                .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
+            Ok((
+                header.xmin.get(),
+                header.xmax.get(),
+                header.cmin.get(),
+                header.cmax.get(),
+                crabka_pgkv::rowenc::decode_row(rest)?,
+                None,
+            ))
+        }
+        Some(T_TUPLE_UPDATED) => {
+            let (header, rest) = UpdateTupleHeader::ref_from_prefix(bytes)
+                .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
+            let next_rowid = header.next_rowid.get();
+            if next_rowid == 0 {
+                return Err(KvError::CorruptRow("invalid update target".into()));
+            }
+            Ok((
+                header.xmin.get(),
+                header.xmax.get(),
+                header.cmin.get(),
+                header.cmax.get(),
+                crabka_pgkv::rowenc::decode_row(rest)?,
+                Some(next_rowid),
+            ))
+        }
+        _ => Err(KvError::CorruptRow("bad tuple header".into())),
     }
-    let row = crabka_pgkv::rowenc::decode_row(rest)?;
-    Ok((header.xmin.get(), header.xmax.get(), row))
+}
+
+fn validate_tuple_header(bytes: &[u8]) -> Result<(), KvError> {
+    match bytes.first().copied() {
+        Some(T_TUPLE_LEGACY) => LegacyTupleHeader::ref_from_prefix(bytes)
+            .map(|_| ())
+            .map_err(|_| KvError::CorruptRow("bad tuple header".into())),
+        Some(T_TUPLE) => TupleHeader::ref_from_prefix(bytes)
+            .map(|_| ())
+            .map_err(|_| KvError::CorruptRow("bad tuple header".into())),
+        Some(T_TUPLE_UPDATED) => UpdateTupleHeader::ref_from_prefix(bytes)
+            .map(|_| ())
+            .map_err(|_| KvError::CorruptRow("bad tuple header".into())),
+        _ => Err(KvError::CorruptRow("bad tuple header".into())),
+    }
 }
 
 /// Decodes a timestamp-transaction tuple version.
@@ -234,11 +387,7 @@ pub fn decode_ts_tuple(bytes: &[u8]) -> Result<TsTupleVersion, KvError> {
 ///
 /// Returns [`KvError::CorruptRow`] when the tuple header is invalid.
 pub fn rewrite_tuple_xmin(bytes: &[u8], xmin: Xid) -> Result<Vec<u8>, KvError> {
-    let (header, _) = TupleHeader::ref_from_prefix(bytes)
-        .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
-    if header.tag != T_TUPLE {
-        return Err(KvError::CorruptRow("bad tuple header".into()));
-    }
+    validate_tuple_header(bytes)?;
 
     let mut rewritten = bytes.to_vec();
     rewritten[1..9].copy_from_slice(U64::new(xmin).as_bytes());
@@ -267,11 +416,7 @@ pub fn freeze_tuple_xmin(bytes: &[u8]) -> Result<Vec<u8>, KvError> {
 ///
 /// Returns [`KvError::CorruptRow`] when the tuple header is invalid.
 pub fn clear_tuple_xmax(bytes: &[u8]) -> Result<Vec<u8>, KvError> {
-    let (header, _) = TupleHeader::ref_from_prefix(bytes)
-        .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
-    if header.tag != T_TUPLE {
-        return Err(KvError::CorruptRow("bad tuple header".into()));
-    }
+    validate_tuple_header(bytes)?;
 
     let mut rewritten = bytes.to_vec();
     rewritten[9..17].copy_from_slice(U64::new(crate::xid::INVALID_XID).as_bytes());
@@ -285,8 +430,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tuple_header_is_packed_17_bytes() {
-        assert_eq!(core::mem::size_of::<TupleHeader>(), 17);
+    fn tuple_header_is_packed_25_bytes() {
+        assert_eq!(core::mem::size_of::<LegacyTupleHeader>(), 17);
+        assert_eq!(core::mem::size_of::<TupleHeader>(), 25);
     }
 
     #[test]
@@ -301,10 +447,14 @@ mod tests {
             tag: T_TUPLE,
             xmin: U64::new(5),
             xmax: U64::new(9),
+            cmin: U32::new(2),
+            cmax: U32::new(7),
         };
         let mut manual = vec![T_TUPLE];
         manual.extend_from_slice(&5u64.to_be_bytes());
         manual.extend_from_slice(&9u64.to_be_bytes());
+        manual.extend_from_slice(&2u32.to_be_bytes());
+        manual.extend_from_slice(&7u32.to_be_bytes());
         assert_eq!(h.as_bytes(), manual.as_slice());
     }
 
@@ -343,12 +493,38 @@ mod tests {
     fn tuple_roundtrips_header_and_row() {
         let row = vec![Datum::Int4(1), Datum::Text("a".into())];
         let bytes = encode_tuple(5, crate::xid::INVALID_XID, &row);
+        assert_eq!(bytes[0], T_TUPLE_LEGACY);
         assert_eq!(decode_tuple(&bytes).expect("decode"), (5, 0, row));
         // a deleted/superseded version keeps its row bytes and carries xmax.
         let bytes = encode_tuple(5, 9, &[Datum::Int4(1)]);
         assert_eq!(
             decode_tuple(&bytes).expect("decode"),
             (5, 9, vec![Datum::Int4(1)])
+        );
+        let bytes = encode_tuple_with_command_ids(5, 9, 2, 7, &[Datum::Int4(1)]);
+        assert_eq!(bytes[0], T_TUPLE);
+        assert_eq!(
+            decode_tuple_with_command_ids(&bytes).expect("decode command IDs"),
+            (5, 9, 2, 7, vec![Datum::Int4(1)])
+        );
+        assert_eq!(
+            decode_tuple_with_command_ids(&clear_tuple_xmax(&bytes).expect("clear command ID"))
+                .expect("decode cleared command ID"),
+            (5, 0, 2, 7, vec![Datum::Int4(1)])
+        );
+        let bytes =
+            encode_tuple_with_command_ids_and_update_target(5, 9, 2, 7, 42, &[Datum::Int4(1)]);
+        assert_eq!(
+            decode_tuple_with_command_ids_and_update_target(&bytes).expect("decode update"),
+            (5, 9, 2, 7, vec![Datum::Int4(1)], Some(42))
+        );
+        assert_eq!(
+            decode_tuple_with_command_ids_and_update_target(
+                &freeze_tuple_xmin(&bytes).expect("freeze update"),
+            )
+            .expect("decode frozen update")
+            .0,
+            FROZEN_XID
         );
     }
 

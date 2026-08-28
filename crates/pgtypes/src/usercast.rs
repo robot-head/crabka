@@ -29,6 +29,8 @@ pub enum CastMethod {
     /// `WITH INOUT` (`i`): the source's output function feeds the target's
     /// input one.
     InOut,
+    /// `WITH FUNCTION` (`f`): a user routine converts the value.
+    Function,
 }
 
 /// One declared cast's identity.
@@ -47,7 +49,11 @@ fn registry() -> &'static RwLock<HashMap<(u32, u32), CastMethod>> {
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Replace the registry with `casts`, the durable catalog's current contents.
+/// Add `casts` from one durable catalog to the process registry.
+///
+/// Type oids are process-unique, so a catalog refresh must not discard casts
+/// belonging to another live catalog. Call [`publish_catalog_delta`] after DDL
+/// to remove entries that this catalog dropped.
 ///
 /// # Panics
 ///
@@ -55,10 +61,29 @@ fn registry() -> &'static RwLock<HashMap<(u32, u32), CastMethod>> {
 /// panicked while holding it.
 pub fn publish(casts: impl IntoIterator<Item = DeclaredCast>) {
     let mut guard = registry().write().expect("cast registry is healthy");
-    *guard = casts
-        .into_iter()
-        .map(|cast| ((cast.source, cast.target), cast.method))
-        .collect();
+    guard.extend(
+        casts
+            .into_iter()
+            .map(|cast| ((cast.source, cast.target), cast.method)),
+    );
+}
+
+/// Apply one catalog's cast change without disturbing other catalogs' casts.
+///
+/// # Panics
+///
+/// If the registry lock is poisoned, which can only happen if another thread
+/// panicked while holding it.
+pub fn publish_catalog_delta(before: &[DeclaredCast], after: &[DeclaredCast]) {
+    let mut guard = registry().write().expect("cast registry is healthy");
+    for cast in before {
+        guard.remove(&(cast.source, cast.target));
+    }
+    guard.extend(
+        after
+            .iter()
+            .map(|cast| ((cast.source, cast.target), cast.method)),
+    );
 }
 
 /// Whether the user declared a cast from `source` to `target`.
@@ -106,7 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn publish_replaces_the_whole_snapshot() {
+    fn catalog_refreshes_merge_and_deltas_remove_only_the_changed_catalog() {
         publish([DeclaredCast {
             source: 23,
             target: 700,
@@ -116,15 +141,32 @@ mod tests {
         assert!(is_declared(23, 700));
         assert!(declared_method(23, 700) == Some(CastMethod::Binary));
         assert!(!is_declared(700, 23));
-        // A second publish is the new catalog state, not an addition to it.
+        // A second catalog must not erase the first catalog's cast.
         publish([DeclaredCast {
             source: 700,
             target: 23,
             method: CastMethod::InOut,
         }]);
-        assert!(!is_declared(23, 700));
+        assert!(is_declared(23, 700));
         assert!(declared_method(700, 23) == Some(CastMethod::InOut));
-        publish([]);
+        publish_catalog_delta(
+            &[DeclaredCast {
+                source: 23,
+                target: 700,
+                method: CastMethod::Binary,
+            }],
+            &[],
+        );
+        assert!(!is_declared(23, 700));
+        assert!(is_declared(700, 23));
+        publish_catalog_delta(
+            &[DeclaredCast {
+                source: 700,
+                target: 23,
+                method: CastMethod::InOut,
+            }],
+            &[],
+        );
         assert!(!any_declared());
         assert!(declared_method(700, 23) == None);
     }

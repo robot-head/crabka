@@ -70,6 +70,7 @@ enum CatalogFunc {
     IndexDef,
     ConstraintDef,
     TriggerDef,
+    RuleDef,
     Expr,
     UserById,
     SerialSequence,
@@ -112,6 +113,7 @@ enum CatalogFunc {
     EventRewriteOid,
     EventRewriteReason,
     NotificationQueueUsage,
+    SettingsFlags,
 }
 
 /// Classify a lowercased function name.
@@ -120,8 +122,9 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
         EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef, IndexesSize,
         IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize, RoutineDef,
-        SerialSequence, ShobjDescription, SizeBytes, SizePretty, StartTime, TableSize,
-        TablespaceLocation, TotalRelationSize, TriggerDef, TriggerDepth, UserById, ViewDef,
+        SerialSequence, SettingsFlags, ShobjDescription, SizeBytes, SizePretty, StartTime,
+        TableSize, TablespaceLocation, TotalRelationSize, TriggerDef, TriggerDepth, UserById,
+        ViewDef,
     };
     Some(match name {
         "pg_get_viewdef" => ViewDef,
@@ -135,8 +138,9 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_get_function_identity_arguments" => RoutineDef(RoutineDefKind::IdentityArguments),
         "pg_get_function_result" => RoutineDef(RoutineDefKind::Result),
         "pg_get_triggerdef" => TriggerDef,
+        "pg_get_ruledef" => CatalogFunc::RuleDef,
         "pg_get_partkeydef" => CatalogFunc::PartKeyDef,
-        "pg_get_ruledef" | "pg_get_statisticsobjdef" | "pg_get_statisticsobjdef_columns" => NullDef,
+        "pg_get_statisticsobjdef" | "pg_get_statisticsobjdef_columns" => NullDef,
         // `pg_table_is_visible` belongs to the same family but is dispatched
         // through [`crate::func`]; every other member lands here. Both routes
         // evaluate through [`crate::visibility`].
@@ -176,6 +180,7 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_event_trigger_table_rewrite_oid" => CatalogFunc::EventRewriteOid,
         "pg_event_trigger_table_rewrite_reason" => CatalogFunc::EventRewriteReason,
         "pg_notification_queue_usage" => CatalogFunc::NotificationQueueUsage,
+        "pg_settings_get_flags" => SettingsFlags,
         _ if is_privilege_func(name) => HasPrivilege,
         "pg_has_role" => HasRole,
         _ => return None,
@@ -237,8 +242,8 @@ pub(crate) fn catalog_func_result_type(
 ) -> Result<ColumnType, ExecError> {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, CurrentSchemas, HasPrivilege, HasRole, InRecovery,
-        IndexesSize, IsPublishable, IsVisible, RelationSize, SizeBytes, SizePretty, StartTime,
-        TableSize, TotalRelationSize,
+        IndexesSize, IsPublishable, IsVisible, RelationSize, SettingsFlags, SizeBytes, SizePretty,
+        StartTime, TableSize, TotalRelationSize,
     };
     let f = catalog_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     let args = crate::func::checked_args(fc)?;
@@ -287,7 +292,7 @@ pub(crate) fn catalog_func_result_type(
         | CatalogFunc::RelationIsUpdatable => ColumnType::Int4,
         CatalogFunc::NotificationQueueUsage => ColumnType::Float8,
         StartTime => ColumnType::Timestamptz,
-        CurrentSchemas => ColumnType::Array(ElemType::Text),
+        CurrentSchemas | SettingsFlags => ColumnType::Array(ElemType::Text),
         _ => ColumnType::Text,
     })
 }
@@ -298,11 +303,13 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
         EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef, IndexesSize,
         IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize, SerialSequence,
-        ShobjDescription, SizeBytes, SizePretty, StartTime, TableSize, TablespaceLocation,
-        TotalRelationSize, UserById, ViewDef,
+        SettingsFlags, ShobjDescription, SizeBytes, SizePretty, StartTime, TableSize,
+        TablespaceLocation, TotalRelationSize, UserById, ViewDef,
     };
     match f {
-        ViewDef | ConstraintDef | CatalogFunc::TriggerDef | NullDef => n == 1 || n == 2,
+        ViewDef | ConstraintDef | CatalogFunc::TriggerDef | CatalogFunc::RuleDef | NullDef => {
+            n == 1 || n == 2
+        }
         CatalogFunc::RoutineDef(_) => n == 1,
         IndexDef => n == 1 || n == 3,
         ExprDef => n == 2 || n == 3,
@@ -323,7 +330,7 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
         CatalogFunc::RelationIsUpdatable => n == 2,
         CatalogFunc::ColumnIsUpdatable => n == 3,
         ObjDescription | RelationSize => n == 1 || n == 2,
-        ClusterSize => n == 1,
+        ClusterSize | SettingsFlags => n == 1,
         BackendPid
         | StartTime
         | InRecovery
@@ -362,8 +369,8 @@ fn eval_resolved(
 ) -> Result<Datum, ExecError> {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, CurrentSchemas, EncodingToChar, HasPrivilege,
-        HasRole, InRecovery, IsPublishable, IsVisible, NullDef, SizeBytes, SizePretty, StartTime,
-        TablespaceLocation,
+        HasRole, InRecovery, IsPublishable, IsVisible, NullDef, SettingsFlags, SizeBytes,
+        SizePretty, StartTime, TablespaceLocation,
     };
     match f {
         NullDef => Ok(Datum::Null),
@@ -403,6 +410,7 @@ fn eval_resolved(
         // is exactly zero. Keep the function volatile: that remains correct if
         // queue state is added later.
         CatalogFunc::NotificationQueueUsage => Ok(Datum::Float8(0.0)),
+        SettingsFlags => setting_flags(&vals[0]),
         StartTime => Ok(Datum::Timestamptz(process_start_time())),
         CurrentSchemas => current_schemas(&vals[0], ctx),
         EncodingToChar => Ok(encoding_to_char(&vals[0])),
@@ -413,6 +421,23 @@ fn eval_resolved(
         HasRole => Ok(Datum::Bool(true)),
         _ => eval_catalog_reading(f, vals, ctx),
     }
+}
+
+fn setting_flags(value: &Datum) -> Result<Datum, ExecError> {
+    let Datum::Text(name) = value else {
+        return Ok(Datum::Null);
+    };
+    Ok(
+        crate::session::guc_setting_flags(name).map_or(Datum::Null, |flags| {
+            Datum::Array(ArrayValue::new(
+                ElemType::Text,
+                flags
+                    .iter()
+                    .map(|flag| Datum::Text((*flag).into()))
+                    .collect(),
+            ))
+        }),
+    )
 }
 
 fn tablespace_location(value: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
@@ -472,7 +497,15 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
         ),
         ConstraintDef => constraint_def(kv, scope, &vals[0]),
         CatalogFunc::PartKeyDef => part_key_def(kv, scope, &vals[0]),
-        CatalogFunc::TriggerDef => trigger_def(kv, &vals[0]),
+        CatalogFunc::TriggerDef => trigger_def(
+            kv,
+            &vals[0],
+            matches!(vals.get(1), Some(Datum::Bool(true))),
+            ctx.output_style(),
+        ),
+        CatalogFunc::RuleDef => {
+            rule_def(kv, &vals[0], matches!(vals.get(1), Some(Datum::Bool(true))))
+        }
         // Every catalog column this reaches already holds the text that column
         // is supposed to report — `polqual` deparsed by its projection, a
         // default or `CHECK` predicate as stored — so "decompiling" is the
@@ -486,7 +519,7 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
         TableSize => table_size(kv, data_kv, scope, &vals[0]),
         IndexesSize => indexes_size(kv, data_kv, scope, &vals[0]),
         TotalRelationSize => total_relation_size(kv, data_kv, scope, &vals[0]),
-        ObjDescription => description(kv, scope, &vals[0], 0),
+        ObjDescription => object_description(kv, scope, vals),
         ColDescription => {
             let subid = i32::try_from(int_arg(&vals[1])?)
                 .map_err(|_| ExecError::Unsupported("column number out of range".into()))?;
@@ -600,7 +633,12 @@ fn updatable_relation_name(kv: &dyn Kv, oid: i32) -> Result<Option<RelationName>
         .find_map(|(name, view_oid)| (view_oid == oid).then_some(name)))
 }
 
-fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
+fn trigger_def(
+    kv: &dyn Kv,
+    reference: &Datum,
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<Datum, ExecError> {
     let Ok(oid) = u32::try_from(int_arg(reference)?) else {
         return Ok(Datum::Null);
     };
@@ -650,12 +688,15 @@ fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
     }
     sql.push(' ');
     sql.push_str(&events.join(" OR "));
-    let _ = write!(
-        sql,
-        " ON {}.{}",
-        quote_identifier(crabka_pgcatalog::displayed_schema(&trigger.table.schema)),
-        quote_identifier(&trigger.table.name)
-    );
+    sql.push_str(" ON ");
+    if !pretty || trigger.table.schema != "public" {
+        let _ = write!(
+            sql,
+            "{}.",
+            quote_identifier(crabka_pgcatalog::displayed_schema(&trigger.table.schema)),
+        );
+    }
+    sql.push_str(&quote_identifier(&trigger.table.name));
     if let Some(referenced) = trigger.referenced_table_id
         && let Ok(table) = crabka_pgcatalog::table_by_id(kv, referenced)
     {
@@ -690,7 +731,13 @@ fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
         TriggerLevel::Statement => " FOR EACH STATEMENT",
     });
     if let Some(predicate) = &trigger.when {
-        let _ = write!(sql, " WHEN ({predicate})");
+        let predicate = crabka_pgparser::parser::parse_expression(predicate)?;
+        let predicate = crate::viewdef::expression_text_with_qualifiers(&predicate, style);
+        let _ = if pretty {
+            write!(sql, " WHEN {predicate}")
+        } else {
+            write!(sql, " WHEN ({predicate})")
+        };
     }
     let args = trigger
         .arguments
@@ -703,6 +750,1074 @@ fn trigger_def(kv: &dyn Kv, reference: &Datum) -> Result<Datum, ExecError> {
             .map_or(trigger.function, |routine| routine.name);
     let _ = write!(sql, " EXECUTE FUNCTION {function}({args})");
     Ok(Datum::Text(sql))
+}
+
+/// `pg_get_ruledef(oid)` — the durable rewrite rule in `CREATE RULE` form.
+pub(crate) fn rule_def(kv: &dyn Kv, reference: &Datum, pretty: bool) -> Result<Datum, ExecError> {
+    let Ok(oid) = u32::try_from(int_arg(reference)?) else {
+        return Ok(Datum::Null);
+    };
+    let Some(rule) = crabka_pgcatalog::rule::list_rules(kv)?
+        .into_iter()
+        .find(|rule| rule.oid == oid)
+    else {
+        let utc = jiff::tz::TimeZone::UTC;
+        let views = crate::catalog_rel::view_oids(kv)?;
+        let Some(view) = crabka_pgcatalog::list_views(kv)?.into_iter().find(|view| {
+            views
+                .get(&view.name)
+                .is_some_and(|view_oid| u32::try_from(*view_oid) == Ok(oid))
+        }) else {
+            return Ok(Datum::Null);
+        };
+        return Ok(Datum::Text(format!(
+            "CREATE RULE \"_RETURN\" AS\n    ON SELECT TO {} DO INSTEAD {}",
+            quote_identifier(&view.name.name),
+            view_definition_text(
+                &view,
+                true,
+                crabka_pgtypes::encoding::OutputStyle::with_zone(&utc),
+            ),
+        )));
+    };
+    let event = match rule.event {
+        crabka_pgcatalog::rule::RuleEvent::Select => "SELECT",
+        crabka_pgcatalog::rule::RuleEvent::Insert => "INSERT",
+        crabka_pgcatalog::rule::RuleEvent::Update => "UPDATE",
+        crabka_pgcatalog::rule::RuleEvent::Delete => "DELETE",
+    };
+    let utc = jiff::tz::TimeZone::UTC;
+    let style = crabka_pgtypes::encoding::OutputStyle::with_zone(&utc);
+    let source_columns = rule_source_columns(kv, &rule.table)?;
+    let source_is_view = match crabka_pgcatalog::get_table(kv, &rule.table) {
+        Ok(_) => false,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => true,
+        Err(error) => return Err(error.into()),
+    };
+    let target = if pretty && rule.table.is_public() {
+        quote_identifier(&rule.table.name)
+    } else {
+        format!(
+            "{}.{}",
+            quote_identifier(crabka_pgcatalog::displayed_schema(&rule.table.schema)),
+            quote_identifier(&rule.table.name),
+        )
+    };
+    let mut sql = format!(
+        "CREATE RULE {} AS\n    ON {event} TO {target}",
+        quote_identifier(&rule.name),
+    );
+    if let Some(condition) = &rule.condition {
+        let condition = crabka_pgparser::parser::parse_expression(condition)?;
+        let _ = write!(
+            sql,
+            "\n   WHERE {}",
+            crate::viewdef::expression_text_with_qualifiers(&condition, style)
+        );
+    }
+    sql.push_str(" DO");
+    if rule.instead {
+        sql.push_str(" INSTEAD");
+    }
+    sql.push_str(&rule_action_definition(
+        kv,
+        &rule.table.schema,
+        &source_columns,
+        source_is_view,
+        &rule.action,
+        pretty,
+        style,
+    )?);
+    Ok(Datum::Text(sql))
+}
+
+/// Reconstruct the action portion of a stored rewrite rule.
+///
+/// The executor deliberately stores source text so it can reparse actions when
+/// firing.  `pg_get_ruledef` uses the same parse here, then normalizes the
+/// `INSERT … VALUES` shape which rewrite rules currently execute.
+fn rule_action_definition(
+    kv: &dyn Kv,
+    source_schema: &str,
+    source_columns: &[crabka_pgcatalog::Column],
+    source_is_view: bool,
+    action_source: &str,
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<String, ExecError> {
+    if action_source.eq_ignore_ascii_case("nothing") {
+        return Ok(" NOTHING;".into());
+    }
+    let action_sql = action_source
+        .trim()
+        .strip_prefix('(')
+        .and_then(|action| action.strip_suffix(')'))
+        .unwrap_or(action_source);
+    let actions = crabka_pgparser::parse(action_sql)?;
+    let grouped = action_source.trim_start().starts_with('(') && actions.len() > 1;
+    if actions.iter().any(|action| !is_simple_rule_action(action)) {
+        return Ok(format!(" {};", action_source.trim().trim_end_matches(';')));
+    }
+    let actions = actions
+        .iter()
+        .map(|action| {
+            rule_action_statement(
+                kv,
+                source_schema,
+                source_columns,
+                source_is_view,
+                action,
+                None,
+                pretty,
+                style,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let [action] = actions.as_slice()
+        && action.starts_with("NOTIFY ")
+    {
+        return Ok(format!("\n {action};"));
+    }
+    if grouped {
+        let mut text = " (".to_string();
+        for action in actions {
+            if action.starts_with("NOTIFY ") {
+                text.push('\n');
+            }
+            let _ = write!(text, " {action};\n");
+        }
+        text.push_str(");");
+        return Ok(text);
+    }
+    Ok(format!("  {};", actions.join("; ")))
+}
+
+fn is_simple_rule_action(action: &crabka_pgparser::ast::Statement) -> bool {
+    use crabka_pgparser::ast::{AssignmentValue, InsertSource, Statement};
+
+    match action {
+        Statement::Notify { .. } => true,
+        Statement::Query(query)
+            if matches!(
+                &query.body,
+                crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(_))
+            ) =>
+        {
+            true
+        }
+        Statement::Delete {
+            only: false,
+            with: None,
+            alias,
+            using,
+            returning,
+            table,
+            ..
+        } if using.is_empty() => simple_rule_returning(returning, table, alias.as_deref()),
+        Statement::Insert {
+            source: InsertSource::Values(_) | InsertSource::Query(_) | InsertSource::DefaultValues,
+            with,
+            alias,
+            returning,
+            table,
+            ..
+        } => {
+            with.as_ref().is_none_or(rule_action_with_is_simple)
+                && simple_rule_returning(returning, table, alias.as_deref())
+        }
+        Statement::Update {
+            only: false,
+            with: None,
+            alias,
+            assignments,
+            from,
+            returning,
+            table,
+            ..
+        } => {
+            from.is_empty()
+                && simple_rule_returning(returning, table, alias.as_deref())
+                && assignments.iter().all(|assignment| {
+                    matches!(
+                        assignment.value,
+                        AssignmentValue::Expr(_)
+                            | AssignmentValue::Row(_)
+                            | AssignmentValue::Subquery(_)
+                    )
+                })
+        }
+        _ => false,
+    }
+}
+
+fn rule_action_with_is_simple(with: &crabka_pgparser::ast::WithClause) -> bool {
+    with.ctes.iter().all(|cte| match &cte.body {
+        crabka_pgparser::ast::CteBody::Query(_) => true,
+        crabka_pgparser::ast::CteBody::Dml(statement) => is_simple_rule_action(statement),
+    })
+}
+
+fn simple_rule_returning(
+    returning: &Option<crabka_pgparser::ast::Returning>,
+    table: &crabka_pgparser::ast::RelationRef,
+    alias: Option<&str>,
+) -> bool {
+    use crabka_pgparser::ast::{Expr, SelectItem};
+
+    returning.as_ref().is_none_or(|returning| {
+        returning.items.iter().all(|item| match item {
+            SelectItem::Wildcard => true,
+            SelectItem::QualifiedWildcard(qualifier) => {
+                qualifier == &table.name
+                    || alias.is_some_and(|alias| qualifier == alias)
+                    || qualifier.eq_ignore_ascii_case("old")
+                    || qualifier.eq_ignore_ascii_case("new")
+            }
+            SelectItem::Expr {
+                expr: Expr::Column {
+                    table: qualifier, ..
+                },
+                ..
+            } => qualifier.as_deref().is_none_or(|qualifier| {
+                qualifier == table.name
+                    || alias.is_some_and(|alias| qualifier == alias)
+                    || qualifier.eq_ignore_ascii_case("old")
+                    || qualifier.eq_ignore_ascii_case("new")
+            }),
+            _ => false,
+        })
+    })
+}
+
+fn rule_action_statement(
+    kv: &dyn Kv,
+    source_schema: &str,
+    source_columns: &[crabka_pgcatalog::Column],
+    source_is_view: bool,
+    statement: &crabka_pgparser::ast::Statement,
+    target_alias: Option<&str>,
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<String, ExecError> {
+    use crabka_pgparser::ast::{InsertSource, Statement};
+
+    if let Statement::Notify { channel, payload } = statement {
+        let payload = payload
+            .as_ref()
+            .map(|payload| format!(", '{}'", payload.replace('\'', "''")))
+            .unwrap_or_default();
+        return Ok(format!("NOTIFY {}{payload}", quote_identifier(channel)));
+    }
+
+    if let Statement::Query(query) = statement
+        && let crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Values(rows)) =
+            &query.body
+    {
+        return Ok(format!(
+            "VALUES {}",
+            rule_values_rows(&rows.rows, source_columns, pretty, style)
+        ));
+    }
+
+    if let Statement::Update {
+        table,
+        alias,
+        assignments,
+        filter,
+        returning,
+        ..
+    } = statement
+    {
+        let target_alias = target_alias.or(alias.as_deref());
+        let assignments = assignments
+            .iter()
+            .map(|assignment| rule_assignment_text(assignment, target_alias, pretty, style))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!(
+            "UPDATE {} SET {assignments}",
+            rule_action_dml_target(table, target_alias)
+        );
+        if let Some(filter) = filter {
+            let _ = write!(
+                sql,
+                "\n  WHERE {}",
+                rule_action_filter_text(filter, target_alias, pretty, style)
+            );
+        }
+        let target_columns = rule_action_columns(kv, source_schema, table)?;
+        write_rule_returning(
+            &mut sql,
+            table,
+            target_alias,
+            &target_columns,
+            source_columns,
+            returning,
+            pretty,
+        );
+        return Ok(sql);
+    }
+
+    if let Statement::Delete {
+        table,
+        alias,
+        filter,
+        returning,
+        ..
+    } = statement
+    {
+        let target_alias = target_alias.or(alias.as_deref());
+        let mut sql = format!(
+            "DELETE FROM {}",
+            rule_action_dml_target(table, target_alias)
+        );
+        if let Some(filter) = filter {
+            let _ = write!(
+                sql,
+                "\n  WHERE {}",
+                rule_action_filter_text(filter, target_alias, pretty, style)
+            );
+        }
+        let target_columns = rule_action_columns(kv, source_schema, table)?;
+        write_rule_returning(
+            &mut sql,
+            table,
+            target_alias,
+            &target_columns,
+            source_columns,
+            returning,
+            pretty,
+        );
+        return Ok(sql);
+    }
+
+    let Statement::Insert {
+        table,
+        alias,
+        columns,
+        source: insert_source,
+        with,
+        on_conflict,
+        returning,
+        ..
+    } = statement
+    else {
+        unreachable!("rule_action_definition filters unsupported action shapes");
+    };
+    let with_prefix = with
+        .as_ref()
+        .map(|with| {
+            rule_action_with_clause(
+                kv,
+                source_schema,
+                source_columns,
+                source_is_view,
+                with,
+                pretty,
+                style,
+            )
+        })
+        .transpose()?;
+    let target_alias = target_alias.or(alias.as_deref());
+    let target_columns = rule_action_columns(kv, source_schema, table)?;
+    let target = rule_action_target(table, target_alias);
+    if matches!(insert_source, InsertSource::DefaultValues) {
+        let mut sql = format!("INSERT INTO {target} DEFAULT VALUES");
+        write_rule_on_conflict(&mut sql, on_conflict, &target_columns, &table.name, style);
+        write_rule_returning(
+            &mut sql,
+            table,
+            target_alias,
+            &target_columns,
+            source_columns,
+            returning,
+            pretty,
+        );
+        return Ok(format!(
+            "{}{sql}",
+            with_prefix.as_deref().unwrap_or_default()
+        ));
+    }
+    let query_names = match insert_source {
+        InsertSource::Query(query) => match &query.body {
+            crabka_pgparser::ast::SetExpr::Query(crabka_pgparser::ast::QueryBody::Select(
+                select,
+            )) if select.projection.iter().any(|item| {
+                matches!(
+                    item,
+                    crabka_pgparser::ast::SelectItem::QualifiedWildcard(name)
+                        if name.eq_ignore_ascii_case("old") || name.eq_ignore_ascii_case("new")
+                )
+            }) =>
+            {
+                source_columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect()
+            }
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    let target_column_names = columns.clone().unwrap_or_else(|| {
+        target_columns
+            .iter()
+            .take(if query_names.is_empty() {
+                target_columns.len()
+            } else {
+                query_names.len()
+            })
+            .map(|column| column.name.clone())
+            .collect()
+    });
+    let columns = target_column_names
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let InsertSource::Query(query) = insert_source {
+        let mut sql = format!("INSERT INTO {target} ({columns}) ");
+        crate::viewdef::write_rule_query_with_qualifiers(
+            &mut sql,
+            query,
+            &query_names,
+            pretty,
+            style,
+        );
+        write_rule_on_conflict(&mut sql, on_conflict, &target_columns, &table.name, style);
+        write_rule_returning(
+            &mut sql,
+            table,
+            target_alias,
+            &target_columns,
+            source_columns,
+            returning,
+            pretty,
+        );
+        return Ok(format!(
+            "{}{sql}",
+            with_prefix.as_deref().unwrap_or_default()
+        ));
+    }
+    let InsertSource::Values(rows) = insert_source else {
+        unreachable!("is_simple_rule_action filters non-values INSERT sources");
+    };
+    let mut value_rows = rows.clone();
+    coerce_rule_values_literals(
+        &mut value_rows,
+        source_columns,
+        &target_columns,
+        &target_column_names,
+    );
+    let rows = rule_values_rows(&value_rows, source_columns, pretty, style);
+    let separator = if pretty && !source_is_view {
+        " "
+    } else {
+        "\n  "
+    };
+    let mut sql = format!("INSERT INTO {target} ({columns}){separator}VALUES {rows}");
+    write_rule_on_conflict(&mut sql, on_conflict, &target_columns, &table.name, style);
+    write_rule_returning(
+        &mut sql,
+        table,
+        target_alias,
+        &target_columns,
+        source_columns,
+        returning,
+        pretty,
+    );
+    Ok(format!(
+        "{}{sql}",
+        with_prefix.as_deref().unwrap_or_default()
+    ))
+}
+
+fn rule_action_with_clause(
+    kv: &dyn Kv,
+    source_schema: &str,
+    source_columns: &[crabka_pgcatalog::Column],
+    source_is_view: bool,
+    with: &crabka_pgparser::ast::WithClause,
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> Result<String, ExecError> {
+    let mut text = if with.recursive {
+        "WITH RECURSIVE ".to_string()
+    } else {
+        "WITH ".to_string()
+    };
+    for (index, cte) in with.ctes.iter().enumerate() {
+        if index != 0 {
+            text.push_str(", ");
+        }
+        text.push_str(&quote_identifier(&cte.name));
+        if let Some(columns) = &cte.columns {
+            let columns = columns
+                .iter()
+                .map(|column| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(text, "({columns})");
+        }
+        text.push_str(" AS (\n");
+        let (body, dml) = match &cte.body {
+            crabka_pgparser::ast::CteBody::Query(query) => {
+                let mut body = String::new();
+                crate::viewdef::write_query_with_qualifiers(
+                    &mut body,
+                    query,
+                    &[],
+                    pretty,
+                    None,
+                    style,
+                );
+                (body, false)
+            }
+            crabka_pgparser::ast::CteBody::Dml(statement) => (
+                rule_action_statement(
+                    kv,
+                    source_schema,
+                    source_columns,
+                    source_is_view,
+                    statement,
+                    Some("trgt_1"),
+                    pretty,
+                    style,
+                )?,
+                true,
+            ),
+        };
+        text.push_str(&rule_action_cte_body(&body, dml));
+        text.push_str("\n        )");
+    }
+    text.push_str("\n ");
+    Ok(text)
+}
+
+fn rule_action_cte_body(body: &str, dml: bool) -> String {
+    let body = body
+        .replace(" VALUES ", "\nVALUES ")
+        .replace("\n  RETURNING ", "\nRETURNING ");
+    body.lines()
+        .map(|line| {
+            let line = line.trim_start();
+            let indent = if dml {
+                if matches!(line, line if line.starts_with("VALUES") || line.starts_with("WHERE") || line.starts_with("RETURNING")) {
+                    "          "
+                } else {
+                    "         "
+                }
+            } else {
+                "        "
+            };
+            format!("{indent}{line}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn rule_assignment_text(
+    assignment: &crabka_pgparser::ast::Assignment,
+    target_alias: Option<&str>,
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    use crabka_pgparser::ast::{ArraySubscript, AssignmentValue, TargetIndirection};
+
+    let targets = assignment
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| {
+            let mut target = quote_identifier(target);
+            if index == 0 {
+                for indirection in &assignment.indirections {
+                    match indirection {
+                        TargetIndirection::Field(field) => {
+                            let _ = write!(target, ".{}", quote_identifier(field));
+                        }
+                        TargetIndirection::Subscript(ArraySubscript::Index(index)) => {
+                            let _ = write!(
+                                target,
+                                "[{}]",
+                                crate::viewdef::expression_text(index, style)
+                            );
+                        }
+                        TargetIndirection::Subscript(ArraySubscript::Slice { lower, upper }) => {
+                            let lower = lower.as_ref().map_or_else(String::new, |expr| {
+                                crate::viewdef::expression_text(expr, style)
+                            });
+                            let upper = upper.as_ref().map_or_else(String::new, |expr| {
+                                crate::viewdef::expression_text(expr, style)
+                            });
+                            let _ = write!(target, "[{lower}:{upper}]");
+                        }
+                    }
+                }
+            }
+            target
+        })
+        .collect::<Vec<_>>();
+    let targets = if targets.len() == 1 {
+        targets.into_iter().next().expect("one target")
+    } else {
+        format!("({})", targets.join(", "))
+    };
+    let expression = |expr: &crabka_pgparser::ast::Expr| {
+        target_alias.map_or_else(
+            || crate::viewdef::expression_text_with_qualifiers(expr, style),
+            |alias| crate::viewdef::expression_text_with_qualifier(expr, alias, pretty, style),
+        )
+    };
+    let value = match &assignment.value {
+        AssignmentValue::Expr(expr) => expression(expr),
+        AssignmentValue::Row(exprs) => format!(
+            "({})",
+            exprs.iter().map(expression).collect::<Vec<_>>().join(", ")
+        ),
+        AssignmentValue::Subquery(query) => {
+            let mut text = "(".to_string();
+            crate::viewdef::write_rule_query_with_qualifiers(&mut text, query, &[], pretty, style);
+            text.push(')');
+            text
+        }
+    };
+    format!("{targets} = {value}")
+}
+
+fn rule_action_filter_text(
+    filter: &crabka_pgparser::ast::Expr,
+    qualifier: Option<&str>,
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    let text = qualifier.map_or_else(
+        || crate::viewdef::expression_text_with_qualifiers(filter, style),
+        |qualifier| {
+            crate::viewdef::expression_text_with_qualifier(filter, qualifier, pretty, style)
+        },
+    );
+    if pretty && matches!(filter, crabka_pgparser::ast::Expr::Binary { .. }) {
+        text.strip_prefix('(')
+            .and_then(|text| text.strip_suffix(')'))
+            .unwrap_or(&text)
+            .to_owned()
+    } else {
+        text
+    }
+}
+
+fn coerce_rule_values_literals(
+    rows: &mut [Vec<crabka_pgparser::ast::Expr>],
+    source_columns: &[crabka_pgcatalog::Column],
+    target_columns: &[crabka_pgcatalog::Column],
+    columns: &[String],
+) {
+    use crabka_pgparser::ast::Expr;
+
+    for row in rows {
+        let mut target_index = 0;
+        for expr in row {
+            if matches!(expr, Expr::Column { table: Some(table), name }
+                if (table.eq_ignore_ascii_case("new") || table.eq_ignore_ascii_case("old")) && name == "*")
+            {
+                target_index += source_columns.len();
+                continue;
+            }
+            let expected = columns
+                .get(target_index)
+                .and_then(|name| target_columns.iter().find(|column| column.name == *name))
+                .map(|column| column.ty);
+            coerce_rule_unknown_literal(expr, expected);
+            target_index += 1;
+        }
+    }
+}
+
+fn rule_values_rows(
+    rows: &[Vec<crabka_pgparser::ast::Expr>],
+    source_columns: &[crabka_pgcatalog::Column],
+    pretty: bool,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    use crabka_pgparser::ast::Expr;
+
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .flat_map(|expr| match expr {
+                    Expr::Column {
+                        table: Some(table),
+                        name,
+                    } if (table.eq_ignore_ascii_case("new")
+                        || table.eq_ignore_ascii_case("old"))
+                        && name == "*" =>
+                    {
+                        source_columns
+                            .iter()
+                            .map(|column| {
+                                format!(
+                                    "{}.{}",
+                                    quote_identifier(table),
+                                    quote_identifier(&column.name)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                    Expr::Column {
+                        table: Some(table),
+                        name,
+                    } => vec![format!(
+                        "{}.{}",
+                        quote_identifier(table),
+                        quote_identifier(name)
+                    )],
+                    _ => vec![crate::viewdef::expression_text(expr, style)],
+                })
+                .collect::<Vec<_>>()
+                .join(if pretty { "," } else { ", " })
+        })
+        .map(|row| format!("({row})"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn write_rule_on_conflict(
+    out: &mut String,
+    on_conflict: &Option<crabka_pgparser::ast::OnConflict>,
+    target_columns: &[crabka_pgcatalog::Column],
+    target_name: &str,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) {
+    use crabka_pgparser::ast::{OnConflictAction, OnConflictTarget};
+
+    let Some(mut on_conflict) = on_conflict.clone() else {
+        return;
+    };
+    coerce_rule_on_conflict_literals(&mut on_conflict, target_columns, target_name);
+    out.push_str(" ON CONFLICT");
+    match &on_conflict.target {
+        OnConflictTarget::None => {}
+        OnConflictTarget::Columns {
+            inference_columns,
+            index_predicate,
+            ..
+        } => {
+            let columns = inference_columns
+                .iter()
+                .map(|column| {
+                    let mut rendered = quote_identifier(&column.name);
+                    if let Some(collation) = &column.collation {
+                        let _ = write!(
+                            rendered,
+                            " COLLATE {}",
+                            quote_qualified_identifier(collation)
+                        );
+                    }
+                    if let Some(opclass) = &column.opclass {
+                        let _ = write!(rendered, " {}", quote_qualified_identifier(opclass));
+                    }
+                    rendered
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(out, "({columns})");
+            if let Some(predicate) = index_predicate {
+                let _ = write!(
+                    out,
+                    "\n  WHERE {}",
+                    crate::viewdef::expression_text_with_qualifiers(predicate, style)
+                );
+            }
+        }
+        OnConflictTarget::OnConstraint(name) => {
+            let _ = write!(out, " ON CONSTRAINT {}", quote_identifier(name));
+        }
+    }
+    match &on_conflict.action {
+        OnConflictAction::DoNothing => out.push_str(" DO NOTHING"),
+        OnConflictAction::DoUpdate {
+            assignments,
+            filter,
+        } => {
+            let assignments = assignments
+                .iter()
+                .map(|(column, value)| {
+                    format!(
+                        "{} = {}",
+                        quote_identifier(column),
+                        crate::viewdef::expression_text_with_qualifiers(value, style)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(out, " DO UPDATE SET {assignments}");
+            if let Some(filter) = filter {
+                let _ = write!(
+                    out,
+                    "\n  WHERE {}",
+                    crate::viewdef::expression_text_with_qualifiers(filter, style)
+                );
+            }
+        }
+    }
+}
+
+/// Rule actions are stored as source and reparsed by `pg_get_ruledef`, unlike
+/// ordinary statements whose unknown literals were resolved against their
+/// target columns during analysis. Reapply that narrow type context before
+/// deparsing an `ON CONFLICT` predicate or filter.
+fn coerce_rule_on_conflict_literals(
+    on_conflict: &mut crabka_pgparser::ast::OnConflict,
+    columns: &[crabka_pgcatalog::Column],
+    target_name: &str,
+) {
+    use crabka_pgparser::ast::{OnConflictAction, OnConflictTarget};
+
+    if let OnConflictTarget::Columns {
+        index_predicate: Some(predicate),
+        ..
+    } = &mut on_conflict.target
+    {
+        coerce_rule_unknown_literals(predicate, columns, target_name, None);
+    }
+    if let OnConflictAction::DoUpdate {
+        assignments,
+        filter,
+    } = &mut on_conflict.action
+    {
+        for (column, value) in assignments {
+            let expected = columns
+                .iter()
+                .find(|candidate| candidate.name == *column)
+                .map(|column| column.ty);
+            coerce_rule_unknown_literals(value, columns, target_name, expected);
+        }
+        if let Some(filter) = filter {
+            coerce_rule_unknown_literals(filter, columns, target_name, None);
+        }
+    }
+}
+
+fn coerce_rule_unknown_literals(
+    expr: &mut crabka_pgparser::ast::Expr,
+    columns: &[crabka_pgcatalog::Column],
+    target_name: &str,
+    expected: Option<crabka_pgtypes::ColumnType>,
+) {
+    use crabka_pgparser::ast::Expr;
+
+    if coerce_rule_unknown_literal(expr, expected) {
+        return;
+    }
+    match expr {
+        Expr::Binary { left, right, .. } => {
+            let left_type = rule_action_column_type(left, columns, target_name);
+            let right_type = rule_action_column_type(right, columns, target_name);
+            coerce_rule_unknown_literals(left, columns, target_name, right_type);
+            coerce_rule_unknown_literals(right, columns, target_name, left_type);
+        }
+        Expr::Unary { expr, .. } | Expr::Collate { expr, .. } => {
+            coerce_rule_unknown_literals(expr, columns, target_name, expected);
+        }
+        _ => {}
+    }
+}
+
+fn coerce_rule_unknown_literal(
+    expr: &mut crabka_pgparser::ast::Expr,
+    expected: Option<crabka_pgtypes::ColumnType>,
+) -> bool {
+    use crabka_pgparser::ast::Expr;
+
+    if matches!(expr, Expr::StringLiteral(_) | Expr::NullLiteral)
+        && let Some(ty) = expected
+    {
+        *expr = Expr::Cast {
+            expr: Box::new(expr.clone()),
+            ty: rule_literal_type(ty),
+        };
+        return true;
+    }
+    false
+}
+
+fn rule_action_column_type(
+    expr: &crabka_pgparser::ast::Expr,
+    columns: &[crabka_pgcatalog::Column],
+    target_name: &str,
+) -> Option<crabka_pgtypes::ColumnType> {
+    let crabka_pgparser::ast::Expr::Column { table, name } = expr else {
+        return None;
+    };
+    let qualified_target = table.as_deref().is_none_or(|table| {
+        table.eq_ignore_ascii_case("excluded")
+            || table
+                .rsplit('.')
+                .next()
+                .is_some_and(|table| table.eq_ignore_ascii_case(target_name))
+    });
+    qualified_target
+        .then(|| columns.iter().find(|column| column.name == *name))
+        .flatten()
+        .map(|column| column.ty)
+}
+
+fn rule_literal_type(ty: crabka_pgtypes::ColumnType) -> crabka_pgtypes::ColumnType {
+    use crabka_pgtypes::ColumnType;
+
+    match ty {
+        ColumnType::Char(_) => ColumnType::Char(None),
+        ColumnType::Varchar(_) => ColumnType::Varchar(None),
+        ColumnType::Bit(_) => ColumnType::Bit(None),
+        ColumnType::VarBit(_) => ColumnType::VarBit(None),
+        ColumnType::Numeric(_) => ColumnType::Numeric(None),
+        ty => ty,
+    }
+}
+
+fn quote_qualified_identifier(name: &str) -> String {
+    name.split('.')
+        .map(quote_identifier)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn rule_source_columns(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<Vec<crabka_pgcatalog::Column>, ExecError> {
+    match crabka_pgcatalog::get_table(kv, name) {
+        Ok(table) => Ok(table.columns),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+            Ok(crabka_pgcatalog::get_view(kv, name)?.columns)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn rule_action_columns(
+    kv: &dyn Kv,
+    source_schema: &str,
+    table: &crabka_pgparser::ast::RelationRef,
+) -> Result<Vec<crabka_pgcatalog::Column>, ExecError> {
+    let target = RelationName::new(
+        table.schema.as_deref().unwrap_or(source_schema),
+        &table.name,
+    );
+    match crabka_pgcatalog::get_table(kv, &target) {
+        Ok(table) => Ok(table.columns),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+            Ok(crabka_pgcatalog::get_view(kv, &target)?.columns)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_rule_returning(
+    out: &mut String,
+    table: &crabka_pgparser::ast::RelationRef,
+    alias: Option<&str>,
+    target_columns: &[crabka_pgcatalog::Column],
+    source_columns: &[crabka_pgcatalog::Column],
+    returning: &Option<crabka_pgparser::ast::Returning>,
+    _pretty: bool,
+) {
+    let Some(returning) = returning else {
+        return;
+    };
+    let images = [("OLD", &returning.old_alias), ("NEW", &returning.new_alias)]
+        .into_iter()
+        .filter_map(|(image, alias)| {
+            alias
+                .as_ref()
+                .map(|alias| format!("{image} AS {}", quote_identifier(alias)))
+        })
+        .collect::<Vec<_>>();
+    let return_target = alias.map_or_else(|| rule_action_relation(table), quote_identifier);
+    let columns = returning
+        .items
+        .iter()
+        .flat_map(|item| match item {
+            crabka_pgparser::ast::SelectItem::Wildcard => target_columns
+                .iter()
+                .map(|column| format!("{}.{}", return_target, quote_identifier(&column.name)))
+                .collect::<Vec<_>>(),
+            crabka_pgparser::ast::SelectItem::QualifiedWildcard(qualifier) => {
+                let (columns, target) = if qualifier.eq_ignore_ascii_case("old")
+                    || qualifier.eq_ignore_ascii_case("new")
+                {
+                    (source_columns, quote_identifier(qualifier))
+                } else {
+                    (target_columns, return_target.clone())
+                };
+                columns
+                    .iter()
+                    .map(|column| format!("{target}.{}", quote_identifier(&column.name)))
+                    .collect()
+            }
+            crabka_pgparser::ast::SelectItem::Expr {
+                expr: crabka_pgparser::ast::Expr::Column { table, name },
+                alias,
+            } => {
+                let output_alias = alias
+                    .as_ref()
+                    .map(|alias| format!(" AS {}", quote_identifier(alias)))
+                    .unwrap_or_default();
+                let target = table
+                    .as_deref()
+                    .filter(|table| {
+                        table.eq_ignore_ascii_case("old") || table.eq_ignore_ascii_case("new")
+                    })
+                    .map_or_else(|| return_target.clone(), quote_identifier);
+                vec![format!(
+                    "{}.{name}{output_alias}",
+                    target,
+                    name = quote_identifier(name)
+                )]
+            }
+            _ => unreachable!("is_simple_rule_action filters complex RETURNING items"),
+        })
+        .collect::<Vec<_>>();
+    let columns = if columns.len() > 1 {
+        columns.join(",\n    ")
+    } else {
+        columns.join(", ")
+    };
+    let images = (!images.is_empty())
+        .then(|| format!(" WITH ({})", images.join(", ")))
+        .unwrap_or_default();
+    let _ = write!(out, "\n  RETURNING{images} {columns}");
+}
+
+fn rule_action_relation(table: &crabka_pgparser::ast::RelationRef) -> String {
+    table.schema.as_ref().map_or_else(
+        || quote_identifier(&table.name),
+        |schema| {
+            format!(
+                "{}.{}",
+                quote_identifier(schema),
+                quote_identifier(&table.name)
+            )
+        },
+    )
+}
+
+fn rule_action_target(table: &crabka_pgparser::ast::RelationRef, alias: Option<&str>) -> String {
+    let relation = rule_action_relation(table);
+    alias.map_or(relation.clone(), |alias| {
+        format!("{relation} AS {}", quote_identifier(alias))
+    })
+}
+
+fn rule_action_dml_target(
+    table: &crabka_pgparser::ast::RelationRef,
+    alias: Option<&str>,
+) -> String {
+    let relation = rule_action_relation(table);
+    alias.map_or(relation.clone(), |alias| {
+        format!("{relation} {}", quote_identifier(alias))
+    })
 }
 
 /// The `pg_get_function*` family.
@@ -1091,10 +2206,10 @@ fn invalid_size_unit(input: &str, unit: &str) -> ExecError {
 /// `INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` is gated on, so the answer and
 /// the enforcement cannot drift apart.
 ///
-/// The rest still answer `true` unconditionally, and that is a statement about
+/// The remaining members answer `true` unconditionally, and that is a statement about
 /// what this catalog stores rather than an oversight: there is no ACL for a
-/// database, a language, a tablespace, a type, a foreign server, a large object
-/// or a routine, so there is nothing for a grant to have written and nothing an
+/// database, a language, a tablespace, a type, a foreign server or a routine,
+/// so there is nothing for a grant to have written and nothing an
 /// enforcement path could read. [`crate::rls::validate_policy_qual`] still
 /// refuses a policy written around one of those, for exactly the reason it once
 /// refused all of them.
@@ -1108,10 +2223,13 @@ fn has_privilege(name: &str, vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, Exe
     if vals.iter().any(|value| matches!(value, Datum::Null)) {
         return Ok(Datum::Null);
     }
-    let bare = privilege
-        .trim()
+    let written = privilege.trim();
+    let (bare, grant_option) = written
         .strip_suffix(" WITH GRANT OPTION")
-        .unwrap_or(privilege.trim());
+        .map_or((written, false), |bare| (bare, true));
+    if name == "has_largeobject_privilege" {
+        return has_largeobject_privilege(vals, ctx, bare, grant_option);
+    }
     if !recognized_privilege(bare) {
         return Err(ExecError::FunctionError {
             sqlstate: "22023",
@@ -1156,6 +2274,59 @@ fn has_privilege(name: &str, vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, Exe
     // function returns a boolean rather than raising one.
     let _ = kind;
     crate::privilege::holds_named(&privilege_ctx, &relation, &owner, &wanted).map(Datum::Bool)
+}
+
+fn has_largeobject_privilege(
+    vals: &[Datum],
+    ctx: &EvalCtx,
+    privilege: &str,
+    grant_option: bool,
+) -> Result<Datum, ExecError> {
+    let Some(runtime) = &ctx.largeobject else {
+        return Ok(Datum::Bool(true));
+    };
+    let (role, oid) = match vals {
+        [oid, _] => (ctx.current_user.clone(), largeobject_oid(oid)?),
+        [role, oid, _] => (
+            role_argument_name(runtime.kv.as_ref(), role)?,
+            largeobject_oid(oid)?,
+        ),
+        _ => return Ok(Datum::Null),
+    };
+    let role = effective_privilege_role(&role);
+    let wanted = privilege.to_ascii_uppercase();
+    let holds = |wanted| {
+        if grant_option {
+            crate::largeobject::has_grant_option(runtime, &role, oid, wanted)
+        } else {
+            crate::largeobject::has_privilege(runtime, &role, oid, wanted)
+        }
+    };
+    let result = match wanted.as_str() {
+        "SELECT" => holds(crate::largeobject::LoPrivilege::Select)?,
+        "UPDATE" => holds(crate::largeobject::LoPrivilege::Update)?,
+        "ALL" | "ALL PRIVILEGES" => match (
+            holds(crate::largeobject::LoPrivilege::Select)?,
+            holds(crate::largeobject::LoPrivilege::Update)?,
+        ) {
+            (Some(select), Some(update)) => Some(select && update),
+            _ => None,
+        },
+        _ => {
+            return Err(ExecError::FunctionError {
+                sqlstate: "22023",
+                message: format!("invalid privilege type {privilege} for large object"),
+            });
+        }
+    };
+    Ok(result.map_or(Datum::Null, Datum::Bool))
+}
+
+fn largeobject_oid(value: &Datum) -> Result<u32, ExecError> {
+    u32::try_from(int_arg(value)?).map_err(|_| ExecError::FunctionError {
+        sqlstate: "22003",
+        message: "large object OID is out of range".into(),
+    })
 }
 
 /// Where a relation-scoped `has_*_privilege` call keeps its arguments.
@@ -1462,6 +2633,7 @@ pub(crate) fn resolve_relation_in_scope(
 ) -> Result<i32, ExecError> {
     let written = parse_written_relation(scope, name)?;
     let schemas = match &written.reference.schema {
+        Some(schema) if schema == crabka_pgcatalog::PG_TEMP_ALIAS => vec![scope.temp_schema()],
         Some(schema) => vec![schema.clone()],
         None => scope.visible_schemas(kv)?,
     };
@@ -1518,7 +2690,7 @@ fn relation_name_operand(value: &Datum) -> Option<&str> {
 /// keys by name. `regclass` also accepts an index and a virtual catalog
 /// relation, so [`resolve_relation_in_scope`] holds the search-path walk, and
 /// this function is the per-schema probe that walk repeats.
-fn relation_oid(kv: &dyn Kv, name: &RelationName) -> Result<Option<i32>, ExecError> {
+pub(crate) fn relation_oid(kv: &dyn Kv, name: &RelationName) -> Result<Option<i32>, ExecError> {
     match crate::exec::resolve_base_relation(kv, name) {
         Ok(oid) => return Ok(Some(oid)),
         // Not a virtual relation and not a table; the other three `pg_class`
@@ -1765,6 +2937,80 @@ fn description(
     Ok(Datum::Null)
 }
 
+/// The two-argument `obj_description(oid, catalog)` form names a catalog row,
+/// not a relation. Large objects live in `pg_largeobject`, so resolve their
+/// comment by the durable object OID rather than trying to resolve that OID as
+/// a relation.
+fn object_description(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    values: &[Datum],
+) -> Result<Datum, ExecError> {
+    if values.len() != 2 {
+        return description(kv, scope, &values[0], 0);
+    }
+    if values.iter().any(|value| matches!(value, Datum::Null)) {
+        return Ok(Datum::Null);
+    }
+    let class_oid = resolve_relation_oid(kv, scope, &values[1])?;
+    if class_oid == crate::catalog_rel::relation_oid("pg_type") {
+        let oid = u32::try_from(crate::func::int_arg(&values[0])?)
+            .map_err(|_| ExecError::Unsupported("type OID is out of range".into()))?;
+        let Some(ty) = crabka_pgcatalog::list_user_types(kv)?
+            .into_iter()
+            .find(|ty| ty.oid == oid)
+        else {
+            return Ok(Datum::Null);
+        };
+        let oid = oid.to_string();
+        return comment_datum(
+            kv,
+            if ty.domain().is_some() {
+                "domain"
+            } else {
+                "type"
+            },
+            CommentObject::Named(&oid),
+        );
+    }
+    if class_oid == crate::catalog_rel::relation_oid("pg_cast") {
+        let oid = u32::try_from(crate::func::int_arg(&values[0])?)
+            .map_err(|_| ExecError::Unsupported("cast OID is out of range".into()))?;
+        let Some(cast) = crabka_pgcatalog::list_user_casts(kv)?
+            .into_iter()
+            .find(|cast| cast.oid == oid)
+        else {
+            return Ok(Datum::Null);
+        };
+        return comment_datum(kv, "cast", CommentObject::Named(&cast.oid.to_string()));
+    }
+    if class_oid == crate::catalog_rel::relation_oid("pg_am") {
+        let oid = u32::try_from(crate::func::int_arg(&values[0])?)
+            .map_err(|_| ExecError::Unsupported("access method OID is out of range".into()))?;
+        let Some(method) = crabka_pgcatalog::list_access_methods(kv)?
+            .into_iter()
+            .find(|method| method.oid == oid)
+        else {
+            return Ok(Datum::Null);
+        };
+        return comment_datum(
+            kv,
+            "access method",
+            CommentObject::Named(&method.oid.to_string()),
+        );
+    }
+    if class_oid != crate::catalog_rel::relation_oid("pg_largeobject") {
+        return description(kv, scope, &values[0], 0);
+    }
+    let oid = u32::try_from(crate::func::int_arg(&values[0])?)
+        .map_err(|_| ExecError::Unsupported("large object OID is out of range".into()))?;
+    match crabka_pgcatalog::largeobject::get_metadata(kv, oid) {
+        Ok(_) => comment_datum(kv, "large object", CommentObject::Named(&oid.to_string())),
+        Err(crabka_pgcatalog::CatalogError::UndefinedLargeObject(_)) => Ok(Datum::Null),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn comment_datum(kv: &dyn Kv, kind: &str, object: CommentObject<'_>) -> Result<Datum, ExecError> {
     Ok(crabka_pgcatalog::get_comment(kv, kind, object)?.map_or(Datum::Null, Datum::Text))
 }
@@ -1782,6 +3028,9 @@ fn view_def(
     vals: &[Datum],
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) -> Result<Datum, ExecError> {
+    if matches!(vals.first(), Some(Datum::Int4(0) | Datum::Int8(0))) {
+        return Ok(Datum::Null);
+    }
     let (pretty, wrap) = match vals.get(1) {
         None => (false, None),
         Some(Datum::Bool(flag)) => (*flag, None),
@@ -2276,6 +3525,7 @@ pub(crate) fn default_source_text(
         crabka_pgcatalog::ColumnDefault::NextVal(sequence) => {
             format!("nextval('{}'::regclass)", sequence.replace('\'', "''"))
         }
+        crabka_pgcatalog::ColumnDefault::Expression(source) => source.clone(),
         // A `regclass` default stores only the oid, so the name it deparses to
         // is read from the catalog now: a `RENAME` of the relation changes what
         // `\d` and `pg_get_expr` print, as it does in PostgreSQL.
@@ -2346,19 +3596,131 @@ mod tests {
         Column, ForeignKey, IndexPlacement, MatchType, ReferentialAction, RelationName, Table,
     };
     use crabka_pgkv::{Kv, MemKv};
-    use crabka_pgparser::parser::parse_expr_for_test as pexpr;
+    use crabka_pgparser::parser::{parse, parse_expr_for_test as pexpr};
     use crabka_pgtypes::{ColumnType, Datum};
 
     use super::{
-        catalog_func, char_to_encoding, constraint_def, encoding_to_char, foreign_key_definition,
-        indexes_size, is_catalog_func, quote_identifier, relation_size, relation_size_with_fork,
-        size_bytes, size_pretty, table_size, total_relation_size,
+        catalog_func, char_to_encoding, coerce_rule_unknown_literals, coerce_rule_values_literals,
+        constraint_def, encoding_to_char, foreign_key_definition, indexes_size, is_catalog_func,
+        is_simple_rule_action, quote_identifier, relation_size, relation_size_with_fork,
+        size_bytes, size_pretty, table_size, total_relation_size, view_def,
     };
     use crate::error::ExecError;
 
     // One case: how it differs from `sample_foreign_key`, and the definition
     // PostgreSQL prints for the result.
     type DefinitionCase = (fn(&mut ForeignKey), &'static str);
+
+    #[test]
+    fn pg_get_viewdef_zero_is_null() {
+        let utc = jiff::tz::TimeZone::UTC;
+        assert!(
+            view_def(
+                &MemKv::default(),
+                &crate::relname::ResolutionScope::default(),
+                &[Datum::Int4(0)],
+                crabka_pgtypes::encoding::OutputStyle::with_zone(&utc),
+            )
+            .expect("view definition")
+                == Datum::Null
+        );
+    }
+
+    #[test]
+    fn rule_literal_coercion_restores_insert_and_expression_types() {
+        use crabka_pgparser::ast::Expr;
+
+        let columns = vec![
+            Column::new("id", ColumnType::Int4),
+            Column::new("label", ColumnType::Text),
+        ];
+        let mut rows = vec![vec![Expr::NullLiteral, Expr::NullLiteral]];
+        coerce_rule_values_literals(&mut rows, &[], &columns, &["id".into(), "label".into()]);
+        assert!(matches!(
+            rows[0][0],
+            Expr::Cast {
+                ty: ColumnType::Int4,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rows[0][1],
+            Expr::Cast {
+                ty: ColumnType::Text,
+                ..
+            }
+        ));
+
+        let mut wildcard_rows = vec![vec![
+            Expr::Column {
+                table: Some("old".into()),
+                name: "*".into(),
+            },
+            Expr::NullLiteral,
+        ]];
+        let wildcard_columns = vec![
+            Column::new("a", ColumnType::Int4),
+            Column::new("b", ColumnType::Int4),
+            Column::new("label", ColumnType::Text),
+        ];
+        coerce_rule_values_literals(
+            &mut wildcard_rows,
+            &wildcard_columns[..2],
+            &wildcard_columns,
+            &["a".into(), "b".into(), "label".into()],
+        );
+        assert!(matches!(
+            wildcard_rows[0][1],
+            Expr::Cast {
+                ty: ColumnType::Text,
+                ..
+            }
+        ));
+
+        let mut expression = pexpr("NOT (id = NULL)").expect("expression");
+        coerce_rule_unknown_literals(
+            &mut expression,
+            &[Column::new("id", ColumnType::Int4)],
+            "target",
+            None,
+        );
+        let utc = jiff::tz::TimeZone::UTC;
+        assert!(
+            crate::viewdef::expression_text(
+                &expression,
+                crabka_pgtypes::encoding::OutputStyle::with_zone(&utc),
+            )
+            .contains("NULL::integer")
+        );
+    }
+
+    #[test]
+    fn simple_rule_actions_allow_only_target_returning_columns() {
+        let action = |sql| parse(sql).expect("parse").pop().expect("statement");
+
+        assert!(is_simple_rule_action(&action(
+            "INSERT INTO target AS t VALUES (1) RETURNING *"
+        )));
+        assert!(is_simple_rule_action(&action(
+            "INSERT INTO target AS t VALUES (1) RETURNING t.*"
+        )));
+        assert!(is_simple_rule_action(&action(
+            "INSERT INTO target AS t VALUES (1) RETURNING target.*"
+        )));
+        assert!(is_simple_rule_action(&action(
+            "INSERT INTO target AS t VALUES (1) RETURNING t.a"
+        )));
+        assert!(!is_simple_rule_action(&action(
+            "INSERT INTO target AS t VALUES (1) RETURNING other.a"
+        )));
+        assert!(!is_simple_rule_action(&action(
+            "INSERT INTO target AS t VALUES (1) RETURNING t.a + 1"
+        )));
+        assert!(!is_simple_rule_action(&action(
+            "WITH deleted AS (DELETE FROM other USING source RETURNING *) \
+             INSERT INTO target VALUES (1)"
+        )));
+    }
 
     // The child of the oracle's `cc` / `pp` pair: one column, every optional
     // clause at its default, so a case only sets what it exercises.

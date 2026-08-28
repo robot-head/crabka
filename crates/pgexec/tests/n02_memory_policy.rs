@@ -27,6 +27,25 @@ async fn runtime_budget_reaches_set_operations_and_recursive_ctes() {
 }
 
 #[tokio::test]
+async fn work_mem_does_not_replace_the_runtime_statement_cap() {
+    let mut session = SqlEngine::new().connect();
+    let sql = "SELECT i FROM generate_series(1, 1000) AS g(i) \
+               UNION SELECT i FROM generate_series(1, 1000) AS g(i)";
+    session
+        .simple_query(sql)
+        .await
+        .expect("runtime policy fits");
+    session
+        .simple_query("SET work_mem = '64kB'")
+        .await
+        .expect("set work_mem");
+    session
+        .simple_query(sql)
+        .await
+        .expect("work_mem does not replace the runtime statement cap");
+}
+
+#[tokio::test]
 async fn scalar_udf_and_builtin_srf_share_a_select_list() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

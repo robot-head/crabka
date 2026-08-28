@@ -4,6 +4,8 @@
 //! Every expectation here was taken from `PostgreSQL` 18.4 — the pinned oracle
 //! for this engine — either directly or from `src/test/regress/expected`.
 
+use std::time::Duration;
+
 use assert2::assert;
 use crabka_pgexec::SqlEngine;
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
@@ -103,6 +105,15 @@ async fn a_monomorphic_aggregate_folds_every_row_and_groups() {
     assert!(
         grid(&engine, "SELECT mysum(f1) FILTER (WHERE f1 <> 2) FROM t").await == vec![some(&["4"])]
     );
+    assert!(
+        grid(
+            &engine,
+            "SELECT mysum(f1) OVER (ORDER BY f1 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) \
+             FROM t ORDER BY f1",
+        )
+        .await
+            == vec![some(&["1"]), some(&["3"]), some(&["5"])]
+    );
 }
 
 #[tokio::test]
@@ -165,9 +176,7 @@ async fn moving_aggregate_definition_validates_its_support_functions() {
          MSTYPE = float8, MSFUNC = float8pl, MINVFUNC = float8mi, PARALLEL = safe)",
     )
     .await;
-    assert!(
-        grid(&engine, "SELECT moving_sum(f1::float8) FROM t").await == vec![some(&["6"])]
-    );
+    assert!(grid(&engine, "SELECT moving_sum(f1::float8) FROM t").await == vec![some(&["6"])]);
     assert!(
         grid(
             &engine,
@@ -193,6 +202,23 @@ async fn moving_aggregate_definition_validates_its_support_functions() {
         )
         .await
             == vec![vec![None], some(&["2"]), some(&["5"])]
+    );
+    // A moving frame uses the moving state, including its separately declared
+    // initial condition. Re-running SFUNC over each frame would be 1, 3, 5.
+    run(
+        &engine,
+        "CREATE AGGREGATE moving_product (int4) (SFUNC = int4pl, STYPE = int4, INITCOND = 0, \
+         MSFUNC = int4pl, MINVFUNC = int4mi, MSTYPE = int4, MINITCOND = 1)",
+    )
+    .await;
+    assert!(
+        grid(
+            &engine,
+            "SELECT moving_product(f1) OVER (ORDER BY f1 ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) \
+             FROM t ORDER BY f1",
+        )
+        .await
+            == vec![some(&["2"]), some(&["4"]), some(&["6"])]
     );
 
     run(
@@ -224,8 +250,9 @@ async fn moving_aggregate_definition_validates_its_support_functions() {
     )
     .await;
     assert!(
-        wrong_return
-            .contains("return type of inverse transition function int_inverse is not double precision"),
+        wrong_return.contains(
+            "return type of inverse transition function int_inverse is not double precision"
+        ),
         "{wrong_return}"
     );
 }
@@ -312,14 +339,7 @@ async fn internal_state_aggregate_preserves_parallel_support_catalog_fields() {
     .await;
     assert!(
         grid(&engine, catalog).await
-            == vec![some(&[
-                "numeric_add",
-                "-",
-                "numeric",
-                "-",
-                "-",
-                "r",
-            ])]
+            == vec![some(&["numeric_add", "-", "numeric", "-", "-", "r",])]
     );
 }
 
@@ -520,7 +540,11 @@ async fn float8mi_transition_defines_a_user_aggregate() {
     .await;
 
     assert!(
-        grid(&engine, "SELECT builtin_float8_difference(f1::float8) FROM t").await
+        grid(
+            &engine,
+            "SELECT builtin_float8_difference(f1::float8) FROM t"
+        )
+        .await
             == vec![some(&["-6"])]
     );
 }
@@ -535,8 +559,7 @@ async fn array_larger_transition_defines_a_user_aggregate() {
     .await;
 
     assert!(
-        grid(&engine, "SELECT builtin_array_max(ARRAY[f1]) FROM t").await
-            == vec![some(&["{3}"])]
+        grid(&engine, "SELECT builtin_array_max(ARRAY[f1]) FROM t").await == vec![some(&["{3}"])]
     );
 }
 
@@ -584,8 +607,7 @@ async fn float8_accumulator_and_finalizer_define_a_user_average() {
     .await;
 
     assert!(
-        grid(&engine, "SELECT builtin_float8_avg(f1::float8) FROM t").await
-            == vec![some(&["2"])]
+        grid(&engine, "SELECT builtin_float8_avg(f1::float8) FROM t").await == vec![some(&["2"])]
     );
 }
 
@@ -691,6 +713,31 @@ async fn a_definition_is_refused_the_way_postgresql_refuses_it() {
         let message = error(&engine, sql).await;
         assert!(message.contains(expected), "{sql}\ngave: {message}");
     }
+}
+
+#[tokio::test]
+async fn quoted_aggregate_option_names_are_rejected_without_hanging() {
+    let engine = fixture().await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        error(
+            &engine,
+            "CREATE AGGREGATE case_agg(float8) (
+                \"Stype\" = internal,
+                \"Sfunc\" = ordered_set_transition,
+                \"Finalfunc\" = percentile_disc_final,
+                \"Finalfunc_extra\" = true,
+                \"Finalfunc_modify\" = read_write,
+                \"Parallel\" = safe
+            )",
+        ),
+    )
+    .await;
+    let message = result.expect("quoted option names must not hang");
+    assert!(
+        message.contains("aggregate sfunc must be specified"),
+        "{message}"
+    );
 }
 
 #[tokio::test]

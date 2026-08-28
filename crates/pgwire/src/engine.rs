@@ -35,6 +35,18 @@ pub struct BoundParam {
     pub value: Option<Bytes>,
 }
 
+/// One legacy frontend `FunctionCall` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FastpathCall {
+    pub function_oid: u32,
+    /// Zero formats means text for every argument; one applies to every
+    /// argument; otherwise there is one per argument.
+    pub argument_formats: Vec<i16>,
+    pub arguments: Vec<Option<Bytes>>,
+    /// 0 = text, 1 = binary.
+    pub result_format: i16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryResult {
     Rows {
@@ -459,6 +471,19 @@ pub trait Session: Send {
         &mut self,
         sql: &str,
     ) -> impl Future<Output = Result<Vec<QueryResult>, PgError>> + Send;
+
+    /// Execute a legacy fastpath function call.
+    fn fastpath(
+        &mut self,
+        _call: FastpathCall,
+    ) -> impl Future<Output = Result<Option<Bytes>, PgError>> + Send {
+        async {
+            Err(PgError::error(
+                crate::error::sqlstate::FEATURE_NOT_SUPPORTED,
+                "fastpath function calls are not supported",
+            ))
+        }
+    }
 
     /// Execute simple-query text into a backpressured bounded sink.
     fn simple_query_into<S: ResultSink>(

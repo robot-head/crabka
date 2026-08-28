@@ -14,9 +14,9 @@
 //! goes through the scalar runtime, exactly as it does in any other expression.
 //!
 //! Deliberately unimplemented, and recorded rather than rejected so the
-//! catalog still describes what was written: moving-aggregate execution
-//! (`MINITCOND`), parallel execution (the definition and catalog metadata for
-//! `COMBINEFUNC`/`SERIALFUNC`/`DESERIALFUNC` do validate), `SORTOP` and `SSPACE`.
+//! catalog still describes what was written: parallel execution (the definition
+//! and catalog metadata for `COMBINEFUNC`/`SERIALFUNC`/`DESERIALFUNC` do
+//! validate), `SORTOP` and `SSPACE`.
 
 use std::sync::Arc;
 
@@ -255,6 +255,9 @@ struct Collected {
     msfunc: Option<String>,
     minvfunc: Option<String>,
     mstype: Option<crabka_pgparser::ast::RoutineType>,
+    mfinalfunc: Option<String>,
+    minitcond: Written<String>,
+    mfinalfunc_extra: bool,
     unimplemented: Vec<String>,
 }
 
@@ -299,6 +302,9 @@ impl Collected {
                 AggregateOption::InitCond(value) => {
                     collected.initcond = Written::from_option(value.clone());
                 }
+                AggregateOption::MInitCond(value) => {
+                    collected.minitcond = Written::from_option(value.clone());
+                }
                 AggregateOption::BaseType(ty) => {
                     collected.basetype = Written::from_option(ty.clone());
                 }
@@ -322,11 +328,15 @@ impl Collected {
                 }
                 AggregateOption::Unimplemented { name, value } if name == "msfunc" => {
                     collected.msfunc = Some(value.clone());
-                    collected.unimplemented.push(format!("{name}={value}"));
                 }
                 AggregateOption::Unimplemented { name, value } if name == "minvfunc" => {
                     collected.minvfunc = Some(value.clone());
-                    collected.unimplemented.push(format!("{name}={value}"));
+                }
+                AggregateOption::Unimplemented { name, value } if name == "mfinalfunc" => {
+                    collected.mfinalfunc = Some(value.clone());
+                }
+                AggregateOption::Unimplemented { name, value } if name == "mfinalfunc_extra" => {
+                    collected.mfinalfunc_extra = value == "true";
                 }
                 AggregateOption::Unimplemented { name, value } => {
                     collected.unimplemented.push(format!("{name}={value}"));
@@ -407,12 +417,14 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
         body_form: crabka_pgcatalog::routine::BodyForm::Source,
         volatility: 'i',
         parallel: aggregate_parallel(&options)?,
+        window: false,
         strict: false,
         security_definer: false,
         leakproof: false,
         cost: 1.0,
         rows: 0.0,
         config: Vec::new(),
+        config_source: Vec::new(),
         owner: owner.to_string(),
         aggregate: Some(AggregateDefinition {
             kind,
@@ -424,13 +436,24 @@ fn build(kv: &dyn Kv, stmt: &CreateAggregateStmt, owner: &str) -> Result<Routine
             deserialfn: options.deserialfunc.clone(),
             finalfunc_modify: finalfunc_modify(&options)?,
             initcond: options.initcond.value().cloned(),
+            moving_transfn: options.msfunc.clone(),
+            moving_invtransfn: options.minvfunc.clone(),
+            moving_transtype: options
+                .mstype
+                .as_ref()
+                .map(|ty| crate::routine::resolve_routine_type(kv, ty, false))
+                .transpose()?,
+            moving_finalfn: options.mfinalfunc.clone(),
+            moving_initcond: options.minitcond.value().cloned(),
+            moving_initcond_specified: !matches!(options.minitcond, Written::Absent),
+            moving_finalfunc_extra: options.mfinalfunc_extra,
             direct_args: declared.direct_count,
             ordered_args: declared.ordered_count,
             finalfunc_extra: options.finalfunc_extra,
             hypothetical: options.hypothetical,
             unimplemented: options.unimplemented,
         }),
-})
+    })
 }
 
 fn aggregate_definition_kind(declared: &DeclaredArgs, options: &Collected) -> char {
@@ -606,16 +629,14 @@ impl SupportRoutine {
 }
 
 fn lookup(kv: &dyn Kv, name: &str, wanted: &[RoutineType]) -> Result<SupportRoutine, ExecError> {
-    let user = routines_named(kv, name)?
-        .into_iter()
-        .find(|candidate| {
-            candidate.kind == RoutineKind::Function
-                && candidate.input_params().count() == wanted.len()
-                && candidate
-                    .input_params()
-                    .zip(wanted)
-                    .all(|(param, want)| accepts(&param.ty, want))
-        });
+    let user = routines_named(kv, name)?.into_iter().find(|candidate| {
+        candidate.kind == RoutineKind::Function
+            && candidate.input_params().count() == wanted.len()
+            && candidate
+                .input_params()
+                .zip(wanted)
+                .all(|(param, want)| accepts(&param.ty, want))
+    });
     if let Some(routine) = user {
         return Ok(SupportRoutine::User(routine));
     }
@@ -648,7 +669,9 @@ fn builtin_support(
     let (Some(Datum::Int4(result_oid)), Some(Datum::Bool(strict)), Some(Datum::Bool(setof))) =
         (row.get(18), row.get(12), row.get(13))
     else {
-        return Err(ExecError::Unsupported("built-in pg_proc fixture is corrupt".into()));
+        return Err(ExecError::Unsupported(
+            "built-in pg_proc fixture is corrupt".into(),
+        ));
     };
     let Datum::OidVector(args) = row
         .get(19)
@@ -998,6 +1021,22 @@ pub(crate) struct UserAggregate {
     /// A strict transition function skips NULL inputs and takes the first
     /// non-null argument as the state when there is no `INITCOND`.
     strict_transition: bool,
+    moving: Option<MovingAggregate>,
+}
+
+/// The window-only transition path, kept separate because its state can differ
+/// from the ordinary aggregate state.
+#[derive(Debug, Clone, PartialEq)]
+struct MovingAggregate {
+    transition: Expr,
+    transition_scope: Scope,
+    final_expr: Option<Expr>,
+    final_scope: Scope,
+    state_type: ColumnType,
+    initcond: Option<String>,
+    initcond_specified: bool,
+    strict_transition: bool,
+    finalfunc_extra: bool,
 }
 
 impl UserAggregate {
@@ -1068,6 +1107,63 @@ impl UserAggregate {
                     row.extend(std::iter::repeat_n(Datum::Null, self.ordered_args));
                 }
                 crate::eval::eval(expr, &self.final_scope, &row, ctx)?
+            }
+            None => state.clone(),
+        };
+        crate::eval::cast_value(&value, self.result_type, &ctx.time_zone)
+    }
+
+    pub(crate) fn has_moving_transition(&self) -> bool {
+        self.moving.is_some()
+    }
+
+    pub(crate) fn moving_initial_state(&self, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+        let moving = self.moving.as_ref().expect("moving transition exists");
+        match &moving.initcond {
+            Some(text) => crate::eval::cast_value(
+                &Datum::Text(text.clone()),
+                moving.state_type,
+                &ctx.time_zone,
+            ),
+            None => Ok(Datum::Null),
+        }
+    }
+
+    pub(crate) fn moving_fold(
+        &self,
+        state: &mut Datum,
+        args: &[Datum],
+        ctx: &EvalCtx,
+    ) -> Result<(), ExecError> {
+        let moving = self.moving.as_ref().expect("moving transition exists");
+        if moving.strict_transition {
+            if args.iter().any(Datum::is_null) {
+                return Ok(());
+            }
+            if state.is_null()
+                && !moving.initcond_specified
+                && let Some(first) = args.first()
+            {
+                *state = first.clone();
+                return Ok(());
+            }
+        }
+        let mut row = Vec::with_capacity(args.len() + 1);
+        row.push(state.clone());
+        row.extend_from_slice(args);
+        *state = crate::eval::eval(&moving.transition, &moving.transition_scope, &row, ctx)?;
+        Ok(())
+    }
+
+    pub(crate) fn moving_finish(&self, state: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+        let moving = self.moving.as_ref().expect("moving transition exists");
+        let value = match &moving.final_expr {
+            Some(expr) => {
+                let mut row = vec![state.clone()];
+                if moving.finalfunc_extra {
+                    row.extend(std::iter::repeat_n(Datum::Null, self.args.len()));
+                }
+                crate::eval::eval(expr, &moving.final_scope, &row, ctx)?
             }
             None => state.clone(),
         };
@@ -1149,9 +1245,7 @@ fn compile(
         ExecError::Unsupported(format!("{} has no definition", routine.identity()))
     })?;
     // `definition.unimplemented` is not consulted: every option it holds is a
-    // performance or parallelism hint that cannot change the answer. The one
-    // option that would — an ordered-set aggregate — is refused in the grammar
-    // and never reaches the catalog.
+    // performance or parallelism hint that cannot change the answer.
     let state_type = resolve_state_type(routine, definition, given)?;
     let transition_given = if definition.ordered_args == 0 {
         given
@@ -1181,6 +1275,44 @@ fn compile(
         Some(expr) => crate::eval::infer_type(expr, &final_scope)?,
         None => state_type,
     };
+    let moving = definition
+        .moving_transfn
+        .as_ref()
+        .map(|name| {
+            let state_type = definition.moving_transtype.as_ref().map_or_else(
+                || Ok(state_type),
+                |ty| resolve_declared_state_type(routine, ty, given),
+            )?;
+            let mut types = vec![state_type];
+            types.extend_from_slice(transition_given);
+            let transition_scope = synthetic_scope(&types);
+            let transition =
+                compile_call(kv, name, &synthetic_args(types.len()), &transition_scope)?;
+            let mut final_types = vec![state_type];
+            if definition.moving_finalfunc_extra {
+                final_types.extend_from_slice(given);
+            }
+            let final_scope = synthetic_scope(&final_types);
+            let final_expr = definition
+                .moving_finalfn
+                .as_ref()
+                .map(|name| {
+                    compile_call(kv, name, &synthetic_args(final_types.len()), &final_scope)
+                })
+                .transpose()?;
+            Ok::<MovingAggregate, ExecError>(MovingAggregate {
+                transition,
+                transition_scope,
+                final_expr,
+                final_scope,
+                state_type,
+                initcond: definition.moving_initcond.clone(),
+                initcond_specified: definition.moving_initcond_specified,
+                strict_transition: transition_is_strict(kv, name, &types),
+                finalfunc_extra: definition.moving_finalfunc_extra,
+            })
+        })
+        .transpose()?;
     Ok(UserAggregate {
         args: if definition.ordered_args == 0 {
             direct_args.to_vec()
@@ -1200,6 +1332,7 @@ fn compile(
         result_type,
         initcond: definition.initcond.clone(),
         strict_transition: transition_is_strict(kv, &definition.transfn, &argument_types),
+        moving,
     })
 }
 
@@ -1210,7 +1343,15 @@ fn resolve_state_type(
     definition: &AggregateDefinition,
     given: &[ColumnType],
 ) -> Result<ColumnType, ExecError> {
-    if let Some(column) = definition.transtype.column {
+    resolve_declared_state_type(routine, &definition.transtype, given)
+}
+
+fn resolve_declared_state_type(
+    routine: &Routine,
+    declared: &RoutineType,
+    given: &[ColumnType],
+) -> Result<ColumnType, ExecError> {
+    if let Some(column) = declared.column {
         return Ok(column);
     }
     let base = routine
@@ -1227,7 +1368,7 @@ fn resolve_state_type(
             routine.identity()
         ))
     })?;
-    Ok(match polymorphic_shape(&definition.transtype.name) {
+    Ok(match polymorphic_shape(&declared.name) {
         Shape::Array => ColumnType::array_of(base).ok_or_else(|| {
             ExecError::Unsupported(format!(
                 "type {} has no array type, so aggregate {} cannot run",
@@ -1269,12 +1410,14 @@ mod tests {
             body_form: crabka_pgcatalog::routine::BodyForm::Source,
             volatility: 'i',
             parallel: 'u',
+            window: false,
             strict: false,
             security_definer: false,
             leakproof: false,
             cost: 1.0,
             rows: 0.0,
             config: Vec::new(),
+            config_source: Vec::new(),
             owner: "postgres".into(),
             aggregate: Some(AggregateDefinition {
                 kind: 'n',
@@ -1286,6 +1429,13 @@ mod tests {
                 deserialfn: None,
                 finalfunc_modify: 'r',
                 initcond: Some("0".into()),
+                moving_transfn: None,
+                moving_invtransfn: None,
+                moving_transtype: None,
+                moving_finalfn: None,
+                moving_initcond: None,
+                moving_initcond_specified: false,
+                moving_finalfunc_extra: false,
                 direct_args,
                 ordered_args,
                 finalfunc_extra: false,
@@ -1351,7 +1501,10 @@ mod tests {
     fn aggregate_kind_words_name_each_postgres_aggregate_family() {
         assert_eq!(aggregate_kind_word('n'), "ordinary aggregate function");
         assert_eq!(aggregate_kind_word('o'), "ordered-set aggregate function");
-        assert_eq!(aggregate_kind_word('h'), "hypothetical-set aggregate function");
+        assert_eq!(
+            aggregate_kind_word('h'),
+            "hypothetical-set aggregate function"
+        );
     }
 
     #[test]
@@ -1365,9 +1518,11 @@ mod tests {
             &[Datum::Int4(701), Datum::Int4(701)],
             &wanted,
         ));
-        assert!(builtin_support("float8pl", &wanted)
-            .expect("catalog")
-            .is_some());
+        assert!(
+            builtin_support("float8pl", &wanted)
+                .expect("catalog")
+                .is_some()
+        );
     }
 }
 
@@ -1406,22 +1561,30 @@ fn compile_call(kv: &dyn Kv, name: &str, args: &[Expr], scope: &Scope) -> Result
 pub(crate) fn pg_aggregate_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let routines = crabka_pgcatalog::routine::list_routines(kv)?;
     let builtin_routines = crate::routine::builtin_pg_proc_rows()?;
-    let oid_of = |name: &str| -> i32 {
-        if let Some(oid) = routines
+    let regproc_of = |name: Option<&str>| -> Datum {
+        let Some(name) = name else {
+            return Datum::Regclass(crabka_pgtypes::RegclassValue::unresolved(0));
+        };
+        if let Some(routine) = routines
             .iter()
             .find(|routine| routine.name == name && !routine.is_aggregate())
-            .map(|routine| i32::try_from(routine.oid).unwrap_or(0))
         {
-            return oid;
+            return Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(
+                i32::try_from(routine.oid).unwrap_or(0),
+                &routine.name,
+            ));
         }
         builtin_routines
             .iter()
             .find(|routine| routine.get(1) == Some(&Datum::Text(name.to_string())))
-            .and_then(|routine| match routine.first() {
-                Some(Datum::Int4(oid)) => Some(*oid),
+            .and_then(|routine| match (routine.first(), routine.get(1)) {
+                (Some(Datum::Int4(oid)), Some(Datum::Text(name))) => Some((*oid, name.clone())),
                 _ => None,
             })
-            .unwrap_or(0)
+            .map_or_else(
+                || Datum::Regclass(crabka_pgtypes::RegclassValue::unresolved(0)),
+                |(oid, name)| Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(oid, &name)),
+            )
     };
     Ok(routines
         .iter()
@@ -1433,22 +1596,25 @@ pub(crate) fn pg_aggregate_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
                 Datum::Int4(i32::try_from(routine.oid).unwrap_or(0)),
                 Datum::Text(definition.kind.to_string()),
                 Datum::Int2(i16::try_from(definition.direct_args).unwrap_or(0)),
-                Datum::Int4(oid_of(&definition.transfn)),
-                Datum::Int4(definition.finalfn.as_deref().map_or(0, oid_of)),
-                Datum::Int4(definition.combinefn.as_deref().map_or(0, oid_of)),
-                Datum::Int4(definition.serialfn.as_deref().map_or(0, oid_of)),
-                Datum::Int4(definition.deserialfn.as_deref().map_or(0, oid_of)),
-                Datum::Int4(0),
-                Datum::Int4(0),
-                Datum::Int4(0),
+                regproc_of(Some(&definition.transfn)),
+                regproc_of(definition.finalfn.as_deref()),
+                regproc_of(definition.combinefn.as_deref()),
+                regproc_of(definition.serialfn.as_deref()),
+                regproc_of(definition.deserialfn.as_deref()),
+                regproc_of(None),
+                regproc_of(None),
+                regproc_of(None),
                 Datum::Bool(false),
                 Datum::Bool(false),
                 Datum::Text(definition.finalfunc_modify.to_string()),
                 Datum::Text("r".into()),
                 Datum::Int4(0),
-                Datum::Int4(transtype),
+                Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(
+                    transtype,
+                    &definition.transtype.name,
+                )),
                 Datum::Int4(0),
-                Datum::Int4(0),
+                Datum::Regclass(crabka_pgtypes::RegclassValue::unresolved(0)),
                 Datum::Int4(0),
                 definition.initcond.clone().map_or(Datum::Null, Datum::Text),
                 Datum::Null,

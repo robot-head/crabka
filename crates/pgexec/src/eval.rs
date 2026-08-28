@@ -211,11 +211,61 @@ pub(crate) fn cast_operand(
             dims.clone(),
         )));
     }
-    let cast = cast_value_in_at(value, ty, ctx.output_style(), ctx.now)?;
+    let cast = if ty.storage_type() == ColumnType::Xml {
+        match value {
+            Datum::Text(text) => {
+                crabka_pgtypes::xml::validate(text, ctx.xml_option)?;
+                Datum::Xml(text.clone())
+            }
+            _ => cast_value_in_at(value, ty, ctx.output_style(), ctx.now)?,
+        }
+    } else {
+        cast_value_in_at(value, ty, ctx.output_style(), ctx.now)?
+    };
     // A cast to a domain converts through the base type and then has to satisfy
     // the domain's own NOT NULL and CHECK constraints.
     crate::usertype::check_domain(ty, &cast, ctx)?;
+    ensure_enum_datum_safe(ctx, &cast)?;
     Ok(cast)
+}
+
+/// Refuse enum labels that an enclosing transaction has just added to an
+/// existing enum. PostgreSQL reserves them until that transaction commits.
+pub(crate) fn ensure_enum_datum_safe(ctx: &EvalCtx, datum: &Datum) -> Result<(), ExecError> {
+    let Some(transaction) = &ctx.txn else {
+        return Ok(());
+    };
+    let check = |value: &crabka_pgtypes::datum::EnumValue| {
+        if transaction
+            .unsafe_enum_values
+            .contains(&(value.ty.oid, value.label.clone()))
+        {
+            Err(ExecError::Remote(
+                crabka_pgwire::error::PgError::error(
+                    "55P04",
+                    format!(
+                        "unsafe use of new value \"{}\" of enum type {}",
+                        value.label, value.ty.name
+                    ),
+                )
+                .with_hint("New enum values must be committed before they can be used."),
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    match datum {
+        Datum::Enum(value) => check(value),
+        Datum::Array(array) => array
+            .elems
+            .iter()
+            .filter_map(|value| match value {
+                Datum::Enum(value) => Some(value),
+                _ => None,
+            })
+            .try_for_each(check),
+        _ => Ok(()),
+    }
 }
 
 /// [`cast_value`] in the session's styles, so an ambiguous all-numeric date
@@ -236,26 +286,30 @@ pub(crate) fn cast_value_in_at(
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
     now: jiff::Timestamp,
 ) -> Result<Datum, ExecError> {
-    if matches!(target, ColumnType::Aclitem | ColumnType::Name | ColumnType::Refcursor) {
+    if matches!(target, ColumnType::Aclitem | ColumnType::Refcursor) {
         return cast_value_in_at(value, ColumnType::Text, style, now);
     }
     let base = target.temporal_base().map_or(target, |(base, _)| base);
     if let Datum::Text(text) = value {
         let parsed = match base {
-            ColumnType::Date => Some(crabka_pgtypes::datetime::parse_date_in_at(
-                text,
-                style.date_order,
-                style.time_zone,
-                now,
-            )
-            .map(Datum::Date)?),
-            ColumnType::Timestamp => Some(crabka_pgtypes::datetime::parse_timestamp_in_at(
-                text,
-                style.date_order,
-                style.time_zone,
-                now,
-            )
-            .map(Datum::Timestamp)?),
+            ColumnType::Date => Some(
+                crabka_pgtypes::datetime::parse_date_in_at(
+                    text,
+                    style.date_order,
+                    style.time_zone,
+                    now,
+                )
+                .map(Datum::Date)?,
+            ),
+            ColumnType::Timestamp => Some(
+                crabka_pgtypes::datetime::parse_timestamp_in_at(
+                    text,
+                    style.date_order,
+                    style.time_zone,
+                    now,
+                )
+                .map(Datum::Timestamp)?,
+            ),
             ColumnType::Timestamptz => Some(
                 crabka_pgtypes::datetime::parse_timestamptz_in_at(
                     text,
@@ -265,20 +319,24 @@ pub(crate) fn cast_value_in_at(
                 )
                 .map(Datum::Timestamptz)?,
             ),
-            ColumnType::Time => Some(crabka_pgtypes::datetime::parse_time_in_at(
-                text,
-                style.date_order,
-                style.time_zone,
-                now,
-            )
-            .map(Datum::Time)?),
-            ColumnType::Timetz => Some(crabka_pgtypes::datetime::parse_timetz_in_at(
-                text,
-                style.date_order,
-                style.time_zone,
-                now,
-            )
-            .map(Datum::Timetz)?),
+            ColumnType::Time => Some(
+                crabka_pgtypes::datetime::parse_time_in_at(
+                    text,
+                    style.date_order,
+                    style.time_zone,
+                    now,
+                )
+                .map(Datum::Time)?,
+            ),
+            ColumnType::Timetz => Some(
+                crabka_pgtypes::datetime::parse_timetz_in_at(
+                    text,
+                    style.date_order,
+                    style.time_zone,
+                    now,
+                )
+                .map(Datum::Timetz)?,
+            ),
             _ => None,
         };
         if let Some(parsed) = parsed {
@@ -299,7 +357,7 @@ pub(crate) fn cast_assign_value_in_at(
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
     now: jiff::Timestamp,
 ) -> Result<Datum, ExecError> {
-    if matches!(target, ColumnType::Aclitem | ColumnType::Name | ColumnType::Refcursor) {
+    if matches!(target, ColumnType::Aclitem | ColumnType::Refcursor) {
         return cast_assign_value_in_at(value, ColumnType::Text, style, now);
     }
     let base = target.temporal_base().map_or(target, |(base, _)| base);
@@ -410,6 +468,12 @@ fn eval_depth_inner(
                 return crate::func::eval_scalar(&call, Some(scope), ctx, |e| {
                     eval_depth(e, scope, values, ctx, d)
                 });
+            }
+            if name == "*"
+                && let Some(qualifier) = table.as_deref()
+                && let Some(value) = scope.refs_value(qualifier, values)
+            {
+                return Ok(value);
             }
             match scope.resolve(table.as_deref(), name) {
                 Ok(idx) => Ok(values[idx].clone()),
@@ -711,7 +775,7 @@ fn eval_depth_inner(
                 _ => a,
             };
             array_fn::eval_quantified(&a, quantifier_of(*all), |elem| {
-                apply_binary(*op, &x, elem, ctx)
+                apply_comparison_of(*op, (expr, &x), (array, elem), ctx)
             })
         }
         // SP34: a resolved subquery folded to a constant.
@@ -1534,6 +1598,36 @@ pub(crate) fn apply_binary_of(
     // on PostgreSQL exactly as it is here.
     let (lb, rb) = bpchar_to_text_operands(op, (left, l), (right, r), scope)?;
     let (l, r) = (lb.as_ref().unwrap_or(l), rb.as_ref().unwrap_or(r));
+    let typed_literal =
+        |literal: &Expr, value: &Datum, other: &Expr| -> Result<Option<Datum>, ExecError> {
+            if matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::IsDistinctFrom
+                    | BinaryOp::IsNotDistinctFrom
+            ) && matches!(literal, Expr::StringLiteral(_))
+            {
+                let target = infer_type(other, scope)?;
+                if !matches!(
+                    target,
+                    ColumnType::Name | ColumnType::Uuid | ColumnType::Enum(_)
+                ) {
+                    return Ok(None);
+                }
+                return cast_value(value, target, &ctx.time_zone).map(Some);
+            }
+            Ok(None)
+        };
+    let (nl, nr) = (
+        typed_literal(left, l, right)?,
+        typed_literal(right, r, left)?,
+    );
+    let (l, r) = (nl.as_ref().unwrap_or(l), nr.as_ref().unwrap_or(r));
     let (lc, rc) = coerce_untyped_literal_operands(op, left, right, l, r, ctx)?;
     let (l, r) = (lc.as_ref().unwrap_or(l), rc.as_ref().unwrap_or(r));
     if op == BinaryOp::Concat {
@@ -1744,6 +1838,20 @@ fn coerce_untyped_literal_operands(
                 | BinaryOp::IsNotDistinctFrom => Some(ColumnType::InternalChar),
                 _ => None,
             };
+        }
+        if let Datum::Enum(value) = other {
+            return matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::IsDistinctFrom
+                    | BinaryOp::IsNotDistinctFrom
+            )
+            .then_some(ColumnType::Enum(value.ty));
         }
         // A bit-string counterpart resolves the literal to a bit string, which
         // is how `b = '1010'` compares two `bit`s and `v || '01'` concatenates.
@@ -2501,7 +2609,12 @@ fn adopt_string_literal_type(
     let adopts = |t: ColumnType| {
         matches!(
             t,
-            ColumnType::Jsonb | ColumnType::TsVector | ColumnType::TsQuery | ColumnType::Range(_)
+            ColumnType::Jsonb
+                | ColumnType::TsVector
+                | ColumnType::TsQuery
+                | ColumnType::Uuid
+                | ColumnType::Enum(_)
+                | ColumnType::Range(_)
         )
     };
     if untyped(left) && adopts(rt) {
@@ -4287,6 +4400,12 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             {
                 return crate::func::scalar_result_type(&call, scope);
             }
+            if name == "*"
+                && let Some(qualifier) = table.as_deref()
+                && let Some(ty) = scope.whole_row_type(qualifier)
+            {
+                return Ok(ty);
+            }
             match scope.resolve(table.as_deref(), name) {
                 Ok(idx) => Ok(scope.ty_at(idx)),
                 Err(error) => whole_row_reference(table.as_deref(), name, &error)
@@ -4515,20 +4634,22 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // subscripting operator.
         Expr::Subscript { base, .. } => {
             let bt = infer_type(base, scope)?;
+            let storage = bt.storage_type();
             // PostgreSQL's jsonb subscripting yields jsonb at every level, so
             // `j['a']['b']` type-checks without the base being an array. `json`
             // deliberately does NOT follow it here: the subscript handler is
             // jsonb's alone, so a `json` base falls through to the error below.
-            if bt == ColumnType::Jsonb {
+            if storage == ColumnType::Jsonb {
                 return Ok(ColumnType::Jsonb);
             }
             // `point[i]` and `line[i]` are `float8`; `box[i]` and `lseg[i]` are
             // `point`. `circle`, `path` and `polygon` have no handler and fall
             // through to the 42804 below.
-            if let Some(elem) = geometric_subscript_element(bt) {
+            if let Some(elem) = geometric_subscript_element(storage) {
                 return Ok(elem);
             }
-            bt.array_element()
+            storage
+                .array_element()
                 .map(ElemType::column_type)
                 .ok_or_else(|| cannot_subscript(bt))
         }
@@ -4536,16 +4657,19 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // only of indexes reaches an element.
         Expr::ArrayRef { base, subscripts } => {
             let bt = infer_type(base, scope)?;
-            if bt == ColumnType::Jsonb {
+            let storage = bt.storage_type();
+            if storage == ColumnType::Jsonb {
                 return Ok(ColumnType::Jsonb);
             }
             // A fixed-length geometric type has one dimension and cannot be
             // sliced, so every chain over one reports the element type; the
             // slice itself is refused when the reference evaluates.
-            if let Some(elem) = geometric_subscript_element(bt) {
+            if let Some(elem) = geometric_subscript_element(storage) {
                 return Ok(elem);
             }
-            let elem = bt.array_element().ok_or_else(|| cannot_subscript(bt))?;
+            let elem = storage
+                .array_element()
+                .ok_or_else(|| cannot_subscript(bt))?;
             if subscripts
                 .iter()
                 .any(crabka_pgparser::ast::ArraySubscript::is_slice)
@@ -5001,17 +5125,12 @@ fn sysid_comparison_rejection(
         return None;
     }
     let allowed = match family {
-        ColumnType::Oid => matches!(
-            other.storage_type(),
-            ColumnType::Oid
-                | ColumnType::Int2
-                | ColumnType::Int4
-                | ColumnType::Int8
-                | ColumnType::Regclass
-                | ColumnType::Regtype
-                | ColumnType::Regprocedure
-                | ColumnType::Regnamespace
-        ),
+        ColumnType::Oid => {
+            matches!(
+                other.storage_type(),
+                ColumnType::Oid | ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8
+            ) || other.storage_type().is_reg()
+        }
         // `xideqint4` / `xidneqint4` have no commutator, so the integer must be
         // on the RIGHT: `'1'::xid = 1` resolves and `1 = '1'::xid` does not.
         // `int2` reaches it through the implicit widening to `int4`.
@@ -5609,6 +5728,18 @@ mod tests {
         assert!(require_collatable(ColumnType::Name).is_ok());
         assert!(require_collatable(ColumnType::Int4).is_err());
         assert!(ev("'name '::char(5)::name", None, &[]) == Datum::Text("name".into()));
+        let long_name = "x".repeat(64);
+        assert!(
+            ev(&format!("'{long_name}'::name = '{long_name}'"), None, &[]) == Datum::Bool(true)
+        );
+        assert!(ev_err("1 = '1'::name").into_pg().code == "42804");
+        assert!(
+            ev(&format!("'{long_name}' = '{long_name}'::text"), None, &[]) == Datum::Bool(true)
+        );
+        assert!(
+            ev(&format!("'x'::name || '{long_name}'"), None, &[])
+                == Datum::Text(format!("x{long_name}"))
+        );
     }
 
     /// PostgreSQL decides an empty `IN` list before it looks at the operand:
@@ -5732,11 +5863,8 @@ mod tests {
             (
                 "timetz 'now'",
                 Datum::Timetz(
-                    crabka_pgtypes::datetime::parse_timetz(
-                        "05:06:07+00",
-                        &jiff::tz::TimeZone::UTC,
-                    )
-                    .expect("timetz"),
+                    crabka_pgtypes::datetime::parse_timetz("05:06:07+00", &jiff::tz::TimeZone::UTC)
+                        .expect("timetz"),
                 ),
             ),
             ("timestamptz 'now'", Datum::Timestamptz(now)),
@@ -5942,6 +6070,41 @@ mod tests {
             let got = infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect("infer");
             assert2::assert!(got == *expected, "{sql}");
         }
+    }
+
+    #[test]
+    fn a_uuid_column_adopts_a_bare_string_literal() {
+        let column = Expr::Column {
+            table: None,
+            name: "id".into(),
+        };
+        assert_eq!(
+            adopt_string_literal_type(
+                &column,
+                &Expr::StringLiteral("550e8400e29b41d4a716446655440000".into()),
+                ColumnType::Uuid,
+                ColumnType::Text,
+            ),
+            (ColumnType::Uuid, ColumnType::Uuid)
+        );
+    }
+
+    #[test]
+    fn a_bare_literal_does_not_adopt_an_unlisted_scalar_type() {
+        let literal = Expr::StringLiteral("1".into());
+        let column = Expr::Column {
+            table: None,
+            name: "id".into(),
+        };
+        let expected = (ColumnType::Text, ColumnType::Int4);
+        assert2::assert!(
+            adopt_string_literal_type(&literal, &column, ColumnType::Text, ColumnType::Int4)
+                == expected
+        );
+        assert2::assert!(
+            adopt_string_literal_type(&column, &literal, ColumnType::Int4, ColumnType::Text)
+                == (ColumnType::Int4, ColumnType::Text)
+        );
     }
 
     /// Adopting a type is not the same as accepting anything. A literal that is

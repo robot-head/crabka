@@ -325,13 +325,24 @@ async fn hash_sharded_update_moves_one_row_without_orphaning_old_bucket() {
         .expect("delete moved row");
     assert!(rows(&mut session, "SELECT id FROM hmove").await.is_empty());
     let new_bucket = crabka_pgkv::key::hash_bucket(&new_id.to_be_bytes(), 16).expect("bucket");
-    let versions = kv
-        .scan_prefix(&crabka_pgkv::key::hash_row_key(table.id, new_bucket, 1))
-        .expect("new bucket versions");
-    assert!(versions.iter().any(|(_, value)| matches!(
-        crabka_pgmvcc::version::decode_ts_tuple(value).expect("tuple").state,
-        crabka_pgmvcc::version::TsVersionState::Deleted { .. }
-    )));
+    assert!(
+        kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
+            .expect("new bucket versions")
+            .iter()
+            .any(|(key, value)| {
+                matches!(
+                    crabka_pgkv::key::classify_key(key),
+                    crabka_pgkv::key::KeyClass::HashPrimaryVersion { bucket, .. }
+                        if bucket == new_bucket
+                ) && matches!(
+                    crabka_pgmvcc::version::decode_ts_tuple(value)
+                        .expect("tuple")
+                        .state,
+                    crabka_pgmvcc::version::TsVersionState::Deleted { .. }
+                )
+            }),
+        "DELETE must tombstone the update's physical successor, not assume its old rowid"
+    );
 }
 
 #[tokio::test]
@@ -1267,6 +1278,17 @@ async fn sharded_autocommit_update_uses_timestamp_versions() {
             (Some("2".into()), Some("keep".into())),
         ]
     );
+    let table =
+        crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("t")).expect("table");
+    let versions = kv
+        .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
+        .expect("physical versions");
+    assert!(versions.iter().all(|(key, _)| {
+        matches!(
+            crabka_pgkv::key::classify_key(key),
+            crabka_pgkv::key::KeyClass::PrimaryVersion { rowid: 1 | 2, .. }
+        )
+    }));
     assert!(
         table_timestamp_versions(kv.as_ref(), "t")
             .iter()

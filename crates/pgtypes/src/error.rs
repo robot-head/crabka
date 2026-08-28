@@ -215,8 +215,7 @@ impl TypeError {
     pub fn hint(&self) -> Option<&str> {
         match self {
             TypeError::InvalidDatetimeTemplate {
-                hint: Some(hint),
-                ..
+                hint: Some(hint), ..
             } => Some(hint),
             TypeError::CodedWithHint { hint, .. } => Some(hint),
             _ => None,

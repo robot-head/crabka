@@ -1,4 +1,4 @@
-use std::{error::Error, sync::Arc};
+use std::{error::Error, sync::Arc, time::Duration};
 
 use bytes::BytesMut;
 use crabka_pgexec::SqlEngine;
@@ -97,6 +97,25 @@ async fn prepare_err_code(client: &tokio_postgres::Client, sql: &str) -> String 
         .code()
         .code()
         .to_string()
+}
+
+#[tokio::test]
+async fn a_data_modifying_cte_describes_its_returning_columns() {
+    let c = connect_new().await;
+    c.simple_query("CREATE TABLE cte_returning (id int4)")
+        .await
+        .expect("create table");
+
+    let statement = c
+        .prepare(
+            "WITH inserted AS (INSERT INTO cte_returning VALUES (1) RETURNING id) \
+             SELECT id FROM inserted",
+        )
+        .await
+        .expect("describe data-modifying CTE");
+    assert_eq!(statement.columns().len(), 1);
+    assert_eq!(statement.columns()[0].name(), "id");
+    assert_eq!(statement.columns()[0].type_(), &Type::INT4);
 }
 
 #[tokio::test]
@@ -419,5 +438,155 @@ async fn describe_rejects_nested_locking_selects() {
     assert_eq!(
         prepare_err_code(&c, "SELECT * FROM (SELECT x FROM t FOR UPDATE) d").await,
         "0A000"
+    );
+}
+
+#[tokio::test]
+async fn create_recursive_view_runs_as_an_implicit_recursive_cte() {
+    let c = connect_new().await;
+    c.simple_query(
+        "CREATE RECURSIVE VIEW nums(n) AS \
+         VALUES (1) UNION ALL SELECT n + 1 FROM nums WHERE n < 3",
+    )
+    .await
+    .expect("create recursive view");
+
+    assert_eq!(
+        rows(&c, "SELECT n FROM nums ORDER BY n").await,
+        vec![
+            vec![Some("1".into())],
+            vec![Some("2".into())],
+            vec![Some("3".into())],
+        ]
+    );
+    let breadth = "WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3) \
+                   SEARCH BREADTH FIRST BY n SET seq SELECT n, seq FROM t";
+    let breadth_statement = c.prepare(breadth).await.expect("describe breadth search");
+    assert_eq!(breadth_statement.columns()[1].type_(), &Type::RECORD);
+
+    let marked = "WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL \
+                  SELECT CASE WHEN n < 2 THEN n + 1 ELSE 1 END FROM t) \
+                  SEARCH DEPTH FIRST BY n SET seq \
+                  CYCLE n SET mark TO 'yes' DEFAULT 'no' USING path \
+                  SELECT n, seq, mark, path FROM t ORDER BY path";
+    assert_eq!(
+        rows(&c, marked).await,
+        vec![
+            vec![
+                Some("1".into()),
+                Some("{(1)}".into()),
+                Some("no".into()),
+                Some("{(1)}".into()),
+            ],
+            vec![
+                Some("2".into()),
+                Some("{(1),(2)}".into()),
+                Some("no".into()),
+                Some("{(1),(2)}".into()),
+            ],
+            vec![
+                Some("1".into()),
+                Some("{(1),(2),(1)}".into()),
+                Some("yes".into()),
+                Some("{(1),(2),(1)}".into()),
+            ],
+        ]
+    );
+    let statement = c.prepare(marked).await.expect("describe recursive extras");
+    assert_eq!(statement.columns()[2].type_(), &Type::TEXT);
+
+    let cycle_statement = c
+        .prepare(
+            "WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 2) \
+             CYCLE n SET mark USING path SELECT n, mark, path FROM t",
+        )
+        .await
+        .expect("describe cycle extras");
+    assert_eq!(cycle_statement.columns()[1].type_(), &Type::BOOL);
+    assert_eq!(cycle_statement.columns()[2].type_(), &Type::RECORD_ARRAY);
+}
+
+#[tokio::test]
+async fn recursive_cte_search_and_cycle_columns_follow_their_parent_rows() {
+    let c = connect_new().await;
+
+    assert_eq!(
+        rows(
+            &c,
+            "WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3) \
+             SEARCH BREADTH FIRST BY n SET seq \
+             SELECT n, seq FROM t ORDER BY seq",
+        )
+        .await,
+        vec![
+            vec![Some("1".into()), Some("(0,1)".into())],
+            vec![Some("2".into()), Some("(1,2)".into())],
+            vec![Some("3".into()), Some("(2,3)".into())],
+        ]
+    );
+
+    assert_eq!(
+        rows(
+            &c,
+            "WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3) \
+             SEARCH DEPTH FIRST BY n SET seq \
+             SELECT n, seq FROM t ORDER BY seq",
+        )
+        .await,
+        vec![
+            vec![Some("1".into()), Some("{(1)}".into())],
+            vec![Some("2".into()), Some("{(1),(2)}".into())],
+            vec![Some("3".into()), Some("{(1),(2),(3)}".into())],
+        ]
+    );
+
+    assert_eq!(
+        rows(
+            &c,
+            "WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL \
+             SELECT CASE WHEN n < 3 THEN n + 1 ELSE 1 END FROM t) \
+             CYCLE n SET is_cycle USING path \
+             SELECT n, is_cycle, path FROM t ORDER BY path",
+        )
+        .await,
+        vec![
+            vec![Some("1".into()), Some("f".into()), Some("{(1)}".into())],
+            vec![Some("2".into()), Some("f".into()), Some("{(1),(2)}".into())],
+            vec![
+                Some("3".into()),
+                Some("f".into()),
+                Some("{(1),(2),(3)}".into())
+            ],
+            vec![
+                Some("1".into()),
+                Some("t".into()),
+                Some("{(1),(2),(3),(1)}".into()),
+            ],
+        ]
+    );
+}
+
+#[tokio::test]
+async fn recursive_cte_stops_when_a_plain_outer_limit_has_enough_rows() {
+    let c = connect_new().await;
+    let rows = tokio::time::timeout(
+        Duration::from_secs(1),
+        rows(
+            &c,
+            "WITH RECURSIVE test AS (SELECT 1 AS x UNION ALL SELECT x + 1 FROM test) \
+             SEARCH DEPTH FIRST BY x SET y SELECT * FROM test LIMIT 5",
+        ),
+    )
+    .await
+    .expect("outer LIMIT must stop unbounded recursive CTE production");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Some("1".into()), Some("{(1)}".into())],
+            vec![Some("2".into()), Some("{(1),(2)}".into())],
+            vec![Some("3".into()), Some("{(1),(2),(3)}".into())],
+            vec![Some("4".into()), Some("{(1),(2),(3),(4)}".into())],
+            vec![Some("5".into()), Some("{(1),(2),(3),(4),(5)}".into())],
+        ]
     );
 }

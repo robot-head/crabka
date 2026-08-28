@@ -218,7 +218,9 @@ pub(crate) fn holds_named(
     // no self-grant row, and `GRANT`ing to yourself is a no-op in PostgreSQL.
     // Membership, not string equality: a member of an owning group owns the
     // relation for this purpose.
-    if crabka_pgcatalog::role_has_privs_of(ctx.catalog_kv, ctx.role, owner)? {
+    if crabka_pgcatalog::role_has_privs_of(ctx.catalog_kv, ctx.role, owner)?
+        && !crabka_pgcatalog::owner_table_privilege_is_revoked(ctx.catalog_kv, relation, privilege)?
+    {
         return Ok(true);
     }
     // A grant naming the role itself, and a grant to PUBLIC, are both point
@@ -835,9 +837,9 @@ pub(crate) fn dml_reads_target(
         return true;
     }
     assignments.iter().any(|assignment| {
-        // A subscripted target reads the column it updates in place: `SET
+        // An indirect target reads the column it updates in place: `SET
         // j['a'] = e` keeps the rest of the stored value.
-        !assignment.subscripts.is_empty()
+        !assignment.indirections.is_empty()
             || match &assignment.value {
                 AssignmentValue::Expr(expr) => reads(expr),
                 AssignmentValue::Row(exprs) => exprs.iter().any(reads),

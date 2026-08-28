@@ -60,6 +60,227 @@ async fn before_row_trigger_can_modify_and_skip_rows() {
 }
 
 #[tokio::test]
+async fn before_trigger_cannot_modify_its_already_modified_row() {
+    let engine = SqlEngine::new();
+    exec(
+        &engine,
+        "CREATE TABLE recursive_trigger_row (id int, value text)",
+    )
+    .await;
+    exec(
+        &engine,
+        "INSERT INTO recursive_trigger_row VALUES (1, 'before')",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE FUNCTION recursively_update_trigger_row() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF TG_OP = 'DELETE' THEN
+             DELETE FROM recursive_trigger_row WHERE id = OLD.id;
+             RETURN OLD;
+           END IF;
+           UPDATE recursive_trigger_row SET value = NEW.value WHERE id = OLD.id;
+           RETURN NEW;
+         END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER recursively_update_trigger_row BEFORE UPDATE OR DELETE ON recursive_trigger_row
+         FOR EACH ROW EXECUTE FUNCTION recursively_update_trigger_row()",
+    )
+    .await;
+
+    let error = engine
+        .connect()
+        .simple_query("UPDATE recursive_trigger_row SET value = 'after' WHERE id = 1")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "27000");
+    assert_eq!(
+        error.message,
+        "tuple to be updated was already modified by an operation triggered by the current command"
+    );
+    assert_eq!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.hint.as_deref()),
+        Some(
+            "Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows."
+        )
+    );
+    assert_eq!(
+        scalar(&engine, "SELECT value FROM recursive_trigger_row").await,
+        "before"
+    );
+    let error = engine
+        .connect()
+        .simple_query(
+            "MERGE INTO recursive_trigger_row AS target USING (VALUES (1)) AS source(id)
+             ON target.id = source.id WHEN MATCHED THEN UPDATE SET value = 'after'",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "27000");
+    assert_eq!(
+        error.message,
+        "tuple to be updated or deleted was already modified by an operation triggered by the current command"
+    );
+    let error = engine
+        .connect()
+        .simple_query("DELETE FROM recursive_trigger_row WHERE id = 1")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "27000");
+    assert_eq!(
+        error.message,
+        "tuple to be deleted was already modified by an operation triggered by the current command"
+    );
+    assert_eq!(
+        scalar(&engine, "SELECT value FROM recursive_trigger_row").await,
+        "before"
+    );
+}
+
+#[tokio::test]
+async fn nested_trigger_reports_the_claimed_rows_operation() {
+    let engine = SqlEngine::new();
+    exec(
+        &engine,
+        "CREATE TABLE claim_operation_rows (id int PRIMARY KEY, parent int, value int DEFAULT 0)",
+    )
+    .await;
+    exec(
+        &engine,
+        "INSERT INTO claim_operation_rows VALUES (1, NULL, 0), (2, 1, 0)",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE FUNCTION recursively_claim_update() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           UPDATE claim_operation_rows SET value = NEW.value WHERE id = NEW.id;
+           RETURN NEW;
+         END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE FUNCTION claim_delete_child() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF OLD.parent IS NOT NULL THEN
+             UPDATE claim_operation_rows SET value = value - 1 WHERE id = OLD.parent;
+           END IF;
+           RETURN OLD;
+         END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER recursive_claim_update BEFORE UPDATE ON claim_operation_rows
+         FOR EACH ROW EXECUTE FUNCTION recursively_claim_update()",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER claim_delete_child BEFORE DELETE ON claim_operation_rows
+         FOR EACH ROW EXECUTE FUNCTION claim_delete_child()",
+    )
+    .await;
+
+    let error = engine
+        .connect()
+        .simple_query("DELETE FROM claim_operation_rows WHERE id = 2")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "27000");
+    assert_eq!(
+        error.message,
+        "tuple to be updated was already modified by an operation triggered by the current command"
+    );
+}
+
+#[tokio::test]
+async fn update_moves_the_visible_row_to_the_heap_tail() {
+    let engine = SqlEngine::new();
+    exec(
+        &engine,
+        "CREATE TABLE heap_order_rows (id int PRIMARY KEY, value text)",
+    )
+    .await;
+    exec(
+        &engine,
+        "INSERT INTO heap_order_rows VALUES (1, 'before'), (2, 'other')",
+    )
+    .await;
+    exec(
+        &engine,
+        "UPDATE heap_order_rows SET value = 'after' WHERE id = 1",
+    )
+    .await;
+
+    let QueryResult::Rows { rows, .. } = exec(&engine, "SELECT id FROM heap_order_rows").await
+    else {
+        panic!("expected rows");
+    };
+    let ids = rows
+        .into_iter()
+        .map(|row| String::from_utf8(row[0].as_ref().unwrap().text.to_vec()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["2", "1"]);
+}
+
+#[tokio::test]
+async fn outer_delete_reports_a_trigger_updated_newer_row_version() {
+    let engine = SqlEngine::new();
+    exec(
+        &engine,
+        "CREATE TABLE self_ref_claim_rows (id int PRIMARY KEY, parent int REFERENCES self_ref_claim_rows, nchildren int DEFAULT 0)",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE FUNCTION decrement_self_ref_parent() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF OLD.parent IS NOT NULL THEN
+             UPDATE self_ref_claim_rows SET nchildren = nchildren - 1 WHERE id = OLD.parent;
+           END IF;
+           RETURN OLD;
+         END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER decrement_self_ref_parent BEFORE DELETE ON self_ref_claim_rows
+         FOR EACH ROW EXECUTE FUNCTION decrement_self_ref_parent()",
+    )
+    .await;
+    exec(
+        &engine,
+        "INSERT INTO self_ref_claim_rows VALUES (1, NULL, 1), (2, 1, 0)",
+    )
+    .await;
+    exec(
+        &engine,
+        "UPDATE self_ref_claim_rows SET nchildren = nchildren WHERE id = 1",
+    )
+    .await;
+
+    let error = engine
+        .connect()
+        .simple_query("DELETE FROM self_ref_claim_rows")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "27000");
+    assert_eq!(
+        error.message,
+        "tuple to be updated was already modified by an operation triggered by the current command"
+    );
+}
+
+#[tokio::test]
 async fn trigger_when_and_update_of_are_honored() {
     let engine = SqlEngine::new();
     exec(
@@ -796,8 +1017,45 @@ async fn trigger_catalog_and_definition_are_visible() {
     )
     .await;
     assert!(definition.contains("CREATE TRIGGER documented_trigger BEFORE UPDATE OF value"));
-    assert!(definition.contains("WHEN (NEW.id > 0)"));
+    assert!(definition.contains("ON public.documented"));
+    assert!(definition.contains("WHEN ((new.id > 0))"));
     assert!(definition.contains("EXECUTE FUNCTION documented_fn('argument')"));
+    let pretty_definition = scalar(
+        &engine,
+        "SELECT pg_get_triggerdef(oid, true) FROM pg_trigger WHERE tgname = 'documented_trigger'",
+    )
+    .await;
+    assert!(pretty_definition.contains("ON documented"));
+    assert!(!pretty_definition.contains("ON public.documented"));
+    assert!(pretty_definition.contains("WHEN (new.id > 0)"));
+    exec(
+        &engine,
+        "CREATE TRIGGER documented_true BEFORE INSERT ON documented
+         FOR EACH STATEMENT WHEN (true) EXECUTE FUNCTION documented_fn()",
+    )
+    .await;
+    assert!(
+        scalar(
+            &engine,
+            "SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgname = 'documented_true'",
+        )
+        .await
+        .contains("WHEN (true)")
+    );
+    exec(
+        &engine,
+        "CREATE TRIGGER documented_whole BEFORE UPDATE ON documented
+         FOR EACH ROW WHEN (OLD.* IS DISTINCT FROM NEW.*) EXECUTE FUNCTION documented_fn()",
+    )
+    .await;
+    assert!(
+        scalar(
+            &engine,
+            "SELECT pg_get_triggerdef(oid, true) FROM pg_trigger WHERE tgname = 'documented_whole'",
+        )
+        .await
+        .contains("WHEN (old.* IS DISTINCT FROM new.*)")
+    );
     exec(
         &engine,
         "ALTER FUNCTION documented_fn() RENAME TO documented_fn_renamed",
@@ -823,6 +1081,15 @@ async fn trigger_catalog_and_definition_are_visible() {
     assert_eq!(
         scalar(
             &engine,
+            "SELECT action_condition FROM information_schema.triggers
+             WHERE trigger_name = 'documented_trigger'",
+        )
+        .await,
+        "(new.id > 0)"
+    );
+    assert_eq!(
+        scalar(
+            &engine,
             "SELECT relhastriggers::text FROM pg_class WHERE relname = 'documented'",
         )
         .await,
@@ -836,6 +1103,55 @@ async fn trigger_catalog_and_definition_are_visible() {
         )
         .await,
         "2"
+    );
+    exec(&engine, "CREATE TABLE documented_audit (events int)").await;
+    exec(
+        &engine,
+        "CREATE FUNCTION documented_compare() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF OLD.* IS DISTINCT FROM NEW.* THEN
+             INSERT INTO documented_audit VALUES (1);
+           END IF;
+           RETURN NEW;
+         END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER documented_compare_trigger BEFORE UPDATE ON documented
+         FOR EACH ROW EXECUTE FUNCTION documented_compare()",
+    )
+    .await;
+    exec(&engine, "INSERT INTO documented VALUES (1, 'old')").await;
+    exec(&engine, "UPDATE documented SET value = 'new'").await;
+    assert_eq!(
+        scalar(&engine, "SELECT count(*) FROM documented_audit").await,
+        "1"
+    );
+    exec(&engine, "CREATE TABLE documented_oid_audit (events int)").await;
+    exec(
+        &engine,
+        "CREATE FUNCTION documented_oid() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.tableoid <> TG_RELID OR OLD.tableoid <> TG_RELID THEN
+             RAISE EXCEPTION 'wrong trigger tableoid';
+           END IF;
+           INSERT INTO documented_oid_audit VALUES (1);
+           RETURN NEW;
+         END $$",
+    )
+    .await;
+    exec(
+        &engine,
+        "CREATE TRIGGER documented_oid_trigger AFTER UPDATE ON documented
+         FOR EACH ROW WHEN (NEW.tableoid = OLD.tableoid)
+         EXECUTE FUNCTION documented_oid()",
+    )
+    .await;
+    exec(&engine, "UPDATE documented SET value = 'newer'").await;
+    assert_eq!(
+        scalar(&engine, "SELECT count(*) FROM documented_oid_audit").await,
+        "1"
     );
 }
 

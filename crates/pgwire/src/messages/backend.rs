@@ -237,6 +237,17 @@ pub fn data_row(out: &mut BytesMut, values: &[Option<Bytes>]) {
     });
 }
 
+/// Legacy fastpath function result.
+pub fn function_call_response(out: &mut BytesMut, value: Option<Bytes>) {
+    msg(out, b'V', |b| match value {
+        Some(value) => {
+            b.put_i32(len_i32(value.len()));
+            b.put_slice(&value);
+        }
+        None => b.put_i32(-1),
+    });
+}
+
 fn diagnostic_response(out: &mut BytesMut, tag: u8, diagnostic: &PgError) {
     msg(out, tag, |b| {
         b.put_u8(b'S');

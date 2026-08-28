@@ -70,7 +70,7 @@ async fn a_memoized_lateral_returns_what_the_indexed_one_returns() {
         // The budget bounds what a lateral entry may retain, so a tight one
         // takes the index-less cached path and a generous one the indexed
         // path. Both must return the same rows.
-        let cramped = rows_under(crabka_units::kibibytes(8), sql).await;
+        let cramped = rows_under(crabka_units::kibibytes(16), sql).await;
         let roomy = rows_under(crabka_units::mebibytes(4), sql).await;
         assert!(cramped == roomy, "{sql}");
         assert!(!cramped.is_empty(), "{sql}");
@@ -83,7 +83,7 @@ async fn a_memoized_lateral_returns_what_the_indexed_one_returns() {
 #[tokio::test]
 async fn a_repeated_binding_reuses_its_entry_without_duplicating_rows() {
     let rows = rows_under(
-        crabka_units::kibibytes(8),
+        crabka_units::kibibytes(16),
         "SELECT o.tag, i.v FROM outer_t o, LATERAL (SELECT v FROM inner_t WHERE k = o.k) i \
          ORDER BY o.tag, i.v",
     )

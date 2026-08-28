@@ -17,6 +17,7 @@ command_identities!(
     (AlterAggregate, "ALTER AGGREGATE"),
     (AlterConversion, "ALTER CONVERSION"),
     (AlterDatabase, "ALTER DATABASE"),
+    (AlterDefaultPrivileges, "ALTER DEFAULT PRIVILEGES"),
     (AlterDomain, "ALTER DOMAIN"),
     (AlterEventTrigger, "ALTER EVENT TRIGGER"),
     (AlterExtension, "ALTER EXTENSION"),

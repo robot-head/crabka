@@ -13,7 +13,7 @@
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry},
     sync::{
         Arc, LazyLock, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -23,17 +23,18 @@ use std::{
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgmvcc::{clog::XidStatus, visibility::Snapshot};
 use crabka_pgparser::ast::{
-    BinaryOp, CopyDestination, CopyDirection, CopySource, CopyStmt, CopyTarget, CursorTarget,
-    DiscardTarget, ExplainOptions, Expr, FetchDirection, FuncArgs, IsolationLevel, JoinConstraint,
-    OnConflict, OnConflictAction, OnConflictTarget, QueryBody, QueryExpr, ResetTarget, SelectItem,
-    SetExpr, Statement, TableExpr, TableLockMode, UnaryOp, UnlistenTarget, UtilityStatement,
+    BinaryOp, CopyDestination, CopyDirection, CopySource, CopyStmt, CopyTarget, CreateAsSource,
+    CursorTarget, DiscardTarget, ExplainOptions, Expr, FetchCount, FetchDirection, FuncArgs,
+    IsolationLevel, JoinConstraint, OnConflict, OnConflictAction, OnConflictTarget, QueryBody,
+    QueryExpr, ResetTarget, SelectItem, SetExpr, Statement, TableExpr, TableLockMode, UnaryOp,
+    UnlistenTarget, UtilityStatement,
 };
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
 use crabka_pgwire::{
     engine::{
         BoundParam, Cell, CloseTarget, CopyInResponse, CopyOutResponse, CopyOutStream,
-        ExecuteOutcome, FieldDescription, Notification, PortalDescription, PreparedDescription,
-        QueryResult, Session, SimpleQueryStop, TxStatus,
+        ExecuteOutcome, FastpathCall, FieldDescription, Notification, PortalDescription,
+        PreparedDescription, QueryResult, Session, SimpleQueryStop, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
 };
@@ -50,12 +51,18 @@ use crate::{
     seq::SequenceManager,
 };
 
+/// Relation rowtypes live in the type parser's process-wide registry. Keep its
+/// catalog refresh and the parse that consumes it together across engines.
+static RELATION_ROWTYPE_PARSE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 /// In-flight transaction context.
 pub(crate) struct TxnCtx {
     /// Effective role at transaction start, restored by every abort path.
     pub(crate) role_at_start: String,
     /// Assigned lazily at the first write (None for a read-only transaction).
     pub(crate) xid: Option<u64>,
+    /// Command number assigned to the next data-modifying statement.
+    pub(crate) command_id: u32,
     /// The visibility snapshot: re-taken per statement under READ COMMITTED,
     /// fixed at BEGIN under REPEATABLE READ.
     pub(crate) snapshot: Snapshot,
@@ -125,6 +132,11 @@ pub(crate) struct TxnCtx {
     /// rewritten by several statements in one block unwind to where the block
     /// found it rather than to some midpoint.
     pub(crate) catalog_undo: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    /// Labels added to enum types that existed when this transaction began.
+    pub(crate) unsafe_enum_values: HashSet<(u32, String)>,
+    /// Types created by this transaction remain safe for pg_dump's
+    /// create-and-populate sequence, even when renamed before an added value.
+    pub(crate) created_user_type_oids: HashSet<u32>,
 }
 
 /// Shared physical gate held while a transaction issues ordinary writes.
@@ -964,6 +976,64 @@ impl GucDefinition {
             None => number,
         }
     }
+
+    /// The `pg_show_all_settings` category for the GUCs this engine exposes.
+    fn category(&self) -> &'static str {
+        match self.name {
+            "block_size"
+            | "integer_datetimes"
+            | "max_identifier_length"
+            | "server_encoding"
+            | "server_version_num" => "Preset Options",
+            "debug_parallel_query" => "Developer Options",
+            "default_statistics_target" => "Query Tuning / Other Planner Options",
+            name if name.starts_with("enable_") => "Query Tuning / Planner Method Configuration",
+            "geqo"
+            | "geqo_effort"
+            | "geqo_generations"
+            | "geqo_pool_size"
+            | "geqo_seed"
+            | "geqo_selection_bias"
+            | "geqo_threshold" => "Query Tuning / Genetic Query Optimizer",
+            "cpu_index_tuple_cost"
+            | "cpu_operator_cost"
+            | "cpu_tuple_cost"
+            | "random_page_cost"
+            | "seq_page_cost" => "Query Tuning / Planner Cost Constants",
+            "cursor_tuple_fraction"
+            | "effective_cache_size"
+            | "effective_io_concurrency"
+            | "from_collapse_limit"
+            | "hash_mem_multiplier"
+            | "join_collapse_limit"
+            | "max_parallel_maintenance_workers"
+            | "max_parallel_workers"
+            | "max_parallel_workers_per_gather"
+            | "min_parallel_index_scan_size"
+            | "min_parallel_table_scan_size"
+            | "parallel_leader_participation"
+            | "parallel_setup_cost"
+            | "parallel_tuple_cost"
+            | "plan_cache_mode"
+            | "recursive_worktable_factor"
+            | "work_mem" => "Query Tuning / Other Planner Options",
+            _ => "Client Connection Defaults / Statement Behavior",
+        }
+    }
+
+    /// Flags PostgreSQL exposes through `pg_settings_get_flags`.
+    fn flags(&self) -> &'static [&'static str] {
+        match self.category() {
+            "Developer Options" | "Preset Options" => &["NOT_IN_SAMPLE"],
+            category
+                if category.starts_with("Query Tuning")
+                    && self.name != "default_statistics_target" =>
+            {
+                &["EXPLAIN"]
+            }
+            _ => &[],
+        }
+    }
 }
 
 /// One `string` parameter of the F-1 registry.
@@ -1139,17 +1209,20 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     guc("check_function_bodies", "bool", "on", parse_bool),
     guc("default_transaction_deferrable", "bool", "off", parse_bool),
     guc("default_transaction_read_only", "bool", "off", parse_bool),
+    guc("default_with_oids", "bool", "off", parse_bool),
     guc("escape_string_warning", "bool", "on", parse_bool),
     guc("exit_on_error", "bool", "off", parse_bool),
     guc("geqo", "bool", "on", parse_bool),
     guc("in_hot_standby", "bool", "off", parse_bool).context(GucContext::Internal),
     guc("integer_datetimes", "bool", "on", parse_bool).context(GucContext::Internal),
     guc("jit", "bool", "on", parse_bool),
+    guc("lo_compat_privileges", "bool", "off", parse_bool),
     guc("parallel_leader_participation", "bool", "on", parse_bool),
     guc("quote_all_identifiers", "bool", "off", parse_bool),
     guc("row_security", "bool", "on", parse_bool),
     guc("transaction_deferrable", "bool", "off", parse_bool),
     guc("transaction_read_only", "bool", "off", parse_bool),
+    guc("track_counts", "bool", "on", parse_bool).context(GucContext::Superuser),
     guc("track_io_timing", "bool", "off", parse_bool).context(GucContext::Superuser),
     guc("transform_null_equals", "bool", "off", parse_bool),
     guc("block_size", "integer", "8192", parse_integer_guc)
@@ -1289,6 +1362,11 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     guc("recursive_worktable_factor", "real", "10", parse_real_guc).ranged(None, 0.001, 1e6),
     guc("seq_page_cost", "real", "1", parse_real_guc).ranged(None, 0.0, f64::MAX),
     guc("vacuum_cost_delay", "real", "0", parse_real_millis_guc).ranged(Some("ms"), 0.0, 100.0),
+    guc("wal_skip_threshold", "integer", "2048", parse_memory_guc).ranged(
+        Some("kB"),
+        0.0,
+        2_147_483_647.0,
+    ),
     guc_enum(
         "backslash_quote",
         "safe_encoding",
@@ -1313,6 +1391,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         &["auto", "regress", "on", "off"],
     )
     .context(GucContext::Superuser),
+    guc("track_activities", "bool", "on", parse_bool).context(GucContext::Superuser),
     guc_enum("debug_parallel_query", "off", &["off", "on", "regress"]),
     guc_enum(
         "default_transaction_isolation",
@@ -1358,10 +1437,16 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     )
     .context(GucContext::Superuser),
     guc_enum(
+        "stats_fetch_consistency",
+        "cache",
+        &["none", "cache", "snapshot"],
+    ),
+    guc_enum(
         "synchronous_commit",
         "on",
         &["local", "remote_write", "remote_apply", "on", "off"],
     ),
+    guc_enum("track_functions", "none", &["none", "pl", "all"]).context(GucContext::Superuser),
     guc_enum(
         "transaction_isolation",
         "read committed",
@@ -1406,6 +1491,7 @@ fn guc_definition(name: &str) -> Option<&'static GucDefinition> {
 #[derive(Debug, Clone)]
 pub(crate) struct GucState {
     slots: BTreeMap<String, GucSlot>,
+    reserved_custom_prefixes: BTreeSet<String>,
 }
 
 /// One effective session parameter row exposed through `pg_catalog.pg_settings`.
@@ -1442,6 +1528,7 @@ impl Default for GucState {
                     (definition.name.into(), GucSlot::new(value))
                 })
                 .collect(),
+            reserved_custom_prefixes: BTreeSet::new(),
         }
     }
 }
@@ -1462,6 +1549,18 @@ impl GucState {
         self.slots
             .get("row_security")
             .is_some_and(|slot| matches!(slot.effective(), GucValue::Bool(true)))
+    }
+
+    fn default_table_access_method(&self) -> &str {
+        match self
+            .slots
+            .get("default_table_access_method")
+            .expect("compiled-in default_table_access_method")
+            .effective()
+        {
+            GucValue::Text(method) => method,
+            _ => unreachable!("default_table_access_method is a string GUC"),
+        }
     }
 
     fn effective_map(&self) -> BTreeMap<String, String> {
@@ -1508,7 +1607,20 @@ impl GucState {
         // assignment. A one-part unknown name stays 42704.
         let Some(definition) = guc_definition(&key) else {
             if !is_custom_guc_name(&key) {
+                if key.contains('.') {
+                    return Err(ExecError::InvalidParameterValueWithDetail {
+                        message: format!("invalid configuration parameter name \"{name}\""),
+                        detail: "Custom parameter names must be two or more simple identifiers separated by dots.".into(),
+                    });
+                }
                 return Err(ExecError::UnrecognizedParameter(name.to_string()));
+            }
+            let prefix = key.split('.').next().expect("custom GUC has a prefix");
+            if self.reserved_custom_prefixes.contains(prefix) {
+                return Err(ExecError::InvalidParameterValueWithDetail {
+                    message: format!("invalid configuration parameter name \"{name}\""),
+                    detail: format!("\"{prefix}\" is a reserved prefix."),
+                });
             }
             return Ok((key, GucValue::Text(value.to_string())));
         };
@@ -1524,12 +1636,26 @@ impl GucState {
         Ok((key, parse_guc_value(definition, value, Some(&current))?))
     }
 
+    /// Check a stored function setting without changing this session.
+    fn validate_assignment(&self, name: &str, value: &str) -> Result<(), ExecError> {
+        self.prepare_assignment(name, value).map(|_| ())
+    }
+
     /// The slot [`Self::prepare_assignment`] resolved to, creating the
     /// placeholder a first-time customized option needs.
     fn slot_for_assignment(&mut self, key: String) -> &mut GucSlot {
         self.slots
             .entry(key)
             .or_insert_with(|| GucSlot::new(GucValue::Text(String::new())))
+    }
+
+    /// Reserve an extension namespace and discard any placeholders it claimed.
+    fn reserve_custom_prefix(&mut self, prefix: &str) -> bool {
+        self.reserved_custom_prefixes.insert(prefix.into());
+        let before = self.slots.len();
+        self.slots
+            .retain(|name, _| !name.starts_with(&format!("{prefix}.")));
+        self.slots.len() != before
     }
 
     /// Restore one parameter's session default. `PostgreSQL` checks the
@@ -1666,16 +1792,53 @@ pub(crate) fn guc_settings_runtime() -> Result<Vec<GucSettingRow>, ExecError> {
     })
 }
 
+/// Metadata backing `pg_show_all_settings` without inventing a second GUC
+/// registry beside the one that owns session values.
+pub(crate) fn guc_setting_category(name: &str) -> &'static str {
+    guc_definition(name).map_or("Custom Options", GucDefinition::category)
+}
+
+/// The accepted enum labels for a built-in setting, if it is an enum.
+pub(crate) fn guc_setting_enum_values(name: &str) -> Option<&'static [&'static str]> {
+    guc_definition(name)
+        .and_then(|definition| (!definition.allowed.is_empty()).then_some(definition.allowed))
+}
+
+/// Return `None` for an unknown setting, or the PostgreSQL flag set for a
+/// built-in or currently registered custom setting.
+pub(crate) fn guc_setting_flags(name: &str) -> Option<&'static [&'static str]> {
+    if let Some(definition) = guc_definition(name) {
+        return Some(definition.flags());
+    }
+    GUC_RUNTIME.with(|cell| {
+        cell.borrow().as_ref().and_then(|runtime| {
+            runtime
+                .settings
+                .iter()
+                .any(|setting| setting.name.eq_ignore_ascii_case(name))
+                .then_some(&[] as &'static [&'static str])
+        })
+    })
+}
+
 #[cfg(test)]
 fn guc_vartype(name: &str) -> &'static str {
     guc_definition(name).map_or("string", |definition| definition.vartype)
 }
 
-/// `PostgreSQL`'s rule for a customized option: exactly one dot, with a
-/// non-empty name on each side.
+/// `PostgreSQL`'s rule for a customized option: two or more simple
+/// identifiers separated by dots.
 fn is_custom_guc_name(name: &str) -> bool {
-    matches!(name.split('.').collect::<Vec<_>>().as_slice(),
-        [prefix, suffix] if !prefix.is_empty() && !suffix.is_empty())
+    let mut parts = name.split('.');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let simple_identifier = |part: &str| {
+        let mut chars = part.chars();
+        matches!(chars.next(), Some('_' | 'a'..='z' | 'A'..='Z'))
+            && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+    };
+    simple_identifier(first) && parts.count() >= 1 && name.split('.').skip(1).all(simple_identifier)
 }
 
 /// The command tag of a `SET`/`RESET` pair that shares one implementation:
@@ -1868,14 +2031,9 @@ fn parse_timezone(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecErr
 }
 
 fn parse_client_encoding(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
-    if matches!(
-        value.to_ascii_uppercase().as_str(),
-        "UTF8" | "UTF-8" | "UNICODE"
-    ) {
-        Ok(GucValue::Text("UTF8".into()))
-    } else {
-        Err(ExecError::InvalidParameterValue(value.to_string()))
-    }
+    crate::charset::Charset::from_name(value)
+        .map(|charset| GucValue::Text(charset.canonical_name().into()))
+        .ok_or_else(|| ExecError::InvalidParameterValue(value.to_string()))
 }
 
 fn parse_bool(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
@@ -1945,10 +2103,15 @@ fn parse_interval_style(value: &str, _: Option<&GucValue>) -> Result<GucValue, E
 }
 
 #[derive(Debug, Clone)]
-struct GucMutation {
+pub(crate) struct GucMutation {
     name: String,
     value: String,
     local: bool,
+}
+
+struct FunctionGucFrame {
+    before: GucState,
+    configured: Option<GucState>,
 }
 
 #[derive(Debug, Clone)]
@@ -1959,6 +2122,8 @@ struct GucRuntime {
     /// The session's prepared statements, as `pg_prepared_statements` reports
     /// them.
     prepared: Vec<PreparedStatementRow>,
+    /// The session's open cursors, as `pg_cursors` reports them.
+    cursors: Vec<CursorRow>,
 }
 
 /// One row of `pg_catalog.pg_prepared_statements`.
@@ -1970,6 +2135,17 @@ pub(crate) struct PreparedStatementRow {
     pub(crate) parameter_types: String,
     pub(crate) result_types: String,
     pub(crate) from_sql: bool,
+}
+
+/// One row of `pg_catalog.pg_cursors`.
+#[derive(Debug, Clone)]
+pub(crate) struct CursorRow {
+    pub(crate) name: String,
+    pub(crate) statement: String,
+    pub(crate) holdable: bool,
+    pub(crate) binary: bool,
+    pub(crate) scrollable: bool,
+    pub(crate) created_at: jiff::Timestamp,
 }
 
 /// The session's prepared statements for `pg_prepared_statements`.
@@ -1984,6 +2160,16 @@ pub(crate) fn prepared_statement_runtime() -> Result<Vec<PreparedStatementRow>, 
             .as_ref()
             .ok_or_else(|| ExecError::UnrecognizedParameter("pg_prepared_statements".into()))?;
         Ok(runtime.prepared.clone())
+    })
+}
+
+/// The session's open cursors for `pg_cursors`.
+pub(crate) fn cursor_runtime() -> Result<Vec<CursorRow>, ExecError> {
+    GUC_RUNTIME.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|runtime| runtime.cursors.clone())
+            .ok_or_else(|| ExecError::UnrecognizedParameter("pg_cursors".into()))
     })
 }
 
@@ -2030,6 +2216,7 @@ pub(crate) fn check_query_canceled() -> Result<(), ExecError> {
 /// The S3 lock context one statement evaluates against.
 struct SessionLockRuntime {
     locks: Arc<SessionLocks>,
+    row_locks: Arc<RowLockManager>,
     session: SessionLockId,
     /// Whether an explicit transaction block is open, which decides whether an
     /// `_xact` advisory lock outlives the statement.
@@ -2038,6 +2225,7 @@ struct SessionLockRuntime {
 
 fn with_session_lock_runtime<T>(
     locks: &Arc<SessionLocks>,
+    row_locks: &Arc<RowLockManager>,
     session: SessionLockId,
     in_transaction: bool,
     f: impl FnOnce() -> T,
@@ -2045,6 +2233,7 @@ fn with_session_lock_runtime<T>(
     SESSION_LOCK_RUNTIME.with(|cell| {
         let previous = cell.replace(Some(SessionLockRuntime {
             locks: Arc::clone(locks),
+            row_locks: Arc::clone(row_locks),
             session,
             in_transaction,
         }));
@@ -2124,6 +2313,30 @@ pub(crate) fn advisory_unlock_all_runtime() -> Result<(), ExecError> {
     })
 }
 
+pub(crate) fn pg_locks_runtime() -> Result<Vec<crate::lockmgr::SessionLockSnapshot>, ExecError> {
+    session_lock_runtime(|runtime| {
+        let mut rows = runtime.locks.snapshot();
+        rows.extend(runtime.row_locks.row_holds().into_iter().filter_map(
+            |(table, rowid, mode, owner)| match owner {
+                crate::lockmgr::LockOwner::Session(id) => {
+                    let session = SessionLockId(id);
+                    runtime.locks.backend_pid(session).map(|pid| {
+                        crate::lockmgr::SessionLockSnapshot::Tuple {
+                            session,
+                            pid,
+                            table,
+                            rowid,
+                            shared: mode == crate::lockmgr::LockMode::Shared,
+                        }
+                    })
+                }
+                crate::lockmgr::LockOwner::Xid(_) => None,
+            },
+        ));
+        Ok(rows)
+    })
+}
+
 pub(crate) fn current_setting_runtime(
     name: &str,
     missing_ok: bool,
@@ -2171,10 +2384,42 @@ pub(crate) fn set_config_runtime(
     })
 }
 
+pub(crate) fn apply_guc_runtime_mutations(mutations: Vec<GucMutation>) -> Result<(), ExecError> {
+    if mutations.is_empty() {
+        return Ok(());
+    }
+    GUC_RUNTIME.with(|cell| {
+        let mut runtime = cell.borrow_mut();
+        let runtime = runtime.as_mut().ok_or_else(|| {
+            ExecError::ObjectNotInPrerequisiteState(
+                "function configuration changes require a statement runtime".into(),
+            )
+        })?;
+        for mutation in mutations {
+            if let Some(setting) = runtime
+                .settings
+                .iter_mut()
+                .find(|setting| setting.name == mutation.name)
+            {
+                setting.value = guc_definition(&mutation.name)
+                    .map(|definition| parse_guc_value(definition, &mutation.value, None))
+                    .transpose()?
+                    .map_or_else(|| mutation.value.clone(), |value| value.render_setting());
+            }
+            runtime
+                .values
+                .insert(mutation.name.clone(), mutation.value.clone());
+            runtime.mutations.push(mutation);
+        }
+        Ok(())
+    })
+}
+
 fn with_guc_runtime<T>(
     values: BTreeMap<String, String>,
     settings: Vec<GucSettingRow>,
     prepared: Vec<PreparedStatementRow>,
+    cursors: Vec<CursorRow>,
     f: impl FnOnce() -> T,
 ) -> (T, Vec<GucMutation>) {
     GUC_RUNTIME.with(|cell| {
@@ -2183,6 +2428,7 @@ fn with_guc_runtime<T>(
             settings,
             mutations: Vec::new(),
             prepared,
+            cursors,
         }));
         let result = f();
         let runtime = cell.replace(previous).expect("runtime installed");
@@ -2251,6 +2497,23 @@ fn record_statement_rows(span: &tracing::Span, result: &QueryResult) {
     }
 }
 
+fn xml_uses_scalar_text(ty: ColumnType) -> bool {
+    match ty {
+        ColumnType::Bool
+        | ColumnType::Bytea
+        | ColumnType::Date
+        | ColumnType::Timestamp
+        | ColumnType::Timestamptz
+        | ColumnType::Temporal(
+            crabka_pgtypes::TemporalType::Timestamp | crabka_pgtypes::TemporalType::Timestamptz,
+            _,
+        ) => true,
+        ColumnType::Domain(domain) => xml_uses_scalar_text(*domain.base),
+        ColumnType::Base(base) => xml_uses_scalar_text(*base.representation),
+        _ => false,
+    }
+}
+
 /// The command tag PostgreSQL names in `cannot execute <tag> in a read-only
 /// transaction`. Only the statements a read-only block can refuse need one, and
 /// [`statement_has_effects`] decides which those are.
@@ -2265,6 +2528,9 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
         Statement::CreateTable { .. } | Statement::CreateTableAs { .. } => "CREATE TABLE",
         Statement::CreateIndex { .. } => "CREATE INDEX",
         Statement::AlterIndex { .. } => "ALTER INDEX",
+        Statement::AlterLargeObject { .. } => "ALTER LARGE OBJECT",
+        Statement::GrantLargeObjectPrivileges { .. } => "GRANT",
+        Statement::RevokeLargeObjectPrivileges { .. } => "REVOKE",
         Statement::CreateView { .. } => "CREATE VIEW",
         Statement::AlterView { .. } => "ALTER VIEW",
         Statement::CreateSchema { .. } => "CREATE SCHEMA",
@@ -2386,14 +2652,21 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::DropForeignTable { .. }
         | Statement::CreateRole { .. }
         | Statement::AlterRole { .. }
+        | Statement::AlterLargeObject { .. }
+        | Statement::GrantLargeObjectPrivileges { .. }
+        | Statement::RevokeLargeObjectPrivileges { .. }
         | Statement::DropRole { .. }
         | Statement::GrantTablePrivileges { .. }
         | Statement::GrantSchemaPrivileges { .. }
         | Statement::RevokeTablePrivileges { .. }
         | Statement::RevokeSchemaPrivileges { .. }
+        | Statement::AlterDefaultTablePrivileges { .. }
         | Statement::GrantRoles { .. }
         | Statement::RevokeRoles { .. }
         | Statement::ImportForeignSchema { .. }
+        | Statement::CreateRule(_)
+        | Statement::AlterRule { .. }
+        | Statement::DropRule { .. }
         | Statement::CreateTrigger(_)
         | Statement::AlterTrigger { .. }
         | Statement::DropTrigger { .. }
@@ -2414,6 +2687,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::DropType { .. }
         | Statement::CreateCast { .. }
         | Statement::DropCast { .. }
+        | Statement::CreateAccessMethod { .. }
         | Statement::CreateDomain { .. }
         | Statement::AlterDomain { .. }
         | Statement::DropDomain { .. }
@@ -2492,6 +2766,7 @@ pub(crate) struct NotifyPending {
     actions: Vec<ListenAction>,
     notifies: Vec<(String, String)>,
     dedup: HashSet<(String, String)>,
+    subscriptions: HashSet<String>,
 }
 
 /// A committing transaction's notification work, held between the point where
@@ -2548,6 +2823,20 @@ impl NotifyPending {
 
     fn is_empty(&self) -> bool {
         self.actions.is_empty() && self.notifies.is_empty()
+    }
+
+    /// Drop the current transaction's work while retaining the session's live
+    /// subscriptions, which `pg_listening_channels()` exposes.
+    fn clear(&mut self) {
+        self.actions.clear();
+        self.notifies.clear();
+        self.dedup.clear();
+    }
+
+    pub(crate) fn listening_channels(&self) -> Vec<String> {
+        let mut channels: Vec<_> = self.subscriptions.iter().cloned().collect();
+        channels.sort_unstable();
+        channels
     }
 }
 
@@ -2725,6 +3014,10 @@ pub struct SqlSession {
     /// value therefore never reaches the client before the op that records it
     /// is durable. That is what makes re-seeding safe for the next writer.
     pending_sequences: Arc<Mutex<crate::seq::PendingSequences>>,
+    /// Transactional large-object edits accumulated by scalar `lo_*` calls.
+    pending_largeobjects: Arc<Mutex<crate::largeobject::PendingLargeObjects>>,
+    /// Session-local handles returned by `lo_open`.
+    largeobject_descriptors: Arc<Mutex<crate::largeobject::Descriptors>>,
     /// An xid `pg_current_xact_id()` assigned during expression evaluation and
     /// the transaction has not adopted yet.
     ///
@@ -2769,6 +3062,9 @@ pub struct SqlSession {
     /// (not owned) because the per-statement `WriteContext` reaches it from
     /// `&self` while the write path holds it.
     deferred_fk: Arc<Mutex<crate::fk::DeferredConstraints>>,
+    /// Claims shared by one command with SQL run from its PL/pgSQL triggers.
+    /// Installed only while the session drives a scalar-function request.
+    command_row_claims: Option<crate::exec::CommandRowClaims>,
     pending_after_triggers: Vec<crate::trigger::PendingTrigger>,
     deferred_after_triggers: Vec<crate::trigger::PendingTrigger>,
     trigger_depth: u32,
@@ -2807,7 +3103,7 @@ pub struct SqlSession {
     session_locks: Arc<SessionLocks>,
     /// This connection's identity in the S3 lock tables.
     session_lock_id: SessionLockId,
-    /// S2: open SQL cursors by name, materialized at `DECLARE`.
+    /// S2: open SQL cursors by name, materialized at first `FETCH`/`MOVE`.
     cursors: HashMap<String, SqlCursor>,
     /// S1: the open savepoint stack, outermost first.
     savepoints: Vec<SavepointFrame>,
@@ -2830,11 +3126,18 @@ pub struct SqlSession {
     implicit_xid: Option<u64>,
 }
 
-/// S2: one open SQL cursor. The executor materializes every query, so a cursor
-/// is its materialized result plus a position.
+/// S2: one open SQL cursor. Its query stays dormant until the first
+/// `FETCH`/`MOVE`, then its materialized result and position remain stable.
 struct SqlCursor {
+    query: QueryExpr,
+    statement: String,
+    binary: bool,
+    created_at: jiff::Timestamp,
     fields: Vec<FieldDescription>,
-    rows: Vec<Vec<Option<crabka_pgwire::engine::Cell>>>,
+    rows: Option<Vec<Vec<Option<crabka_pgwire::engine::Cell>>>>,
+    /// The physical identity retained alongside each row of a simply updatable
+    /// cursor. It stays out of the client-visible projection.
+    identities: Option<Vec<CursorRowIdentity>>,
     position: crate::cursor::CursorPosition,
     /// Whether backward movement is allowed. `DECLARE … NO SCROLL` clears it;
     /// every other spelling sets it, because a materialized result always
@@ -2860,6 +3163,12 @@ struct SqlCursor {
     pinned: Vec<crabka_pgcatalog::RelationName>,
 }
 
+/// The row `WHERE CURRENT OF` targets after a cursor has materialized.
+struct CursorRowIdentity {
+    table: crabka_pgcatalog::RelationName,
+    ctid: String,
+}
+
 /// S1: one open savepoint level.
 struct SavepointFrame {
     name: String,
@@ -2878,6 +3187,8 @@ struct SavepointFrame {
     undo: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     /// Catalog-key before-images for transactional DDL inside this level.
     catalog_undo: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    unsafe_enum_values: HashSet<(u32, String)>,
+    created_user_type_oids: HashSet<u32>,
     /// Locks held at the boundary. PostgreSQL releases subtransaction locks on
     /// `ROLLBACK TO` while retaining locks acquired before the savepoint.
     row_locks: HashMap<LockKey, LockMode>,
@@ -2885,6 +3196,8 @@ struct SavepointFrame {
     advisory_lock_count: usize,
     /// Transactional LISTEN/NOTIFY work as of `SAVEPOINT`.
     notify_pending: NotifyPending,
+    /// Transaction-local large-object state as of `SAVEPOINT`.
+    largeobjects: crate::largeobject::PendingLargeObjects,
     /// Whether the transaction block was already aborted when the savepoint was
     /// taken. A `ROLLBACK TO` restores the block to that state.
     failed: bool,
@@ -3094,6 +3407,7 @@ struct WriteStatementContext<'a> {
     global_snapshot: &'a Snapshot,
     snapshot: &'a Snapshot,
     xid: u64,
+    command_id: u32,
     repeatable_read: bool,
     eval_ctx: &'a crate::clock::EvalCtx,
     prune_horizon: Option<u64>,
@@ -3104,9 +3418,24 @@ struct WriteActorContext {
     global_snapshot: Snapshot,
     snapshot: Snapshot,
     xid: u64,
+    command_id: u32,
     repeatable_read: bool,
     eval_ctx: crate::clock::EvalCtx,
     prune_horizon: Option<u64>,
+}
+
+enum WriteActorWork {
+    Statement(Statement),
+    Copy(CopyActorInput),
+}
+
+struct CopyActorInput {
+    name: crabka_pgparser::ast::RelationRef,
+    columns: Option<Vec<String>>,
+    text: String,
+    format: crate::copyfmt::CopyInFormat,
+    header_columns: Vec<String>,
+    force: crate::copyfmt::CopyForceFlags,
 }
 
 struct LockingActorContext {
@@ -3193,11 +3522,8 @@ impl SqlSession {
             session_locks,
             backend_pid,
         } = config;
-        let session_lock_id = session_locks.next_session_id();
-        let unique_index_owner = coordination
-            .next_unique_index_owner
-            .fetch_add(1, Ordering::Relaxed);
-        let lock_owner = crate::lockmgr::LockOwner::Session(unique_index_owner);
+        let session_lock_id = session_locks.next_session_id(backend_pid);
+        let lock_owner = crate::lockmgr::LockOwner::Session(session_lock_id.0);
         // The parser resolves a user-defined type *name* through a process-wide
         // registry (it holds no catalog handle), so the registry has to be
         // populated from the durable catalog before this session parses
@@ -3258,6 +3584,12 @@ impl SqlSession {
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
             pending_sequences: Arc::new(Mutex::new(crate::seq::PendingSequences::default())),
+            pending_largeobjects: Arc::new(Mutex::new(
+                crate::largeobject::PendingLargeObjects::default(),
+            )),
+            largeobject_descriptors: Arc::new(Mutex::new(
+                crate::largeobject::Descriptors::default(),
+            )),
             assigned_xact_id: Arc::new(Mutex::new(None)),
             notify: None,
             notify_rx: None,
@@ -3267,6 +3599,7 @@ impl SqlSession {
             notify_pending: Arc::new(Mutex::new(NotifyPending::default())),
             notify_reserved: Mutex::new(None),
             deferred_fk: Arc::new(Mutex::new(crate::fk::DeferredConstraints::default())),
+            command_row_claims: None,
             pending_after_triggers: Vec::new(),
             deferred_after_triggers: Vec::new(),
             trigger_depth: 0,
@@ -3314,7 +3647,7 @@ impl SqlSession {
     }
 
     fn type_search_schemas(&self) -> Result<Vec<String>, ExecError> {
-        crate::catalog_rel::sync_relation_rowtypes(self.catalog_kv.as_ref())?;
+        crate::usertype::hydrate(self.catalog_kv.as_ref())?;
         self.resolution_scope()
             .visible_schemas(self.catalog_kv.as_ref())
     }
@@ -3464,6 +3797,14 @@ impl SqlSession {
             Ok("escape") => crabka_pgtypes::encoding::ByteaOutput::Escape,
             _ => crabka_pgtypes::encoding::ByteaOutput::Hex,
         };
+        let xml_option = match self.guc.effective("xmloption").as_deref() {
+            Ok("document") => crabka_pgtypes::xml::XmlOption::Document,
+            _ => crabka_pgtypes::xml::XmlOption::Content,
+        };
+        let xml_binary = match self.guc.effective("xmlbinary").as_deref() {
+            Ok("hex") => crate::clock::XmlBinary::Hex,
+            _ => crate::clock::XmlBinary::Base64,
+        };
         crate::clock::EvalCtx {
             now,
             stmt_now,
@@ -3473,9 +3814,13 @@ impl SqlSession {
             interval_style,
             extra_float_digits,
             bytea_output,
+            xml_option,
+            xml_binary,
             current_user: self.current_role.clone(),
             session_user: self.session_user.clone(),
             backend_pid: self.backend_pid,
+            compute_query_id: self.guc.effective("compute_query_id").as_deref() == Ok("on"),
+            track_activities: self.guc.effective("track_activities").as_deref() == Ok("on"),
             trigger_depth: self.trigger_depth,
             clock: Arc::clone(&self.clock),
             random: Some(Arc::clone(&self.random)),
@@ -3489,8 +3834,22 @@ impl SqlSession {
                 currvals: Arc::clone(&self.sequence_currvals),
                 pending: Arc::clone(&self.pending_sequences),
             })),
+            largeobject: Some(Arc::new(crate::clock::LargeObjectRuntime {
+                kv: Arc::clone(&self.catalog_kv),
+                compat_privileges: self.guc.effective("lo_compat_privileges").as_deref()
+                    == Ok("on"),
+                read_only: self.guc.effective("transaction_read_only").as_deref() == Ok("on"),
+                pending: Arc::clone(&self.pending_largeobjects),
+                descriptors: Arc::clone(&self.largeobject_descriptors),
+            })),
             resolution: Some(Arc::new(self.resolution_scope())),
             notify: Some(Arc::clone(&self.notify_pending)),
+            warning_tx: self
+                .guc
+                .effective("client_min_messages")
+                .ok()
+                .filter(|minimum| client_accepts_message(minimum, Severity::Warning))
+                .map(|_| self.notice_tx.clone()),
             transition_relations: Some(Arc::clone(&self.transition_relations)),
             event_trigger: self.event_trigger.clone(),
             txn: Some(Arc::new(crate::clock::TxnRuntime {
@@ -3498,6 +3857,12 @@ impl SqlSession {
                 own_xid: self.local_xid(),
                 procarray: Arc::clone(&self.procarray),
                 assigned: Arc::clone(&self.assigned_xact_id),
+                unsafe_enum_values: Arc::new(match &self.state {
+                    TxnState::InTransaction(context)
+                    | TxnState::Prepared(context)
+                    | TxnState::Failed(context) => context.unsafe_enum_values.clone(),
+                    TxnState::Idle => HashSet::new(),
+                }),
             })),
         }
     }
@@ -3573,6 +3938,7 @@ impl SqlSession {
             seq: self.seq.as_ref(),
             snapshot: statement.snapshot,
             xid: statement.xid,
+            command_id: statement.command_id,
             repeatable_read: statement.repeatable_read,
             eval_ctx: statement.eval_ctx,
             prune_horizon: statement.prune_horizon,
@@ -3584,6 +3950,7 @@ impl SqlSession {
                 current_user: &self.current_role,
                 session_user: &self.session_user,
                 row_security: self.guc.row_security(),
+                default_table_access_method: self.guc.default_table_access_method(),
                 // `INSERT … SELECT` builds its source relation through the
                 // ordinary read path, which resolves an unqualified name
                 // against `fctx.resolution`. `ForeignCtx::none()` carries the
@@ -3598,6 +3965,8 @@ impl SqlSession {
             range_scanner: self.range_scanner.as_ref(),
             blocking_query_memory: self.blocking_query_memory,
             ctes: statement.ctes,
+            command_row_claims: self.command_row_claims.as_ref(),
+            trigger_write: self.trigger_depth > 0,
             // One guard per session: a session runs one statement at a time and
             // every entry is popped before the statement returns, so the stack
             // is empty again by the next one. Threading a fresh one through each
@@ -3672,6 +4041,7 @@ impl SqlSession {
     /// client expects. The registration lives until the session is dropped.
     pub fn register_notify(&mut self, bus: &Arc<NotifyBus>, pid: i32) {
         let (handle, rx) = NotifyBus::register(bus, pid);
+        self.pending_notify().subscriptions = handle.subscriptions();
         self.notify = Some(handle);
         self.notify_rx = Some(rx);
     }
@@ -3682,6 +4052,7 @@ impl SqlSession {
     /// drains the queue at its own session boundary, then hands the handle to
     /// the coordinator [`SqlSession`] that actually runs the statements.
     pub fn adopt_notify(&mut self, handle: NotifySessionHandle) {
+        self.pending_notify().subscriptions = handle.subscriptions();
         self.notify = Some(handle);
         self.notify_rx = None;
     }
@@ -3778,6 +4149,10 @@ impl SqlSession {
         }
         let catalog = Arc::clone(&self.catalog_kv);
         let ctx = self.eval_ctx();
+        let guc_values = self.guc.effective_map();
+        let guc_settings = self.guc.settings();
+        let prepared = self.prepared_statement_rows();
+        let cursors = self.cursor_rows();
         let (request_tx, request_rx) = mpsc::channel(1);
         let worker_catalog = Arc::clone(&catalog);
         let (worker_id, _cancel, finished) = self.register_worker();
@@ -3791,14 +4166,21 @@ impl SqlSession {
             let _worker_span =
                 crate::telemetry::blocking_worker_span("plpgsql_expression").entered();
             let _finished = finished;
-            crate::routine::with_scalar_runtime(&worker_catalog, Some(request_tx), || {
-                let scope = crate::scope::Scope::empty();
-                let ty = crate::eval::infer_type(&expr, &scope)?;
-                let value = crate::eval::eval(&expr, &scope, &[], &ctx)?;
-                Ok((value, ty))
+            with_guc_runtime(guc_values, guc_settings, prepared, cursors, || {
+                crate::routine::with_scalar_runtime(&worker_catalog, Some(request_tx), || {
+                    let scope = crate::scope::Scope::empty();
+                    let ty = crate::eval::infer_type(&expr, &scope)?;
+                    let value = crate::eval::eval(&expr, &scope, &[], &ctx)?;
+                    Ok((value, ty))
+                })
             })
         });
-        Box::pin(self.drive_scalar_worker(worker_id, worker, request_rx, false)).await?
+        let (result, mutations) =
+            Box::pin(self.drive_scalar_worker(worker_id, worker, request_rx, false)).await?;
+        if result.is_ok() {
+            self.apply_guc_mutations(mutations)?;
+        }
+        result
     }
 
     /// Render a PL/pgSQL value the way a `RAISE` format parameter is rendered.
@@ -3887,6 +4269,14 @@ impl SqlSession {
         decode_text_bound_param(text, ty, &self.eval_ctx().time_zone).map_err(ExecError::from)
     }
 
+    pub(crate) fn plpgsql_decode_text(
+        &self,
+        text: &str,
+        ty: ColumnType,
+    ) -> Result<Datum, ExecError> {
+        decode_text_bound_param(text, ty, &self.eval_ctx().time_zone).map_err(ExecError::from)
+    }
+
     fn pending_notify(&self) -> std::sync::MutexGuard<'_, NotifyPending> {
         self.notify_pending.lock().expect("notify pending mutex")
     }
@@ -3918,6 +4308,163 @@ impl SqlSession {
     /// would let its successor hand the same value out again.
     async fn flush_pending_sequences(&self) -> Result<(), ExecError> {
         let ops = self.take_pending_sequence_ops();
+        if ops.is_empty() {
+            return Ok(());
+        }
+        self.committer.commit(ops).await
+    }
+
+    /// Take this transaction's large-object writes for a successful commit.
+    fn take_pending_largeobject_ops(&self) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+        self.pending_largeobjects
+            .lock()
+            .expect("pending large objects mutex")
+            .take_ops(self.catalog_kv.as_ref())
+    }
+
+    /// Forget large-object writes after a rollback or failed autocommit.
+    fn discard_pending_largeobjects(&self) {
+        self.pending_largeobjects
+            .lock()
+            .expect("pending large objects mutex")
+            .clear();
+    }
+
+    fn clear_largeobject_descriptors(&self) {
+        self.largeobject_descriptors
+            .lock()
+            .expect("large object descriptors mutex")
+            .clear();
+    }
+
+    fn has_pending_largeobjects(&self) -> bool {
+        !self
+            .pending_largeobjects
+            .lock()
+            .expect("pending large objects mutex")
+            .is_empty()
+    }
+
+    fn alter_large_object(
+        &mut self,
+        oid: u32,
+        owner: &crabka_pgparser::ast::RoleSpec,
+    ) -> Result<QueryResult, ExecError> {
+        let resolution = self.resolution_scope();
+        let fctx = crate::exec::ForeignCtx {
+            scanner: self.foreign_scanner.as_ref(),
+            current_user: &self.current_role,
+            session_user: &self.session_user,
+            resolution: &resolution,
+            catalog: Some(&self.catalog_kv),
+            reserved_table_ids: None,
+            own_xid: None,
+            row_security: self.guc.row_security(),
+            default_table_access_method: self.guc.default_table_access_method(),
+        };
+        let new_owner = crate::exec::resolve_new_owner(self.catalog_kv.as_ref(), fctx, owner)?;
+        let actor = fctx.effective_role().to_string();
+        self.pending_largeobjects
+            .lock()
+            .expect("pending large objects mutex")
+            .set_owner(self.catalog_kv.as_ref(), oid, &actor, new_owner)?;
+        Ok(QueryResult::Command {
+            tag: "ALTER LARGE OBJECT".into(),
+        })
+    }
+
+    fn comment_large_object(
+        &mut self,
+        object_name: &str,
+        comment: Option<&str>,
+    ) -> Result<QueryResult, ExecError> {
+        let oid = object_name
+            .parse::<u32>()
+            .map_err(|_| ExecError::Syntax("large object comments require an OID".into()))?;
+        let resolution = self.resolution_scope();
+        let fctx = crate::exec::ForeignCtx {
+            scanner: self.foreign_scanner.as_ref(),
+            current_user: &self.current_role,
+            session_user: &self.session_user,
+            resolution: &resolution,
+            catalog: Some(&self.catalog_kv),
+            reserved_table_ids: None,
+            own_xid: None,
+            row_security: self.guc.row_security(),
+            default_table_access_method: self.guc.default_table_access_method(),
+        };
+        let actor = fctx.effective_role().to_string();
+        self.pending_largeobjects
+            .lock()
+            .expect("pending large objects mutex")
+            .set_comment(
+                self.catalog_kv.as_ref(),
+                oid,
+                &actor,
+                comment.map(str::to_owned),
+            )?;
+        Ok(QueryResult::Command {
+            tag: "COMMENT".into(),
+        })
+    }
+
+    fn change_large_object_acl(
+        &mut self,
+        oids: &[u32],
+        grantees: &[crabka_pgparser::ast::RoleSpec],
+        privileges: &[crabka_pgparser::ast::PrivilegeSpec],
+        grant: bool,
+        grant_option: bool,
+    ) -> Result<QueryResult, ExecError> {
+        let resolution = self.resolution_scope();
+        let fctx = crate::exec::ForeignCtx {
+            scanner: self.foreign_scanner.as_ref(),
+            current_user: &self.current_role,
+            session_user: &self.session_user,
+            resolution: &resolution,
+            catalog: Some(&self.catalog_kv),
+            reserved_table_ids: None,
+            own_xid: None,
+            row_security: self.guc.row_security(),
+            default_table_access_method: self.guc.default_table_access_method(),
+        };
+        let grantees = crate::exec::resolve_grantees(self.catalog_kv.as_ref(), fctx, grantees)?;
+        let actor = fctx.effective_role().to_string();
+        let mut pending = self
+            .pending_largeobjects
+            .lock()
+            .expect("pending large objects mutex");
+        let mut staged = pending.clone();
+        for oid in oids {
+            if grant {
+                staged.grant(
+                    self.catalog_kv.as_ref(),
+                    *oid,
+                    &actor,
+                    &grantees,
+                    privileges,
+                    grant_option,
+                )?;
+            } else {
+                staged.revoke(
+                    self.catalog_kv.as_ref(),
+                    *oid,
+                    &actor,
+                    &grantees,
+                    privileges,
+                    grant_option,
+                )?;
+            }
+        }
+        *pending = staged;
+        Ok(QueryResult::Command {
+            tag: if grant { "GRANT" } else { "REVOKE" }.into(),
+        })
+    }
+
+    /// Commit a read-only statement's staged large-object writes.
+    async fn flush_pending_largeobjects(&self) -> Result<(), ExecError> {
+        let ops = self.take_pending_largeobject_ops()?;
         if ops.is_empty() {
             return Ok(());
         }
@@ -4118,6 +4665,7 @@ impl SqlSession {
                 ListenAction::UnlistenAll => handle.unlisten_all(),
             }
         }
+        self.pending_notify().subscriptions = handle.subscriptions();
     }
 
     /// Undo a reservation whose transaction did not commit. Reserving touches
@@ -4133,7 +4681,7 @@ impl SqlSession {
     /// commit. Live subscriptions are untouched, because nothing queued has
     /// reached the bus.
     fn discard_pending_notifications(&self) {
-        *self.pending_notify() = NotifyPending::default();
+        self.pending_notify().clear();
         drop(self.reserved_notify().take());
     }
 
@@ -4184,6 +4732,19 @@ impl SqlSession {
         // own property, so the flattening happens here rather than in the
         // parser, which does not know the name it is setting.
         let zone = guc_definition(name).map_or_else(|| value.plain(), |gd| gd.flatten(value));
+        if normalize_guc_name(name) == "default_with_oids"
+            && !matches!(value, crabka_pgparser::ast::SetValue::Default)
+            && matches!(parse_bool(&zone, None)?, GucValue::Bool(true))
+        {
+            return Err(ExecError::Unsupported(
+                "tables declared WITH OIDS are not supported".into(),
+            ));
+        }
+        if normalize_guc_name(name) == "default_table_access_method"
+            && matches!(value, crabka_pgparser::ast::SetValue::Value(_))
+        {
+            self.validate_default_table_access_method(&zone)?;
+        }
         // Apply with the right transactional scope.
         let in_txn = matches!(self.state, TxnState::InTransaction(_));
         if in_txn {
@@ -4199,11 +4760,42 @@ impl SqlSession {
                 crabka_pgparser::ast::SetValue::Value(_) => self.guc.set(name, &zone, local)?,
             }
             self.guc.commit();
+            if local {
+                self.plpgsql_notice(
+                    PgError::warning("SET LOCAL can only be used in transaction blocks")
+                        .with_code("25P01"),
+                )?;
+            }
         }
         // `default_transaction_isolation` decides what `transaction_isolation`
         // reports outside a block, so the two must move together.
         self.sync_transaction_isolation();
         Ok(QueryResult::Command { tag: "SET".into() })
+    }
+
+    fn validate_default_table_access_method(&self, method: &str) -> Result<(), ExecError> {
+        if method.is_empty() {
+            return Err(ExecError::Remote(
+                PgError::error(
+                    "22023",
+                    "invalid value for parameter \"default_table_access_method\": \"\"",
+                )
+                .with_detail("\"default_table_access_method\" cannot be empty."),
+            ));
+        }
+        match crate::exec::resolve_table_access_method_oid(self.catalog_kv.as_ref(), method) {
+            Ok(_) => Ok(()),
+            Err(ExecError::UndefinedObject(_)) => Err(ExecError::Remote(
+                PgError::error(
+                    "22023",
+                    format!(
+                        "invalid value for parameter \"default_table_access_method\": \"{method}\""
+                    ),
+                )
+                .with_detail(format!("Table access method \"{method}\" does not exist.")),
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     /// Reset a registered parameter to its independent source value. Transactional
@@ -4404,6 +4996,96 @@ impl SqlSession {
         Ok(())
     }
 
+    fn enter_function_guc(
+        &mut self,
+        routine: &crabka_pgcatalog::routine::Routine,
+    ) -> Result<FunctionGucFrame, ExecError> {
+        let before = self.guc.clone();
+        if routine.config.is_empty() {
+            return Ok(FunctionGucFrame {
+                before,
+                configured: None,
+            });
+        }
+        for entry in &routine.config {
+            let result = match entry.split_once('=') {
+                Some((name, value)) => self.guc.set(name, value, false),
+                None => self.guc.reset(entry),
+            };
+            if let Err(error) = result {
+                self.guc = before;
+                return Err(error);
+            }
+            if let Some((name, value)) = entry.split_once('=')
+                && normalize_guc_name(name) == "default_text_search_config"
+                && let Err(error) =
+                    crate::text_search_catalog::config_is_simple(Some(&*self.catalog_kv), value)
+            {
+                self.guc = before;
+                return match error {
+                    ExecError::UndefinedObject(_) => {
+                        Err(ExecError::InvalidParameterValueMessage(format!(
+                            "invalid value for parameter \"default_text_search_config\": \"{value}\""
+                        )))
+                    }
+                    error => Err(error),
+                };
+            }
+        }
+        Ok(FunctionGucFrame {
+            before,
+            configured: Some(self.guc.clone()),
+        })
+    }
+
+    fn finish_function_guc(
+        &mut self,
+        frame: FunctionGucFrame,
+        succeeded: bool,
+    ) -> Vec<GucMutation> {
+        if !succeeded {
+            self.guc = frame.before;
+            return Vec::new();
+        }
+        if let Some(configured) = frame.configured {
+            let current = self.guc.clone();
+            let mut restored = frame.before.clone();
+            for (name, slot) in &current.slots {
+                let configured_session = configured
+                    .slots
+                    .get(name)
+                    .and_then(|slot| slot.txn_session.as_ref());
+                if slot.txn_session.as_ref() != configured_session
+                    && let Some(value) = &slot.txn_session
+                {
+                    restored
+                        .slot_for_assignment(name.clone())
+                        .set(value.clone(), false);
+                }
+            }
+            self.guc = restored;
+        }
+        self.guc_mutations_since(&frame.before)
+    }
+
+    fn guc_mutations_since(&self, before: &GucState) -> Vec<GucMutation> {
+        self.guc
+            .slots
+            .iter()
+            .filter_map(|(name, slot)| {
+                let before_slot = before.slots.get(name);
+                (before_slot.map(GucSlot::effective) != Some(slot.effective())).then(|| {
+                    GucMutation {
+                        name: name.clone(),
+                        value: slot.effective().render(),
+                        local: before_slot.and_then(|slot| slot.txn_session.as_ref())
+                            == slot.txn_session.as_ref(),
+                    }
+                })
+            })
+            .collect()
+    }
+
     /// Catch range 0's LOCAL replica up to its leader's linearizable applied index
     /// (data-range engines only; a no-op on range 0's own engine and single-range
     /// engines). Run AFTER the own-range `linearizer.ensure_readable()` and BEFORE
@@ -4442,7 +5124,19 @@ impl SqlSession {
         self.require_transaction_block("SAVEPOINT")?;
         let deferral = self.deferred_constraints().modes().clone();
         let notify_pending = self.pending_notify().clone();
+        let largeobjects = self
+            .pending_largeobjects
+            .lock()
+            .expect("pending large objects mutex")
+            .clone();
         let row_locks = self.lockmgr.held_locks_as(self.lock_owner);
+        let (unsafe_enum_values, created_user_type_oids) = match &self.state {
+            TxnState::InTransaction(context) | TxnState::Failed(context) => (
+                context.unsafe_enum_values.clone(),
+                context.created_user_type_oids.clone(),
+            ),
+            TxnState::Idle | TxnState::Prepared(_) => unreachable!("savepoint needs a transaction"),
+        };
         self.savepoints.push(SavepointFrame {
             name: name.to_string(),
             role: self.current_role.clone(),
@@ -4450,6 +5144,8 @@ impl SqlSession {
             deferral,
             undo: BTreeMap::new(),
             catalog_undo: BTreeMap::new(),
+            unsafe_enum_values,
+            created_user_type_oids,
             row_locks,
             table_lock_count: self
                 .session_locks
@@ -4460,6 +5156,7 @@ impl SqlSession {
                 .advisory
                 .transaction_hold_count(self.session_lock_id),
             notify_pending,
+            largeobjects,
             failed: matches!(self.state, TxnState::Failed(_)),
         });
         Ok(QueryResult::Command {
@@ -4579,7 +5276,16 @@ impl SqlSession {
             .restore_transaction_hold_count(self.session_lock_id, advisory_lock_count);
 
         self.savepoints.truncate(index + 1);
-        let (role, guc, deferral, notify_pending, restore_failed) = {
+        let (
+            role,
+            guc,
+            deferral,
+            notify_pending,
+            largeobjects,
+            unsafe_enum_values,
+            created_user_type_oids,
+            restore_failed,
+        ) = {
             let frame = &mut self.savepoints[index];
             frame.undo.clear();
             frame.catalog_undo.clear();
@@ -4588,6 +5294,9 @@ impl SqlSession {
                 frame.guc.clone(),
                 frame.deferral.clone(),
                 frame.notify_pending.clone(),
+                frame.largeobjects.clone(),
+                frame.unsafe_enum_values.clone(),
+                frame.created_user_type_oids.clone(),
                 frame.failed,
             )
         };
@@ -4595,6 +5304,14 @@ impl SqlSession {
         self.guc = guc;
         self.deferred_constraints().restore_modes(deferral);
         *self.pending_notify() = notify_pending;
+        *self
+            .pending_largeobjects
+            .lock()
+            .expect("pending large objects mutex") = largeobjects;
+        if let TxnState::InTransaction(context) | TxnState::Failed(context) = &mut self.state {
+            context.unsafe_enum_values = unsafe_enum_values;
+            context.created_user_type_oids = created_user_type_oids;
+        }
         // Every cursor declared inside the sub-transaction being unwound dies
         // with it, `WITH HOLD` included; one declared outside survives with its
         // position intact, even if it was advanced inside.
@@ -4650,13 +5367,16 @@ impl SqlSession {
 
     // ---- S2: cursors ----------------------------------------------------
 
-    /// `DECLARE … CURSOR FOR <query>`: materialize the result now and open a
-    /// cursor over it.
+    /// `DECLARE … CURSOR FOR <query>`: open the cursor without executing its
+    /// query. PostgreSQL reports query errors at the first fetch and lets the
+    /// query observe writes made after declaration.
     pub(crate) async fn declare_cursor(
         &mut self,
         name: &str,
+        binary: bool,
         scroll: Option<bool>,
         hold: bool,
+        query_source: &str,
         query: &QueryExpr,
     ) -> Result<QueryResult, ExecError> {
         if !hold {
@@ -4665,24 +5385,18 @@ impl SqlSession {
         if self.cursors.contains_key(name) {
             return Err(ExecError::DuplicateCursor(name.to_string()));
         }
-        let statement = Statement::Query(query.clone());
-        let result = if query.locking.is_some() {
-            self.run_query_locking(query).await?
-        } else {
-            self.run_select(&statement).await?
-        };
-        let (fields, rows) = match result {
-            QueryResult::Rows { fields, rows, .. } => (fields, rows),
-            QueryResult::Command { .. } | QueryResult::Empty => (Vec::new(), Vec::new()),
-        };
-        let position = crate::cursor::CursorPosition::new(rows.len());
         let pinned = self.cursor_pinned_relations(query);
         self.cursors.insert(
             name.to_string(),
             SqlCursor {
-                fields,
-                rows,
-                position,
+                query: query.clone(),
+                statement: query_source.to_string(),
+                binary,
+                created_at: self.eval_ctx().now,
+                fields: Vec::new(),
+                rows: None,
+                identities: None,
+                position: crate::cursor::CursorPosition::new(0),
                 pinned,
                 // A materialized result always supports a backward scan, so only
                 // an explicit NO SCROLL forbids one.
@@ -4699,13 +5413,230 @@ impl SqlSession {
         })
     }
 
+    async fn materialize_cursor(&mut self, name: &str) -> Result<(), ExecError> {
+        let query = self
+            .cursors
+            .get(name)
+            .ok_or_else(|| ExecError::UndefinedCursor(name.to_string()))?
+            .query
+            .clone();
+        if self
+            .cursors
+            .get(name)
+            .is_some_and(|cursor| cursor.rows.is_some())
+        {
+            return Ok(());
+        }
+        let identity_table = self.cursor_identity_query(&query)?;
+        let query = identity_table
+            .as_ref()
+            .map_or_else(|| query.clone(), |(query, _)| query.clone());
+        let statement = Statement::Query(query.clone());
+        let result = if query.locking.is_some() {
+            self.run_query_locking(&query).await?
+        } else {
+            self.run_select(&statement).await?
+        };
+        let (mut fields, mut rows) = match result {
+            QueryResult::Rows { fields, rows, .. } => (fields, rows),
+            QueryResult::Command { .. } | QueryResult::Empty => (Vec::new(), Vec::new()),
+        };
+        let identities = if let Some((_, table)) = identity_table {
+            fields.pop().ok_or_else(|| {
+                ExecError::Unsupported("cursor identity projection is missing".into())
+            })?;
+            let mut identities = Vec::with_capacity(rows.len());
+            for row in &mut rows {
+                let cell = row.pop().and_then(|cell| cell).ok_or_else(|| {
+                    ExecError::Unsupported("cursor identity row is missing ctid".into())
+                })?;
+                let ctid = String::from_utf8(cell.text.to_vec()).map_err(|_| {
+                    ExecError::Unsupported("cursor identity ctid is not text".into())
+                })?;
+                identities.push(CursorRowIdentity {
+                    table: table.clone(),
+                    ctid,
+                });
+            }
+            Some(identities)
+        } else {
+            None
+        };
+        let cursor = self
+            .cursors
+            .get_mut(name)
+            .ok_or_else(|| ExecError::UndefinedCursor(name.to_string()))?;
+        cursor.position = crate::cursor::CursorPosition::new(rows.len());
+        cursor.fields = fields;
+        cursor.rows = Some(rows);
+        cursor.identities = identities;
+        Ok(())
+    }
+
+    /// Add a hidden `ctid` to a cursor query only when each output row maps to
+    /// exactly one ordinary stored table row. Complex cursor shapes remain
+    /// readable but cannot be targets of `WHERE CURRENT OF`.
+    fn cursor_identity_query(
+        &self,
+        query: &QueryExpr,
+    ) -> Result<Option<(QueryExpr, crabka_pgcatalog::RelationName)>, ExecError> {
+        let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
+            return Ok(None);
+        };
+        if query.with.is_some()
+            || query.locking.is_some()
+            || select.distinct.dedups()
+            || !select.group_by.is_empty()
+            || select.grouping.is_some()
+            || select.having.is_some()
+            || !select.windows.is_empty()
+            || !select.window_calls.is_empty()
+            || select.from.len() != 1
+        {
+            return Ok(None);
+        }
+        let TableExpr::Table {
+            name,
+            alias,
+            columns,
+            sample,
+            ..
+        } = &select.from[0]
+        else {
+            return Ok(None);
+        };
+        if columns.is_some() || sample.is_some() {
+            return Ok(None);
+        }
+        let resolution = self.resolution_scope();
+        let table = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &resolution,
+            name,
+            crate::relname::SchemaDisposition::Reference,
+        )?;
+        let Ok(definition) = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &table) else {
+            return Ok(None);
+        };
+        if definition.foreign.is_some()
+            || definition.materialized.is_some()
+            || !crate::inheritance::children_of(self.catalog_kv.as_ref(), &table)?.is_empty()
+            || crate::partition::scheme_of(self.catalog_kv.as_ref(), &table)?.is_some()
+        {
+            return Ok(None);
+        }
+        let mut query = query.clone();
+        let SetExpr::Query(QueryBody::Select(select)) = &mut query.body else {
+            unreachable!("cursor query shape was checked above")
+        };
+        select.projection.push(SelectItem::Expr {
+            expr: Expr::Column {
+                table: Some(alias.clone().unwrap_or_else(|| name.name.clone())),
+                name: crate::scope::CTID_COLUMN.into(),
+            },
+            alias: Some("__crabka_cursor_ctid".into()),
+        });
+        Ok(Some((query, table)))
+    }
+
+    /// Replace `WHERE CURRENT OF` with the current row's hidden `ctid` filter.
+    async fn rewrite_where_current_of(
+        &mut self,
+        stmt: &Statement,
+    ) -> Result<Option<Statement>, ExecError> {
+        let (cursor_name, table, alias) = match stmt {
+            Statement::Update {
+                where_current_of: Some(cursor),
+                table,
+                alias,
+                ..
+            }
+            | Statement::Delete {
+                where_current_of: Some(cursor),
+                table,
+                alias,
+                ..
+            } => (cursor, table, alias),
+            _ => return Ok(None),
+        };
+        let positioned = self
+            .cursors
+            .get(cursor_name)
+            .ok_or_else(|| ExecError::UndefinedCursor(cursor_name.clone()))?
+            .position
+            .current_row()
+            .is_some();
+        if !positioned {
+            return Err(ExecError::Remote(PgError::error(
+                "24000",
+                format!("cursor \"{cursor_name}\" is not positioned on a row"),
+            )));
+        }
+        self.materialize_cursor(cursor_name).await?;
+        let resolution = self.resolution_scope();
+        let target = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &resolution,
+            table,
+            crate::relname::SchemaDisposition::Reference,
+        )?;
+        let cursor = self
+            .cursors
+            .get(cursor_name)
+            .ok_or_else(|| ExecError::UndefinedCursor(cursor_name.clone()))?;
+        let row = cursor.position.current_row().ok_or_else(|| {
+            ExecError::Remote(PgError::error(
+                "24000",
+                format!("cursor \"{cursor_name}\" is not positioned on a row"),
+            ))
+        })?;
+        let identity = cursor
+            .identities
+            .as_ref()
+            .and_then(|identities| identities.get(row - 1))
+            .filter(|identity| identity.table == target)
+            .ok_or_else(|| {
+                ExecError::ObjectNotInPrerequisiteState(format!(
+                    "cursor \"{cursor_name}\" is not a simply updatable scan of table \"{target}\""
+                ))
+            })?;
+        let qualifier = alias.clone().unwrap_or_else(|| table.name.clone());
+        let filter = Expr::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(Expr::Column {
+                table: Some(qualifier),
+                name: crate::scope::CTID_COLUMN.into(),
+            }),
+            right: Box::new(Expr::StringLiteral(identity.ctid.clone())),
+        };
+        let mut rewritten = stmt.clone();
+        match &mut rewritten {
+            Statement::Update {
+                where_current_of,
+                filter: statement_filter,
+                ..
+            }
+            | Statement::Delete {
+                where_current_of,
+                filter: statement_filter,
+                ..
+            } => {
+                *where_current_of = None;
+                *statement_filter = Some(filter);
+            }
+            _ => unreachable!("WHERE CURRENT OF statement was matched above"),
+        }
+        Ok(Some(rewritten))
+    }
+
     /// `FETCH`/`MOVE` over an open cursor.
-    pub(crate) fn fetch_cursor(
+    pub(crate) async fn fetch_cursor(
         &mut self,
         name: &str,
         direction: FetchDirection,
         move_only: bool,
     ) -> Result<QueryResult, ExecError> {
+        self.materialize_cursor(name).await?;
         let cursor = self
             .cursors
             .get_mut(name)
@@ -4727,7 +5658,7 @@ impl SqlSession {
         let rows = plan
             .rows
             .iter()
-            .map(|row| cursor.rows[row - 1].clone())
+            .map(|row| cursor.rows.as_ref().expect("materialized cursor")[row - 1].clone())
             .collect();
         Ok(QueryResult::Rows {
             fields: cursor.fields.clone(),
@@ -4891,6 +5822,7 @@ impl SqlSession {
             resolution: &scope,
             params: &params,
             time_zone: &time_zone,
+            xml_option: self.eval_ctx().xml_option,
             inferred_param_types: RefCell::new(vec![None; parameter_count]),
         };
         let mut inferred = statement.clone();
@@ -4977,6 +5909,32 @@ impl SqlSession {
     /// `EXECUTE <name> [(args)]`: bind the argument expressions and run the
     /// prepared statement.
     async fn execute_sql(&mut self, name: &str, args: &[Expr]) -> Result<QueryResult, ExecError> {
+        let Some(statement) = self.bound_prepared_statement(name, args).await? else {
+            return Ok(QueryResult::Empty);
+        };
+        let result = Box::pin(self.run_one(&statement)).await?;
+        // The scope check above is `PostgreSQL`'s gate, and it does not see a
+        // relation altered under a statement whose scope never moved. What the
+        // run actually produced does, and comparing it costs nothing.
+        let prepared = self
+            .prepared
+            .get(name)
+            .expect("prepared statement exists while it executes");
+        if let QueryResult::Rows { fields, .. } = &result
+            && prepared.fixed_result
+            && result_type(fields) != result_type(&prepared.description.fields)
+        {
+            return Err(ExecError::Remote(cached_plan_result_type_changed()));
+        }
+        Ok(result)
+    }
+
+    /// Look up a SQL-level prepared statement and apply its `EXECUTE` arguments.
+    async fn bound_prepared_statement(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<Option<Statement>, ExecError> {
         let prepared = self
             .prepared
             .get(name)
@@ -4991,32 +5949,28 @@ impl SqlSession {
         self.check_cached_result_type(&prepared)
             .map_err(ExecError::Remote)?;
         let Some(mut statement) = prepared.statement.clone() else {
-            return Ok(QueryResult::Empty);
+            return Ok(None);
         };
         if !args.is_empty() {
             let params = self.evaluate_execute_args(args, &prepared).await?;
             self.bind_extended_statement_params(&mut statement, &params)
                 .map_err(ExecError::Remote)?;
         }
-        let result = Box::pin(self.run_one(&statement)).await?;
-        // The scope check above is `PostgreSQL`'s gate, and it does not see a
-        // relation altered under a statement whose scope never moved. What the
-        // run actually produced does, and comparing it costs nothing.
-        if let QueryResult::Rows { fields, .. } = &result
-            && prepared.fixed_result
-            && result_type(fields) != result_type(&prepared.description.fields)
-        {
-            return Err(ExecError::Remote(cached_plan_result_type_changed()));
-        }
-        Ok(result)
+        Ok(Some(statement))
     }
 
     /// `CALL <procedure>(args)`: run the procedure's body statements in order.
     ///
     /// `PostgreSQL` reports `CALL` regardless of what the body did. A procedure
     /// with `OUT`/`INOUT` parameters returns their final values as one row.
-    async fn run_call(&mut self, name: &str, args: &[Expr]) -> Result<QueryResult, ExecError> {
-        crate::plpgsql::execute_call(self, name, args).await
+    async fn run_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        named_args: &[(String, Expr)],
+        variadic: Option<&Expr>,
+    ) -> Result<QueryResult, ExecError> {
+        crate::plpgsql::execute_call(self, name, args, named_args, variadic).await
     }
 
     /// Evaluate an `EXECUTE` argument list into wire parameters by projecting it
@@ -5275,10 +6229,14 @@ impl SqlSession {
         // Deciding whether a call aggregates is a catalog question once a user
         // can define an aggregate, so the renderer needs the runtime too.
         let mut plan = crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
-            crate::explain::plan_statement(statement)
-        });
-        if let Some(state) = explain_plan_state
-            .and_then(|slot| slot.lock().expect("EXPLAIN plan state").take())
+            crate::explain::plan_statement_with_rewrite(
+                &*self.catalog_kv,
+                &self.resolution_scope(),
+                statement,
+            )
+        })?;
+        if let Some(state) =
+            explain_plan_state.and_then(|slot| slot.lock().expect("EXPLAIN plan state").take())
         {
             let runtime = crate::explain::plan_runtime_state(&state);
             crate::explain::apply_runtime_state(&mut plan, &runtime);
@@ -5329,11 +6287,16 @@ impl SqlSession {
         match target {
             DiscardTarget::All => {
                 self.guc.discard_all();
-                self.current_role.clone_from(&self.session_user);
+                self.session_user.clone_from(&self.authenticated_user);
+                self.current_role.clone_from(&self.authenticated_user);
                 self.prepared.clear();
                 self.portals.clear();
                 self.cursors.clear();
                 self.sequence_currvals.lock().expect("currvals").clear();
+                if let Some(handle) = &self.notify {
+                    handle.unlisten_all();
+                    self.pending_notify().subscriptions.clear();
+                }
                 self.drop_temp_relations().await?;
             }
             // Gres compiles a plan per execution, so there is no plan cache to
@@ -5536,10 +6499,61 @@ impl SqlSession {
     ) -> Result<(), ExecError> {
         let mut ops = Vec::new();
         for name in relations {
+            if let Ok(table) = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name) {
+                for (index, column) in table.columns.iter().enumerate() {
+                    if let Some(stats) = self
+                        .collect_attribute_statistics(
+                            &name,
+                            &crate::catalog_fn::quote_identifier(&column.name),
+                        )
+                        .await
+                    {
+                        let Ok(attnum) = i16::try_from(index + 1) else {
+                            continue;
+                        };
+                        ops.push(crate::attrstats::set_op(
+                            &crate::attrstats::AttributeStatsKey {
+                                relation: name.clone(),
+                                attnum,
+                                inherited: false,
+                            },
+                            stats,
+                        ));
+                    }
+                }
+                for index in crabka_pgcatalog::list_indexes(self.catalog_kv.as_ref())?
+                    .into_iter()
+                    .filter(|index| index.table == name)
+                {
+                    for (position, key) in index.columns.iter().enumerate() {
+                        let Some(expression) = crabka_pgcatalog::index_key_expression(key) else {
+                            continue;
+                        };
+                        if let Some(stats) =
+                            self.collect_attribute_statistics(&name, expression).await
+                        {
+                            let Ok(attnum) = i16::try_from(position + 1) else {
+                                continue;
+                            };
+                            ops.push(crate::attrstats::set_op(
+                                &crate::attrstats::AttributeStatsKey {
+                                    relation: index.qualified_name(),
+                                    attnum,
+                                    inherited: false,
+                                },
+                                stats,
+                            ));
+                        }
+                    }
+                }
+            }
             if let Some(reltuples) = self.count_relation_rows(&name).await {
                 ops.push(crate::relstats::set_reltuples_op(&name, reltuples));
             }
             let kv = self.catalog_kv.as_ref();
+            if crate::partition::is_partitioned(kv, &name)? {
+                ops.push(crate::relstats::set_relpages_op(&name, -1));
+            }
             if crate::relstats::of(kv, &name)?.has_subclass
                 && !crate::inheritance::has_children(kv, &name)?
                 && crate::partition::partitions_of(kv, &name)?.is_empty()
@@ -5548,6 +6562,57 @@ impl SqlSession {
             }
         }
         self.commit_catalog_ops(ops).await
+    }
+
+    /// The fixed statistics `ANALYZE` can derive from one ordinary scan.
+    async fn collect_attribute_statistics(
+        &mut self,
+        relation: &crabka_pgcatalog::RelationName,
+        expression: &str,
+    ) -> Option<crate::attrstats::AttributeStats> {
+        let only = match crate::partition::is_partitioned(self.catalog_kv.as_ref(), relation) {
+            Ok(partitioned) => !partitioned,
+            Err(_) => return None,
+        };
+        let sql = format!(
+            "SELECT {expression} FROM {}{}.{}",
+            if only { "ONLY " } else { "" },
+            crate::catalog_fn::quote_identifier(&relation.schema),
+            crate::catalog_fn::quote_identifier(&relation.name),
+        );
+        let parsed = crabka_pgparser::parse(&sql).ok()?;
+        let [statement] = parsed.as_slice() else {
+            return None;
+        };
+        let QueryResult::Rows { rows, .. } = Box::pin(self.run_select(statement)).await.ok()?
+        else {
+            return None;
+        };
+        if rows.is_empty() {
+            return None;
+        }
+        let total = rows.len();
+        let mut values = BTreeSet::new();
+        let mut nulls = 0usize;
+        let mut width = 0usize;
+        for row in rows {
+            let [value] = row.as_slice() else {
+                return None;
+            };
+            let Some(value) = value else {
+                nulls += 1;
+                continue;
+            };
+            width = width.saturating_add(value.text.len());
+            values.insert(value.text.to_vec());
+        }
+        let non_null = total.checked_sub(nulls)?;
+        Some(crate::attrstats::AttributeStats {
+            null_frac: Some(nulls as f32 / total as f32),
+            avg_width: (non_null > 0).then(|| i32::try_from(width / non_null).unwrap_or(i32::MAX)),
+            n_distinct: Some(values.len() as f32),
+            ..Default::default()
+        })
     }
 
     /// The live-row count `ANALYZE` records for one relation, or `None` when
@@ -5708,6 +6773,14 @@ impl SqlSession {
             }),
             UtilityStatement::Load { filename } => {
                 crate::routine::validate_load_target(filename)?;
+                if filename == "plpgsql" && self.guc.reserve_custom_prefix("plpgsql") {
+                    self.plpgsql_notice(
+                        PgError::warning(
+                            "invalid configuration parameter name \"plpgsql.extra_foo_warnings\", removing it",
+                        )
+                        .with_detail("\"plpgsql\" is now a reserved prefix."),
+                    )?;
+                }
                 Ok(QueryResult::Command { tag: "LOAD".into() })
             }
             UtilityStatement::SecurityLabel { provider } => {
@@ -6676,6 +7749,7 @@ impl SqlSession {
             global_snapshot: &global_snapshot,
             snapshot: &txn.snapshot,
             xid,
+            command_id: txn.command_id,
             repeatable_read: txn.repeatable_read,
             eval_ctx: &eval_ctx,
             // A cascaded write re-reads its row's chain under the row lock like
@@ -6697,9 +7771,14 @@ impl SqlSession {
     fn parse_for_session(&mut self, sql: &str) -> Result<Vec<Statement>, PgError> {
         let span = crate::telemetry::parse_span(sql.len());
         let _entered = span.enter();
-        let parsed = self.type_search_schemas().and_then(|schemas| {
-            crabka_pgparser::parse_with_type_schemas(sql, &schemas).map_err(ExecError::from)
-        });
+        let parsed = {
+            let _rowtype_parse = RELATION_ROWTYPE_PARSE_LOCK
+                .lock()
+                .expect("relation rowtype parse lock");
+            self.type_search_schemas().and_then(|schemas| {
+                crabka_pgparser::parse_with_type_schemas(sql, &schemas).map_err(ExecError::from)
+            })
+        };
         match parsed {
             Ok(statements) => {
                 crate::telemetry::record_parse_statements(&span, statements.len());
@@ -6747,6 +7826,23 @@ impl SqlSession {
         rows
     }
 
+    fn cursor_rows(&self) -> Vec<CursorRow> {
+        let mut rows: Vec<_> = self
+            .cursors
+            .iter()
+            .map(|(name, cursor)| CursorRow {
+                name: name.clone(),
+                statement: cursor.statement.clone(),
+                holdable: cursor.hold,
+                binary: cursor.binary,
+                scrollable: cursor.scrollable,
+                created_at: cursor.created_at,
+            })
+            .collect();
+        rows.sort_by(|left, right| left.name.cmp(&right.name));
+        rows
+    }
+
     fn mark_transaction_failed(&mut self) {
         match std::mem::replace(&mut self.state, TxnState::Idle) {
             TxnState::InTransaction(ctx) => self.state = TxnState::Failed(ctx),
@@ -6765,6 +7861,7 @@ impl SqlSession {
             resolution: &self.resolution_scope(),
             params,
             time_zone: &time_zone,
+            xml_option: self.eval_ctx().xml_option,
             inferred_param_types: RefCell::new(vec![None; params.len()]),
         }
         .bind_statement_params(stmt);
@@ -6987,6 +8084,8 @@ impl SqlSession {
             self.mark_transaction_failed();
             return Err(ExecError::ReadOnlyTransaction(tag));
         }
+        let current_of_statement = self.rewrite_where_current_of(stmt).await?;
+        let stmt = current_of_statement.as_ref().unwrap_or(stmt);
         // An `IF NOT EXISTS` create that steps over an existing object says so,
         // and the skip is invisible afterwards -- the object is there either
         // way. Asked here rather than on the DDL path because `CREATE TABLE …
@@ -6997,6 +8096,7 @@ impl SqlSession {
             || self.resolution_scope(),
             stmt,
         )?;
+        let enum_skip_notice = self.skipped_enum_add_value_notice(stmt)?;
         let result = match stmt {
             Statement::CompatibilityRefusal(command) => {
                 Err(ExecError::CompatibilityRefusal(*command))
@@ -7008,6 +8108,33 @@ impl SqlSession {
             } => self.begin(*isolation, *read_only).await,
             Statement::Commit { chain } => self.commit_cmd(*chain).await,
             Statement::Rollback { chain } => self.rollback_cmd(*chain).await,
+            Statement::AlterLargeObject { oid, owner } => self.alter_large_object(*oid, owner),
+            Statement::Comment {
+                object_kind,
+                object_name,
+                comment,
+                ..
+            } if object_kind == "large object" => {
+                self.comment_large_object(object_name, comment.as_deref())
+            }
+            Statement::GrantLargeObjectPrivileges {
+                privileges,
+                oids,
+                grantees,
+                grant_option,
+            } => self.change_large_object_acl(oids, grantees, privileges, true, *grant_option),
+            Statement::RevokeLargeObjectPrivileges {
+                privileges,
+                oids,
+                grantees,
+                grant_option_only,
+            } => self.change_large_object_acl(
+                oids,
+                grantees,
+                privileges,
+                false,
+                *grant_option_only,
+            ),
             Statement::CreateTable { .. }
             | Statement::CreateIndex { .. }
             | Statement::AlterIndex { .. }
@@ -7044,9 +8171,13 @@ impl SqlSession {
             | Statement::GrantSchemaPrivileges { .. }
             | Statement::RevokeTablePrivileges { .. }
             | Statement::RevokeSchemaPrivileges { .. }
+            | Statement::AlterDefaultTablePrivileges { .. }
             | Statement::GrantRoles { .. }
             | Statement::RevokeRoles { .. }
             | Statement::ImportForeignSchema { .. }
+            | Statement::CreateRule(_)
+            | Statement::AlterRule { .. }
+            | Statement::DropRule { .. }
             | Statement::CreateTrigger(_)
             | Statement::AlterTrigger { .. }
             | Statement::DropTrigger { .. }
@@ -7073,6 +8204,7 @@ impl SqlSession {
         // same catalog-lock + `execute_ddl` + commit path they do.
         | Statement::CreateCast { .. }
         | Statement::DropCast { .. }
+        | Statement::CreateAccessMethod { .. }
         | Statement::CreateDomain { .. }
         | Statement::AlterDomain { .. }
         | Statement::DropDomain { .. }
@@ -7085,7 +8217,14 @@ impl SqlSession {
             self.refuse_relation_pinned_by_cursor(stmt)?;
             self.run_ddl(stmt).await
         }
-        Statement::Call { name, args } => self.run_call(name, args).await,
+        Statement::Call {
+            name,
+            args,
+            named_args,
+            variadic,
+        } => self
+            .run_call(name, args, named_args, variadic.as_deref())
+            .await,
         Statement::DoBlock { language, body } => {
             crate::plpgsql::execute_do(self, language, body).await
         }
@@ -7179,16 +8318,21 @@ impl SqlSession {
             Statement::ReleaseSavepoint { name } => self.release_savepoint(name),
             Statement::DeclareCursor {
                 name,
+                binary,
                 scroll,
                 hold,
+                query_source,
                 query,
                 ..
-            } => self.declare_cursor(name, *scroll, *hold, query).await,
+            } => {
+                self.declare_cursor(name, *binary, *scroll, *hold, query_source, query)
+                    .await
+            }
             Statement::FetchCursor {
                 cursor,
                 direction,
                 move_only,
-            } => self.fetch_cursor(cursor, *direction, *move_only),
+            } => self.fetch_cursor(cursor, *direction, *move_only).await,
             Statement::CloseCursor { target } => self.close_cursor(target),
             Statement::PrepareStatement {
                 name,
@@ -7207,7 +8351,7 @@ impl SqlSession {
             Statement::Utility(utility) => self.utility(utility).await,
         };
         if result.is_ok()
-            && let Some(notice) = skip_notice
+            && let Some(notice) = skip_notice.or(enum_skip_notice)
         {
             self.plpgsql_notice(notice)?;
         }
@@ -7291,12 +8435,14 @@ impl SqlSession {
             .release_transaction(self.session_lock_id);
         match result {
             Ok(result) => {
+                self.flush_pending_largeobjects().await?;
                 // An autocommit statement is its own transaction, so what a
                 // `COMMIT` owes a temporary relation comes due here too.
                 self.apply_on_commit().await?;
                 self.flush_autocommit_notifications().await.map(|()| result)
             }
             Err(e) => {
+                self.discard_pending_largeobjects();
                 self.discard_pending_notifications();
                 Err(e)
             }
@@ -7310,6 +8456,7 @@ impl SqlSession {
         // checks all die with the transaction that queued them.
         self.discard_pending_notifications();
         self.discard_deferred_constraints();
+        self.discard_pending_largeobjects();
         if let Some(xid) = ctx.xid {
             // Best-effort abort record; the versions are already invisible
             // (in-progress in no future snapshot once deregistered), so even if
@@ -7444,6 +8591,7 @@ impl SqlSession {
         self.state = TxnState::InTransaction(Box::new(TxnCtx {
             role_at_start: self.current_role.clone(),
             xid: None,
+            command_id: 0,
             snapshot,
             _snapshot_pin: snapshot_pin,
             repeatable_read: rr,
@@ -7460,6 +8608,8 @@ impl SqlSession {
             writer_fence_guard: None,
             activity_started: false,
             catalog_undo: BTreeMap::new(),
+            unsafe_enum_values: HashSet::new(),
+            created_user_type_oids: HashSet::new(),
         }));
         self.sync_transaction_isolation();
         self.guc
@@ -7602,6 +8752,17 @@ impl SqlSession {
                     return Err(error);
                 }
             };
+            if self.global_xid.is_some() && self.has_pending_largeobjects() {
+                // Page rows have no MVCC xid, so they cannot join the global
+                // decision batch without becoming visible before that decision.
+                // Abort instead of silently committing or losing them.
+                let _ = self.abort_current_global().await;
+                self.abort_ctx(ctx).await?;
+                self.guc.rollback();
+                return Err(ExecError::Unsupported(
+                    "large-object writes in global transactions are not supported".into(),
+                ));
+            }
             if let Some(g) = self.global_xid.take() {
                 // A foreign key on a sharded relation is refused at DDL, and a
                 // sharded write inside a block is refused outright, so a
@@ -7655,6 +8816,7 @@ impl SqlSession {
             // transaction committed, in the transaction's own WAL entry.
             ops.extend(notify_ops);
             ops.extend(self.take_pending_sequence_ops());
+            ops.extend(self.take_pending_largeobject_ops()?);
             let r = self.committer.commit(ops).await;
             self.procarray.finish(xid);
             // Free every row this transaction locked, waking waiters.
@@ -7670,6 +8832,7 @@ impl SqlSession {
                 self.deferred_constraints().is_empty(),
                 "a transaction that allocated no xid cannot have deferred a check"
             );
+            self.flush_pending_largeobjects().await?;
             self.append_notify_records(notify_ops).await;
         }
         // SP37: a real COMMIT of an open block promotes any staged session
@@ -7708,6 +8871,7 @@ impl SqlSession {
         }
         // SP37: ROLLBACK discards every staged GUC override (session and LOCAL).
         self.guc.rollback();
+        self.discard_pending_largeobjects();
         // Every abort path drops the notification queue; a ROLLBACK with no open
         // block has nothing staged, so this is a no-op there.
         self.discard_pending_notifications();
@@ -8026,11 +9190,13 @@ impl SqlSession {
         let session_user = self.session_user.clone();
         let resolution = self.resolution_scope();
         let session_locks = Arc::clone(&self.session_locks);
+        let row_locks = Arc::clone(&self.lockmgr);
         let session_lock_id = self.session_lock_id;
         let guc_values = self.guc.effective_map();
         let row_security = self.guc.row_security();
         let guc_settings = self.guc.settings();
         let prepared = self.prepared_statement_rows();
+        let cursors = self.cursor_rows();
         let explain_plan_state = self.explain_plan_state.clone();
         let stmt = stmt.clone();
         let (requests, request_rx) = mpsc::channel(1);
@@ -8063,6 +9229,7 @@ impl SqlSession {
                 reserved_table_ids: None,
                 own_xid,
                 row_security,
+                default_table_access_method: "heap",
             };
             let policy_stack = crate::rls::PolicyStack::default();
             let read_ctx = crate::subquery::SubCtx {
@@ -8072,6 +9239,7 @@ impl SqlSession {
                 gsnap: &gsnap,
                 snapshot: &snapshot,
                 own,
+                command_id: None,
                 ctes: &ctes,
                 eval_ctx: &ctx,
                 fctx,
@@ -8084,9 +9252,10 @@ impl SqlSession {
                 explain_plan_state,
             };
             with_query_cancel_runtime(Some(cancel.canceled), || {
-                with_guc_runtime(guc_values, guc_settings, prepared, || {
+                with_guc_runtime(guc_values, guc_settings, prepared, cursors, || {
                     with_session_lock_runtime(
                         &session_locks,
+                        &row_locks,
                         session_lock_id,
                         in_transaction,
                         || {
@@ -8130,6 +9299,16 @@ impl SqlSession {
                             ))
                         });
                     };
+                    let previous_command_row_claims =
+                        std::mem::replace(&mut self.command_row_claims, request.command_row_claims);
+                    let frame = request
+                        .routine
+                        .as_ref()
+                        .map(|routine| self.enter_function_guc(routine))
+                        .transpose();
+                    let (result, mutations) = match frame {
+                        Err(error) => (Err(error), Vec::new()),
+                        Ok(frame) => {
                     let result = match PlPgSqlCallDepthGuard::enter(Arc::clone(
                         &self.plpgsql_call_depth,
                     )) {
@@ -8142,17 +9321,18 @@ impl SqlSession {
                                 ),
                             ),
                             crate::routine::FunctionRequestKind::Scalar => {
-                                let result = if request.routine.language == "sql" {
+                                let routine = request.routine.as_ref().expect("routine request");
+                                let result = if routine.language == "sql" {
                                     crate::plpgsql::execute_sql_scalar_function(
                                         self,
-                                        &request.routine,
+                                        routine,
                                         &request.values,
                                     )
                                     .await
                                 } else {
                                     crate::plpgsql::execute_scalar_function(
                                         self,
-                                        &request.routine,
+                                        routine,
                                         &request.values,
                                     )
                                     .await
@@ -8166,10 +9346,11 @@ impl SqlSession {
                                 ),
                             ),
                             crate::routine::FunctionRequestKind::Table(columns) => {
-                                let result = if request.routine.language == "sql" {
+                                let routine = request.routine.as_ref().expect("routine request");
+                                let result = if routine.language == "sql" {
                                     crate::plpgsql::execute_sql_table_function(
                                         self,
-                                        &request.routine,
+                                        routine,
                                         &request.values,
                                         columns,
                                     )
@@ -8177,7 +9358,7 @@ impl SqlSession {
                                 } else {
                                     crate::plpgsql::execute_table_function(
                                         self,
-                                        &request.routine,
+                                        routine,
                                         &request.values,
                                         columns,
                                     )
@@ -8186,24 +9367,388 @@ impl SqlSession {
                                 result.map(crate::routine::FunctionRequestResult::Table)
                             }
                             crate::routine::FunctionRequestKind::Trigger(invocation) => {
+                                let routine = request.routine.as_ref().expect("trigger request");
                                 self.trigger_depth = self.trigger_depth.saturating_add(1);
                                 let result = Box::pin(crate::plpgsql::execute_trigger_function(
                                     self,
-                                    &request.routine,
+                                    routine,
                                     *invocation,
                                 ))
                                 .await;
                                 self.trigger_depth = self.trigger_depth.saturating_sub(1);
                                 result.map(crate::routine::FunctionRequestResult::Scalar)
                             }
+                            crate::routine::FunctionRequestKind::Statistics(request) => {
+                                let result = crate::stats_fn::execute_in_scope(
+                                    &*self.catalog_kv,
+                                    &self.resolution_scope(),
+                                    request,
+                                );
+                                match result {
+                                    Ok(outcome) => {
+                                        for (name, target) in outcome.locks {
+                                            self.session_locks
+                                                .tables
+                                                .acquire_relation(
+                                                    target,
+                                                    self.session_lock_id,
+                                                    TableLockMode::ShareUpdateExclusive,
+                                                )
+                                                .map_err(|_| {
+                                                    ExecError::LockNotAvailable(format!(
+                                                        "could not obtain lock on relation \"{}\" (Gres never waits)",
+                                                        name
+                                                    ))
+                                                })?;
+                                        }
+                                        for warning in outcome.warnings {
+                                            self.plpgsql_notice(crate::stats_fn::warning(warning))?;
+                                        }
+                                        if let Some(error) = outcome.error {
+                                            return Err(error);
+                                        }
+                                        self.commit_catalog(outcome.ops).await?;
+                                        Ok(crate::routine::FunctionRequestResult::Scalar(outcome.value))
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            crate::routine::FunctionRequestKind::TableXml(request) => {
+                                self.execute_table_to_xml(request)
+                                    .await
+                                    .map(crate::routine::FunctionRequestResult::Scalar)
+                            }
+                            crate::routine::FunctionRequestKind::QueryXml(request) => {
+                                self.execute_query_to_xml(request)
+                                    .await
+                                    .map(crate::routine::FunctionRequestResult::Scalar)
+                            }
+                            crate::routine::FunctionRequestKind::CursorXml(request) => {
+                                self.execute_cursor_to_xml(request)
+                                    .await
+                                    .map(crate::routine::FunctionRequestResult::Scalar)
+                            }
+                            crate::routine::FunctionRequestKind::TableXmlSchema(request) => {
+                                self.execute_table_to_xmlschema(request)
+                                    .await
+                                    .map(crate::routine::FunctionRequestResult::Scalar)
+                            }
+                            crate::routine::FunctionRequestKind::QueryXmlSchema(request) => {
+                                self.execute_query_to_xmlschema(request)
+                                    .await
+                                    .map(crate::routine::FunctionRequestResult::Scalar)
+                            }
+                            crate::routine::FunctionRequestKind::CursorXmlSchema(request) => {
+                                self.execute_cursor_to_xmlschema(request)
+                                    .await
+                                    .map(crate::routine::FunctionRequestResult::Scalar)
+                            }
+                            crate::routine::FunctionRequestKind::SchemaXml(request) => {
+                                self.execute_schema_to_xml(request)
+                                    .await
+                                    .map(crate::routine::FunctionRequestResult::Scalar)
+                            }
                         },
                     };
-                    let _ = request.reply.send(result);
+                    let mutations = frame.map_or_else(Vec::new, |frame| {
+                        self.finish_function_guc(frame, result.is_ok())
+                    });
+                    (result, mutations)
+                        }
+                    };
+                    self.command_row_claims = previous_command_row_claims;
+                    let _ = request.reply.send(result.map(|result| (result, mutations)));
                 }
             }
         };
         self.worker_finished(worker_id);
         result
+    }
+
+    async fn execute_table_to_xml(
+        &mut self,
+        request: crate::xmlmap::TableXmlRequest,
+    ) -> Result<Datum, ExecError> {
+        let written =
+            crate::relname::parse_written_relation(&self.resolution_scope(), &request.relation)?;
+        let relation = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            &written.reference,
+            crate::relname::SchemaDisposition::Reference,
+        )?;
+        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &relation)?;
+        let identifier = |part: &str| format!("\"{}\"", part.replace('"', "\"\""));
+        let sql = format!(
+            "SELECT * FROM {}.{}",
+            identifier(&relation.schema),
+            identifier(&relation.name)
+        );
+        let statements = crabka_pgparser::parse(&sql)?;
+        let [statement] = statements.as_slice() else {
+            return Err(ExecError::Syntax(
+                "table_to_xml query did not parse as one statement".into(),
+            ));
+        };
+        let result = self.run_select(statement).await?;
+        let crabka_pgwire::engine::QueryResult::Rows { rows, .. } = result else {
+            return Err(ExecError::ObjectNotInPrerequisiteState(
+                "table_to_xml scan returned no rows result".into(),
+            ));
+        };
+        let types = table
+            .columns
+            .iter()
+            .map(|column| Some(column.ty))
+            .collect::<Vec<_>>();
+        let rows = self.xml_rows(&types, &rows)?;
+        Ok(Datum::Xml(crate::xmlmap::table_to_xml(
+            &table, &rows, &request,
+        )))
+    }
+
+    async fn execute_query_to_xml(
+        &mut self,
+        request: crate::xmlmap::QueryXmlRequest,
+    ) -> Result<Datum, ExecError> {
+        let statements = crabka_pgparser::parse(&request.query)?;
+        let [statement @ Statement::Query(_)] = statements.as_slice() else {
+            return Err(ExecError::Syntax(
+                "query_to_xml requires exactly one query statement".into(),
+            ));
+        };
+        let result = self.run_select(statement).await?;
+        let crabka_pgwire::engine::QueryResult::Rows { fields, rows, .. } = result else {
+            return Err(ExecError::ObjectNotInPrerequisiteState(
+                "query_to_xml query returned no rows result".into(),
+            ));
+        };
+        let types = fields
+            .iter()
+            .map(|field| crate::exec::column_type_from_oid(field.type_oid).ok())
+            .collect::<Vec<_>>();
+        let rows = self.xml_rows(&types, &rows)?;
+        Ok(Datum::Xml(crate::xmlmap::query_to_xml(
+            &fields, &rows, &request,
+        )))
+    }
+
+    async fn execute_cursor_to_xml(
+        &mut self,
+        request: crate::xmlmap::CursorXmlRequest,
+    ) -> Result<Datum, ExecError> {
+        let result = self
+            .fetch_cursor(
+                &request.cursor,
+                FetchDirection::Relative(FetchCount::Rows(request.count)),
+                false,
+            )
+            .await?;
+        let crabka_pgwire::engine::QueryResult::Rows { fields, rows, .. } = result else {
+            return Err(ExecError::ObjectNotInPrerequisiteState(
+                "cursor_to_xml fetch returned no rows result".into(),
+            ));
+        };
+        let types = fields
+            .iter()
+            .map(|field| crate::exec::column_type_from_oid(field.type_oid).ok())
+            .collect::<Vec<_>>();
+        let rows = self.xml_rows(&types, &rows)?;
+        Ok(Datum::Xml(crate::xmlmap::cursor_to_xml(
+            &fields, &rows, &request,
+        )))
+    }
+
+    async fn execute_table_to_xmlschema(
+        &mut self,
+        request: crate::xmlmap::TableXmlSchemaRequest,
+    ) -> Result<Datum, ExecError> {
+        let written =
+            crate::relname::parse_written_relation(&self.resolution_scope(), &request.relation)?;
+        let relation = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            &written.reference,
+            crate::relname::SchemaDisposition::Reference,
+        )?;
+        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &relation)?;
+        let rows = if request.include_data {
+            let identifier = |part: &str| format!("\"{}\"", part.replace('\"', "\"\""));
+            let statements = crabka_pgparser::parse(&format!(
+                "SELECT * FROM {}.{}",
+                identifier(&relation.schema),
+                identifier(&relation.name)
+            ))?;
+            let [statement] = statements.as_slice() else {
+                return Err(ExecError::Syntax(
+                    "table XML schema query did not parse as one statement".into(),
+                ));
+            };
+            let QueryResult::Rows { rows, .. } = self.run_select(statement).await? else {
+                return Err(ExecError::ObjectNotInPrerequisiteState(
+                    "table XML schema scan returned no rows result".into(),
+                ));
+            };
+            rows
+        } else {
+            Vec::new()
+        };
+        let types = table
+            .columns
+            .iter()
+            .map(|column| Some(column.ty))
+            .collect::<Vec<_>>();
+        let rows = self.xml_rows(&types, &rows)?;
+        Ok(Datum::Xml(crate::xmlmap::table_to_xmlschema(
+            &table,
+            &rows,
+            &self.database,
+            &request,
+        )))
+    }
+
+    async fn execute_query_to_xmlschema(
+        &mut self,
+        request: crate::xmlmap::QueryXmlSchemaRequest,
+    ) -> Result<Datum, ExecError> {
+        let statements = crabka_pgparser::parse(&request.query)?;
+        let [statement @ Statement::Query(_)] = statements.as_slice() else {
+            return Err(ExecError::Syntax(
+                "query XML schema functions require exactly one query statement".into(),
+            ));
+        };
+        let QueryResult::Rows { fields, rows, .. } = self.run_select(statement).await? else {
+            return Err(ExecError::ObjectNotInPrerequisiteState(
+                "query XML schema scan returned no rows result".into(),
+            ));
+        };
+        let types = fields
+            .iter()
+            .map(|field| crate::exec::column_type_from_oid(field.type_oid).ok())
+            .collect::<Vec<_>>();
+        let rows = self.xml_rows(&types, &rows)?;
+        Ok(Datum::Xml(crate::xmlmap::result_to_xmlschema(
+            &fields,
+            &rows,
+            &self.database,
+            request.nulls,
+            request.tableforest,
+            &request.target_ns,
+            request.include_data,
+        )?))
+    }
+
+    async fn execute_cursor_to_xmlschema(
+        &mut self,
+        request: crate::xmlmap::CursorXmlSchemaRequest,
+    ) -> Result<Datum, ExecError> {
+        let QueryResult::Rows { fields, .. } = self
+            .fetch_cursor(
+                &request.cursor,
+                FetchDirection::Relative(FetchCount::Rows(0)),
+                false,
+            )
+            .await?
+        else {
+            return Err(ExecError::ObjectNotInPrerequisiteState(
+                "cursor XML schema fetch returned no rows result".into(),
+            ));
+        };
+        Ok(Datum::Xml(crate::xmlmap::result_to_xmlschema(
+            &fields,
+            &[],
+            &self.database,
+            request.nulls,
+            request.tableforest,
+            &request.target_ns,
+            false,
+        )?))
+    }
+
+    async fn execute_schema_to_xml(
+        &mut self,
+        request: crate::xmlmap::SchemaXmlRequest,
+    ) -> Result<Datum, ExecError> {
+        if !crabka_pgcatalog::schema_exists(self.catalog_kv.as_ref(), &request.schema)? {
+            return Err(
+                crabka_pgcatalog::CatalogError::UndefinedSchema(request.schema.clone()).into(),
+            );
+        }
+        let tables = crabka_pgcatalog::list_tables(self.catalog_kv.as_ref())?
+            .into_iter()
+            .filter(|table| table.name.schema == request.schema)
+            .collect::<Vec<_>>();
+        let identifier = |part: &str| format!("\"{}\"", part.replace('"', "\"\""));
+        let mut rows = Vec::with_capacity(tables.len());
+        for table in &tables {
+            if request.include_data {
+                let statements = crabka_pgparser::parse(&format!(
+                    "SELECT * FROM {}.{}",
+                    identifier(&table.name.schema),
+                    identifier(&table.name.name)
+                ))?;
+                let [statement] = statements.as_slice() else {
+                    return Err(ExecError::Syntax(
+                        "schema XML query did not parse as one statement".into(),
+                    ));
+                };
+                let QueryResult::Rows {
+                    rows: table_rows, ..
+                } = self.run_select(statement).await?
+                else {
+                    return Err(ExecError::ObjectNotInPrerequisiteState(
+                        "schema XML scan returned no rows result".into(),
+                    ));
+                };
+                let types = table
+                    .columns
+                    .iter()
+                    .map(|column| Some(column.ty))
+                    .collect::<Vec<_>>();
+                rows.push(self.xml_rows(&types, &table_rows)?);
+            } else {
+                rows.push(Vec::new());
+            }
+        }
+        Ok(Datum::Xml(crate::xmlmap::schema_to_xml(
+            &tables,
+            &rows,
+            &self.database,
+            &request,
+        )))
+    }
+
+    /// Re-render values whose XML spelling differs from their ordinary wire text.
+    fn xml_rows(
+        &self,
+        types: &[Option<ColumnType>],
+        rows: &[Vec<Option<Cell>>],
+    ) -> Result<Vec<Vec<Option<Cell>>>, ExecError> {
+        let ctx = self.eval_ctx();
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(index, cell)| {
+                        let Some(cell) = cell else {
+                            return Ok(None);
+                        };
+                        let Some(Some(ty)) = types.get(index) else {
+                            return Ok(Some(cell.clone()));
+                        };
+                        if !xml_uses_scalar_text(*ty) {
+                            return Ok(Some(cell.clone()));
+                        }
+                        let value = decode_binary_value(&cell.binary, *ty, &ctx.time_zone)
+                            .map_err(ExecError::Remote)?;
+                        Ok(Some(Cell {
+                            text: crate::xml_fn::xml_text_of(&value, &ctx)?.into(),
+                            binary: cell.binary.clone(),
+                        }))
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     async fn run_query_locking(&mut self, q: &QueryExpr) -> Result<QueryResult, ExecError> {
@@ -8385,9 +9930,10 @@ impl SqlSession {
             temporary,
             if_not_exists,
             columns,
-            query,
+            source,
             with_data,
             tablespace,
+            access_method,
         } = stmt
         else {
             return Err(ExecError::Unsupported("not a CREATE TABLE AS".into()));
@@ -8419,10 +9965,23 @@ impl SqlSession {
                 tag: "CREATE TABLE AS".into(),
             });
         }
+        let query = match source {
+            CreateAsSource::Query(query) => (**query).clone(),
+            CreateAsSource::Execute { name, args } => {
+                let Some(Statement::Query(query)) =
+                    self.bound_prepared_statement(name, args).await?
+                else {
+                    return Err(ExecError::Syntax(format!(
+                        "prepared statement \"{name}\" is not a SELECT"
+                    )));
+                };
+                query
+            }
+        };
         let fields = crate::query::describe_query_expr(
             self.catalog_kv.as_ref(),
             &self.resolution_scope(),
-            query,
+            &query,
         )?;
         if let Some(names) = columns
             && names.len() > fields.len()
@@ -8473,12 +10032,15 @@ impl SqlSession {
             sharding: None,
             if_not_exists: *if_not_exists,
             temporary: *temporary,
+            of_type: None,
+            typed_options: Vec::new(),
             like: Vec::new(),
             inherits: Vec::new(),
             on_commit: None,
             partition_by: None,
             partition_of: None,
             tablespace: tablespace.clone(),
+            access_method: access_method.clone(),
         };
         self.run_ddl(&create).await?;
         if !with_data {
@@ -8486,10 +10048,27 @@ impl SqlSession {
                 tag: "CREATE TABLE AS".into(),
             });
         }
+        // PostgreSQL populates CTAS as part of the create operation, before the
+        // new table's default ACL can deny its owner a later INSERT. Gres runs
+        // that population through its ordinary write path, so temporarily lift
+        // the one marker that represents such an owner revocation.
+        let restore_owner_insert = crabka_pgcatalog::owner_table_privilege_is_revoked(
+            self.catalog_kv.as_ref(),
+            name,
+            "INSERT",
+        )?;
+        if restore_owner_insert {
+            self.catalog_kv
+                .write_batch(&[crabka_pgcatalog::restore_owner_table_privilege_op(
+                    name, "INSERT",
+                )])?;
+        }
         let insert = Statement::Insert {
             table: target.clone(),
+            alias: None,
             columns: None,
-            source: crabka_pgparser::ast::InsertSource::Query(query.clone()),
+            indirections: None,
+            source: crabka_pgparser::ast::InsertSource::Query(Box::new(query)),
             on_conflict: None,
             returning: None,
             with: None,
@@ -8511,6 +10090,12 @@ impl SqlSession {
                 return Err(error);
             }
         };
+        if restore_owner_insert {
+            self.catalog_kv
+                .write_batch(&[crabka_pgcatalog::revoke_owner_table_privilege_op(
+                    name, "INSERT",
+                )])?;
+        }
         // PostgreSQL reports the populated form as `SELECT <n>`.
         let n = match &inserted {
             QueryResult::Command { tag } => {
@@ -8666,6 +10251,7 @@ impl SqlSession {
             using: Vec::new(),
             only: false,
             filter: None,
+            where_current_of: None,
             returning: None,
             with: None,
         })
@@ -8711,7 +10297,9 @@ impl SqlSession {
         let inserted = self
             .run_write(&Statement::Insert {
                 table: target.clone(),
+                alias: None,
                 columns: None,
+                indirections: None,
                 source: crabka_pgparser::ast::InsertSource::Query(Box::new(query.clone())),
                 on_conflict: None,
                 returning: None,
@@ -8964,7 +10552,7 @@ impl SqlSession {
         Ok(())
     }
 
-    /// Whether the relation an entry was armed for is still the one standing
+    /// The owner of the relation an entry was armed for, if it is still standing
     /// under its name.
     ///
     /// A relation dropped since then has no rows to delete and nothing to drop.
@@ -8972,10 +10560,10 @@ impl SqlSession {
     /// anything else that empties the namespace all drop it. A name re-used
     /// since then by a different relation carries that relation's own
     /// disposition and not this one.
-    fn on_commit_relation_is_live(&self, entry: &OnCommitEntry) -> Result<bool, ExecError> {
+    fn on_commit_relation_owner(&self, entry: &OnCommitEntry) -> Result<Option<String>, ExecError> {
         match crabka_pgcatalog::get_table(&*self.catalog_kv, &entry.relation) {
-            Ok(table) => Ok(table.id == entry.table),
-            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => Ok(false),
+            Ok(table) if table.id == entry.table => Ok(Some(table.owner)),
+            Ok(_) | Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => Ok(None),
             Err(error) => Err(error.into()),
         }
     }
@@ -9012,17 +10600,17 @@ impl SqlSession {
                 &entry.relation.schema,
                 &entry.relation.name,
             );
-            match self.on_commit_relation_is_live(&entry) {
-                Ok(true) => {}
-                Ok(false) => continue,
+            let owner = match self.on_commit_relation_owner(&entry) {
+                Ok(Some(owner)) => owner,
+                Ok(None) => continue,
                 Err(error) => {
                     failure = failure.or(Some(error));
                     continue;
                 }
-            }
+            };
             match entry.action {
                 crabka_pgparser::ast::OnCommitAction::PreserveRows => {}
-                crabka_pgparser::ast::OnCommitAction::Drop => drop.push(reference),
+                crabka_pgparser::ast::OnCommitAction::Drop => drop.push((reference, owner)),
                 crabka_pgparser::ast::OnCommitAction::DeleteRows => {
                     // A partitioned parent holds no rows, so there is nothing
                     // here to empty and `PostgreSQL`'s `heap_truncate` skips it
@@ -9054,6 +10642,7 @@ impl SqlSession {
                     // One statement per relation, so an entry that cannot be
                     // emptied costs only its own disposition rather than every
                     // other relation's.
+                    let previous_role = std::mem::replace(&mut self.current_role, owner);
                     let emptied = Box::pin(self.run_write(&Statement::Truncate {
                         targets: vec![crabka_pgparser::ast::TruncateTarget {
                             name: reference,
@@ -9063,6 +10652,7 @@ impl SqlSession {
                         cascade: false,
                     }))
                     .await;
+                    self.current_role = previous_role;
                     match emptied {
                         Ok(_) => still_owed.push(entry),
                         Err(error) => failure = failure.or(Some(error)),
@@ -9071,16 +10661,19 @@ impl SqlSession {
             }
         }
         self.on_commit = still_owed;
-        if !drop.is_empty()
-            && let Err(error) = self
+        for (reference, owner) in drop {
+            let previous_role = std::mem::replace(&mut self.current_role, owner);
+            let dropped = self
                 .run_ddl(&Statement::DropTable {
-                    names: drop,
+                    names: vec![reference],
                     if_exists: true,
                     cascade: true,
                 })
-                .await
-        {
-            failure = failure.or(Some(error));
+                .await;
+            self.current_role = previous_role;
+            if let Err(error) = dropped {
+                failure = failure.or(Some(error));
+            }
         }
         match failure {
             Some(error) => Err(error),
@@ -9112,25 +10705,41 @@ impl SqlSession {
             tag,
             &replication_role,
         )?;
-        for trigger in triggers {
-            let routine = crate::routine::routine_by_oid(
-                &*self.catalog_kv,
-                i32::try_from(trigger.function_oid).unwrap_or(0),
-            )?
-            .ok_or_else(|| {
-                ExecError::UndefinedFunction(format!(
-                    "function {}() does not exist",
-                    trigger.function
-                ))
-            })?;
-            let invocation = crate::trigger::event_invocation(&trigger, tag);
-            let previous = self.event_trigger.clone();
-            self.event_trigger = context.clone();
-            let result = crate::plpgsql::execute_trigger_function(self, &routine, invocation).await;
-            self.event_trigger = previous;
-            let _ = result?;
+        if triggers.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        // Event-trigger SQL can issue DDL and synchronously re-enter this
+        // dispatcher. Allow nested DDL that has no matching event trigger, but
+        // reject an event that would invoke another trigger while one runs.
+        if self.trigger_depth > 0 {
+            return Err(ExecError::StackDepthExceeded);
+        }
+        self.trigger_depth += 1;
+        let result = async {
+            for trigger in triggers {
+                let routine = crate::routine::routine_by_oid(
+                    &*self.catalog_kv,
+                    i32::try_from(trigger.function_oid).unwrap_or(0),
+                )?
+                .ok_or_else(|| {
+                    ExecError::UndefinedFunction(format!(
+                        "function {}() does not exist",
+                        trigger.function
+                    ))
+                })?;
+                let invocation = crate::trigger::event_invocation(&trigger, tag);
+                let previous = self.event_trigger.clone();
+                self.event_trigger = context.clone();
+                let result =
+                    crate::plpgsql::execute_trigger_function(self, &routine, invocation).await;
+                self.event_trigger = previous;
+                result?;
+            }
+            Ok(())
+        }
+        .await;
+        self.trigger_depth -= 1;
+        result
     }
 
     /// Put every catalog key back to the image `before` records for it, undoing
@@ -9267,11 +10876,126 @@ impl SqlSession {
         Ok(())
     }
 
+    /// Reject a domain constraint validation that existing table values would
+    /// violate before its catalog row is committed.
+    async fn validate_domain_constraint(&mut self, stmt: &Statement) -> Result<(), ExecError> {
+        let Statement::AlterDomain { name, action } = stmt else {
+            return Ok(());
+        };
+
+        let resolution = self.resolution_scope();
+        let name = crate::exec::resolve_user_type(&*self.catalog_kv, &resolution, name)?;
+        let Some(domain_type) = crabka_pgcatalog::get_user_type(&*self.catalog_kv, &name)? else {
+            return Ok(());
+        };
+        let Some(domain) = domain_type.domain() else {
+            return Ok(());
+        };
+        let text = match action {
+            crabka_pgparser::ast::AlterDomainAction::SetNotNull(true)
+            | crabka_pgparser::ast::AlterDomainAction::AddNotNull { .. } => None,
+            crabka_pgparser::ast::AlterDomainAction::AddConstraint {
+                text, not_valid, ..
+            } if !not_valid => Some(text),
+            crabka_pgparser::ast::AlterDomainAction::ValidateConstraint(name) => {
+                let Some(check) = domain.checks.iter().find(|check| check.name == *name) else {
+                    return Ok(());
+                };
+                if check.validated {
+                    return Ok(());
+                }
+                Some(&check.expr)
+            }
+            _ => return Ok(()),
+        };
+        let predicate = text
+            .map(|text| {
+                let expr = crabka_pgparser::parser::parse_expression(text)?;
+                let scope = crate::scope::Scope {
+                    columns: vec![crate::scope::ColumnBinding {
+                        exposure: crate::scope::Exposure::Output,
+                        qualifier: None,
+                        name: "value".to_string(),
+                        ty: domain.base,
+                    }],
+                    ..Default::default()
+                };
+                crate::eval::check_predicate_resolves(&expr, &scope)?;
+                let result = crate::eval::infer_type(&expr, &scope)?;
+                if result != ColumnType::Bool {
+                    return Err(ExecError::TypeMismatch(format!(
+                        "argument of CHECK must be type boolean, not type {}",
+                        result.name()
+                    )));
+                }
+                Ok((expr, scope))
+            })
+            .transpose()?;
+
+        let (snapshot, own_xid, global_snapshot) = self.read_context().await?;
+        let ctx = self.eval_ctx();
+        for table in crabka_pgcatalog::list_tables(&*self.catalog_kv)? {
+            for (index, column) in table.columns.iter().enumerate() {
+                if column.ty.oid() != domain_type.oid {
+                    continue;
+                }
+                for (_, _, row) in crate::exec::scan_live(
+                    self.kv.as_ref(),
+                    self.catalog_kv.as_ref(),
+                    &global_snapshot,
+                    &snapshot,
+                    own_xid,
+                    &table,
+                )? {
+                    let value = row.get(index).ok_or_else(|| {
+                        ExecError::InvalidObjectDefinition(format!(
+                            "stored row for relation \"{}\" is missing column \"{}\"",
+                            table.name, column.name
+                        ))
+                    })?;
+                    let violates = if let Some((expr, scope)) = &predicate {
+                        matches!(
+                            crate::eval::eval(expr, scope, std::slice::from_ref(value), &ctx)?,
+                            Datum::Bool(false)
+                        )
+                    } else {
+                        value.is_null()
+                    };
+                    if violates {
+                        let (code, message) = if predicate.is_some() {
+                            (
+                                "23514",
+                                format!(
+                                    "column \"{}\" of table \"{}\" contains values that violate the new constraint",
+                                    column.name, table.name.name
+                                ),
+                            )
+                        } else {
+                            (
+                                "23502",
+                                format!(
+                                    "column \"{}\" of table \"{}\" contains null values",
+                                    column.name, table.name.name
+                                ),
+                            )
+                        };
+                        return Err(ExecError::Remote(PgError::error(code, message)));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn run_ddl(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        self.validate_routine_settings(stmt)?;
         let fires_event_triggers = !crate::trigger::event_trigger_ddl_is_excluded(stmt);
         let publishes_user_casts = matches!(
             stmt,
-            Statement::CreateCast { .. } | Statement::DropCast { .. } | Statement::DropType { .. }
+            Statement::CreateCast { .. }
+                | Statement::DropCast { .. }
+                | Statement::DropRoutine { .. }
+                | Statement::DropType { .. }
         );
         let publishes_user_types = matches!(
             stmt,
@@ -9282,6 +11006,10 @@ impl SqlSession {
                 | Statement::AlterDomain { .. }
                 | Statement::DropDomain { .. }
                 | Statement::DropSchema { .. }
+        );
+        let publishes_relation_rowtypes = matches!(
+            stmt,
+            Statement::DropTable { .. } | Statement::DropView { .. } | Statement::DropSchema { .. }
         );
         let event_tag = crate::trigger::event_command_tag(stmt);
         let drop_event_context = if fires_event_triggers && crate::trigger::is_drop_ddl(stmt) {
@@ -9320,6 +11048,7 @@ impl SqlSession {
             }
         };
         self.ensure_temp_schema(stmt).await?;
+        self.validate_domain_constraint(stmt).await?;
         // An explicit writer retains its writer-fence lease, but releases its
         // shared physical gate before waiting for the catalog lock. Conversion
         // waits for that lease before it can acquire the physical gate.
@@ -9411,6 +11140,12 @@ impl SqlSession {
         let user_types_before = publishes_user_types
             .then(|| crabka_pgcatalog::list_user_types(&*self.catalog_kv))
             .transpose()?;
+        let user_casts_before = publishes_user_casts
+            .then(|| crabka_pgcatalog::list_user_casts(&*self.catalog_kv))
+            .transpose()?;
+        let relation_rowtypes_before = publishes_relation_rowtypes
+            .then(|| crate::catalog_rel::relation_rowtype_oids(&*self.catalog_kv))
+            .transpose()?;
         let resolution = self.resolution_scope();
         // SP40: IMPORT FOREIGN SCHEMA needs the registered scanner + current user
         // to discover foreign tables; the rest of DDL ignores the ForeignCtx.
@@ -9426,6 +11161,7 @@ impl SqlSession {
                 _ => None,
             },
             row_security: self.guc.row_security(),
+            default_table_access_method: self.guc.default_table_access_method(),
         };
         let inheritance_notices =
             crate::exec::inheritance_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
@@ -9436,11 +11172,20 @@ impl SqlSession {
             crate::exec::add_column_merge_notices(&*self.catalog_kv, &resolution, stmt)?;
         // Computed before the statement runs: a `CREATE TYPE` that completes a
         // shell, and a `CREATE FUNCTION` that names one, both change the answer.
-        let shell_notices = crate::routine::shell_type_notices(&*self.catalog_kv, stmt);
+        let shell_notices =
+            crate::routine::shell_type_notices(&*self.catalog_kv, &resolution, stmt);
         // Computed before the drop runs, while the dependents still exist.
         let cascade_notice =
             crate::exec::cascade_drop_notice(&*self.catalog_kv, &resolution, stmt)?;
-        let (result, ops) = crate::exec::execute_ddl(&*self.catalog_kv, stmt, fctx)?;
+        let text_search_notice = match stmt {
+            Statement::Utility(UtilityStatement::TextSearch(ddl)) => {
+                crate::text_search_catalog::skipped_mapping_notice(&*self.catalog_kv, ddl)?
+            }
+            _ => None,
+        };
+        let check_function_bodies = self.guc.effective("check_function_bodies")? == "on";
+        let (result, ops) =
+            crate::exec::execute_ddl(&*self.catalog_kv, stmt, fctx, check_function_bodies)?;
         // An open block needs the before-images whether or not it has taken a
         // savepoint: DDL commits its batch here and now, so `ROLLBACK` has
         // nothing but these images to undo it with.
@@ -9588,10 +11333,13 @@ impl SqlSession {
             return Err(error);
         }
         self.record_on_commit(stmt)?;
-        for column in inheritance_notices {
-            self.plpgsql_notice(PgError::notice(format!(
-                "merging multiple inherited definitions of column \"{column}\""
-            )))?;
+        for (column, multiple_inherited) in inheritance_notices {
+            let message = if multiple_inherited {
+                format!("merging multiple inherited definitions of column \"{column}\"")
+            } else {
+                format!("merging column \"{column}\" with inherited definition")
+            };
+            self.plpgsql_notice(PgError::notice(message))?;
         }
         for (column, child) in column_merge_notices {
             self.plpgsql_notice(PgError::notice(format!(
@@ -9608,6 +11356,13 @@ impl SqlSession {
                 None => notice,
             })?;
         }
+        if let Some(notice) = text_search_notice {
+            self.plpgsql_notice(PgError::notice(notice))?;
+        }
+        if let Some(before) = &user_types_before {
+            let after = crabka_pgcatalog::list_user_types(&*self.catalog_kv)?;
+            self.record_enum_transaction_state(stmt, before, &after);
+        }
         if let (Some(before), Some(changed)) = (&user_types_before, &changed_user_type_oids) {
             // Hooks can commit nested type DDL after the outer batch. Publish
             // the final durable state, not the pre-hook snapshot.
@@ -9623,9 +11378,129 @@ impl SqlSession {
             crabka_pgtypes::usertype::publish_catalog_delta(&before, &after);
         }
         if publishes_user_casts {
-            crate::usercast::publish(&*self.catalog_kv)?;
+            crate::usercast::publish_delta(
+                user_casts_before
+                    .as_deref()
+                    .expect("cast DDL captured its prior state"),
+                &*self.catalog_kv,
+            )?;
+        }
+        if let Some(before) = relation_rowtypes_before {
+            let after = crate::catalog_rel::relation_rowtype_oids(&*self.catalog_kv)?;
+            for name in before.keys().filter(|name| !after.contains_key(*name)) {
+                crabka_pgtypes::usertype::unregister_in(&name.schema, &name.name);
+            }
         }
         Ok(result)
+    }
+
+    /// Track enum labels which PostgreSQL keeps unusable until the transaction
+    /// that added them commits. Types created by this transaction are exempt.
+    fn record_enum_transaction_state(
+        &mut self,
+        stmt: &Statement,
+        before: &[crabka_pgtypes::usertype::UserType],
+        after: &[crabka_pgtypes::usertype::UserType],
+    ) {
+        let (TxnState::InTransaction(context) | TxnState::Failed(context)) = &mut self.state else {
+            return;
+        };
+        context.created_user_type_oids.extend(
+            after
+                .iter()
+                .filter(|after| !before.iter().any(|before| before.oid == after.oid))
+                .map(|ty| ty.oid),
+        );
+        if !matches!(
+            stmt,
+            Statement::AlterType {
+                action: crabka_pgparser::ast::AlterTypeAction::AddValue { .. },
+                ..
+            }
+        ) {
+            return;
+        }
+        for after_type in after {
+            let Some(before_type) = before.iter().find(|before| before.oid == after_type.oid)
+            else {
+                continue;
+            };
+            let (Some(before_labels), Some(after_labels)) =
+                (before_type.labels(), after_type.labels())
+            else {
+                continue;
+            };
+            for label in after_labels {
+                if !before_labels.contains(label)
+                    && !context.created_user_type_oids.contains(&after_type.oid)
+                {
+                    context
+                        .unsafe_enum_values
+                        .insert((after_type.oid, label.clone()));
+                }
+            }
+        }
+    }
+
+    fn skipped_enum_add_value_notice(
+        &self,
+        stmt: &Statement,
+    ) -> Result<Option<PgError>, ExecError> {
+        let Statement::AlterType {
+            name,
+            action:
+                crabka_pgparser::ast::AlterTypeAction::AddValue {
+                    label,
+                    if_not_exists: true,
+                    ..
+                },
+        } = stmt
+        else {
+            return Ok(None);
+        };
+        let name = crate::exec::resolve_user_type(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            name,
+        )?;
+        let exists = crabka_pgcatalog::get_user_type(self.catalog_kv.as_ref(), &name)?
+            .is_some_and(|ty| ty.labels().is_some_and(|labels| labels.contains(label)));
+        Ok(exists
+            .then(|| PgError::notice(format!("enum label \"{label}\" already exists, skipping"))))
+    }
+
+    /// Validate `CREATE FUNCTION ... SET` clauses before the routine is stored.
+    fn validate_routine_settings(&self, stmt: &Statement) -> Result<(), ExecError> {
+        let Statement::CreateRoutine(routine) = stmt else {
+            return Ok(());
+        };
+        for option in &routine.options {
+            let crabka_pgparser::ast::RoutineOption::Set {
+                name,
+                value: Some(value),
+                ..
+            } = option
+            else {
+                continue;
+            };
+            self.guc.validate_assignment(name, value)?;
+            if normalize_guc_name(name) != "default_text_search_config" {
+                continue;
+            }
+            match crate::text_search_catalog::config_is_simple(Some(&*self.catalog_kv), value) {
+                Ok(_) => {}
+                Err(ExecError::UndefinedObject(message)) => {
+                    self.plpgsql_notice(PgError::notice(message))?;
+                    if self.guc.effective("check_function_bodies")? == "on" {
+                        return Err(ExecError::InvalidParameterValueMessage(format!(
+                            "invalid value for parameter \"default_text_search_config\": \"{value}\""
+                        )));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     async fn ensure_unique_index_guard(
@@ -9738,6 +11613,7 @@ impl SqlSession {
                 gsnap: &global_snapshot,
                 snapshot: &snapshot,
                 own: Some(xid),
+                command_id: None,
                 ctes: &ctes,
                 eval_ctx: &eval_ctx,
                 fctx,
@@ -9775,7 +11651,7 @@ impl SqlSession {
 
     async fn execute_write_with_scalar_actor(
         &mut self,
-        stmt: Statement,
+        work: WriteActorWork,
         statement: WriteActorContext,
     ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
         let catalog_kv = Arc::clone(&self.catalog_kv);
@@ -9795,6 +11671,9 @@ impl SqlSession {
         let row_security = self.guc.row_security();
         let guc_settings = self.guc.settings();
         let prepared = self.prepared_statement_rows();
+        let cursors = self.cursor_rows();
+        let command_row_claims = self.command_row_claims.clone().unwrap_or_default();
+        let trigger_write = self.trigger_depth > 0;
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, mut cancel, finished) = self.register_worker();
         // Re-enter the `pg.write` span on the pool thread — see the note at the
@@ -9808,6 +11687,7 @@ impl SqlSession {
                 global_snapshot,
                 snapshot,
                 xid,
+                command_id,
                 repeatable_read,
                 eval_ctx,
                 prune_horizon,
@@ -9826,6 +11706,7 @@ impl SqlSession {
             };
             let ctes = crate::cte::CteContext::empty();
             let policy_stack = crate::rls::PolicyStack::default();
+            let runtime_command_row_claims = Arc::clone(&command_row_claims);
             let write_ctx = crate::exec::WriteContext {
                 view_checks: &[],
                 merge_target_qual: None,
@@ -9840,6 +11721,7 @@ impl SqlSession {
                 seq: seq.as_ref(),
                 snapshot: &snapshot,
                 xid,
+                command_id,
                 repeatable_read,
                 eval_ctx: &eval_ctx,
                 prune_horizon,
@@ -9863,23 +11745,51 @@ impl SqlSession {
                 range_scanner: range_scanner.as_ref(),
                 blocking_query_memory,
                 ctes: &ctes,
+                command_row_claims: Some(&command_row_claims),
+                trigger_write,
                 deferred_fk: defer_constraints.then(|| &*deferred_fk),
                 policy_stack: &policy_stack,
             };
-            with_guc_runtime(guc_values, guc_settings, prepared, || {
+            with_guc_runtime(guc_values, guc_settings, prepared, cursors, || {
                 crate::trigger::with_after_trigger_queue(|| {
-                    crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
-                        runtime.block_on(async {
+                    crate::routine::with_scalar_runtime_with_command_row_claims(
+                        &catalog_kv,
+                        Some(request_tx),
+                        Some(runtime_command_row_claims),
+                        || {
+                            runtime.block_on(async {
                             tokio::select! {
                                 biased;
                                 _ = cancel.signal.changed() => Err(ExecError::Remote(PgError::error(
                                     sqlstate::QUERY_CANCELED,
                                     "canceling statement due to user request",
                                 ))),
-                                result = crate::exec::execute_write(&write_ctx, &stmt) => result,
+                                result = async {
+                                    match work {
+                                        WriteActorWork::Statement(stmt) => {
+                                            crate::exec::execute_write(&write_ctx, &stmt).await
+                                        }
+                                        WriteActorWork::Copy(input) => {
+                                            let target = crate::exec::CopyIntoTarget {
+                                                name: &input.name,
+                                                columns: &input.columns,
+                                            };
+                                            let rows = crate::copyfmt::decode_copy_rows(
+                                                &input.text,
+                                                &input.format,
+                                                &input.header_columns,
+                                                &input.force,
+                                                &input.name.name,
+                                            )?;
+                                            crate::exec::execute_copy_write(&write_ctx, target, &rows)
+                                                .await
+                                        }
+                                    }
+                                } => result,
                             }
                         })
-                    })
+                        },
+                    )
                 })
             })
         });
@@ -10066,12 +11976,17 @@ impl SqlSession {
                     }
                     _ => self.global_read_snapshot(None)?,
                 };
-                let (snapshot, xid, repeatable_read) = match &self.state {
-                    TxnState::InTransaction(c) => (
-                        c.snapshot.clone(),
-                        c.xid.expect("xid set"),
-                        c.repeatable_read,
-                    ),
+                let (snapshot, xid, repeatable_read, command_id) = match &mut self.state {
+                    TxnState::InTransaction(c) => {
+                        let command_id = c.command_id;
+                        c.command_id = c.command_id.wrapping_add(1);
+                        (
+                            c.snapshot.clone(),
+                            c.xid.expect("xid set"),
+                            c.repeatable_read,
+                            command_id,
+                        )
+                    }
                     _ => unreachable!(),
                 };
                 let ctx = self.eval_ctx();
@@ -10089,11 +12004,12 @@ impl SqlSession {
                 let prune_horizon = Some(self.local_prune_horizon()?);
                 let (result, mut ops) = self
                     .execute_write_with_scalar_actor(
-                        stmt.clone(),
+                        WriteActorWork::Statement(stmt.clone()),
                         WriteActorContext {
                             global_snapshot: gsnap,
                             snapshot,
                             xid,
+                            command_id,
                             repeatable_read,
                             eval_ctx: ctx,
                             prune_horizon,
@@ -10196,11 +12112,12 @@ impl SqlSession {
                 // after its row is durable.
                 let outcome = match self
                     .execute_write_with_scalar_actor(
-                        stmt.clone(),
+                        WriteActorWork::Statement(stmt.clone()),
                         WriteActorContext {
                             global_snapshot: gsnap,
                             snapshot,
                             xid,
+                            command_id: 0,
                             repeatable_read: false,
                             eval_ctx: ctx,
                             prune_horizon,
@@ -10667,13 +12584,6 @@ impl SqlSession {
         // an unterminated CSV field — is reported with the same `CONTEXT` a
         // failing row gets, so the decode is told the relation to name.
         let text = crate::copyfmt::decode_copy_payload(&data, &format, &target.name.name)?;
-        let rows = crate::copyfmt::decode_copy_rows(
-            &text,
-            &format,
-            &header_columns,
-            &force,
-            &target.name.name,
-        )?;
         match &self.state {
             TxnState::InTransaction(_) => {
                 self.ensure_table_write_guard().await;
@@ -10697,31 +12607,44 @@ impl SqlSession {
                 )?;
                 self.ensure_unique_index_guard(unique_serialization).await?;
                 self.ensure_write_xid()?;
-                let xid = match &self.state {
-                    TxnState::InTransaction(ctx) => ctx.xid.expect("xid set"),
+                let (xid, command_id) = match &mut self.state {
+                    TxnState::InTransaction(ctx) => {
+                        let command_id = ctx.command_id;
+                        ctx.command_id = ctx.command_id.wrapping_add(1);
+                        (ctx.xid.expect("xid set"), command_id)
+                    }
                     _ => unreachable!(),
                 };
                 let ctx = self.eval_ctx();
                 let gsnap = self.global_read_snapshot(None)?;
                 let snapshot = self.procarray.snapshot();
-                // COPY is insert-only: no chains are re-read, nothing to prune.
-                let statement_ctes = crate::cte::CteContext::empty();
-                let write_ctx = self.write_context(&WriteStatementContext {
-                    global_snapshot: &gsnap,
-                    snapshot: &snapshot,
-                    xid,
-                    repeatable_read: false,
-                    eval_ctx: &ctx,
-                    prune_horizon: None,
-                    ctes: &statement_ctes,
-                });
-                let (result, mut ops) =
-                    crate::exec::execute_copy_write(&write_ctx, target, &rows).await?;
+                let (result, mut ops) = self
+                    .execute_write_with_scalar_actor(
+                        WriteActorWork::Copy(CopyActorInput {
+                            name: (*target.name).clone(),
+                            columns: (*target.columns).clone(),
+                            text: text.into_owned(),
+                            format,
+                            header_columns,
+                            force,
+                        }),
+                        WriteActorContext {
+                            global_snapshot: gsnap,
+                            snapshot,
+                            xid,
+                            command_id,
+                            repeatable_read: false,
+                            eval_ctx: ctx,
+                            prune_horizon: None,
+                        },
+                    )
+                    .await?;
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
                 ops.extend(self.take_pending_sequence_ops());
                 self.commit_local_data_ops(ops).await?;
+                self.fire_pending_after_triggers().await?;
                 Ok(result)
             }
             TxnState::Idle => {
@@ -10737,6 +12660,13 @@ impl SqlSession {
                     )?,
                 )?;
                 if crate::exec::table_uses_global_visibility(&copy_table) {
+                    let rows = crate::copyfmt::decode_copy_rows(
+                        &text,
+                        &format,
+                        &header_columns,
+                        &force,
+                        &target.name.name,
+                    )?;
                     let ctx = self.eval_ctx();
                     let plan = crate::exec::execute_timestamp_copy_write(
                         self.catalog_kv.as_ref(),
@@ -10775,21 +12705,30 @@ impl SqlSession {
                 let ctx = self.eval_ctx();
                 let gsnap = self.global_read_snapshot(None)?;
                 let snapshot = self.procarray.snapshot();
-                // COPY is insert-only: no chains are re-read, nothing to prune.
-                let statement_ctes = crate::cte::CteContext::empty();
-                let write_ctx = self.write_context(&WriteStatementContext {
-                    global_snapshot: &gsnap,
-                    snapshot: &snapshot,
-                    xid,
-                    repeatable_read: false,
-                    eval_ctx: &ctx,
-                    prune_horizon: None,
-                    ctes: &statement_ctes,
-                });
                 // Reserved before the batch is durable, as in `run_write`: a
                 // column default that calls `pg_notify()` must not be able to
                 // fail a COPY whose rows are already committed.
-                let outcome = match crate::exec::execute_copy_write(&write_ctx, target, &rows).await
+                let outcome = match self
+                    .execute_write_with_scalar_actor(
+                        WriteActorWork::Copy(CopyActorInput {
+                            name: (*target.name).clone(),
+                            columns: (*target.columns).clone(),
+                            text: text.into_owned(),
+                            format,
+                            header_columns,
+                            force,
+                        }),
+                        WriteActorContext {
+                            global_snapshot: gsnap,
+                            snapshot,
+                            xid,
+                            command_id: 0,
+                            repeatable_read: false,
+                            eval_ctx: ctx,
+                            prune_horizon: None,
+                        },
+                    )
+                    .await
                 {
                     Ok(written) => self.reserve_autocommit_notifications().map(|()| written),
                     Err(error) => Err(error),
@@ -10822,6 +12761,7 @@ impl SqlSession {
                     self.discard_pending_notifications();
                     return Err(error);
                 }
+                self.fire_pending_after_triggers().await?;
                 self.flush_autocommit_notifications().await?;
                 Ok(result)
             }
@@ -10844,6 +12784,7 @@ impl SqlSession {
         let guc_values = self.guc.effective_map();
         let guc_settings = self.guc.settings();
         let prepared = self.prepared_statement_rows();
+        let cursors = self.cursor_rows();
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, _cancel, finished) = self.register_worker();
         // Re-enter the `pg.write` span on the pool thread — see the note at the
@@ -10854,7 +12795,7 @@ impl SqlSession {
             let _worker_span =
                 crate::telemetry::blocking_worker_span("sharded_timestamp_write").entered();
             let _finished = finished;
-            with_guc_runtime(guc_values, guc_settings, prepared, || {
+            with_guc_runtime(guc_values, guc_settings, prepared, cursors, || {
                 crate::trigger::with_after_trigger_queue(|| {
                     crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
                         crate::exec::execute_timestamp_write(
@@ -11239,6 +13180,7 @@ impl SqlSession {
             .advisory
             .release_transaction(self.session_lock_id);
         self.session_locks.tables.release_all(self.session_lock_id);
+        self.clear_largeobject_descriptors();
     }
 
     fn commit_release(&mut self) {
@@ -11394,6 +13336,7 @@ struct ParamBinder<'a> {
     resolution: &'a crate::relname::ResolutionScope,
     params: &'a [BoundParam],
     time_zone: &'a jiff::tz::TimeZone,
+    xml_option: crabka_pgtypes::xml::XmlOption,
     inferred_param_types: RefCell<Vec<Option<ColumnType>>>,
 }
 
@@ -11449,7 +13392,14 @@ impl ParamBinder<'_> {
                 }
             }
             Statement::Query(q) => self.bind_query_expr(q)?,
-            Statement::CreateTableAs { query, .. } => self.bind_query_expr(query)?,
+            Statement::CreateTableAs { source, .. } => match source {
+                CreateAsSource::Query(query) => self.bind_query_expr(query)?,
+                CreateAsSource::Execute { args, .. } => {
+                    for arg in args {
+                        self.bind_expr(arg, None)?;
+                    }
+                }
+            },
             Statement::Update {
                 table,
                 alias,
@@ -11859,10 +13809,37 @@ impl ParamBinder<'_> {
                             ctes,
                         )?;
                     }
+                    for (_, arg) in &mut call.named_args {
+                        self.bind_expr_with_scope_and_ctes(
+                            arg,
+                            None,
+                            &crate::scope::Scope::empty(),
+                            ctes,
+                        )?;
+                    }
+                    if let Some(arg) = &mut call.variadic {
+                        self.bind_expr_with_scope_and_ctes(
+                            arg,
+                            None,
+                            &crate::scope::Scope::empty(),
+                            ctes,
+                        )?;
+                    }
                 }
                 Ok(())
             }
             TableExpr::JsonTable(table) => {
+                for expr in table.exprs_mut() {
+                    self.bind_expr_with_scope_and_ctes(
+                        expr,
+                        None,
+                        &crate::scope::Scope::empty(),
+                        ctes,
+                    )?;
+                }
+                Ok(())
+            }
+            TableExpr::XmlTable(table) => {
                 for expr in table.exprs_mut() {
                     self.bind_expr_with_scope_and_ctes(
                         expr,
@@ -11983,9 +13960,10 @@ impl ParamBinder<'_> {
                 if param.type_oid.is_none() {
                     self.inferred_param_types.borrow_mut()[index] = expected;
                 }
-                *expr = self
-                    .regclass_param_expr(param, expected)?
-                    .map_or_else(|| bound_param_expr(param, expected, self.time_zone), Ok)?;
+                *expr = self.regclass_param_expr(param, expected)?.map_or_else(
+                    || bound_param_expr(param, expected, self.time_zone, self.xml_option),
+                    Ok,
+                )?;
             }
             Expr::Unary { op, expr } => {
                 let child_expected = match op {
@@ -12387,7 +14365,14 @@ fn max_statement_param(stmt: &Statement) -> usize {
             collect_returning_param(returning.as_ref(), &mut max);
         }
         Statement::Query(q) => collect_query_param(q, &mut max),
-        Statement::CreateTableAs { query, .. } => collect_query_param(query, &mut max),
+        Statement::CreateTableAs { source, .. } => match source {
+            CreateAsSource::Query(query) => collect_query_param(query, &mut max),
+            CreateAsSource::Execute { args, .. } => {
+                for arg in args {
+                    collect_expr_param(arg, &mut max);
+                }
+            }
+        },
         Statement::Update {
             assignments,
             from,
@@ -12574,11 +14559,16 @@ fn collect_table_param(table: &TableExpr, max: &mut usize) {
         // A set-returning function in FROM (`unnest($1)`) is not LATERAL, so its
         // arguments see no other FROM item — but they can still be parameters.
         TableExpr::Function { functions, .. } => {
-            for arg in functions.iter().flat_map(|call| call.args.iter()) {
+            for arg in functions.iter().flat_map(|call| call.arguments()) {
                 collect_expr_param(arg, max);
             }
         }
         TableExpr::JsonTable(table) => {
+            for expr in table.exprs() {
+                collect_expr_param(expr, max);
+            }
+        }
+        TableExpr::XmlTable(table) => {
             for expr in table.exprs() {
                 collect_expr_param(expr, max);
             }
@@ -12715,6 +14705,7 @@ fn bound_param_expr(
     param: &BoundParam,
     expected: Option<ColumnType>,
     time_zone: &jiff::tz::TimeZone,
+    xml_option: crabka_pgtypes::xml::XmlOption,
 ) -> Result<Expr, PgError> {
     let ty = param_column_type(param)?
         .or(expected)
@@ -12725,7 +14716,7 @@ fn bound_param_expr(
             ty,
         });
     };
-    let value = decode_bound_param(value, param, ty, time_zone)?;
+    let value = decode_bound_param(value, param, ty, time_zone, xml_option)?;
     Ok(Expr::Const { value, ty })
 }
 
@@ -12794,10 +14785,17 @@ fn decode_bound_param(
     param: &BoundParam,
     ty: ColumnType,
     time_zone: &jiff::tz::TimeZone,
+    xml_option: crabka_pgtypes::xml::XmlOption,
 ) -> Result<Datum, PgError> {
     match param.format {
         0 => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            if ty == ColumnType::Xml {
+                return crabka_pgtypes::xml::validate(text, xml_option)
+                    .map(|()| Datum::Xml(text.to_string()))
+                    .map_err(ExecError::from)
+                    .map_err(ExecError::into_pg);
+            }
             if matches!(
                 ty,
                 ColumnType::JsonPath | ColumnType::Array(ElemType::JsonPath)
@@ -12806,6 +14804,13 @@ fn decode_bound_param(
                     .map_err(ExecError::into_pg);
             }
             decode_text_bound_param(text, ty, time_zone)
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
+        1 if ty == ColumnType::Xml => {
+            let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            crabka_pgtypes::xml::validate(text, xml_option)
+                .map(|()| Datum::Xml(text.to_string()))
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
@@ -14077,6 +16082,7 @@ impl SqlSession {
                     global_snapshot: &global_snapshot,
                     snapshot: &snapshot,
                     own_xid: own,
+                    command_id: None,
                     read_ts: None,
                     own_start_ts: None,
                     table,
@@ -14578,6 +16584,9 @@ fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError)
     // struct rather than on the position, so it has to run before anything that
     // can create one.
     let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
+    let error = attach_rule_action_position(sql, stmt, error);
+    let error = attach_typed_table_position(sql, stmt, error);
+    let error = attach_variadic_array_position(sql, error);
     let error = attach_reg_cast_literal_position(sql, error);
     // The date/time family first: it owns the temporal operand names, which
     // `attach_operator_resolution_position` therefore leaves out.
@@ -14589,6 +16598,115 @@ fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError)
         stmt,
         attach_range_literal_position(sql, attach_type_input_literal_position(sql, error)),
     )
+}
+
+fn attach_typed_table_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    use crabka_pgparser::{ast::AlterTableAction, token::Token};
+
+    if error
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
+        return error;
+    };
+    let is_word = |token: &Token, word| matches!(token, Token::Ident(found) if found == word);
+    let position = |offset| sql[..offset].chars().count() + 1;
+
+    let found = match stmt {
+        Statement::CreateTable {
+            of_type: Some(reference),
+            ..
+        } if error.code == "42704"
+            && error.message == format!("type \"{reference}\" does not exist") =>
+        {
+            tokens
+                .windows(2)
+                .find(|pair| is_word(&pair[0].0, "of"))
+                .map(|pair| position(pair[1].1))
+        }
+        Statement::AlterTable { actions, .. }
+            if error.code == "42809"
+                && error.message == "cannot alter column type of typed table" =>
+        {
+            actions
+                .iter()
+                .find_map(|action| match action {
+                    AlterTableAction::SetType { column, .. } => Some(column),
+                    _ => None,
+                })
+                .and_then(|column| {
+                    tokens
+                        .windows(3)
+                        .find(|pair| {
+                            is_word(&pair[0].0, "alter")
+                                && is_word(&pair[1].0, "column")
+                                && matches!(&pair[2].0, Token::Ident(found) if found == column)
+                        })
+                        .map(|pair| position(pair[2].1))
+                })
+        }
+        _ => None,
+    };
+    match found {
+        Some(position) => error.with_position(position),
+        None => error,
+    }
+}
+
+fn attach_variadic_array_position(sql: &str, error: PgError) -> PgError {
+    if error.code != "42804" || error.message != "VARIADIC argument must be an array" {
+        return error;
+    }
+    let matches: Vec<_> = sql.match_indices("variadic").collect();
+    let [(offset, _)] = matches.as_slice() else {
+        return error;
+    };
+    let argument = sql[*offset + "variadic".len()..].trim_start();
+    let argument_offset = sql.len() - argument.len();
+    error.with_position(sql[..argument_offset].chars().count() + 1)
+}
+
+fn attach_rule_action_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
+    if error
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let Statement::CreateRule(rule) = stmt else {
+        return error;
+    };
+    let name = if error.code == "42703"
+        && error
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.hint.as_deref())
+            == Some("Try using a table-qualified name.")
+    {
+        error
+            .message
+            .strip_prefix("column \"")
+            .and_then(|message| message.split_once('"').map(|(name, _)| name))
+    } else if error.code == "42P01" {
+        error
+            .message
+            .strip_prefix("relation \"")
+            .and_then(|message| message.split_once('"').map(|(name, _)| name))
+    } else {
+        None
+    };
+    let (Some(name), Some(action_start)) = (name, sql.find(&rule.action_source)) else {
+        return error;
+    };
+    let Some(offset) = rule.action_source.rfind(name) else {
+        return error;
+    };
+    error.with_position(sql[..action_start + offset].chars().count() + 1)
 }
 
 /// The multi-word spellings PostgreSQL accepts for a type name. One word needs
@@ -14757,6 +16875,10 @@ fn rejected_input(message: &str) -> Option<RejectedInput<'_>> {
     if let Some(rest) = message.strip_prefix("invalid input value for enum ") {
         let (enum_name, quoted) = rest.split_once(": \"")?;
         return Some(named(quoted.strip_suffix('"')?, enum_name));
+    }
+    if let Some(rest) = message.strip_prefix("unsafe use of new value \"") {
+        let (value, enum_name) = rest.split_once("\" of enum type ")?;
+        return Some(named(value, enum_name));
     }
     // A `\u0000` escape is the one the JSON lexer re-codes to 22P05. It reaches
     // only a JSON input, so the written type is the whole of the evidence.
@@ -15107,7 +17229,7 @@ fn attach_type_input_literal_position(sql: &str, error: PgError) -> PgError {
     // of every statement that fails for another reason.
     if !matches!(
         error.code.as_str(),
-        "22P02" | "22003" | "22007" | "22008" | "22009" | "22015" | "22P05" | "54000"
+        "22P02" | "22003" | "22007" | "22008" | "22009" | "22015" | "22P05" | "54000" | "55P04"
     ) || error
         .diagnostics
         .as_ref()
@@ -15931,6 +18053,144 @@ fn attach_range_literal_position(sql: &str, error: PgError) -> PgError {
     }
 }
 
+fn fastpath_sql(call: &FastpathCall) -> Result<String, PgError> {
+    let integer = |index| fastpath_i32(call, index);
+    let oid = |index| fastpath_u32(call, index);
+    let int64 = |index| fastpath_i64(call, index);
+    let bytea = |index| fastpath_bytea_sql(call, index);
+    match call.function_oid {
+        715 => Ok(format!("SELECT lo_create({})", oid(0)?)),
+        952 => Ok(format!("SELECT lo_open({}, {})", oid(0)?, integer(1)?)),
+        953 => Ok(format!("SELECT lo_close({})", integer(0)?)),
+        954 => Ok(format!("SELECT loread({}, {})", integer(0)?, integer(1)?)),
+        955 => Ok(format!("SELECT lowrite({}, {})", integer(0)?, bytea(1)?)),
+        957 => Ok(format!("SELECT lo_creat({})", integer(0)?)),
+        964 => Ok(format!("SELECT lo_unlink({})", oid(0)?)),
+        1004 => Ok(format!(
+            "SELECT lo_truncate({}, {})",
+            integer(0)?,
+            integer(1)?
+        )),
+        3170 => Ok(format!(
+            "SELECT lo_lseek64({}, {}, {})",
+            integer(0)?,
+            int64(1)?,
+            integer(2)?
+        )),
+        3171 => Ok(format!("SELECT lo_tell64({})", integer(0)?)),
+        3172 => Ok(format!(
+            "SELECT lo_truncate64({}, {})",
+            integer(0)?,
+            int64(1)?
+        )),
+        3457 => Ok(format!("SELECT lo_from_bytea({}, {})", oid(0)?, bytea(1)?)),
+        3458 => Ok(format!("SELECT lo_get({})", oid(0)?)),
+        3459 => Ok(format!(
+            "SELECT lo_get({}, {}, {})",
+            oid(0)?,
+            int64(1)?,
+            integer(2)?
+        )),
+        3460 => Ok(format!(
+            "SELECT lo_put({}, {}, {})",
+            oid(0)?,
+            int64(1)?,
+            bytea(2)?
+        )),
+        _ => Err(PgError::error(
+            "42883",
+            format!("function with OID {} does not exist", call.function_oid),
+        )),
+    }
+}
+
+fn fastpath_format(call: &FastpathCall, index: usize) -> Result<i16, PgError> {
+    match call.argument_formats.as_slice() {
+        [] => Ok(0),
+        [format] => Ok(*format),
+        formats => formats
+            .get(index)
+            .copied()
+            .ok_or_else(|| PgError::protocol("fastpath argument index is out of range")),
+    }
+}
+
+fn fastpath_argument(call: &FastpathCall, index: usize) -> Result<&[u8], PgError> {
+    call.arguments
+        .get(index)
+        .ok_or_else(|| PgError::protocol("fastpath argument index is out of range"))?
+        .as_deref()
+        .ok_or_else(|| PgError::error("22004", "fastpath function argument must not be null"))
+}
+
+fn fastpath_i32(call: &FastpathCall, index: usize) -> Result<i32, PgError> {
+    let value = fastpath_argument(call, index)?;
+    match fastpath_format(call, index)? {
+        0 => std::str::from_utf8(value)
+            .map_err(|_| PgError::error("22P02", "invalid text fastpath integer"))?
+            .parse()
+            .map_err(|_| PgError::error("22P02", "invalid text fastpath integer")),
+        1 => {
+            let bytes: [u8; 4] = value
+                .try_into()
+                .map_err(|_| PgError::protocol("invalid binary fastpath int4 length"))?;
+            Ok(i32::from_be_bytes(bytes))
+        }
+        _ => unreachable!("frontend validates fastpath argument format"),
+    }
+}
+
+fn fastpath_u32(call: &FastpathCall, index: usize) -> Result<u32, PgError> {
+    let value = fastpath_argument(call, index)?;
+    match fastpath_format(call, index)? {
+        0 => std::str::from_utf8(value)
+            .map_err(|_| PgError::error("22P02", "invalid text fastpath OID"))?
+            .parse()
+            .map_err(|_| PgError::error("22P02", "invalid text fastpath OID")),
+        1 => {
+            let bytes: [u8; 4] = value
+                .try_into()
+                .map_err(|_| PgError::protocol("invalid binary fastpath OID length"))?;
+            Ok(u32::from_be_bytes(bytes))
+        }
+        _ => unreachable!("frontend validates fastpath argument format"),
+    }
+}
+
+fn fastpath_i64(call: &FastpathCall, index: usize) -> Result<i64, PgError> {
+    let value = fastpath_argument(call, index)?;
+    match fastpath_format(call, index)? {
+        0 => std::str::from_utf8(value)
+            .map_err(|_| PgError::error("22P02", "invalid text fastpath integer"))?
+            .parse()
+            .map_err(|_| PgError::error("22P02", "invalid text fastpath integer")),
+        1 => {
+            let bytes: [u8; 8] = value
+                .try_into()
+                .map_err(|_| PgError::protocol("invalid binary fastpath int8 length"))?;
+            Ok(i64::from_be_bytes(bytes))
+        }
+        _ => unreachable!("frontend validates fastpath argument format"),
+    }
+}
+
+fn fastpath_bytea_sql(call: &FastpathCall, index: usize) -> Result<String, PgError> {
+    let value = fastpath_argument(call, index)?;
+    let bytes = match fastpath_format(call, index)? {
+        0 => {
+            let text = std::str::from_utf8(value)
+                .map_err(|_| PgError::error("22P02", "invalid text fastpath bytea"))?;
+            let hex = text
+                .strip_prefix("\\x")
+                .ok_or_else(|| PgError::error("22P02", "invalid text fastpath bytea"))?;
+            hex::decode(hex).map_err(|_| PgError::error("22P02", "invalid text fastpath bytea"))?
+        }
+        1 => value.to_vec(),
+        _ => unreachable!("frontend validates fastpath argument format"),
+    };
+    Ok(format!("'\\x{}'::bytea", hex::encode(bytes)))
+}
+
 impl Session for SqlSession {
     fn set_database(&mut self, name: &str) {
         self.database = name.to_string();
@@ -16034,6 +18294,25 @@ impl Session for SqlSession {
             }
         }
         Ok(results)
+    }
+
+    async fn fastpath(&mut self, call: FastpathCall) -> Result<Option<bytes::Bytes>, PgError> {
+        let sql = fastpath_sql(&call)?;
+        let mut results = self.simple_query(&sql).await?;
+        let Some(QueryResult::Rows { rows, .. }) = results.pop() else {
+            return Err(PgError::protocol("fastpath function did not return a row"));
+        };
+        let Some(row) = rows.into_iter().next() else {
+            return Err(PgError::protocol("fastpath function returned no row"));
+        };
+        let Some(value) = row.into_iter().next() else {
+            return Err(PgError::protocol("fastpath function returned no value"));
+        };
+        Ok(value.map(|cell| match call.result_format {
+            0 => cell.text,
+            1 => cell.binary,
+            _ => unreachable!("frontend validates fastpath result format"),
+        }))
     }
 
     async fn simple_query_into<S: crabka_pgwire::engine::ResultSink>(
@@ -16225,6 +18504,9 @@ impl Session for SqlSession {
             self.reject_prepared_participant()
                 .map_err(ExecError::into_pg)?;
             let result = (|| {
+                let _rowtype_parse = RELATION_ROWTYPE_PARSE_LOCK
+                    .lock()
+                    .expect("relation rowtype parse lock");
                 let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
                 let statement = parse_single_extended_statement(sql, &type_schemas)?;
                 let shape = self.describe_prepared_shape(&statement, param_types)?;
@@ -16503,12 +18785,16 @@ impl Session for SqlSession {
         // This is the wire loop's first look at a simple-query string, so a
         // parse failure here is the one the client sees — and PostgreSQL aborts
         // an open transaction block on a syntax error like any other.
-        let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
-        let statements =
+        let statements = {
+            let _rowtype_parse = RELATION_ROWTYPE_PARSE_LOCK
+                .lock()
+                .expect("relation rowtype parse lock");
+            let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
             crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
                 self.mark_transaction_failed();
                 parse_failure(sql, error)
-            })?;
+            })?
+        };
         let parsed = single_copy_from_stdin(&statements);
         self.copy_probe = Some((sql.to_string(), statements));
         let Some(copy) = parsed else {
@@ -16525,6 +18811,9 @@ impl Session for SqlSession {
         let statements = match self.copy_probe.take() {
             Some((probed, statements)) if probed == sql => statements,
             _ => {
+                let _rowtype_parse = RELATION_ROWTYPE_PARSE_LOCK
+                    .lock()
+                    .expect("relation rowtype parse lock");
                 let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
                 crabka_pgparser::parse_with_type_schemas(sql, &type_schemas).map_err(|error| {
                     self.mark_transaction_failed();
@@ -16556,9 +18845,14 @@ impl Session for SqlSession {
         data: Vec<bytes::Bytes>,
     ) -> Result<QueryResult, PgError> {
         let _tracked = self.track_statement(sql);
-        let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
-        let statements = crabka_pgparser::parse_with_type_schemas(sql, &type_schemas)
-            .map_err(|error| parse_failure(sql, error))?;
+        let statements = {
+            let _rowtype_parse = RELATION_ROWTYPE_PARSE_LOCK
+                .lock()
+                .expect("relation rowtype parse lock");
+            let type_schemas = self.type_search_schemas().map_err(ExecError::into_pg)?;
+            crabka_pgparser::parse_with_type_schemas(sql, &type_schemas)
+                .map_err(|error| parse_failure(sql, error))?
+        };
         let Some(copy) = statements
             .get(statement_index)
             .and_then(copy_from_stdin_stmt)
@@ -16712,6 +19006,79 @@ mod tests {
         guc_default, guc_vartype, parse_enum_guc,
     };
     use crate::{ExecError, SqlEngine};
+
+    #[test]
+    fn variadic_array_error_points_at_the_argument() {
+        let error = super::attach_variadic_array_position(
+            "select concat_ws(',', variadic 10)",
+            crabka_pgwire::error::PgError::error("42804", "VARIADIC argument must be an array"),
+        );
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.position)
+                == Some(32),
+        );
+    }
+
+    #[test]
+    fn typed_table_semantic_errors_point_at_the_source() {
+        for (sql, code, message, position) in [
+            (
+                "CREATE TABLE ttable1 OF nothing",
+                "42704",
+                "type \"nothing\" does not exist",
+                25,
+            ),
+            (
+                "ALTER TABLE persons ALTER COLUMN name TYPE varchar",
+                "42809",
+                "cannot alter column type of typed table",
+                34,
+            ),
+        ] {
+            let statement = crabka_pgparser::parse(sql)
+                .expect("valid statement")
+                .pop()
+                .expect("one statement");
+            let error = super::attach_typed_table_position(
+                sql,
+                &statement,
+                crabka_pgwire::error::PgError::error(code, message),
+            );
+            assert!(
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|fields| fields.position)
+                    == Some(position),
+                "{sql}: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_and_execute_agree_on_sorted_aggregate_result_type() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE t (a int); INSERT INTO t VALUES (2), (1)")
+            .await
+            .expect("seed");
+        let sql = "SELECT (SELECT array_agg(a ORDER BY a) FROM t)::text";
+        let described = session.test_describe(sql).await.expect("describe");
+        let QueryResult::Rows { fields, .. } = session
+            .simple_query(sql)
+            .await
+            .expect("execute")
+            .pop()
+            .expect("one result")
+        else {
+            panic!("expected rows");
+        };
+        assert!(super::result_type(&described) == super::result_type(&fields));
+    }
 
     struct FailOnCommitter {
         kv: Arc<dyn Kv>,
@@ -16896,6 +19263,7 @@ mod tests {
             reserved_table_ids: None,
             own_xid: own,
             row_security: session.guc.row_security(),
+            default_table_access_method: session.guc.default_table_access_method(),
         };
         let policy_stack = crate::rls::PolicyStack::default();
         let read_ctx = crate::subquery::SubCtx {
@@ -16905,6 +19273,7 @@ mod tests {
             gsnap: &gsnap,
             snapshot: &snapshot,
             own,
+            command_id: None,
             ctes: &ctes,
             eval_ctx: &eval_ctx,
             fctx,
@@ -16950,7 +19319,7 @@ mod tests {
         let (_, state) = crate::plan::exec::try_execute_seq_scan_with_state(&read_ctx, &select)
             .expect("plan state executes")
             .expect("stored-table shape retains plan state");
-        assert_eq!((state.nloops, state.ntuples, state.rows_removed), (1, 2, 1));
+        assert_eq!((state.nloops, state.ntuples, state.rows_removed), (1, 2, 0));
         assert_eq!(state.children.len(), 1);
         assert!(matches!(
             state.children[0].plan.node,
@@ -16962,7 +19331,7 @@ mod tests {
                 state.children[0].ntuples,
                 state.children[0].rows_removed,
             ),
-            (1, 3, 0)
+            (1, 2, 0)
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
@@ -16999,8 +19368,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17015,8 +19390,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17047,10 +19428,22 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(0), crabka_pgtypes::Datum::Int8(1)],
-                vec![crabka_pgtypes::Datum::Int4(0), crabka_pgtypes::Datum::Int8(1)],
-                vec![crabka_pgtypes::Datum::Int4(0), crabka_pgtypes::Datum::Int8(1)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(0),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(0),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(0),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(3)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17085,13 +19478,17 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
-                vec![crabka_pgtypes::Datum::Int4(0), crabka_pgtypes::Datum::Int8(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(0),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
             ]
         );
-        for sql in [
-            "SELECT generate_series(1, 2), row_number() OVER () FROM seq_scan_test",
-        ] {
+        for sql in ["SELECT generate_series(1, 2), row_number() OVER () FROM seq_scan_test"] {
             assert!(
                 crate::plan::exec::try_execute_seq_scan(&read_ctx, &select_of(sql))
                     .expect("unsupported direct SeqScan shape falls back")
@@ -17127,8 +19524,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
                 vec![crabka_pgtypes::Datum::Null, crabka_pgtypes::Datum::Int8(3)],
             ]
         );
@@ -17144,9 +19547,18 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(2)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17161,8 +19573,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(3)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(3)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
             ]
         );
         for sql in [
@@ -17203,9 +19621,18 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(0), crabka_pgtypes::Datum::Int8(1)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
-                vec![crabka_pgtypes::Datum::Int4(0), crabka_pgtypes::Datum::Int8(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(0),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(3)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(0),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17242,9 +19669,7 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
-            &select_of(
-                "SELECT n FROM (VALUES (2), (1) ORDER BY 1 LIMIT 1) AS derived(n)",
-            ),
+            &select_of("SELECT n FROM (VALUES (2), (1) ORDER BY 1 LIMIT 1) AS derived(n)"),
         )
         .expect("derived ValuesScan tail plan executes")
         .expect("derived VALUES ORDER BY and LIMIT use SubqueryScan");
@@ -17259,8 +19684,8 @@ mod tests {
         .expect("derived VALUES FETCH WITH TIES uses SubqueryScan");
         assert_eq!(
             relation.rows,
-                vec![
-                    vec![crabka_pgtypes::Datum::Int4(1)],
+            vec![
+                vec![crabka_pgtypes::Datum::Int4(1)],
                 vec![crabka_pgtypes::Datum::Int4(1)],
             ]
         );
@@ -17273,9 +19698,7 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(1)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
-            &select_of(
-                "SELECT a FROM seq_scan_test TABLESAMPLE BERNOULLI (100) WHERE a = 2",
-            ),
+            &select_of("SELECT a FROM seq_scan_test TABLESAMPLE BERNOULLI (100) WHERE a = 2"),
         )
         .expect("sampled SeqScan plan executes")
         .expect("stored table TABLESAMPLE uses SeqScan");
@@ -17309,9 +19732,7 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int4(3)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
-            &select_of(
-                "SELECT a FROM seq_scan_test ORDER BY a FETCH FIRST 2 ROWS WITH TIES",
-            ),
+            &select_of("SELECT a FROM seq_scan_test ORDER BY a FETCH FIRST 2 ROWS WITH TIES"),
         )
         .expect("SeqScan FETCH WITH TIES plan executes")
         .expect("stored table FETCH WITH TIES uses Limit");
@@ -17335,16 +19756,23 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(3)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(3)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int4(3)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(3)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(3)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int4(3)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
-            &select_of(
-                "SELECT a, p FROM seq_scan_test, planned_cte AS c(p) WHERE a = 1 AND p = 2",
-            ),
+            &select_of("SELECT a, p FROM seq_scan_test, planned_cte AS c(p) WHERE a = 1 AND p = 2"),
         )
         .expect("NestedLoop CteScan plan executes")
         .expect("aliased CTE in a nested loop uses CteScan");
@@ -17357,9 +19785,7 @@ mod tests {
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
-            &select_of(
-                "SELECT a FROM seq_scan_test, planned_transition TABLESAMPLE SYSTEM (0)",
-            ),
+            &select_of("SELECT a FROM seq_scan_test, planned_transition TABLESAMPLE SYSTEM (0)"),
         )
         .expect("NestedLoop NamedTuplestoreScan plan executes")
         .expect("sampled transition in a nested loop uses NamedTuplestoreScan");
@@ -17396,9 +19822,7 @@ mod tests {
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(0)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
-            &select_of(
-                "SELECT n FROM planned_transition TABLESAMPLE BERNOULLI (100) WHERE n = 3",
-            ),
+            &select_of("SELECT n FROM planned_transition TABLESAMPLE BERNOULLI (100) WHERE n = 3"),
         )
         .expect("sampled NamedTuplestoreScan plan executes")
         .expect("transition TABLESAMPLE uses NamedTuplestoreScan");
@@ -17412,10 +19836,7 @@ mod tests {
         )
         .expect("NestedLoop plan executes")
         .expect("joined aggregate uses Aggregate");
-        assert_eq!(
-            relation.rows,
-            vec![vec![crabka_pgtypes::Datum::Int8(1)]]
-        );
+        assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(1)]]);
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of("SELECT l.a FROM seq_scan_test AS l, seq_scan_third AS r GROUP BY l.a"),
@@ -17462,7 +19883,10 @@ mod tests {
         .expect("stored-table column aliases use NestedLoop");
         assert_eq!(
             relation.rows,
-            vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(3)]]
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int4(3)
+            ]]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
@@ -17534,8 +19958,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17546,7 +19976,10 @@ mod tests {
         .expect("stored table and CTE source use NestedLoop");
         assert_eq!(
             relation.rows,
-            vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)]]
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int4(2)
+            ]]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
@@ -17557,8 +19990,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(3)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(3)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17583,7 +20022,10 @@ mod tests {
         .expect("stored table and JSON_TABLE source use NestedLoop");
         assert_eq!(
             relation.rows,
-            vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)]]
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int4(2)
+            ]]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
@@ -17597,8 +20039,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17634,7 +20082,10 @@ mod tests {
         .expect("nested window owns ordering and limit");
         assert_eq!(
             relation.rows,
-            vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(2)]]
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int8(2)
+            ]]
         );
         for sql in [
             "SELECT a FROM seq_scan_test, LATERAL (VALUES (1)) AS derived(n)",
@@ -17755,9 +20206,18 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
-                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int8(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(3)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(3),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17772,8 +20232,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(3)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17788,14 +20254,20 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(3)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
             ]
         );
         let named_aggregate_select = select_of("SELECT count(*) FROM planned_transition");
         let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &named_aggregate_select)
-        .expect("NamedTuplestoreScan Aggregate plan executes")
-        .expect("transition source aggregate uses Aggregate");
+            .expect("NamedTuplestoreScan Aggregate plan executes")
+            .expect("transition source aggregate uses Aggregate");
         assert_eq!(relation.rows, vec![vec![crabka_pgtypes::Datum::Int8(3)]]);
         let planned = crate::plan::exec::named_tuplestore_scan_plan_for_test(
             &read_ctx,
@@ -17807,7 +20279,10 @@ mod tests {
         let crate::plan::query::PlanNode::Aggregate { input } = &planned.node else {
             panic!("transition aggregate should plan an Aggregate");
         };
-        assert!(input.target_list.is_empty(), "Filter leaves projection to Aggregate");
+        assert!(
+            input.target_list.is_empty(),
+            "Filter leaves projection to Aggregate"
+        );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of("SELECT DISTINCT n % 2 FROM planned_transition"),
@@ -17821,7 +20296,8 @@ mod tests {
                 vec![crabka_pgtypes::Datum::Int4(0)],
             ]
         );
-        let named_limit_select = select_of("SELECT n FROM planned_transition ORDER BY n DESC LIMIT 2");
+        let named_limit_select =
+            select_of("SELECT n FROM planned_transition ORDER BY n DESC LIMIT 2");
         let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &named_limit_select)
             .expect("NamedTuplestoreScan Sort/Limit plan executes")
             .expect("transition sort and limit use Sort and Limit");
@@ -17845,14 +20321,21 @@ mod tests {
         );
         let named_project_set_select =
             select_of("SELECT n, generate_series(1, 2) FROM planned_transition WHERE n = 1");
-        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &named_project_set_select)
-            .expect("NamedTuplestoreScan ProjectSet plan executes")
-            .expect("transition projection SRF uses ProjectSet");
+        let relation =
+            crate::plan::exec::try_execute_seq_scan(&read_ctx, &named_project_set_select)
+                .expect("NamedTuplestoreScan ProjectSet plan executes")
+                .expect("transition projection SRF uses ProjectSet");
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
             ]
         );
         let planned = crate::plan::exec::named_tuplestore_scan_plan_for_test(
@@ -17865,7 +20348,10 @@ mod tests {
         let crate::plan::query::PlanNode::ProjectSet { input } = &planned.node else {
             panic!("transition projection SRF should plan a ProjectSet");
         };
-        assert!(input.target_list.is_empty(), "Filter leaves projection to ProjectSet");
+        assert!(
+            input.target_list.is_empty(),
+            "Filter leaves projection to ProjectSet"
+        );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
@@ -17878,8 +20364,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int4(2)],
-                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int4(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(3),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(3),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17894,8 +20386,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int4(2)],
-                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int4(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(3),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(3),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17930,9 +20428,18 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(1)],
-                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int8(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(3),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -17971,13 +20478,19 @@ mod tests {
         let cte_project_set_select =
             select_of("SELECT n, generate_series(1, 2) FROM planned_cte WHERE n = 1");
         let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &cte_project_set_select)
-        .expect("CteScan ProjectSet plan executes")
-        .expect("CTE projection SRF uses ProjectSet");
+            .expect("CteScan ProjectSet plan executes")
+            .expect("CTE projection SRF uses ProjectSet");
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
             ]
         );
         let planned = crate::plan::exec::cte_scan_plan_for_test(
@@ -17990,7 +20503,10 @@ mod tests {
         let crate::plan::query::PlanNode::ProjectSet { input } = &planned.node else {
             panic!("CTE projection SRF should plan a ProjectSet");
         };
-        assert!(input.target_list.is_empty(), "Filter leaves projection to ProjectSet");
+        assert!(
+            input.target_list.is_empty(),
+            "Filter leaves projection to ProjectSet"
+        );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of("SELECT n, row_number() OVER (ORDER BY n DESC) FROM planned_cte"),
@@ -18000,9 +20516,18 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(3)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
-                vec![crabka_pgtypes::Datum::Int4(3), crabka_pgtypes::Datum::Int8(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(3)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(3),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -18053,14 +20578,21 @@ mod tests {
             "SELECT n, generate_series(1, 2) \
              FROM (VALUES (1)) AS derived(n)",
         );
-        let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &derived_project_set_select)
-        .expect("SubqueryScan ProjectSet plan executes")
-        .expect("derived projection SRF uses ProjectSet");
+        let relation =
+            crate::plan::exec::try_execute_seq_scan(&read_ctx, &derived_project_set_select)
+                .expect("SubqueryScan ProjectSet plan executes")
+                .expect("derived projection SRF uses ProjectSet");
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
             ]
         );
         let planned = crate::plan::exec::subquery_scan_plan_for_test(
@@ -18073,7 +20605,10 @@ mod tests {
         let crate::plan::query::PlanNode::ProjectSet { input } = &planned.node else {
             panic!("derived projection SRF should plan a ProjectSet");
         };
-        assert!(input.target_list.is_empty(), "Filter leaves projection to ProjectSet");
+        assert!(
+            input.target_list.is_empty(),
+            "Filter leaves projection to ProjectSet"
+        );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of(
@@ -18086,8 +20621,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(2)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -18101,7 +20642,10 @@ mod tests {
         .expect("derived window owns ordering and limit");
         assert_eq!(
             relation.rows,
-            vec![vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(2)]]
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(1),
+                crabka_pgtypes::Datum::Int8(2)
+            ]]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
@@ -18180,11 +20724,9 @@ mod tests {
             "SELECT seq_scan_test.a, t.n FROM seq_scan_test, \
              ROWS FROM (generate_series(1, 2)) AS t(n)",
         );
-        let planned = crate::plan::exec::nested_loop_plan_for_test(
-            &read_ctx,
-            &nested_rows_from_select,
-        )
-        .expect("ROWS FROM joins use nested-loop planning");
+        let planned =
+            crate::plan::exec::nested_loop_plan_for_test(&read_ctx, &nested_rows_from_select)
+                .expect("ROWS FROM joins use nested-loop planning");
         let crate::plan::query::PlanNode::NestedLoop { inner, .. } = &planned.node else {
             panic!("ROWS FROM join should plan a Nested Loop");
         };
@@ -18297,8 +20839,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
             ]
         );
         let relation = crate::plan::exec::try_execute_seq_scan(
@@ -18312,20 +20860,29 @@ mod tests {
         .expect("FROM SRF window owns ordering and limit");
         assert_eq!(
             relation.rows,
-            vec![vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(2)]]
+            vec![vec![
+                crabka_pgtypes::Datum::Int4(2),
+                crabka_pgtypes::Datum::Int8(2)
+            ]]
         );
         let project_set_select = select_of(
             "SELECT n, generate_series(1, 2) \
              FROM unnest(ARRAY[1]) AS g(n)",
         );
         let relation = crate::plan::exec::try_execute_seq_scan(&read_ctx, &project_set_select)
-        .expect("FunctionScan ProjectSet plan executes")
-        .expect("FROM SRF projection SRF uses ProjectSet");
+            .expect("FunctionScan ProjectSet plan executes")
+            .expect("FROM SRF projection SRF uses ProjectSet");
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(1)],
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int4(2)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(1)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int4(2)
+                ],
             ]
         );
         let planned = crate::plan::exec::function_scan_plan_for_test(
@@ -18338,7 +20895,10 @@ mod tests {
         let crate::plan::query::PlanNode::ProjectSet { input } = &planned.node else {
             panic!("FunctionScan projection SRF should plan a ProjectSet");
         };
-        assert!(input.target_list.is_empty(), "Filter leaves projection to ProjectSet");
+        assert!(
+            input.target_list.is_empty(),
+            "Filter leaves projection to ProjectSet"
+        );
         let relation = crate::plan::exec::try_execute_seq_scan(
             &read_ctx,
             &select_of("SELECT count(*) FROM unnest(ARRAY[1, 1, 2]) AS g(n) WHERE n = 1"),
@@ -18355,8 +20915,14 @@ mod tests {
         assert_eq!(
             relation.rows,
             vec![
-                vec![crabka_pgtypes::Datum::Int4(1), crabka_pgtypes::Datum::Int8(2)],
-                vec![crabka_pgtypes::Datum::Int4(2), crabka_pgtypes::Datum::Int8(1)],
+                vec![
+                    crabka_pgtypes::Datum::Int4(1),
+                    crabka_pgtypes::Datum::Int8(2)
+                ],
+                vec![
+                    crabka_pgtypes::Datum::Int4(2),
+                    crabka_pgtypes::Datum::Int8(1)
+                ],
             ]
         );
         for sql in [
@@ -18486,11 +21052,7 @@ mod tests {
                  FROM (VALUES (1), (2), (3)) AS t(v) ORDER BY v",
             )
             .await
-                == Ok(vec![
-                    vec!["0".into()],
-                    vec!["1".into()],
-                    vec!["2".into()],
-                ])
+                == Ok(vec![vec!["0".into()], vec!["1".into()], vec!["2".into()],])
         );
 
         let mut constrained = SqlEngine::new_with_policy(crate::RuntimePolicy {
@@ -19137,6 +21699,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_enum_values_wait_for_commit_except_on_new_types() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TYPE enum_txn_old AS ENUM ('old')")
+            .await
+            .expect("seed enum");
+        for sql in [
+            "BEGIN",
+            "ALTER TYPE enum_txn_old ADD VALUE 'new'",
+            "SAVEPOINT before_use",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+        assert!(sqlstate(&mut session, "SELECT 'new'::enum_txn_old").await == "55P04");
+        session
+            .simple_query("ROLLBACK TO before_use")
+            .await
+            .expect("recover after cast");
+        assert!(
+            rows_or_sqlstate(&mut session, "SELECT enum_first(NULL::enum_txn_old)").await
+                == Ok(vec![vec!["old".into()]])
+        );
+        assert!(sqlstate(&mut session, "SELECT enum_last(NULL::enum_txn_old)").await == "55P04");
+        session
+            .simple_query("ROLLBACK TO before_use")
+            .await
+            .expect("recover after enum_last");
+        assert!(sqlstate(&mut session, "SELECT enum_range(NULL::enum_txn_old)").await == "55P04");
+        session
+            .simple_query("ROLLBACK TO before_use")
+            .await
+            .expect("recover after enum_range");
+        session
+            .simple_query("COMMIT")
+            .await
+            .expect("commit enum value");
+        assert!(
+            rows_or_sqlstate(&mut session, "SELECT 'new'::enum_txn_old").await
+                == Ok(vec![vec!["new".into()]])
+        );
+
+        for sql in [
+            "BEGIN",
+            "ALTER TYPE enum_txn_old RENAME TO enum_txn_renamed",
+            "ALTER TYPE enum_txn_renamed ADD VALUE 'bad'",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+        assert!(sqlstate(&mut session, "SELECT 'bad'::enum_txn_renamed").await == "55P04");
+        session
+            .simple_query("ROLLBACK")
+            .await
+            .expect("rollback rename");
+
+        for sql in [
+            "BEGIN",
+            "CREATE TYPE enum_txn_new AS ENUM ('old')",
+            "ALTER TYPE enum_txn_new ADD VALUE 'new'",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+        assert!(
+            rows_or_sqlstate(&mut session, "SELECT 'new'::enum_txn_new").await
+                == Ok(vec![vec!["new".into()]])
+        );
+        session
+            .simple_query("COMMIT")
+            .await
+            .expect("commit new type");
+        session
+            .simple_query("DROP TYPE enum_txn_old, enum_txn_new")
+            .await
+            .expect("clean up types");
+    }
+
+    #[tokio::test]
     async fn client_min_messages_filters_plpgsql_raise_output() {
         use assert2::assert;
         use crabka_pgwire::error::Severity;
@@ -19169,6 +21810,63 @@ mod tests {
             .expect("error threshold");
         assert!(notices.try_recv().expect("info").severity == Severity::Info);
         assert!(notices.try_recv() == Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn jsonpath_temporal_precision_warnings_reach_the_session_notice_sink() {
+        use crabka_pgwire::error::Severity;
+        use tokio::sync::mpsc::error::TryRecvError;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        session
+            .simple_query(r#"SELECT jsonb_path_query('"12:34:56.789"', '$.time(10)')"#)
+            .await
+            .expect("jsonpath query");
+        let warning = notices.try_recv().expect("precision warning");
+        assert_eq!(warning.severity, Severity::Warning);
+        assert_eq!(
+            warning.message,
+            "TIME(10) precision reduced to maximum allowed, 6"
+        );
+        let error = session
+            .simple_query(r#"SELECT jsonb_path_query('"12:34:56"', '$.time(12345678901)')"#)
+            .await
+            .expect_err("out-of-range precision");
+        assert_eq!(error.code, "22031");
+        assert_eq!(notices.try_recv(), Err(TryRecvError::Empty));
+
+        session
+            .simple_query(
+                r#"SET client_min_messages = error; SELECT jsonb_path_query('"12:34:56.789"', '$.time(10)')"#,
+            )
+            .await
+            .expect("suppressed warning query");
+        assert_eq!(notices.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn set_local_outside_a_transaction_warns_and_does_not_persist() {
+        use crabka_pgwire::error::Severity;
+        use tokio::sync::mpsc::error::TryRecvError;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        session
+            .simple_query("SET LOCAL vacuum_cost_delay = 50")
+            .await
+            .expect("SET LOCAL");
+        let warning = notices.try_recv().expect("SET LOCAL warning");
+        assert_eq!(warning.severity, Severity::Warning);
+        assert_eq!(warning.code, "25P01");
+        assert_eq!(
+            warning.message,
+            "SET LOCAL can only be used in transaction blocks"
+        );
+        assert_eq!(shown_setting(&mut session, "vacuum_cost_delay").await, "0");
+        assert_eq!(notices.try_recv(), Err(TryRecvError::Empty));
     }
 
     #[tokio::test]
@@ -19314,6 +22012,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cursor_materializes_when_first_fetched() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("CREATE TABLE t (id int4)")
+            .await
+            .expect("ddl");
+        s.simple_query("INSERT INTO t VALUES (1)")
+            .await
+            .expect("seed");
+        s.simple_query("BEGIN").await.expect("begin");
+        s.simple_query("DECLARE c CURSOR FOR SELECT id FROM t ORDER BY id")
+            .await
+            .expect("declare");
+        s.simple_query("INSERT INTO t VALUES (2)")
+            .await
+            .expect("later insert");
+        assert!(
+            rows_or_sqlstate(&mut s, "FETCH ALL FROM c").await
+                == Ok(vec![vec!["1".into()], vec!["2".into()]])
+        );
+    }
+
+    #[tokio::test]
+    async fn where_current_of_changes_only_the_cursor_row() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("CREATE TABLE current_of (id int4, value text)")
+            .await
+            .expect("ddl");
+        s.simple_query("INSERT INTO current_of VALUES (1, 'one'), (2, 'two')")
+            .await
+            .expect("seed");
+        s.simple_query("BEGIN").await.expect("begin");
+        s.simple_query("DECLARE c CURSOR FOR SELECT id FROM current_of ORDER BY id")
+            .await
+            .expect("declare");
+        assert!(
+            sqlstate(
+                &mut s,
+                "UPDATE current_of SET value = 'changed' WHERE CURRENT OF c"
+            )
+            .await
+                == "24000"
+        );
+        s.simple_query("FETCH NEXT FROM c").await.expect("fetch");
+        s.simple_query("UPDATE current_of SET value = 'changed' WHERE CURRENT OF c")
+            .await
+            .expect("update current row");
+        assert!(
+            rows_or_sqlstate(&mut s, "SELECT id, value FROM current_of ORDER BY id").await
+                == Ok(vec![
+                    vec!["1".into(), "changed".into()],
+                    vec!["2".into(), "two".into()]
+                ])
+        );
+        s.simple_query("FETCH NEXT FROM c")
+            .await
+            .expect("fetch second row");
+        s.simple_query("DELETE FROM current_of WHERE CURRENT OF c")
+            .await
+            .expect("delete current row");
+        assert!(
+            rows_or_sqlstate(&mut s, "SELECT id, value FROM current_of ORDER BY id").await
+                == Ok(vec![vec!["1".into(), "changed".into()]])
+        );
+        s.simple_query("ROLLBACK").await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn where_current_of_on_an_unfetched_join_does_not_materialize_it() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new_with_policy(crate::RuntimePolicy {
+            blocking_query_memory: crabka_units::bytes(1),
+            ..Default::default()
+        })
+        .expect("policy");
+        let mut s = engine.connect();
+        s.simple_query("CREATE TABLE current_of_left (id int4)")
+            .await
+            .expect("left ddl");
+        s.simple_query("CREATE TABLE current_of_right (id int4)")
+            .await
+            .expect("right ddl");
+        s.simple_query("INSERT INTO current_of_left VALUES (1)")
+            .await
+            .expect("left seed");
+        s.simple_query("INSERT INTO current_of_right VALUES (1)")
+            .await
+            .expect("right seed");
+        s.simple_query("BEGIN").await.expect("begin");
+        s.simple_query(
+            "DECLARE c CURSOR FOR \
+             SELECT * FROM current_of_left JOIN current_of_right USING (id)",
+        )
+        .await
+        .expect("declare");
+        assert!(
+            sqlstate(&mut s, "DELETE FROM current_of_left WHERE CURRENT OF c").await == "24000"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cursor_query_error_surfaces_at_first_fetch() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("BEGIN").await.expect("begin");
+        s.simple_query("DECLARE c CURSOR FOR SELECT missing FROM absent")
+            .await
+            .expect("declare keeps the query dormant");
+        assert!(sqlstate(&mut s, "FETCH NEXT FROM c").await == "42P01");
+    }
+
+    #[tokio::test]
+    async fn pg_cursors_reports_open_cursor_metadata() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("BEGIN").await.expect("begin");
+        s.simple_query("DECLARE c BINARY NO SCROLL CURSOR WITH HOLD FOR SELECT 42")
+            .await
+            .expect("declare");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "SELECT name, statement, is_holdable, is_binary, is_scrollable, \
+                 creation_time IS NOT NULL FROM pg_cursors"
+            )
+            .await
+                == Ok(vec![vec![
+                    "c".into(),
+                    "SELECT 42".into(),
+                    "t".into(),
+                    "t".into(),
+                    "f".into(),
+                    "t".into(),
+                ]])
+        );
+    }
+
+    #[tokio::test]
     async fn a_with_hold_cursor_outlives_its_transaction() {
         use assert2::assert;
         let engine = SqlEngine::new();
@@ -19364,6 +22210,26 @@ mod tests {
             .await
             .expect("prepare");
         assert!(rows_or_sqlstate(&mut s, "EXECUTE q(41)").await == Ok(vec![vec!["42".into()]]));
+        s.simple_query("CREATE TABLE ctas_from_execute AS EXECUTE p(2)")
+            .await
+            .expect("CTAS EXECUTE with data");
+        assert!(
+            rows_or_sqlstate(&mut s, "SELECT s FROM ctas_from_execute").await
+                == Ok(vec![vec!["b".into()]])
+        );
+        s.simple_query("CREATE TABLE ctas_from_execute_empty AS EXECUTE p(1) WITH NO DATA")
+            .await
+            .expect("CTAS EXECUTE with no data");
+        assert!(
+            rows_or_sqlstate(&mut s, "SELECT count(*) FROM ctas_from_execute_empty").await
+                == Ok(vec![vec!["0".into()]])
+        );
+        s.simple_query("CREATE TABLE ctas_existing (id int4)")
+            .await
+            .expect("create target");
+        s.simple_query("CREATE TABLE IF NOT EXISTS ctas_existing AS EXECUTE absent")
+            .await
+            .expect("existing CTAS target skips its source");
         assert!(
             rows_or_sqlstate(
                 &mut s,
@@ -19392,6 +22258,57 @@ mod tests {
         assert!(
             rows_or_sqlstate(&mut s, "SELECT count(*) FROM pg_prepared_statements").await
                 == Ok(vec![vec!["0".into()]])
+        );
+    }
+
+    #[tokio::test]
+    async fn default_table_privileges_apply_when_the_role_creates_a_table() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("CREATE USER owner").await.expect("owner");
+        s.simple_query("CREATE USER reader").await.expect("reader");
+        s.simple_query("CREATE SCHEMA private AUTHORIZATION owner")
+            .await
+            .expect("schema");
+        s.simple_query(
+            "ALTER DEFAULT PRIVILEGES FOR ROLE owner \
+             REVOKE INSERT ON TABLES FROM owner",
+        )
+        .await
+        .expect("default revoke");
+        s.simple_query(
+            "ALTER DEFAULT PRIVILEGES FOR ROLE owner IN SCHEMA private \
+             GRANT SELECT ON TABLES TO reader",
+        )
+        .await
+        .expect("default grant");
+        s.simple_query("GRANT USAGE ON SCHEMA private TO reader")
+            .await
+            .expect("schema usage");
+        s.simple_query("SET SESSION AUTHORIZATION owner")
+            .await
+            .expect("owner session");
+        s.simple_query("CREATE TABLE private.docs (id int4)")
+            .await
+            .expect("table");
+        assert!(sqlstate(&mut s, "INSERT INTO private.docs VALUES (1)").await == "42501");
+        s.simple_query("CREATE TABLE private.from_ctas AS SELECT 2")
+            .await
+            .expect("CTAS population bypasses the default ACL");
+        assert!(sqlstate(&mut s, "INSERT INTO private.from_ctas VALUES (3)").await == "42501");
+        s.simple_query("RESET SESSION AUTHORIZATION")
+            .await
+            .expect("reset");
+        s.simple_query("INSERT INTO private.docs VALUES (1)")
+            .await
+            .expect("seed");
+        s.simple_query("SET SESSION AUTHORIZATION reader")
+            .await
+            .expect("reader session");
+        assert!(
+            rows_or_sqlstate(&mut s, "SELECT id FROM private.docs").await
+                == Ok(vec![vec!["1".into()]])
         );
     }
 
@@ -19493,6 +22410,7 @@ mod tests {
             ("max_parallel_workers_per_gather", "0", "0"),
             ("allow_in_place_tablespaces", "true", "on"),
             ("crabka_test.option", "'value'", "value"),
+            ("custom.my.qualified.guc", "'value'", "value"),
         ];
         for (name, value, shown) in cases {
             s.simple_query(&format!("SET {name} = {value}"))
@@ -19520,6 +22438,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_custom_guc_names_report_postgres_detail() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let error = session
+            .simple_query("SET custom.\"bad-guc\" = 42")
+            .await
+            .expect_err("invalid custom name");
+        assert_eq!(error.code, "22023");
+        assert_eq!(
+            error.message,
+            "invalid configuration parameter name \"custom.bad-guc\""
+        );
+        assert_eq!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.detail.as_deref()),
+            Some(
+                "Custom parameter names must be two or more simple identifiers separated by dots."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn default_with_oids_rejects_only_the_unsupported_true_value() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("SET default_with_oids = false")
+            .await
+            .expect("false remains accepted");
+        assert_eq!(
+            shown_setting(&mut session, "default_with_oids").await,
+            "off"
+        );
+        let error = session
+            .simple_query("SET default_with_oids = true")
+            .await
+            .expect_err("WITH OIDS is unsupported");
+        assert_eq!(error.code, "0A000");
+        assert_eq!(error.message, "tables declared WITH OIDS are not supported");
+    }
+
+    #[tokio::test]
     async fn planner_compatibility_gucs_keep_postgres_values_and_enum_hints() {
         use assert2::assert;
         let engine = SqlEngine::new();
@@ -19539,6 +22501,18 @@ mod tests {
                 "SET geqo_selection_bias = 1.5",
                 "SHOW geqo_selection_bias",
                 "1.5",
+            ),
+            ("SET track_counts = off", "SHOW track_counts", "off"),
+            ("SET track_functions = 'all'", "SHOW track_functions", "all"),
+            (
+                "SET stats_fetch_consistency = snapshot",
+                "SHOW stats_fetch_consistency",
+                "snapshot",
+            ),
+            (
+                "SET wal_skip_threshold = '1kB'",
+                "SHOW wal_skip_threshold",
+                "1kB",
             ),
         ] {
             assert!(sqlstate(&mut s, sql).await == "00000", "{sql}");
@@ -19625,11 +22599,73 @@ mod tests {
                 == Ok(vec![
                     vec!["Seq Scan on t (actual rows=1.00 loops=1)".into()],
                     vec!["  Filter: (id = 1)".into()],
-                    vec!["  Rows Removed by Filter: 1".into()],
                 ])
         );
         assert!(sqlstate(&mut s, "EXPLAIN (NO_SUCH_OPTION) SELECT 1").await == "42601");
         assert!(sqlstate(&mut s, "EXPLAIN (FORMAT NONSENSE) SELECT 1").await == "22023");
+    }
+
+    #[tokio::test]
+    async fn explain_uses_the_target_and_conflict_clause_of_an_instead_rule() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE hats (name text, color text); \
+             CREATE TABLE hat_data (name text PRIMARY KEY, color char(10)); \
+             CREATE RULE hats_insert AS ON INSERT TO hats DO INSTEAD \
+               INSERT INTO hat_data VALUES (NEW.name, NEW.color) \
+               ON CONFLICT (name) DO UPDATE SET color = excluded.color \
+               WHERE excluded.color <> 'forbidden'",
+        )
+        .await
+        .expect("rule ddl");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN (COSTS OFF) WITH data(name, color) AS MATERIALIZED \
+                 (VALUES ('hat', 'blue')) INSERT INTO hats SELECT * FROM data",
+            )
+            .await
+                == Ok(vec![
+                    vec!["Insert on hat_data".into()],
+                    vec!["  Conflict Resolution: UPDATE".into()],
+                    vec!["  Conflict Arbiter Indexes: hat_data_pkey".into()],
+                    vec!["  Conflict Filter: (excluded.color <> 'forbidden'::bpchar)".into()],
+                    vec!["  CTE data".into()],
+                    vec!["    ->  Values Scan on \"*VALUES*\"".into()],
+                    vec!["  ->  CTE Scan on data".into()],
+                ])
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_keeps_a_conditional_instead_rule_as_an_unexpanded_write() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE hats (name text); \
+             CREATE TABLE hat_data (name text); \
+             CREATE RULE hats_insert AS ON INSERT TO hats \
+               WHERE NEW.name = 'redirect' DO INSTEAD \
+               INSERT INTO hat_data VALUES (NEW.name)",
+        )
+        .await
+        .expect("conditional rule ddl");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN (COSTS OFF) INSERT INTO hats VALUES ('redirect')"
+            )
+            .await
+                == Ok(vec![
+                    vec!["Insert on hats".into()],
+                    vec!["  ->  Result".into()],
+                ])
+        );
     }
 
     #[tokio::test]
@@ -21257,6 +24293,7 @@ mod tests {
             &malformed,
             ColumnType::Int8,
             &time_zone,
+            crabka_pgtypes::xml::XmlOption::Content,
         )
         .expect_err("short int8 must be malformed binary");
         assert_eq!(error.code, "22P03");
@@ -21271,6 +24308,7 @@ mod tests {
             &invalid_utf8,
             ColumnType::Text,
             &time_zone,
+            crabka_pgtypes::xml::XmlOption::Content,
         )
         .expect_err("invalid UTF-8 must fail");
         assert_eq!(error.code, "22021");
@@ -21776,6 +24814,20 @@ mod tests {
         assert_eq!(
             single_text(&s.simple_query("SHOW client_encoding").await.expect("show")),
             "UTF8"
+        );
+        for encoding in ["LATIN1", "EUC_JP"] {
+            s.simple_query(&format!("SET client_encoding = {encoding}"))
+                .await
+                .unwrap_or_else(|error| panic!("{encoding}: {error:?}"));
+            assert!(
+                single_text(&s.simple_query("SHOW client_encoding").await.expect("show"))
+                    == encoding
+            );
+        }
+        assert!(
+            s.simple_query("SET client_encoding = NO_SUCH_ENCODING")
+                .await
+                .is_err()
         );
 
         s.simple_query("RESET ALL").await.expect("reset all");
@@ -22380,6 +25432,255 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_expression_workers_install_the_session_guc_runtime() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_work_mem() RETURNS text LANGUAGE plpgsql AS \
+                 $$ BEGIN RETURN current_setting('work_mem'); END $$",
+            )
+            .await
+            .expect("create function");
+        session
+            .simple_query("SET work_mem = '3MB'")
+            .await
+            .expect("set work_mem");
+
+        session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_work_mem_subquery() RETURNS text LANGUAGE plpgsql AS \
+                 $$ BEGIN RETURN (SELECT current_setting('work_mem')); END $$",
+            )
+            .await
+            .expect("create subquery function");
+        session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_set_config() RETURNS text LANGUAGE plpgsql AS \
+                 $$ BEGIN RETURN set_config('application_name', 'from-plpgsql', false); END $$",
+            )
+            .await
+            .expect("create set_config function");
+
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_work_mem()")
+                    .await
+                    .expect("PL/pgSQL current_setting")
+            ),
+            "3MB"
+        );
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_work_mem_subquery()")
+                    .await
+                    .expect("PL/pgSQL subquery current_setting")
+            ),
+            "3MB"
+        );
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_set_config()")
+                    .await
+                    .expect("PL/pgSQL set_config")
+            ),
+            "from-plpgsql"
+        );
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SHOW application_name")
+                    .await
+                    .expect("session mutation")
+            ),
+            "from-plpgsql"
+        );
+    }
+
+    #[tokio::test]
+    async fn plpgsql_perform_errors_include_sql_and_function_context() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE FUNCTION perform_context(integer) RETURNS text LANGUAGE plpgsql AS $$\n\
+                 BEGIN\n\
+                   PERFORM 1/$1;\n\
+                   RETURN 'unreachable';\n\
+                 END\n\
+                 $$",
+            )
+            .await
+            .expect("create function");
+
+        let error = session
+            .simple_query("SELECT perform_context(0)")
+            .await
+            .expect_err("division by zero");
+        assert_eq!(error.code, "22012");
+        assert_eq!(
+            error
+                .diagnostics
+                .as_deref()
+                .and_then(|diagnostics| diagnostics.context.as_deref()),
+            Some(
+                "SQL statement \"SELECT 1/$1\"\nPL/pgSQL function perform_context(integer) line 3 at PERFORM"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn function_guc_options_scope_and_propagate_plpgsql_changes() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session.simple_query("SET work_mem = '3MB'").await.unwrap();
+        session
+            .simple_query(
+                "CREATE FUNCTION report_work_mem() RETURNS text LANGUAGE sql \
+                 AS $$ SELECT current_setting('work_mem') $$ SET work_mem = '1MB'",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT report_work_mem() || '|' || current_setting('work_mem')",)
+                    .await
+                    .unwrap(),
+            ),
+            "1MB|3MB"
+        );
+        session
+            .simple_query("ALTER FUNCTION report_work_mem() SET work_mem = '2MB'")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT report_work_mem() || '|' || current_setting('work_mem')",)
+                    .await
+                    .unwrap(),
+            ),
+            "2MB|3MB"
+        );
+        session
+            .simple_query("ALTER FUNCTION report_work_mem() RESET ALL")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT report_work_mem() || '|' || current_setting('work_mem')",)
+                    .await
+                    .unwrap(),
+            ),
+            "3MB|3MB"
+        );
+        session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_work_mem_scope() RETURNS text LANGUAGE plpgsql \
+                 AS $$ BEGIN SET LOCAL work_mem = '2MB'; RETURN current_setting('work_mem'); END $$ \
+                 SET work_mem = '1MB'",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query(
+                        "SELECT plpgsql_work_mem_scope() || '|' || current_setting('work_mem')",
+                    )
+                    .await
+                    .unwrap(),
+            ),
+            "2MB|3MB"
+        );
+        session
+            .simple_query("ALTER FUNCTION plpgsql_work_mem_scope() RESET ALL")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query(
+                        "SELECT plpgsql_work_mem_scope() || '|' || current_setting('work_mem')",
+                    )
+                    .await
+                    .unwrap(),
+            ),
+            "2MB|2MB"
+        );
+        session.simple_query("SET work_mem = '3MB'").await.unwrap();
+        session
+            .simple_query(
+                "CREATE OR REPLACE FUNCTION plpgsql_work_mem_scope() RETURNS text LANGUAGE plpgsql \
+                 AS $$ BEGIN SET work_mem = '2MB'; RETURN current_setting('work_mem'); END $$",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query(
+                        "SELECT plpgsql_work_mem_scope() || '|' || current_setting('work_mem')",
+                    )
+                    .await
+                    .unwrap(),
+            ),
+            "2MB|2MB"
+        );
+        assert_eq!(shown_setting(&mut session, "work_mem").await, "2MB");
+        session.simple_query("SET work_mem = '3MB'").await.unwrap();
+        session
+            .simple_query(
+                "CREATE OR REPLACE FUNCTION plpgsql_work_mem_scope() RETURNS text LANGUAGE plpgsql \
+                 AS $$ BEGIN SET work_mem = '2MB'; PERFORM 1 / 0; RETURN current_setting('work_mem'); END $$",
+            )
+            .await
+            .unwrap();
+        let error = session
+            .simple_query("SELECT plpgsql_work_mem_scope()")
+            .await
+            .expect_err("function errors");
+        assert_eq!(error.code, "22012");
+        assert_eq!(
+            single_text(&session.simple_query("SHOW work_mem").await.unwrap()),
+            "3MB"
+        );
+    }
+
+    #[test]
+    fn function_guc_mutations_update_statement_settings() {
+        let gucs = GucState::default();
+        let (settings, _) = super::with_guc_runtime(
+            gucs.effective_map(),
+            gucs.settings(),
+            Vec::new(),
+            Vec::new(),
+            || {
+                super::apply_guc_runtime_mutations(vec![super::GucMutation {
+                    name: "work_mem".into(),
+                    value: "2MB".into(),
+                    local: false,
+                }])
+                .unwrap();
+                super::guc_settings_runtime().unwrap()
+            },
+        );
+        assert_eq!(
+            settings
+                .into_iter()
+                .find(|setting| setting.name == "work_mem")
+                .unwrap()
+                .value,
+            "2048"
+        );
+    }
+
+    #[tokio::test]
     async fn guc_sql_interleavings_match_postgres_18() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
@@ -22540,6 +25841,107 @@ mod tests {
             single_text(&session.simple_query("SHOW application_name").await.unwrap()),
             "configured-source"
         );
+    }
+
+    #[tokio::test]
+    async fn settings_srf_and_flags_share_the_live_guc_registry() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT count(*) FROM pg_show_all_settings()")
+                    .await
+                    .unwrap(),
+            ),
+            super::GUC_DEFINITIONS.len().to_string()
+        );
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT 'EXPLAIN' = ANY(pg_settings_get_flags('enable_seqscan'))")
+                    .await
+                    .unwrap(),
+            ),
+            "t"
+        );
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT pg_settings_get_flags('does_not_exist') IS NULL")
+                    .await
+                    .unwrap(),
+            ),
+            "t"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_commit_cleanup_survives_session_authorization_and_discard_all_resets_it() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TEMP TABLE cleanup_tmp (id int4) ON COMMIT DELETE ROWS; \
+                 CREATE ROLE cleanup_role; \
+                 SET SESSION AUTHORIZATION cleanup_role",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT current_user = 'cleanup_role'")
+                    .await
+                    .unwrap(),
+            ),
+            "t"
+        );
+
+        session.simple_query("DISCARD ALL").await.unwrap();
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT current_user = 'cleanup_role'")
+                    .await
+                    .unwrap(),
+            ),
+            "f"
+        );
+        session
+            .simple_query("DROP ROLE cleanup_role")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn routine_settings_validate_catalog_backed_gucs_at_the_postgres_lifecycle_point() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let create = "CREATE FUNCTION invalid_config() RETURNS int AS $$ SELECT 1 $$ \
+                      LANGUAGE sql SET default_text_search_config = no_such_config";
+
+        let error = session
+            .simple_query(create)
+            .await
+            .expect_err("invalid setting");
+        assert_eq!(error.code, "22023");
+        assert_eq!(
+            error.message,
+            "invalid value for parameter \"default_text_search_config\": \"no_such_config\""
+        );
+
+        session
+            .simple_query("SET check_function_bodies = off")
+            .await
+            .unwrap();
+        session.simple_query(create).await.unwrap();
+        let error = session
+            .simple_query("SELECT invalid_config()")
+            .await
+            .expect_err("invalid setting at invocation");
+        assert_eq!(error.code, "22023");
     }
 
     #[tokio::test]
@@ -22991,9 +26393,7 @@ mod compatibility_refusal_tests {
 mod notify_and_binary_parameter_tests {
     use assert2::assert;
     use crabka_pgparser::ast::Statement;
-    use crabka_pgtypes::{
-        ArrayValue, ColumnType, Datum, ElemType, TemporalType, encoding, oids,
-    };
+    use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, TemporalType, encoding, oids};
     use crabka_pgwire::{engine::BoundParam, error::PgError};
 
     use super::{
@@ -23011,7 +26411,13 @@ mod notify_and_binary_parameter_tests {
 
     fn decode(param: &BoundParam, ty: ColumnType) -> Result<Datum, PgError> {
         let value = param.value.clone().expect("a bound value");
-        decode_bound_param(&value, param, ty, &jiff::tz::TimeZone::UTC)
+        decode_bound_param(
+            &value,
+            param,
+            ty,
+            &jiff::tz::TimeZone::UTC,
+            crabka_pgtypes::xml::XmlOption::Content,
+        )
     }
 
     fn jsonb(text: &str) -> Datum {
@@ -23102,7 +26508,9 @@ mod notify_and_binary_parameter_tests {
             (
                 Datum::Time(crabka_pgtypes::datetime::parse_time("12:34:56.785").expect("time")),
                 ColumnType::Temporal(TemporalType::Time, 2),
-                Datum::Time(crabka_pgtypes::datetime::parse_time("12:34:56.79").expect("rounded time")),
+                Datum::Time(
+                    crabka_pgtypes::datetime::parse_time("12:34:56.79").expect("rounded time"),
+                ),
             ),
             (
                 Datum::Timestamp(
@@ -23745,6 +27153,22 @@ mod listen_notify_session_tests {
         tag.clone()
     }
 
+    async fn listening_channels(session: &mut SqlSession) -> Vec<String> {
+        let results = session
+            .simple_query("SELECT pg_listening_channels()")
+            .await
+            .expect("listening channels");
+        let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
+            panic!("expected channel rows: {results:?}");
+        };
+        rows.iter()
+            .map(|row| {
+                String::from_utf8(row[0].as_ref().expect("channel is non-null").text.to_vec())
+                    .expect("channel is text")
+            })
+            .collect()
+    }
+
     /// Number of rows one query returns. This is how a test checks whether a
     /// failed statement's write is there.
     async fn row_count(session: &mut SqlSession, sql: &str) -> usize {
@@ -24040,6 +27464,26 @@ mod listen_notify_session_tests {
     }
 
     #[tokio::test]
+    async fn pg_listening_channels_reflects_committed_subscriptions() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+
+        assert!(listening_channels(&mut listener).await.is_empty());
+        tag(&mut listener, "LISTEN b").await;
+        tag(&mut listener, "LISTEN a").await;
+        assert!(listening_channels(&mut listener).await == ["a", "b"]);
+
+        tag(&mut listener, "BEGIN").await;
+        tag(&mut listener, "UNLISTEN a").await;
+        assert!(listening_channels(&mut listener).await == ["a", "b"]);
+        tag(&mut listener, "COMMIT").await;
+        assert!(listening_channels(&mut listener).await == ["b"]);
+
+        tag(&mut listener, "DISCARD ALL").await;
+        assert!(listening_channels(&mut listener).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn an_oversized_payload_is_rejected_by_the_notifying_statement() {
         let engine = SqlEngine::new();
         let mut notifier = session(&engine, 22);
@@ -24288,9 +27732,13 @@ mod listen_notify_session_tests {
 #[cfg(test)]
 mod session_conformance_tests {
     use assert2::assert;
-    use crabka_pgwire::engine::{Engine, QueryResult, Session};
+    use crabka_pgwire::engine::{Engine, FastpathCall, QueryResult, Session};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
 
-    use super::{SqlSession, format_g, render_text_array};
+    use super::{SqlSession, WriteStatementContext, format_g, render_text_array};
     use crate::SqlEngine;
 
     /// Run one statement, returning either its rows as text or its SQLSTATE.
@@ -24756,6 +28204,72 @@ mod session_conformance_tests {
     }
 
     #[tokio::test]
+    async fn load_plpgsql_reserves_its_custom_guc_prefix() {
+        use crabka_pgwire::error::Severity;
+        use tokio::sync::mpsc::error::TryRecvError;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+
+        run(&mut session, "SET plpgsql.extra_foo_warnings = true")
+            .await
+            .expect("placeholder setting");
+        run(&mut session, "LOAD 'plpgsql'").await.expect("LOAD");
+        let warning = notices.try_recv().expect("reserved-prefix warning");
+        assert_eq!(warning.severity, Severity::Warning);
+        assert_eq!(
+            warning.message,
+            "invalid configuration parameter name \"plpgsql.extra_foo_warnings\", removing it"
+        );
+        assert_eq!(
+            warning
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.detail.as_deref()),
+            Some("\"plpgsql\" is now a reserved prefix.")
+        );
+        assert_eq!(
+            state(&mut session, "SET plpgsql.extra_foo_warnings = true").await,
+            "22023"
+        );
+        assert_eq!(
+            state(&mut session, "SHOW plpgsql.extra_foo_warnings").await,
+            "42704"
+        );
+        assert_eq!(notices.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn track_activities_controls_pg_stat_activity_query_id() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+
+        assert!(state(&mut s, "SET compute_query_id = on").await == "00000");
+        assert!(scalar(&mut s, "SHOW compute_query_id").await == "on");
+        assert!(scalar(&mut s, "SHOW track_activities").await == "on");
+        assert!(s.eval_ctx().compute_query_id);
+        assert!(s.eval_ctx().track_activities);
+        assert!(
+            run(
+                &mut s,
+                "SELECT query_id IS NOT NULL FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+            )
+            .await
+                == Ok(vec![vec!["t".into()]])
+        );
+        assert!(state(&mut s, "SET track_activities = off").await == "00000");
+        assert!(
+            run(
+                &mut s,
+                "SELECT query_id IS NOT NULL FROM pg_stat_activity WHERE pid = pg_backend_pid()",
+            )
+            .await
+                == Ok(vec![vec!["f".into()]])
+        );
+    }
+
+    #[tokio::test]
     async fn and_chain_outside_a_transaction_block_is_25p01() {
         let engine = SqlEngine::new();
         let mut s = engine.connect();
@@ -24863,6 +28377,41 @@ mod session_conformance_tests {
             .expect("rollback role");
         assert!(scalar(&mut session, "SELECT current_user").await == "member_role");
         assert!(state(&mut session, "SET ROLE unrelated_role").await == "42501");
+    }
+
+    #[tokio::test]
+    async fn write_context_preserves_current_and_session_users() {
+        let (_engine, mut session) = seeded().await;
+        session.current_role = "current_role".to_owned();
+        session.session_user = "session_role".to_owned();
+        session
+            .simple_query("SET row_security TO off")
+            .await
+            .expect("disable row security");
+        session
+            .simple_query("SET search_path TO write_context_schema")
+            .await
+            .expect("set search path");
+        let snapshot = session
+            .global_read_snapshot(None)
+            .expect("global read snapshot");
+        let eval_ctx = session.eval_ctx();
+        let ctes = crate::cte::CteContext::empty();
+        let context = session.write_context(&WriteStatementContext {
+            global_snapshot: &snapshot,
+            snapshot: &snapshot,
+            xid: 1,
+            command_id: 0,
+            repeatable_read: false,
+            eval_ctx: &eval_ctx,
+            prune_horizon: None,
+            ctes: &ctes,
+        });
+
+        assert2::assert!(context.fctx.current_user == "current_role");
+        assert2::assert!(context.fctx.session_user == "session_role");
+        assert2::assert!(!context.fctx.row_security);
+        assert2::assert!(std::ptr::eq(context.fctx.resolution, eval_ctx.resolution()));
     }
 
     #[tokio::test]
@@ -25524,7 +29073,6 @@ mod session_conformance_tests {
             // where PostgreSQL answers them, so a caret would be two more lines
             // of divergence rather than two fewer.
             ("select '{\"a\":1}'::jsonb #- '{a}'", None),
-            ("SELECT ARRAY[1.1] || ARRAY[2,3,4]", None),
             ("SELECT 'a' <-> 'b & d'::tsquery", None),
         ] {
             let error = session.simple_query(sql).await.expect_err(sql);
@@ -26814,6 +30362,16 @@ mod session_conformance_tests {
                 run(&mut s, sql).await.expect(label);
             }
             assert_class_stats(&mut s, "par", analyzed, "t", label).await;
+            if partitioned {
+                assert!(
+                    run(
+                        &mut s,
+                        "SELECT relpages FROM pg_class WHERE oid = 'par'::regclass",
+                    )
+                    .await
+                        == Ok(vec![vec!["-1".into()]])
+                );
+            }
 
             run(&mut s, "DROP TABLE chi").await.expect(label);
             assert_class_stats(
@@ -26911,6 +30469,88 @@ mod session_conformance_tests {
         assert_class_stats(&mut s, "dw2", 2.0, "f", "bare ANALYZE").await;
     }
 
+    #[tokio::test]
+    async fn analyze_persists_fixed_statistics_for_table_and_expression_index_columns() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE analyzed (id int4)",
+            "INSERT INTO analyzed VALUES (1), (2), (NULL)",
+            "CREATE INDEX analyzed_expr ON analyzed ((id % 2 = 1))",
+            "ANALYZE analyzed",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT null_frac::text || ',' || avg_width::text || ',' || n_distinct::text \
+                 FROM pg_stats WHERE tablename = 'analyzed' AND attname = 'id'",
+            )
+            .await
+                == "0.33333334,1,2"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_stats WHERE tablename = 'analyzed_expr' AND attname = 'expr'",
+            )
+            .await
+                == "1"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT staattnum::text FROM pg_statistic \
+                 WHERE starelid = 'analyzed_expr'::regclass",
+            )
+            .await
+                == "1"
+        );
+        for sql in [
+            "CREATE TABLE analyzed_clone (id int4)",
+            "CREATE INDEX analyzed_expr_clone ON analyzed_clone ((id % 2 = 1))",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            run(
+                &mut session,
+                "SELECT s.tablename, s.attname, r.* \
+                 FROM pg_stats AS s \
+                 CROSS JOIN LATERAL pg_catalog.pg_restore_attribute_stats(\
+                    'schemaname', 'public', \
+                    'relname', s.tablename || '_clone', \
+                    'attname', s.attname, \
+                    'inherited', s.inherited, \
+                    'null_frac', s.null_frac, \
+                    'avg_width', s.avg_width, \
+                    'n_distinct', s.n_distinct) AS r \
+                 WHERE s.tablename IN ('analyzed', 'analyzed_expr') \
+                 ORDER BY s.tablename, s.attname",
+            )
+            .await
+            .expect("clone analyzed statistics")
+                == vec![
+                    vec!["analyzed".to_string(), "id".to_string(), "t".to_string()],
+                    vec![
+                        "analyzed_expr".to_string(),
+                        "expr".to_string(),
+                        "t".to_string(),
+                    ],
+                ]
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_statistic \
+                 WHERE starelid IN ('analyzed_clone'::regclass, 'analyzed_expr_clone'::regclass)",
+            )
+            .await
+                == "2"
+        );
+    }
+
     /// Nothing is collected until every check has passed for every named
     /// relation, and statistics never outlive the relation they describe — a
     /// new relation reusing a dropped one's name starts from "unknown".
@@ -26941,10 +30581,10 @@ mod session_conformance_tests {
         assert_class_stats(&mut s, "keep", -1.0, "f", "a reused name").await;
     }
 
-    /// Every other relation kind shares the `pg_class` row builder, and none of
-    /// them has statistics of its own: `ANALYZE` skips them and they keep
-    /// reporting the defaults. A catalog relation is neither skipped nor
-    /// refused, and still has nothing stored to report.
+    /// A newly built ordinary index has PostgreSQL's known empty estimate;
+    /// every other non-table relation reports unknown statistics even after
+    /// `ANALYZE` skips it. A catalog relation is neither skipped nor refused,
+    /// and still has nothing stored to report.
     #[tokio::test]
     async fn relations_that_carry_no_statistics_report_the_defaults() {
         let engine = SqlEngine::new();
@@ -26962,8 +30602,536 @@ mod session_conformance_tests {
         ] {
             assert!(state(&mut s, sql).await == "00000", "case: {sql}");
         }
-        for relname in ["basev", "baseq", "basei", "pg_class"] {
+        for relname in ["basev", "baseq", "pg_class"] {
             assert_class_stats(&mut s, relname, -1.0, "f", relname).await;
         }
+        assert_class_stats(&mut s, "basei", 0.0, "f", "basei").await;
+    }
+
+    #[tokio::test]
+    async fn large_objects_are_transactional_and_descriptor_backed() {
+        async fn rows(session: &mut SqlSession, sql: &str) -> Result<Vec<Vec<String>>, String> {
+            session
+                .simple_query(sql)
+                .await
+                .map(|results| {
+                    results
+                        .into_iter()
+                        .flat_map(|result| match result {
+                            crabka_pgwire::engine::QueryResult::Rows { rows, .. } => rows,
+                            crabka_pgwire::engine::QueryResult::Command { .. }
+                            | crabka_pgwire::engine::QueryResult::Empty => Vec::new(),
+                        })
+                        .map(|row| {
+                            row.into_iter()
+                                .map(|cell| {
+                                    cell.map_or_else(String::new, |cell| {
+                                        String::from_utf8_lossy(&cell.text).into_owned()
+                                    })
+                                })
+                                .collect()
+                        })
+                        .collect()
+                })
+                .map_err(|error| error.code)
+        }
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE ROLE lo_reader")
+            .await
+            .expect("create large-object reader");
+        session
+            .simple_query("CREATE ROLE lo_owner")
+            .await
+            .expect("create large-object owner");
+        session
+            .simple_query("CREATE ROLE lo_grantee")
+            .await
+            .expect("create large-object grantee");
+        let oid = rows(&mut session, r"SELECT lo_from_bytea(0, '\x6162'::bytea)")
+            .await
+            .expect("create large object")[0][0]
+            .parse::<u32>()
+            .expect("oid");
+
+        assert_eq!(
+            rows(&mut session, &format!("SELECT lo_get({oid})"))
+                .await
+                .expect("read object"),
+            vec![vec![String::from("\\x6162")]]
+        );
+        assert_eq!(
+            rows(
+                &mut session,
+                &format!(
+                    "BEGIN; SELECT lo_open({oid}, 393216); \
+                     SELECT lowrite(0, '\\x43'::bytea); \
+                     SELECT lo_lseek64(0, 1, 0); \
+                     SELECT loread(0, 99); \
+                     SELECT lo_close(0); COMMIT"
+                ),
+            )
+            .await
+            .expect("descriptor round trip"),
+            vec![
+                vec![String::from("0")],
+                vec![String::from("1")],
+                vec![String::from("1")],
+                vec![String::from("\\x62")],
+                vec![String::from("0")],
+            ]
+        );
+        assert_eq!(
+            rows(
+                &mut session,
+                &format!(
+                    "SELECT lo_put({oid}, 1, '\\x5a'::bytea); SELECT lo_get({oid}); SELECT lo_get({oid}, 1, 99)"
+                ),
+            )
+            .await
+            .expect("put object"),
+            vec![
+                vec![String::new()],
+                vec![String::from("\\x435a")],
+                vec![String::from("\\x5a")],
+            ]
+        );
+        assert_eq!(
+            rows(
+                &mut session,
+                "SELECT oid, lomowner, lomacl FROM pg_largeobject_metadata ORDER BY oid",
+            )
+            .await
+            .expect("large-object metadata catalog"),
+            vec![vec![oid.to_string(), String::from("10"), String::new()]]
+        );
+        assert_eq!(
+            rows(
+                &mut session,
+                "SELECT loid, pageno, data FROM pg_largeobject ORDER BY loid, pageno",
+            )
+            .await
+            .expect("large-object page catalog"),
+            vec![vec![
+                oid.to_string(),
+                String::from("0"),
+                String::from("\\x435a"),
+            ]]
+        );
+        session
+            .simple_query(&format!("COMMENT ON LARGE OBJECT {oid} IS 'owned bytes'"))
+            .await
+            .expect("comment on large object");
+        assert_eq!(
+            rows(
+                &mut session,
+                &format!("SELECT obj_description({oid}, 'pg_largeobject')"),
+            )
+            .await,
+            Ok(vec![vec!["owned bytes".into()]])
+        );
+        assert_eq!(
+            rows(
+                &mut session,
+                &format!(
+                    "SELECT description FROM pg_description \
+                     WHERE objoid = {oid} AND classoid = 2613"
+                ),
+            )
+            .await,
+            Ok(vec![vec!["owned bytes".into()]])
+        );
+        session
+            .simple_query(&format!(
+                "BEGIN; COMMENT ON LARGE OBJECT {oid} IS 'rolled back'; ROLLBACK"
+            ))
+            .await
+            .expect("roll back a large-object comment");
+        assert_eq!(
+            rows(
+                &mut session,
+                &format!("SELECT obj_description({oid}, 'pg_largeobject')"),
+            )
+            .await,
+            Ok(vec![vec!["owned bytes".into()]])
+        );
+        session
+            .simple_query(
+                "SELECT lo_create(4246); COMMENT ON LARGE OBJECT 4246 IS 'temporary'; \
+                 SELECT lo_unlink(4246)",
+            )
+            .await
+            .expect("unlink commented large object");
+        assert_eq!(
+            rows(
+                &mut session,
+                "SELECT obj_description(4246, 'pg_largeobject')",
+            )
+            .await,
+            Ok(vec![vec![String::new()]])
+        );
+
+        session
+            .simple_query("BEGIN; SELECT lo_create(4242); ROLLBACK")
+            .await
+            .expect("rolled back creation");
+        assert_eq!(
+            rows(&mut session, "SELECT lo_get(4242)").await,
+            Err("42704".into())
+        );
+        session
+            .simple_query("BEGIN; SELECT lo_from_bytea(4243, '\\x61'::bytea); SAVEPOINT lo_sp")
+            .await
+            .expect("create savepoint object");
+        session
+            .simple_query("SELECT lo_put(4243, 0, '\\x62'::bytea); ROLLBACK TO lo_sp")
+            .await
+            .expect("roll back large-object edit");
+        assert_eq!(
+            rows(&mut session, "SELECT lo_get(4243)").await,
+            Ok(vec![vec!["\\x61".into()]])
+        );
+        session
+            .simple_query("SAVEPOINT lo_sp_new; SELECT lo_create(4244); ROLLBACK TO lo_sp_new")
+            .await
+            .expect("roll back large-object creation");
+        assert_eq!(
+            rows(&mut session, "SELECT lo_get(4244)").await,
+            Err("42704".into())
+        );
+        session
+            .simple_query("ROLLBACK")
+            .await
+            .expect("rollback savepoint transaction");
+        session
+            .simple_query(
+                "BEGIN; SELECT lo_from_bytea(4245, '\\x6f'::bytea); \
+                 ALTER LARGE OBJECT 4245 OWNER TO lo_owner; COMMIT",
+            )
+            .await
+            .expect("transfer a transaction-local large object");
+        assert_eq!(
+            rows(
+                &mut session,
+                &format!(
+                    "SELECT has_largeobject_privilege({oid}, 'SELECT'), \
+                     has_largeobject_privilege({oid}, 'UPDATE'), \
+                     has_largeobject_privilege(999999, 'SELECT') IS NULL"
+                ),
+            )
+            .await,
+            Ok(vec![vec!["t".into(), "t".into(), "t".into()]])
+        );
+
+        let files = tempfile::tempdir().expect("large-object test directory");
+        let import_path = files.path().join("import.bin");
+        std::fs::write(&import_path, b"imported").expect("write import fixture");
+        let import_path = import_path.display().to_string().replace('\'', "''");
+        let imported_oid = rows(&mut session, &format!("SELECT lo_import('{import_path}')"))
+            .await
+            .expect("import large object")[0][0]
+            .parse::<u32>()
+            .expect("imported oid");
+        assert_eq!(
+            rows(&mut session, &format!("SELECT lo_get({imported_oid})")).await,
+            Ok(vec![vec!["\\x696d706f72746564".into()]])
+        );
+        let export_path = files.path().join("export.bin");
+        let export_path = export_path.display().to_string().replace('\'', "''");
+        assert_eq!(
+            rows(
+                &mut session,
+                &format!("SELECT lo_export({imported_oid}, '{export_path}')"),
+            )
+            .await,
+            Ok(vec![vec!["1".into()]])
+        );
+        assert_eq!(
+            std::fs::read(files.path().join("export.bin")).expect("read export"),
+            b"imported"
+        );
+        session
+            .simple_query("BEGIN READ ONLY")
+            .await
+            .expect("begin read-only");
+        assert_eq!(
+            rows(&mut session, &format!("SELECT lo_import('{import_path}')")).await,
+            Err("25006".into())
+        );
+        session
+            .simple_query("ROLLBACK")
+            .await
+            .expect("rollback read-only transaction");
+
+        let mut reader = engine.connect();
+        reader
+            .simple_query("SET SESSION AUTHORIZATION lo_reader")
+            .await
+            .expect("become non-owner");
+        assert_eq!(
+            reader
+                .simple_query("ALTER LARGE OBJECT 4245 OWNER TO lo_reader")
+                .await
+                .map_err(|error| error.code),
+            Err("42501".into())
+        );
+        assert_eq!(
+            reader
+                .simple_query(&format!("COMMENT ON LARGE OBJECT {oid} IS 'denied'"))
+                .await
+                .map_err(|error| error.code),
+            Err("42501".into())
+        );
+        assert_eq!(
+            rows(&mut reader, &format!("SELECT lo_get({oid})")).await,
+            Err("42501".into())
+        );
+        assert_eq!(
+            rows(&mut reader, &format!("SELECT lo_open({oid}, 262144)")).await,
+            Err("42501".into())
+        );
+        assert_eq!(
+            rows(
+                &mut reader,
+                &format!(
+                    "SELECT has_largeobject_privilege({oid}, 'SELECT'), \
+                     has_largeobject_privilege({oid}, 'ALL')"
+                ),
+            )
+            .await,
+            Ok(vec![vec!["f".into(), "f".into()]])
+        );
+        assert_eq!(
+            rows(
+                &mut reader,
+                &format!("SELECT has_largeobject_privilege({oid}, 'INSERT')"),
+            )
+            .await,
+            Err("22023".into())
+        );
+        session
+            .simple_query(&format!(
+                "GRANT SELECT ON LARGE OBJECT {oid} TO lo_reader WITH GRANT OPTION"
+            ))
+            .await
+            .expect("grant large-object select with grant option");
+        assert_eq!(
+            rows(&mut reader, &format!("SELECT lo_get({oid})")).await,
+            Ok(vec![vec!["\\x435a".into()]])
+        );
+        assert_eq!(
+            rows(
+                &mut reader,
+                &format!("SELECT has_largeobject_privilege({oid}, 'SELECT WITH GRANT OPTION')"),
+            )
+            .await,
+            Ok(vec![vec!["t".into()]])
+        );
+        reader
+            .simple_query(&format!("GRANT SELECT ON LARGE OBJECT {oid} TO lo_grantee"))
+            .await
+            .expect("grant through large-object grant option");
+        let mut grantee = engine.connect();
+        grantee
+            .simple_query("SET SESSION AUTHORIZATION lo_grantee")
+            .await
+            .expect("become large-object grantee");
+        assert_eq!(
+            rows(&mut grantee, &format!("SELECT lo_get({oid})")).await,
+            Ok(vec![vec!["\\x435a".into()]])
+        );
+        session
+            .simple_query(&format!(
+                "REVOKE GRANT OPTION FOR SELECT ON LARGE OBJECT {oid} FROM lo_reader"
+            ))
+            .await
+            .expect("revoke large-object grant option");
+        assert_eq!(
+            rows(
+                &mut reader,
+                &format!("SELECT has_largeobject_privilege({oid}, 'SELECT WITH GRANT OPTION')"),
+            )
+            .await,
+            Ok(vec![vec!["f".into()]])
+        );
+        assert_eq!(
+            reader
+                .simple_query(&format!("GRANT SELECT ON LARGE OBJECT {oid} TO lo_grantee"))
+                .await
+                .map_err(|error| error.code),
+            Err("42501".into())
+        );
+        session
+            .simple_query(&format!(
+                "REVOKE SELECT ON LARGE OBJECT {oid} FROM lo_reader"
+            ))
+            .await
+            .expect("revoke large-object select");
+        assert_eq!(
+            rows(&mut reader, &format!("SELECT lo_get({oid})")).await,
+            Err("42501".into())
+        );
+
+        let mut owner = engine.connect();
+        owner
+            .simple_query("SET SESSION AUTHORIZATION lo_owner")
+            .await
+            .expect("become transferred large-object owner");
+        assert_eq!(
+            rows(&mut owner, "SELECT lo_get(4245)").await,
+            Ok(vec![vec!["\\x6f".into()]])
+        );
+
+        let public_oid = rows(
+            &mut session,
+            r"SET lo_compat_privileges = on; SELECT lo_from_bytea(0, '\x70'::bytea)",
+        )
+        .await
+        .expect("create compatibility object")[0][0]
+            .parse::<u32>()
+            .expect("oid");
+        assert_eq!(
+            rows(&mut reader, &format!("SELECT lo_get({public_oid})")).await,
+            Ok(vec![vec![String::from("\\x70")]])
+        );
+    }
+
+    #[tokio::test]
+    async fn large_objects_support_binary_fastpath_calls() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let call = |function_oid, arguments| FastpathCall {
+            function_oid,
+            argument_formats: vec![1],
+            arguments,
+            result_format: 1,
+        };
+        let int4 = |value: i32| bytes::Bytes::copy_from_slice(&value.to_be_bytes());
+        let oid_arg = |value: u32| bytes::Bytes::copy_from_slice(&value.to_be_bytes());
+        let oid = session
+            .fastpath(call(715, vec![Some(oid_arg(0))]))
+            .await
+            .expect("lo_create fastpath")
+            .expect("lo_create value");
+        let oid = u32::from_be_bytes(oid.as_ref().try_into().expect("OID bytes"));
+        session
+            .simple_query("BEGIN")
+            .await
+            .expect("start large-object transaction");
+        let descriptor = session
+            .fastpath(call(952, vec![Some(oid_arg(oid)), Some(int4(0x60_000))]))
+            .await
+            .expect("lo_open fastpath")
+            .expect("lo_open value");
+        let descriptor = i32::from_be_bytes(descriptor.as_ref().try_into().expect("fd bytes"));
+        assert!(
+            session
+                .fastpath(call(
+                    955,
+                    vec![
+                        Some(int4(descriptor)),
+                        Some(bytes::Bytes::from_static(b"fastpath")),
+                    ],
+                ))
+                .await
+                .expect("lowrite fastpath")
+                .is_some()
+        );
+        assert!(
+            session
+                .fastpath(call(953, vec![Some(int4(descriptor))]))
+                .await
+                .expect("lo_close fastpath")
+                .is_some()
+        );
+        session
+            .simple_query("COMMIT")
+            .await
+            .expect("finish large-object transaction");
+        assert_eq!(
+            session
+                .fastpath(call(3458, vec![Some(oid_arg(oid))]))
+                .await
+                .expect("lo_get fastpath"),
+            Some(bytes::Bytes::from_static(b"fastpath"))
+        );
+    }
+
+    #[tokio::test]
+    async fn large_object_fastpath_works_over_pgwire() {
+        async fn read_message(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+            let mut tag = [0];
+            stream.read_exact(&mut tag).await.expect("message tag");
+            let mut length = [0; 4];
+            stream
+                .read_exact(&mut length)
+                .await
+                .expect("message length");
+            let length = usize::try_from(i32::from_be_bytes(length)).expect("positive length");
+            let mut body = vec![0; length - 4];
+            stream.read_exact(&mut body).await.expect("message body");
+            (tag[0], body)
+        }
+
+        async fn write_message(stream: &mut TcpStream, tag: u8, body: &[u8]) {
+            let length = i32::try_from(body.len() + 4).expect("frame length");
+            stream.write_all(&[tag]).await.expect("write tag");
+            stream
+                .write_all(&length.to_be_bytes())
+                .await
+                .expect("write length");
+            stream.write_all(body).await.expect("write body");
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        tokio::spawn(crabka_pgwire::server::serve(
+            listener,
+            std::sync::Arc::new(SqlEngine::new()),
+            std::sync::Arc::new(crabka_pgwire::session::SessionConfig::trust()),
+        ));
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        let mut startup = Vec::new();
+        startup.extend_from_slice(&196_608_i32.to_be_bytes());
+        startup.extend_from_slice(b"user\0postgres\0database\0postgres\0\0");
+        stream
+            .write_all(
+                &i32::try_from(startup.len() + 4)
+                    .expect("startup length")
+                    .to_be_bytes(),
+            )
+            .await
+            .expect("startup length");
+        stream.write_all(&startup).await.expect("startup packet");
+        loop {
+            let (tag, _) = read_message(&mut stream).await;
+            if tag == b'Z' {
+                break;
+            }
+        }
+
+        let mut call = Vec::new();
+        call.extend_from_slice(&715_i32.to_be_bytes());
+        call.extend_from_slice(&1_i16.to_be_bytes());
+        call.extend_from_slice(&1_i16.to_be_bytes());
+        call.extend_from_slice(&1_i16.to_be_bytes());
+        call.extend_from_slice(&4_i32.to_be_bytes());
+        call.extend_from_slice(&0_u32.to_be_bytes());
+        call.extend_from_slice(&1_i16.to_be_bytes());
+        write_message(&mut stream, b'F', &call).await;
+
+        let (tag, body) = read_message(&mut stream).await;
+        assert_eq!(tag, b'V');
+        assert_eq!(
+            i32::from_be_bytes(body[..4].try_into().expect("result length")),
+            4
+        );
+        assert!(u32::from_be_bytes(body[4..].try_into().expect("result OID")) > 0);
+        let (tag, body) = read_message(&mut stream).await;
+        assert_eq!((tag, body), (b'Z', vec![b'I']));
     }
 }

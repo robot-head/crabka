@@ -129,9 +129,12 @@ fn bind(expr: &Expr, scope: &Scope) -> Result<Expr, ExecError> {
             // FROM clause, and then it is that relation's whole row. It has no
             // single position, so it survives binding for `eval` to answer.
             Err(error) => {
-                if table.is_none()
-                    && matches!(error, ExecError::UndefinedColumn(_))
-                    && scope.whole_row(name).is_some()
+                if matches!(error, ExecError::UndefinedColumn(_))
+                    && ((table.is_none() && scope.whole_row(name).is_some())
+                        || (name == "*"
+                            && table
+                                .as_deref()
+                                .is_some_and(|qualifier| scope.whole_row(qualifier).is_some())))
                 {
                     return Ok(None);
                 }
@@ -248,10 +251,22 @@ mod tests {
         let scope = two_table_scope();
         let expr = column(None, "a");
         assert!(BoundExpr::new(&expr, &scope) == Ok(BoundExpr(expr.clone())));
+        // `a.*` is also a whole row, even though `a` is the function item's
+        // output column name. Its internal spelling must survive binding.
+        let expr = column(Some("a"), "*");
+        assert!(BoundExpr::new(&expr, &scope) == Ok(BoundExpr(expr.clone())));
         // A name that is neither a column nor a relation is still an error.
         assert!(
             BoundExpr::new(&column(None, "nosuchrel"), &scope)
                 == Err(ExecError::UndefinedColumn("nosuchrel".into()))
+        );
+        assert!(
+            BoundExpr::new(&column(Some("a"), "nope"), &scope)
+                == Err(ExecError::UndefinedColumn("nope".into()))
+        );
+        assert!(
+            BoundExpr::new(&column(Some("nosuchrel"), "*"), &scope)
+                == Err(ExecError::MissingFromEntry("nosuchrel".into()))
         );
     }
 

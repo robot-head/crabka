@@ -1,5 +1,7 @@
 //! Typed range-map and routing primitives for Chapter Gres multi-range tenants.
 
+#![recursion_limit = "256"]
+
 pub mod barrier;
 mod config;
 pub mod control;

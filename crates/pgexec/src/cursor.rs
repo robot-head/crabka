@@ -1,8 +1,7 @@
 //! S2: SQL cursor position algebra.
 //!
-//! A Gres cursor materializes its whole result at `DECLARE` time, because the
-//! executor materializes every query anyway. Beyond its rows, a cursor
-//! therefore carries only a position. This module owns that position and
+//! A Gres cursor materializes its whole result at its first `FETCH`/`MOVE`.
+//! Beyond its rows, a cursor therefore carries only a position. This module owns that position and
 //! `PostgreSQL`'s `FETCH`/`MOVE` direction semantics, independent of how a row
 //! is represented.
 //!
@@ -35,6 +34,16 @@ impl CursorPosition {
     /// A freshly declared cursor: before the first of `count` rows.
     pub(crate) const fn new(count: usize) -> Self {
         Self { position: 0, count }
+    }
+
+    /// The current one-based row, or `None` while positioned before or after
+    /// the materialized result.
+    pub(crate) const fn current_row(self) -> Option<usize> {
+        if self.position >= 1 && self.position <= self.count {
+            Some(self.position)
+        } else {
+            None
+        }
     }
 
     /// Walk `direction` from the current position, return the rows crossed, and
@@ -255,5 +264,20 @@ mod tests {
         let plan = position.walk(direction("BACKWARD ALL"));
         assert!(plan.rows.is_empty());
         assert!(position.position == 0);
+    }
+
+    #[test]
+    fn where_current_of_current_row_is_present_only_while_on_a_row() {
+        let mut position = CursorPosition::new(2);
+        assert!(position.current_row().is_none());
+
+        position.walk(direction("NEXT"));
+        assert!(position.current_row() == Some(1));
+
+        position.walk(direction("NEXT"));
+        assert!(position.current_row() == Some(2));
+
+        position.walk(direction("NEXT"));
+        assert!(position.current_row().is_none());
     }
 }

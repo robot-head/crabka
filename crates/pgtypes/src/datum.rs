@@ -46,6 +46,8 @@ pub mod oids {
     pub const REFCURSOR: u32 = 1790;
     /// `refcursor[]`.
     pub const REFCURSORARRAY: u32 = 2201;
+    pub const OIDVECTORARRAY: u32 = 1013;
+    pub const INT2VECTORARRAY: u32 = 1006;
     /// PostgreSQL `oid` — object identifier, an **unsigned** 4-byte integer.
     pub const OID: u32 = 26;
     /// `oid[]`.
@@ -75,11 +77,13 @@ pub mod oids {
     pub const PG_LSNARRAY: u32 = 3221;
     /// PostgreSQL `pg_snapshot` — an exported `(xmin, xmax, xip)` triple.
     pub const PG_SNAPSHOT: u32 = 5038;
+    pub const PG_SNAPSHOTARRAY: u32 = 5039;
     /// PostgreSQL `txid_snapshot` — `pg_snapshot`'s deprecated predecessor. It
     /// is a separate type with a separate oid, and it shares every input and
     /// output function with `pg_snapshot`, so the two hold the same values and
     /// report the same errors.
     pub const TXID_SNAPSHOT: u32 = 2970;
+    pub const TXID_SNAPSHOTARRAY: u32 = 2949;
     pub const OIDVECTOR: u32 = 30;
     /// PostgreSQL `int2vector` — a zero-based `int2` array with the same
     /// space-separated text form `oidvector` uses.
@@ -114,6 +118,15 @@ pub mod oids {
     pub const REGROLE: u32 = 4096;
     /// PostgreSQL `regcollation` — a `pg_collation` oid.
     pub const REGCOLLATION: u32 = 4191;
+    pub const REGPROCEDUREARRAY: u32 = 2207;
+    pub const REGPROCARRAY: u32 = 1008;
+    pub const REGOPERARRAY: u32 = 2208;
+    pub const REGOPERATORARRAY: u32 = 2209;
+    pub const REGCLASSARRAY: u32 = 2210;
+    pub const REGCONFIGARRAY: u32 = 3735;
+    pub const REGDICTIONARYARRAY: u32 = 3770;
+    pub const REGROLEARRAY: u32 = 4097;
+    pub const REGCOLLATIONARRAY: u32 = 4192;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
     /// PostgreSQL `"char"` — the ad-hoc one-byte type, written in double
@@ -129,21 +142,25 @@ pub mod oids {
     pub const FLOAT8: u32 = 701;
     /// PostgreSQL geometric point.
     pub const POINT: u32 = 600;
+    pub const POINTARRAY: u32 = 1017;
     /// PostgreSQL geometric path.
     pub const PATH: u32 = 602;
-    /// PostgreSQL `polygon` — a closed vertex list. Its array type (`_polygon`,
-    /// 1027) is deliberately not named here: like the other six geometric
-    /// types, `polygon` has no [`ElemType`] and so no array form crabka can
-    /// encode.
+    pub const PATHARRAY: u32 = 1019;
+    /// PostgreSQL `polygon` — a closed vertex list.
     pub const POLYGON: u32 = 604;
+    pub const POLYGONARRAY: u32 = 1027;
     /// PostgreSQL `lseg` — a line segment between two points.
     pub const LSEG: u32 = 601;
+    pub const LSEGARRAY: u32 = 1018;
     /// PostgreSQL `line` — an infinite line as `Ax + By + C = 0`.
     pub const LINE: u32 = 628;
+    pub const LINEARRAY: u32 = 629;
     /// PostgreSQL `circle` — a centre point and a radius.
     pub const CIRCLE: u32 = 718;
+    pub const CIRCLEARRAY: u32 = 719;
     /// PostgreSQL `box` — an axis-aligned rectangle.
     pub const BOX: u32 = 603;
+    pub const BOXARRAY: u32 = 1020;
     /// SP32: arbitrary-precision `numeric`/`decimal`.
     pub const NUMERIC: u32 = 1700;
     /// SP37: `date`: days since 2000-01-01, stored as i32.
@@ -152,6 +169,7 @@ pub mod oids {
     pub const TIME: u32 = 1083;
     /// `time with time zone`: microseconds since midnight plus a UTC offset.
     pub const TIMETZ: u32 = 1266;
+    pub const TIMETZARRAY: u32 = 1270;
     /// SP37: `timestamp without time zone`: microseconds since 2000-01-01 00:00:00.
     pub const TIMESTAMP: u32 = 1114;
     /// SP37: `timestamp with time zone`: microseconds since Unix epoch (UTC), stored as i64.
@@ -271,12 +289,45 @@ pub mod oids {
     pub const VARBITARRAY: u32 = 1563;
 }
 
+/// A built-in array element outside the original compact [`ElemType`] set.
+///
+/// The descriptor is indirect so an element can retain its concrete
+/// [`ColumnType`] without making `ColumnType` and `ElemType` recursively sized.
+#[derive(Debug, Clone, Copy)]
+pub struct BuiltinElem {
+    def: &'static BuiltinElemDef,
+    typmod: Option<i32>,
+}
+
+#[derive(Debug)]
+struct BuiltinElemDef {
+    column_type: ColumnType,
+    array_oid: u32,
+    array_name: &'static str,
+    catalog_name: &'static str,
+}
+
+impl PartialEq for BuiltinElem {
+    fn eq(&self, other: &Self) -> bool {
+        self.def.array_oid == other.def.array_oid && self.typmod == other.typmod
+    }
+}
+
+impl Eq for BuiltinElem {}
+
+impl std::hash::Hash for BuiltinElem {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.def.array_oid, state);
+        std::hash::Hash::hash(&self.typmod, state);
+    }
+}
+
 /// The element type of a SQL array.
 ///
 /// This is a separate `Copy` enum rather than a boxed [`ColumnType`], because
-/// the executor passes `ColumnType` by value everywhere. It is deliberately
-/// smaller than `ColumnType`: `regclass` and arrays themselves have no array
-/// form here, and [`ElemType::from_column_type`] refuses them with 0A000.
+/// the executor passes `ColumnType` by value everywhere. `regclass` and arrays
+/// themselves have no array form here, and [`ElemType::from_column_type`]
+/// refuses them with 0A000.
 /// `PostgreSQL` has no nested array type: `int[][]` *is* `int[]` (`_int4`), and
 /// the extra dimensions live in the value, not the type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -309,6 +360,15 @@ pub enum ElemType {
     Char(Option<u16>),
     Range(RangeRef),
     Multirange(MultirangeRef),
+    /// An anonymous or named composite value. Named composites have a stable
+    /// user-type array OID; the anonymous `record` uses OID 2287.
+    Record(Option<UserTypeRef>),
+    /// A user-defined enum, domain, or base type. Its registry entry supplies
+    /// the exact scalar type while this reference preserves the array identity.
+    User(UserTypeRef),
+    /// A built-in scalar with an array companion not covered by the original
+    /// compact set (geometric, `reg*`, network, and system identifier types).
+    Builtin(BuiltinElem),
 }
 
 impl ElemType {
@@ -370,6 +430,10 @@ impl ElemType {
             ElemType::Char(n) => ColumnType::Char(n),
             ElemType::Range(range) => ColumnType::Range(range),
             ElemType::Multirange(multirange) => ColumnType::Multirange(multirange),
+            ElemType::Record(record) => ColumnType::Record(record),
+            ElemType::User(user) => crate::usertype::column_type_for_oid(user.oid)
+                .expect("registered user array element type"),
+            ElemType::Builtin(builtin) => builtin.column_type(),
         }
     }
 
@@ -378,6 +442,9 @@ impl ElemType {
     /// no nested array type, so `int[][]` resolves to `int[]` at the type
     /// level).
     pub fn from_column_type(elem: ColumnType) -> Option<Self> {
+        if let Some(builtin) = BuiltinElem::from_column_type(elem) {
+            return Some(ElemType::Builtin(builtin));
+        }
         Some(match elem {
             ColumnType::Bool => ElemType::Bool,
             ColumnType::Int4 => ElemType::Int4,
@@ -388,13 +455,15 @@ impl ElemType {
             ColumnType::Numeric(_) => ElemType::Numeric,
             ColumnType::Date => ElemType::Date,
             ColumnType::Time | ColumnType::Temporal(TemporalType::Time, _) => ElemType::Time,
-            // `timetz` and `"char"` have no array type in crabka yet. Their
-            // `pg_type.typarray` still resolves, so a driver walking the
-            // scalar → array link finds the row upstream has.
-            ColumnType::Timetz | ColumnType::Temporal(TemporalType::Timetz, _) | ColumnType::InternalChar => return None,
-            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => ElemType::Timestamp,
-            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => ElemType::Timestamptz,
-            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => ElemType::Interval,
+            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => {
+                ElemType::Timestamp
+            }
+            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => {
+                ElemType::Timestamptz
+            }
+            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => {
+                ElemType::Interval
+            }
             ColumnType::Bytea => ElemType::Bytea,
             ColumnType::Uuid => ElemType::Uuid,
             ColumnType::Json => ElemType::Json,
@@ -405,62 +474,13 @@ impl ElemType {
             ColumnType::Float4 => ElemType::Float4,
             ColumnType::Varchar(n) => ElemType::Varchar(n),
             ColumnType::Char(n) => ElemType::Char(n),
-            // Composite, enum and domain element types are not supported: an
-            // array of them would need an element oid the array encoder cannot
-            // name, so callers report 0A000 rather than mis-encoding.
-            ColumnType::Point
-            | ColumnType::Aclitem
-            | ColumnType::Path
-            | ColumnType::Polygon
-            | ColumnType::Lseg
-            | ColumnType::Line
-            | ColumnType::Circle
-            | ColumnType::Box
-            | ColumnType::Regclass
-            | ColumnType::Regprocedure
-            | ColumnType::Regnamespace
-            | ColumnType::Regproc
-            | ColumnType::Regoper
-            | ColumnType::Regoperator
-            | ColumnType::Regconfig
-            | ColumnType::Regdictionary
-            | ColumnType::Regrole
-            | ColumnType::Regcollation
-            | ColumnType::OidVector
-            | ColumnType::Int2Vector
-            | ColumnType::TsVector
-            | ColumnType::TsQuery
-            // The network types have no array element form here for the same
-            // reason the geometric ones do not: their array oids would need an
-            // `ElemType` the array encoder cannot name.
-            | ColumnType::Inet
-            | ColumnType::Cidr
-            | ColumnType::MacAddr
-            | ColumnType::MacAddr8
-            // The system identifier types have no `ElemType` for the same
-            // reason: their array oids would need an element the array encoder
-            // cannot name.
-            | ColumnType::Oid
-            | ColumnType::Xid
-            | ColumnType::Xid8
-            | ColumnType::Cid
-            | ColumnType::Tid
-            | ColumnType::PgLsn
-            // The two snapshot types have array oids upstream, and no element
-            // the array encoder can name here either.
-            | ColumnType::PgSnapshot
-            | ColumnType::TxidSnapshot
-            | ColumnType::Refcursor
-            | ColumnType::Money
-            | ColumnType::Bit(_)
-            | ColumnType::VarBit(_)
-            | ColumnType::Array(_)
-            | ColumnType::Record(_)
-            | ColumnType::Enum(_)
-            | ColumnType::Domain(_)
-            // A user-defined base type gets no array companion, for the same
-            // reason a composite, an enum and a domain get none.
-            | ColumnType::Base(_) => return None,
+            ColumnType::Record(record) => ElemType::Record(record),
+            ColumnType::Enum(user) => ElemType::User(user),
+            ColumnType::Domain(domain) => ElemType::User(domain.as_ref()),
+            ColumnType::Base(base) => ElemType::User(base.as_ref()),
+            // PostgreSQL has no nested array type: dimensions live in the
+            // array value, not in a second array element descriptor.
+            ColumnType::Array(_) => return None,
             ColumnType::Range(range) => {
                 let elem = ElemType::Range(range);
                 if elem.array_oid() == 0 {
@@ -470,6 +490,7 @@ impl ElemType {
             }
             ColumnType::Multirange(multirange) => ElemType::Multirange(multirange),
             ColumnType::Regtype => ElemType::Regtype,
+            _ => return None,
         })
     }
 
@@ -504,6 +525,10 @@ impl ElemType {
             ElemType::Regtype => oids::REGTYPEARRAY,
             ElemType::Varchar(_) => oids::VARCHARARRAY,
             ElemType::Char(_) => oids::BPCHARARRAY,
+            ElemType::Record(None) => oids::RECORDARRAY,
+            ElemType::Record(Some(record)) => record.array_oid,
+            ElemType::User(user) => user.array_oid,
+            ElemType::Builtin(builtin) => builtin.array_oid(),
             ElemType::Range(range) => match range.oid {
                 oids::INT4RANGE => oids::INT4RANGEARRAY,
                 oids::NUMRANGE => oids::NUMRANGEARRAY,
@@ -511,7 +536,7 @@ impl ElemType {
                 oids::TSTZRANGE => oids::TSTZRANGEARRAY,
                 oids::DATERANGE => oids::DATERANGEARRAY,
                 oids::INT8RANGE => oids::INT8RANGEARRAY,
-                _ => 0,
+                oid => crate::usertype::user_array_oid(oid),
             },
             ElemType::Multirange(multirange) => match multirange.oid {
                 oids::INT4MULTIRANGE => oids::INT4MULTIRANGEARRAY,
@@ -556,6 +581,12 @@ impl ElemType {
             ElemType::Regtype => "regtype[]",
             ElemType::Varchar(_) => "character varying[]",
             ElemType::Char(_) => "character[]",
+            ElemType::Record(None) => "record[]",
+            ElemType::Record(Some(record)) => {
+                crate::usertype::intern(&format!("{}[]", record.name))
+            }
+            ElemType::User(user) => crate::usertype::intern(&format!("{}[]", user.name)),
+            ElemType::Builtin(builtin) => builtin.array_name(),
             ElemType::Range(range) => match range.oid {
                 oids::INT4RANGE => "int4range[]",
                 oids::NUMRANGE => "numrange[]",
@@ -563,7 +594,7 @@ impl ElemType {
                 oids::TSTZRANGE => "tstzrange[]",
                 oids::DATERANGE => "daterange[]",
                 oids::INT8RANGE => "int8range[]",
-                _ => "range[]",
+                _ => crate::usertype::intern(&format!("{}[]", range.name)),
             },
             ElemType::Multirange(multirange) => match multirange.oid {
                 oids::INT4MULTIRANGE => "int4multirange[]",
@@ -572,7 +603,7 @@ impl ElemType {
                 oids::TSTZMULTIRANGE => "tstzmultirange[]",
                 oids::DATEMULTIRANGE => "datemultirange[]",
                 oids::INT8MULTIRANGE => "int8multirange[]",
-                _ => "multirange[]",
+                _ => crate::usertype::intern(&format!("{}[]", multirange.name)),
             },
         }
     }
@@ -617,13 +648,18 @@ impl ElemType {
             ElemType::Json => 22,
             ElemType::Xml => 23,
             ElemType::Name => 24,
+            ElemType::Record(_) => 25,
+            ElemType::User(_) => 26,
+            ElemType::Builtin(_) => 27,
         }
     }
 
     /// The inverse of [`ElemType::code`] (`None` for an unknown code). The
     /// length-modified families come back unconstrained.
     pub fn from_code(code: u8) -> Option<Self> {
-        ElemType::ALL.into_iter().find(|e| e.code() == code)
+        ElemType::ALL
+            .into_iter()
+            .find(|e| e.code() == code && code != 27)
     }
 
     /// Append the lossless storage encoding: the [`ElemType::code`] byte, plus a
@@ -634,6 +670,16 @@ impl ElemType {
             out.extend_from_slice(&range.oid.to_be_bytes());
         } else if let ElemType::Multirange(multirange) = self {
             out.extend_from_slice(&multirange.oid.to_be_bytes());
+        } else if let ElemType::Record(record) = self {
+            out.extend_from_slice(
+                &record
+                    .map_or(oids::RECORD, |record| record.oid)
+                    .to_be_bytes(),
+            );
+        } else if let ElemType::User(user) = self {
+            out.extend_from_slice(&user.oid.to_be_bytes());
+        } else if let ElemType::Builtin(builtin) = self {
+            builtin.write_code(out);
         } else if matches!(self, ElemType::Varchar(_) | ElemType::Char(_)) {
             match self.typmod() {
                 None => out.push(0),
@@ -671,6 +717,33 @@ impl ElemType {
                 ColumnType::Multirange(multirange) => Some(ElemType::Multirange(multirange)),
                 _ => None,
             };
+        }
+        if *code == 25 {
+            let (bytes, rest) = cursor.split_at_checked(4)?;
+            *cursor = rest;
+            let oid = u32::from_be_bytes(bytes.try_into().ok()?);
+            return if oid == oids::RECORD {
+                Some(ElemType::Record(None))
+            } else {
+                match crate::usertype::column_type_for_oid(oid)? {
+                    ColumnType::Record(record) => Some(ElemType::Record(record)),
+                    _ => None,
+                }
+            };
+        }
+        if *code == 26 {
+            let (bytes, rest) = cursor.split_at_checked(4)?;
+            *cursor = rest;
+            let oid = u32::from_be_bytes(bytes.try_into().ok()?);
+            return match crate::usertype::column_type_for_oid(oid)? {
+                ColumnType::Enum(user) => Some(ElemType::User(user)),
+                ColumnType::Domain(domain) => Some(ElemType::User(domain.as_ref())),
+                ColumnType::Base(base) => Some(ElemType::User(base.as_ref())),
+                _ => None,
+            };
+        }
+        if *code == 27 {
+            return BuiltinElem::read_code(cursor).map(ElemType::Builtin);
         }
         let base = ElemType::from_code(*code)?;
         if !matches!(base, ElemType::Varchar(_) | ElemType::Char(_)) {
@@ -713,6 +786,14 @@ impl ElemType {
                 return Some(elem);
             }
         }
+        if let Some(range) = crate::usertype::all().into_iter().find_map(|ty| {
+            let ColumnType::Range(range) = ty.column_type()? else {
+                return None;
+            };
+            (ElemType::Range(range).array_oid() == oid).then_some(range)
+        }) {
+            return Some(ElemType::Range(range));
+        }
         for multirange_oid in [
             oids::INT4MULTIRANGE,
             oids::NUMMULTIRANGE,
@@ -737,6 +818,30 @@ impl ElemType {
             (ElemType::Multirange(multirange).array_oid() == oid).then_some(multirange)
         }) {
             return Some(ElemType::Multirange(multirange));
+        }
+        if oid == oids::RECORDARRAY {
+            return Some(ElemType::Record(None));
+        }
+        if let Some(record) = crate::usertype::all().into_iter().find_map(|ty| {
+            let ColumnType::Record(record) = ty.column_type()? else {
+                return None;
+            };
+            (ElemType::Record(record).array_oid() == oid).then_some(record)
+        }) {
+            return Some(ElemType::Record(record));
+        }
+        if let Some(user) = crate::usertype::all().into_iter().find_map(|ty| {
+            matches!(
+                ty.column_type(),
+                Some(ColumnType::Enum(_) | ColumnType::Domain(_) | ColumnType::Base(_))
+            )
+            .then_some(ty.type_ref())
+            .filter(|user| user.array_oid == oid)
+        }) {
+            return Some(ElemType::User(user));
+        }
+        if let Some(builtin) = BuiltinElem::from_array_oid(oid) {
+            return Some(ElemType::Builtin(builtin));
         }
         ElemType::ALL.into_iter().find(|e| e.array_oid() == oid)
     }
@@ -1266,9 +1371,15 @@ impl ColumnType {
             ColumnType::Date => oids::DATE,
             ColumnType::Time | ColumnType::Temporal(TemporalType::Time, _) => oids::TIME,
             ColumnType::Timetz | ColumnType::Temporal(TemporalType::Timetz, _) => oids::TIMETZ,
-            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => oids::TIMESTAMP,
-            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => oids::TIMESTAMPTZ,
-            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => oids::INTERVAL,
+            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => {
+                oids::TIMESTAMP
+            }
+            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => {
+                oids::TIMESTAMPTZ
+            }
+            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => {
+                oids::INTERVAL
+            }
             ColumnType::Bytea => oids::BYTEA,
             ColumnType::Uuid => oids::UUID,
             ColumnType::Regclass => oids::REGCLASS,
@@ -1343,10 +1454,18 @@ impl ColumnType {
             ColumnType::Box => "box",
             ColumnType::Numeric(_) => "numeric",
             ColumnType::Date => "date",
-            ColumnType::Time | ColumnType::Temporal(TemporalType::Time, _) => "time without time zone",
-            ColumnType::Timetz | ColumnType::Temporal(TemporalType::Timetz, _) => "time with time zone",
-            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => "timestamp without time zone",
-            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => "timestamp with time zone",
+            ColumnType::Time | ColumnType::Temporal(TemporalType::Time, _) => {
+                "time without time zone"
+            }
+            ColumnType::Timetz | ColumnType::Temporal(TemporalType::Timetz, _) => {
+                "time with time zone"
+            }
+            ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => {
+                "timestamp without time zone"
+            }
+            ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => {
+                "timestamp with time zone"
+            }
             ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => "interval",
             ColumnType::Bytea => "bytea",
             ColumnType::Uuid => "uuid",
@@ -1401,7 +1520,10 @@ impl ColumnType {
             ColumnType::Int2 => 2,
             ColumnType::Int8 => 8,
             ColumnType::Int4 => 4,
-            ColumnType::Text | ColumnType::Refcursor | ColumnType::Varchar(_) | ColumnType::Char(_) => -1,
+            ColumnType::Text
+            | ColumnType::Refcursor
+            | ColumnType::Varchar(_)
+            | ColumnType::Char(_) => -1,
             ColumnType::Name => 64,
             ColumnType::Aclitem => 16,
             // The whole point of `"char"`: one byte, pass-by-value, no varlena
@@ -1513,7 +1635,13 @@ impl ColumnType {
             // `bittypmodin` stores the bit count with no varlena adjustment,
             // so `bit(4)`'s typmod is 4, not 8.
             ColumnType::Bit(Some(n)) | ColumnType::VarBit(Some(n)) => n,
-            ColumnType::Temporal(TemporalType::Time | TemporalType::Timetz | TemporalType::Timestamp | TemporalType::Timestamptz, p) => i32::from(p),
+            ColumnType::Temporal(
+                TemporalType::Time
+                | TemporalType::Timetz
+                | TemporalType::Timestamp
+                | TemporalType::Timestamptz,
+                p,
+            ) => i32::from(p),
             ColumnType::Temporal(TemporalType::Interval, p) => (0x7fff << 16) | i32::from(p),
             // A domain inherits its base type's length modifier.
             ColumnType::Domain(domain) => domain.base.typmod(),
@@ -1530,13 +1658,209 @@ impl ColumnType {
             ColumnType::Timestamp => (ColumnType::Timestamp, None),
             ColumnType::Timestamptz => (ColumnType::Timestamptz, None),
             ColumnType::Interval => (ColumnType::Interval, None),
-            ColumnType::Temporal(TemporalType::Time, precision) => (ColumnType::Time, Some(precision)),
-            ColumnType::Temporal(TemporalType::Timetz, precision) => (ColumnType::Timetz, Some(precision)),
-            ColumnType::Temporal(TemporalType::Timestamp, precision) => (ColumnType::Timestamp, Some(precision)),
-            ColumnType::Temporal(TemporalType::Timestamptz, precision) => (ColumnType::Timestamptz, Some(precision)),
-            ColumnType::Temporal(TemporalType::Interval, precision) => (ColumnType::Interval, Some(precision)),
+            ColumnType::Temporal(TemporalType::Time, precision) => {
+                (ColumnType::Time, Some(precision))
+            }
+            ColumnType::Temporal(TemporalType::Timetz, precision) => {
+                (ColumnType::Timetz, Some(precision))
+            }
+            ColumnType::Temporal(TemporalType::Timestamp, precision) => {
+                (ColumnType::Timestamp, Some(precision))
+            }
+            ColumnType::Temporal(TemporalType::Timestamptz, precision) => {
+                (ColumnType::Timestamptz, Some(precision))
+            }
+            ColumnType::Temporal(TemporalType::Interval, precision) => {
+                (ColumnType::Interval, Some(precision))
+            }
             _ => return None,
         })
+    }
+}
+
+macro_rules! builtin_array_elem_defs {
+    ($($name:ident: ($column_type:expr, $array_oid:expr, $array_name:literal, $catalog_name:literal)),+ $(,)?) => {
+        $(
+            static $name: BuiltinElemDef = BuiltinElemDef {
+                column_type: $column_type,
+                array_oid: $array_oid,
+                array_name: $array_name,
+                catalog_name: $catalog_name,
+            };
+        )+
+    };
+}
+
+builtin_array_elem_defs! {
+    ACLITEM_ELEM: (ColumnType::Aclitem, oids::ACLITEMARRAY, "aclitem[]", "_aclitem"),
+    REFCURSOR_ELEM: (ColumnType::Refcursor, oids::REFCURSORARRAY, "refcursor[]", "_refcursor"),
+    INTERNAL_CHAR_ELEM: (ColumnType::InternalChar, oids::CHARARRAY, "\"char\"[]", "_char"),
+    TIMETZ_ELEM: (ColumnType::Timetz, oids::TIMETZARRAY, "time with time zone[]", "_timetz"),
+    POINT_ELEM: (ColumnType::Point, oids::POINTARRAY, "point[]", "_point"),
+    PATH_ELEM: (ColumnType::Path, oids::PATHARRAY, "path[]", "_path"),
+    POLYGON_ELEM: (ColumnType::Polygon, oids::POLYGONARRAY, "polygon[]", "_polygon"),
+    LSEG_ELEM: (ColumnType::Lseg, oids::LSEGARRAY, "lseg[]", "_lseg"),
+    LINE_ELEM: (ColumnType::Line, oids::LINEARRAY, "line[]", "_line"),
+    CIRCLE_ELEM: (ColumnType::Circle, oids::CIRCLEARRAY, "circle[]", "_circle"),
+    BOX_ELEM: (ColumnType::Box, oids::BOXARRAY, "box[]", "_box"),
+    REGCLASS_ELEM: (ColumnType::Regclass, oids::REGCLASSARRAY, "regclass[]", "_regclass"),
+    REGPROCEDURE_ELEM: (ColumnType::Regprocedure, oids::REGPROCEDUREARRAY, "regprocedure[]", "_regprocedure"),
+    REGNAMESPACE_ELEM: (ColumnType::Regnamespace, oids::REGNAMESPACEARRAY, "regnamespace[]", "_regnamespace"),
+    REGPROC_ELEM: (ColumnType::Regproc, oids::REGPROCARRAY, "regproc[]", "_regproc"),
+    REGOPER_ELEM: (ColumnType::Regoper, oids::REGOPERARRAY, "regoper[]", "_regoper"),
+    REGOPERATOR_ELEM: (ColumnType::Regoperator, oids::REGOPERATORARRAY, "regoperator[]", "_regoperator"),
+    REGCONFIG_ELEM: (ColumnType::Regconfig, oids::REGCONFIGARRAY, "regconfig[]", "_regconfig"),
+    REGDICTIONARY_ELEM: (ColumnType::Regdictionary, oids::REGDICTIONARYARRAY, "regdictionary[]", "_regdictionary"),
+    REGROLE_ELEM: (ColumnType::Regrole, oids::REGROLEARRAY, "regrole[]", "_regrole"),
+    REGCOLLATION_ELEM: (ColumnType::Regcollation, oids::REGCOLLATIONARRAY, "regcollation[]", "_regcollation"),
+    OIDVECTOR_ELEM: (ColumnType::OidVector, oids::OIDVECTORARRAY, "oidvector[]", "_oidvector"),
+    INT2VECTOR_ELEM: (ColumnType::Int2Vector, oids::INT2VECTORARRAY, "int2vector[]", "_int2vector"),
+    TSVECTOR_ELEM: (ColumnType::TsVector, oids::TSVECTORARRAY, "tsvector[]", "_tsvector"),
+    TSQUERY_ELEM: (ColumnType::TsQuery, oids::TSQUERYARRAY, "tsquery[]", "_tsquery"),
+    INET_ELEM: (ColumnType::Inet, oids::INETARRAY, "inet[]", "_inet"),
+    CIDR_ELEM: (ColumnType::Cidr, oids::CIDRARRAY, "cidr[]", "_cidr"),
+    MACADDR_ELEM: (ColumnType::MacAddr, oids::MACADDRARRAY, "macaddr[]", "_macaddr"),
+    MACADDR8_ELEM: (ColumnType::MacAddr8, oids::MACADDR8ARRAY, "macaddr8[]", "_macaddr8"),
+    OID_ELEM: (ColumnType::Oid, oids::OIDARRAY, "oid[]", "_oid"),
+    XID_ELEM: (ColumnType::Xid, oids::XIDARRAY, "xid[]", "_xid"),
+    XID8_ELEM: (ColumnType::Xid8, oids::XID8ARRAY, "xid8[]", "_xid8"),
+    CID_ELEM: (ColumnType::Cid, oids::CIDARRAY, "cid[]", "_cid"),
+    TID_ELEM: (ColumnType::Tid, oids::TIDARRAY, "tid[]", "_tid"),
+    PG_LSN_ELEM: (ColumnType::PgLsn, oids::PG_LSNARRAY, "pg_lsn[]", "_pg_lsn"),
+    PG_SNAPSHOT_ELEM: (ColumnType::PgSnapshot, oids::PG_SNAPSHOTARRAY, "pg_snapshot[]", "_pg_snapshot"),
+    TXID_SNAPSHOT_ELEM: (ColumnType::TxidSnapshot, oids::TXID_SNAPSHOTARRAY, "txid_snapshot[]", "_txid_snapshot"),
+    MONEY_ELEM: (ColumnType::Money, oids::MONEYARRAY, "money[]", "_money"),
+    BIT_ELEM: (ColumnType::Bit(None), oids::BITARRAY, "bit[]", "_bit"),
+    VARBIT_ELEM: (ColumnType::VarBit(None), oids::VARBITARRAY, "bit varying[]", "_varbit"),
+}
+
+impl BuiltinElem {
+    /// Every descriptor outside the original compact [`ElemType`] set.
+    pub fn all() -> impl Iterator<Item = Self> {
+        [
+            &ACLITEM_ELEM,
+            &REFCURSOR_ELEM,
+            &INTERNAL_CHAR_ELEM,
+            &TIMETZ_ELEM,
+            &POINT_ELEM,
+            &PATH_ELEM,
+            &POLYGON_ELEM,
+            &LSEG_ELEM,
+            &LINE_ELEM,
+            &CIRCLE_ELEM,
+            &BOX_ELEM,
+            &REGCLASS_ELEM,
+            &REGPROCEDURE_ELEM,
+            &REGNAMESPACE_ELEM,
+            &REGPROC_ELEM,
+            &REGOPER_ELEM,
+            &REGOPERATOR_ELEM,
+            &REGCONFIG_ELEM,
+            &REGDICTIONARY_ELEM,
+            &REGROLE_ELEM,
+            &REGCOLLATION_ELEM,
+            &OIDVECTOR_ELEM,
+            &INT2VECTOR_ELEM,
+            &TSVECTOR_ELEM,
+            &TSQUERY_ELEM,
+            &INET_ELEM,
+            &CIDR_ELEM,
+            &MACADDR_ELEM,
+            &MACADDR8_ELEM,
+            &OID_ELEM,
+            &XID_ELEM,
+            &XID8_ELEM,
+            &CID_ELEM,
+            &TID_ELEM,
+            &PG_LSN_ELEM,
+            &PG_SNAPSHOT_ELEM,
+            &TXID_SNAPSHOT_ELEM,
+            &MONEY_ELEM,
+            &BIT_ELEM,
+            &VARBIT_ELEM,
+        ]
+        .into_iter()
+        .map(|def| Self { def, typmod: None })
+    }
+
+    fn from_column_type(column_type: ColumnType) -> Option<Self> {
+        let (column_type, typmod) = match column_type {
+            ColumnType::Bit(typmod) => (ColumnType::Bit(None), typmod),
+            ColumnType::VarBit(typmod) => (ColumnType::VarBit(None), typmod),
+            ColumnType::Temporal(TemporalType::Timetz, _) => (ColumnType::Timetz, None),
+            other => (other, None),
+        };
+        Self::all()
+            .find(|elem| elem.def.column_type == column_type)
+            .map(|mut elem| {
+                elem.typmod = typmod;
+                elem
+            })
+    }
+
+    fn from_array_oid(array_oid: u32) -> Option<Self> {
+        Self::all().find(|elem| elem.array_oid() == array_oid)
+    }
+
+    fn column_type(self) -> ColumnType {
+        match self.def.column_type {
+            ColumnType::Bit(_) => ColumnType::Bit(self.typmod),
+            ColumnType::VarBit(_) => ColumnType::VarBit(self.typmod),
+            column_type => column_type,
+        }
+    }
+
+    fn array_oid(self) -> u32 {
+        self.def.array_oid
+    }
+
+    fn array_name(self) -> &'static str {
+        self.def.array_name
+    }
+
+    /// The `pg_type.typname` of this descriptor's array type.
+    pub fn catalog_name(self) -> &'static str {
+        self.def.catalog_name
+    }
+
+    fn write_code(self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.column_type().oid().to_be_bytes());
+        if matches!(
+            self.def.column_type,
+            ColumnType::Bit(_) | ColumnType::VarBit(_)
+        ) {
+            match self.typmod {
+                None => out.push(0),
+                Some(typmod) => {
+                    out.push(1);
+                    out.extend_from_slice(&typmod.to_be_bytes());
+                }
+            }
+        }
+    }
+
+    fn read_code(cursor: &mut &[u8]) -> Option<Self> {
+        let (bytes, rest) = cursor.split_at_checked(4)?;
+        *cursor = rest;
+        let oid = u32::from_be_bytes(bytes.try_into().ok()?);
+        let mut elem = Self::all().find(|elem| elem.column_type().oid() == oid)?;
+        if matches!(
+            elem.def.column_type,
+            ColumnType::Bit(_) | ColumnType::VarBit(_)
+        ) {
+            let (flag, rest) = cursor.split_first()?;
+            *cursor = rest;
+            elem.typmod = match flag {
+                0 => None,
+                1 => {
+                    let (bytes, rest) = cursor.split_at_checked(4)?;
+                    *cursor = rest;
+                    Some(i32::from_be_bytes(bytes.try_into().ok()?))
+                }
+                _ => return None,
+            };
+        }
+        Some(elem)
     }
 }
 
@@ -2985,8 +3309,46 @@ mod tests {
             assert!(ty.array_element() == Some(*elem));
             assert!(ElemType::from_array_oid(*array_oid) == Some(*elem));
         }
+        for builtin in BuiltinElem::all() {
+            let elem = ElemType::Builtin(builtin);
+            assert!(
+                elem.oid() == builtin.column_type().oid(),
+                "{elem:?} element oid"
+            );
+            assert!(
+                ColumnType::Array(elem).oid() == elem.array_oid(),
+                "{elem:?} array oid"
+            );
+            assert!(
+                ColumnType::Array(elem).name() == elem.array_name(),
+                "{elem:?} array name"
+            );
+            assert!(ElemType::from_array_oid(elem.array_oid()) == Some(elem));
+        }
         assert!(ElemType::from_array_oid(oids::JSONARRAY) == Some(ElemType::Json));
         assert!(ElemType::from_array_oid(9999) == None);
+    }
+
+    #[test]
+    fn builtin_array_descriptors_have_distinct_identities_and_postgres_names() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        use assert2::assert;
+
+        let aclitem = BuiltinElem::all().next().expect("aclitem descriptor");
+        let refcursor = BuiltinElem::all().nth(1).expect("refcursor descriptor");
+        assert!(aclitem == aclitem);
+        assert!(aclitem != refcursor);
+        assert!(aclitem.array_name() == "aclitem[]");
+        assert!(aclitem.catalog_name() == "_aclitem");
+
+        let hash = |value: BuiltinElem| {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert!(hash(aclitem) != hash(refcursor));
     }
 
     /// The element codes are persisted (row encoding, catalog schema), so they
@@ -2998,6 +3360,23 @@ mod tests {
             assert!(ElemType::from_code(elem.code()) == Some(elem), "{elem:?}");
         }
         assert!(ElemType::JsonPath.code() == 21);
+        assert!(ElemType::Record(None).code() == 25);
+        assert!(
+            ElemType::User(crate::usertype::UserTypeRef {
+                oid: 301_104,
+                array_oid: crate::usertype::user_array_oid(301_104),
+                name: "datum_user_array_code",
+            })
+            .code()
+                == 26
+        );
+        assert!(
+            ElemType::Builtin(BuiltinElem::all().next().expect("builtin descriptor")).code() == 27
+        );
+        assert!(
+            ElemType::from_code(27) == None,
+            "builtin descriptors carry an oid payload"
+        );
         assert!(ElemType::from_code(200) == None);
     }
 
@@ -3011,13 +3390,87 @@ mod tests {
             ElemType::Varchar(Some(5)),
             ElemType::Varchar(Some(u16::MAX)),
             ElemType::Char(Some(1)),
+            ElemType::Record(None),
         ]);
+        every.extend(BuiltinElem::all().map(ElemType::Builtin));
+        every.push(ElemType::Builtin(
+            BuiltinElem::from_column_type(ColumnType::Bit(Some(7))).expect("bit array element"),
+        ));
         for elem in every {
             let mut bytes = Vec::new();
             elem.write_code(&mut bytes);
             let mut cursor = bytes.as_slice();
             assert!(ElemType::read_code(&mut cursor) == Some(elem), "{elem:?}");
             assert!(cursor.is_empty(), "{elem:?}");
+        }
+        let named = crate::usertype::UserType {
+            oid: 301_100,
+            array_oid: crate::usertype::user_array_oid(301_100),
+            schema: crate::usertype::USER_TYPE_DEFAULT_SCHEMA.to_string(),
+            name: "datum_record_array_codec".to_string(),
+            body: crate::usertype::UserTypeBody::Composite(Vec::new()),
+        };
+        crate::usertype::replace(&named);
+        let elem = ElemType::Record(Some(named.type_ref()));
+        let mut bytes = Vec::new();
+        elem.write_code(&mut bytes);
+        let mut cursor = bytes.as_slice();
+        assert!(ElemType::read_code(&mut cursor) == Some(elem));
+        assert!(cursor.is_empty());
+        crate::usertype::unregister("datum_record_array_codec");
+        let user = crate::usertype::UserType {
+            oid: 301_104,
+            array_oid: crate::usertype::user_array_oid(301_104),
+            schema: crate::usertype::USER_TYPE_DEFAULT_SCHEMA.to_string(),
+            name: "datum_user_array_codec".to_string(),
+            body: crate::usertype::UserTypeBody::Enum(vec!["ok".into()]),
+        };
+        crate::usertype::replace(&user);
+        let elem = ElemType::User(user.type_ref());
+        let mut bytes = Vec::new();
+        elem.write_code(&mut bytes);
+        let mut cursor = bytes.as_slice();
+        assert!(ElemType::read_code(&mut cursor) == Some(elem));
+        assert!(cursor.is_empty());
+        assert!(ElemType::from_array_oid(user.array_oid) == Some(elem));
+        crate::usertype::unregister("datum_user_array_codec");
+        for user in [
+            crate::usertype::UserType {
+                oid: 301_108,
+                array_oid: crate::usertype::user_array_oid(301_108),
+                schema: crate::usertype::USER_TYPE_DEFAULT_SCHEMA.to_string(),
+                name: "datum_domain_array_codec".to_string(),
+                body: crate::usertype::UserTypeBody::Domain(crate::usertype::DomainBody {
+                    base: ColumnType::Int4,
+                    not_null: false,
+                    not_null_name: None,
+                    default: None,
+                    checks: Vec::new(),
+                }),
+            },
+            crate::usertype::UserType {
+                oid: 301_112,
+                array_oid: crate::usertype::user_array_oid(301_112),
+                schema: crate::usertype::USER_TYPE_DEFAULT_SCHEMA.to_string(),
+                name: "datum_base_array_codec".to_string(),
+                body: crate::usertype::UserTypeBody::Base(crate::usertype::BaseBody {
+                    representation: ColumnType::Int4,
+                    input: "int4in".to_string(),
+                    output: "int4out".to_string(),
+                    category: "N".to_string(),
+                    preferred: false,
+                    delimiter: ",".to_string(),
+                }),
+            },
+        ] {
+            crate::usertype::replace(&user);
+            let elem = ElemType::User(user.type_ref());
+            let mut bytes = Vec::new();
+            elem.write_code(&mut bytes);
+            let mut cursor = bytes.as_slice();
+            assert!(ElemType::read_code(&mut cursor) == Some(elem), "{elem:?}");
+            assert!(cursor.is_empty(), "{elem:?}");
+            crate::usertype::unregister(&user.name);
         }
         assert!(ElemType::read_code(&mut [].as_slice()) == None);
         assert!(ElemType::read_code(&mut [200u8].as_slice()) == None);
@@ -3111,7 +3564,7 @@ mod tests {
     }
 
     #[test]
-    fn array_of_refuses_element_types_without_an_array_type() {
+    fn array_of_supports_record_and_every_builtin_element_type() {
         use assert2::assert;
         assert!(ColumnType::array_of(ColumnType::Int4) == Some(ColumnType::Array(ElemType::Int4)));
         assert!(
@@ -3131,14 +3584,29 @@ mod tests {
             ColumnType::array_of(ColumnType::Char(Some(2)))
                 == Some(ColumnType::Array(ElemType::Char(Some(2))))
         );
-        // `regclass` has none, and PostgreSQL has no nested array TYPE — an
-        // array of an array is refused, the extra dimensions living in values.
-        for unsupported in [ColumnType::Regclass, ColumnType::Array(ElemType::Int4)] {
+        assert!(
+            ColumnType::array_of(ColumnType::Record(None))
+                == Some(ColumnType::Array(ElemType::Record(None)))
+        );
+        let enum_type = crate::usertype::UserTypeRef {
+            oid: 301_108,
+            array_oid: crate::usertype::user_array_oid(301_108),
+            name: "datum_array_enum",
+        };
+        assert!(
+            ColumnType::array_of(ColumnType::Enum(enum_type))
+                == Some(ColumnType::Array(ElemType::User(enum_type)))
+        );
+        for builtin in BuiltinElem::all() {
+            let ty = builtin.column_type();
             assert!(
-                ColumnType::array_of(unsupported) == None,
-                "{unsupported:?} has no array type"
+                ColumnType::array_of(ty) == Some(ColumnType::Array(ElemType::Builtin(builtin))),
+                "{ty:?} has no array type"
             );
         }
+        // PostgreSQL has no nested array TYPE — an array of an array is
+        // refused, the extra dimensions living in values.
+        assert!(ColumnType::array_of(ColumnType::Array(ElemType::Int4)) == None);
         assert!(ColumnType::Int4.array_element() == None);
     }
 
@@ -3361,11 +3829,10 @@ mod tests {
             assert!(!ty.is_string(), "{name} is not a string type");
             assert!(!ty.is_numeric(), "{name} is not numeric");
             assert!(!ty.is_reg(), "{name} is not a reg type");
-            // None of the seven has an `ElemType`, so crabka names no array type
-            // over them — `polygon[]` (1027) included.
+            let array = ColumnType::array_of(*ty).expect("every geometric type has an array");
+            assert!(array.oid() != 0, "{name} array oid");
             assert!(
-                ColumnType::array_of(*ty) == None,
-                "{name} has no array type"
+                array.array_element() == Some(ElemType::from_column_type(*ty).expect("element"))
             );
             assert!(ty.array_element() == None, "{name} is not an array");
             assert!(ty.storage_type() == *ty, "{name} stores as itself");
@@ -3386,7 +3853,10 @@ mod tests {
         ] {
             let ty = ColumnType::information_schema_domain(name).expect("known domain");
             assert!(ty.oid() == oid, "{name} oid");
-            assert!(ty.name() == format!("information_schema.{name}"), "{name} name");
+            assert!(
+                ty.name() == format!("information_schema.{name}"),
+                "{name} name"
+            );
             assert!(ColumnType::information_schema_domain_by_oid(oid) == Some(ty));
         }
         assert!(ColumnType::information_schema_domain("missing") == None);

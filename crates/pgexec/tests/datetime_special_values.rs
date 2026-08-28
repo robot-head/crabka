@@ -590,6 +590,37 @@ async fn date_bin_snaps_to_a_stride_grid() {
 }
 
 #[tokio::test]
+async fn temporal_typmods_round_values_when_stored() {
+    let client = connect(spawn().await).await;
+    client
+        .simple_query(
+            "CREATE TABLE temporal_typmod_store (\
+               t time(0), z time(2) with time zone, ts timestamp(0), \
+               tz timestamptz(0), iv interval(0)); \
+             INSERT INTO temporal_typmod_store VALUES (\
+               '12:34:56.5', '12:34:56.785-05', '2000-01-01 00:00:00.5', \
+               '2000-01-01 00:00:00.5+00', '1.5 seconds')",
+        )
+        .await
+        .expect("store temporal typmods");
+    assert!(
+        row(
+            &client,
+            "SELECT t::text, z::text, ts::text, tz::text, iv::text \
+             FROM temporal_typmod_store",
+        )
+        .await
+            == vec![
+                Some("12:34:57".into()),
+                Some("12:34:56.79-05".into()),
+                Some("2000-01-01 00:00:01".into()),
+                Some("2000-01-01 00:00:01+00".into()),
+                Some("00:00:02".into()),
+            ]
+    );
+}
+
+#[tokio::test]
 async fn out_of_range_literals_carry_postgres_sqlstates() {
     let client = connect(spawn().await).await;
     let cases: &[(&str, &str)] = &[

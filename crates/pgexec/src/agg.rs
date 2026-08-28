@@ -68,6 +68,8 @@ enum AggFunc {
     JsonObjectAgg,
     /// `string_agg(value, delimiter)` — the values joined by the delimiter.
     StringAgg,
+    /// `xmlagg(xml)` — XML values concatenated in input order.
+    XmlAgg,
     /// `bool_and(b)` / `every(b)`, true when no input is false.
     BoolAnd,
     /// `bool_or(b)`, true when some input is true.
@@ -210,6 +212,7 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
         "json_agg" => Some(AggFunc::JsonAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "string_agg" => Some(AggFunc::StringAgg),
+        "xmlagg" => Some(AggFunc::XmlAgg),
         // `every` is SQL's spelling of `bool_and`; `variance`/`stddev` are
         // PostgreSQL's historical aliases for the SAMPLE forms.
         "bool_and" | "every" => Some(AggFunc::BoolAnd),
@@ -245,7 +248,7 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
 /// `Ok(None)` means "not a user aggregate", which leaves every built-in path
 /// exactly as it was — including the case where no statement runtime is
 /// installed at all.
-fn resolve_user(
+pub(crate) fn resolve_user(
     fc: &FuncCall,
     scope: &Scope,
 ) -> Result<Option<crate::useragg::UserAggregate>, ExecError> {
@@ -281,14 +284,14 @@ pub(crate) fn contains_aggregate(e: &Expr) -> bool {
                 || match &fc.args {
                     FuncArgs::Star => false,
                     FuncArgs::Exprs(args) => args.iter().any(contains_aggregate),
-                FuncArgs::Named { positional, named } => positional
-                    .iter()
-                    .chain(named.iter().map(|(_, arg)| arg))
-                    .any(contains_aggregate),
-                FuncArgs::Variadic { positional, array } => positional
-                    .iter()
-                    .chain(std::iter::once(array.as_ref()))
-                    .any(contains_aggregate),
+                    FuncArgs::Named { positional, named } => positional
+                        .iter()
+                        .chain(named.iter().map(|(_, arg)| arg))
+                        .any(contains_aggregate),
+                    FuncArgs::Variadic { positional, array } => positional
+                        .iter()
+                        .chain(std::iter::once(array.as_ref()))
+                        .any(contains_aggregate),
                 }
         }
         Expr::Unary { expr, .. } => contains_aggregate(expr),
@@ -456,6 +459,14 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
                 ColumnType::Text => Ok(ColumnType::Text),
                 other => Err(undefined_for_arg("string_agg", other)),
             }
+        }
+        AggFunc::XmlAgg => {
+            let value = single_value_arg(fc)?;
+            let ty = crate::eval::infer_type(value, scope)?;
+            if ty != ColumnType::Xml && !crate::eval::is_unknown_literal(value) {
+                return Err(undefined_for_arg("xmlagg", ty));
+            }
+            Ok(ColumnType::Xml)
         }
         AggFunc::BoolAnd | AggFunc::BoolOr => {
             let arg = single_value_arg(fc)?;
@@ -857,6 +868,24 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 user: None,
             })
         }
+        AggFunc::XmlAgg => {
+            let arg = single_value_arg(fc)?;
+            reject_nested_aggregate(arg)?;
+            let arg_type = crate::eval::infer_type(arg, scope)?;
+            if arg_type != ColumnType::Xml && !crate::eval::is_unknown_literal(arg) {
+                return Err(undefined_for_arg("xmlagg", arg_type));
+            }
+            Ok(AggSpec {
+                func,
+                arg: Some(arg.clone()),
+                value_arg: None,
+                arg_type: Some(arg_type),
+                distinct: fc.distinct,
+                order_by: fc.order_by.clone(),
+                filter: fc.filter.as_deref().cloned(),
+                user: None,
+            })
+        }
         _ if func.is_two_variable() => {
             let (y, x) = two_value_args(fc)?;
             reject_nested_aggregate(y)?;
@@ -971,10 +1000,24 @@ fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<()
             if is_wrapping_scalar_func(&fc.name)
                 || crate::routine::is_plpgsql_scalar_runtime(fc, scope) =>
         {
-            if let FuncArgs::Exprs(args) = &fc.args {
-                for a in args {
-                    collect_specs(a, scope, specs)?;
+            match &fc.args {
+                FuncArgs::Exprs(args) => {
+                    for arg in args {
+                        collect_specs(arg, scope, specs)?;
+                    }
                 }
+                FuncArgs::Named { positional, named } => {
+                    for arg in positional.iter().chain(named.iter().map(|(_, arg)| arg)) {
+                        collect_specs(arg, scope, specs)?;
+                    }
+                }
+                FuncArgs::Variadic { positional, array } => {
+                    for arg in positional {
+                        collect_specs(arg, scope, specs)?;
+                    }
+                    collect_specs(array, scope, specs)?;
+                }
+                FuncArgs::Star => {}
             }
         }
         Expr::Func(fc) => return Err(undefined_function(&fc.name)),
@@ -1229,10 +1272,24 @@ fn validate_grouped(e: &Expr, group_by: &[Expr], scope: &Scope) -> Result<(), Ex
             if is_wrapping_scalar_func(&fc.name)
                 || crate::routine::is_plpgsql_scalar_runtime(fc, scope) =>
         {
-            if let FuncArgs::Exprs(args) = &fc.args {
-                for a in args {
-                    validate_grouped(a, group_by, scope)?;
+            match &fc.args {
+                FuncArgs::Exprs(args) => {
+                    for arg in args {
+                        validate_grouped(arg, group_by, scope)?;
+                    }
                 }
+                FuncArgs::Named { positional, named } => {
+                    for arg in positional.iter().chain(named.iter().map(|(_, arg)| arg)) {
+                        validate_grouped(arg, group_by, scope)?;
+                    }
+                }
+                FuncArgs::Variadic { positional, array } => {
+                    for arg in positional {
+                        validate_grouped(arg, group_by, scope)?;
+                    }
+                    validate_grouped(array, group_by, scope)?;
+                }
+                FuncArgs::Star => {}
             }
             Ok(())
         }
@@ -1616,7 +1673,7 @@ fn eval_grouped_depth(
             let x = eval_grouped_depth(expr, grouped, d)?;
             let a = eval_grouped_depth(array, grouped, d)?;
             crate::array_fn::eval_quantified(&a, crate::eval::quantifier_of(*all), |elem| {
-                crate::eval::apply_binary(*op, &x, elem, ctx)
+                crate::eval::apply_comparison_of(*op, (expr, &x), (array, elem), ctx)
             })
         }
         // SP34: a resolved subquery constant in a grouped context.
@@ -1741,6 +1798,10 @@ enum AccState {
     /// reads it, and is written before every value but the first.
     StringAgg {
         acc: Option<StringAggAcc>,
+    },
+    /// `xmlagg`'s non-NULL values, kept for declaration-aware concatenation.
+    XmlAgg {
+        parts: Vec<String>,
     },
     /// `bool_and`/`bool_or`/`every`, which record whether any input was true
     /// and whether any input was false. No rows at all is SQL NULL.
@@ -2024,6 +2085,7 @@ impl AccState {
                 AccState::JsonPairs { pairs: Vec::new() }
             }
             AggFunc::StringAgg => AccState::StringAgg { acc: None },
+            AggFunc::XmlAgg => AccState::XmlAgg { parts: Vec::new() },
             AggFunc::BoolAnd | AggFunc::BoolOr => AccState::BoolAgg {
                 any_true: false,
                 any_false: false,
@@ -2204,6 +2266,19 @@ impl AccState {
                 let delimiter = args.get(1).cloned().unwrap_or(Datum::Null);
                 append_string_agg(acc, &v, &delimiter)?;
             }
+            AccState::XmlAgg { parts } => match v {
+                Datum::Xml(text) => parts.push(text),
+                Datum::Text(text) => {
+                    crabka_pgtypes::xml::validate(&text, ctx.xml_option)?;
+                    parts.push(text);
+                }
+                other => {
+                    return Err(undefined_for_arg(
+                        "xmlagg",
+                        other.column_type().unwrap_or(ColumnType::Text),
+                    ));
+                }
+            },
             AccState::BoolAgg {
                 any_true,
                 any_false,
@@ -2452,6 +2527,8 @@ impl AccState {
             AccState::ArrayAgg { elem, elems } => {
                 if elems.is_empty() {
                     Datum::Null
+                } else if matches!(spec.arg_type, Some(ColumnType::Array(_))) {
+                    finish_array_agg_arrays(*elem, elems)?
                 } else {
                     crate::array_fn::build_constructor(*elem, elems.clone())?
                 }
@@ -2488,6 +2565,14 @@ impl AccState {
                 Some(StringAggAcc::Text(s)) => Datum::Text(s.clone()),
                 Some(StringAggAcc::Bytea(b)) => Datum::Bytea(b.clone()),
             },
+            AccState::XmlAgg { parts } => {
+                if parts.is_empty() {
+                    Datum::Null
+                } else {
+                    let text: Vec<_> = parts.iter().map(String::as_str).collect();
+                    Datum::Xml(crabka_pgtypes::xml::concat(&text))
+                }
+            }
             AccState::BoolAgg {
                 any_true,
                 any_false,
@@ -2661,6 +2746,39 @@ fn finish_regr(func: AggFunc, n: f64, sx: f64, sxx: f64, sy: f64, syy: f64, sxy:
         AggFunc::RegrR2 => Datum::Float8((sxy * sxy) / (sxx * syy)),
         _ => Datum::Null,
     }
+}
+
+/// Finish `array_agg(anyarray)`, whose inputs become the outer dimension.
+///
+/// Unlike a nested `ARRAY[...]` constructor, PostgreSQL gives this aggregate
+/// its own errors for NULL, empty, and differently shaped input arrays.
+fn finish_array_agg_arrays(elem: ElemType, arrays: &[Datum]) -> Result<Datum, ExecError> {
+    let mut dimensions = None;
+    for input in arrays {
+        let Datum::Array(array) = input else {
+            return Err(ExecError::Type(TypeError::Coded {
+                sqlstate: "22004",
+                message: "cannot accumulate null arrays".into(),
+            }));
+        };
+        if array.elems.is_empty() {
+            return Err(ExecError::Type(TypeError::Coded {
+                sqlstate: "2202E",
+                message: "cannot accumulate empty arrays".into(),
+            }));
+        }
+        if let Some(seen) = &dimensions {
+            if seen != &array.dims {
+                return Err(ExecError::Type(TypeError::Coded {
+                    sqlstate: "2202E",
+                    message: "cannot accumulate arrays of different dimensionality".into(),
+                }));
+            }
+        } else {
+            dimensions = Some(array.dims.clone());
+        }
+    }
+    crate::array_fn::build_constructor(elem, arrays.to_vec())
 }
 
 /// Build a `jsonb` aggregate's result through the corresponding `json_fn`
@@ -4253,6 +4371,52 @@ mod tests {
                     == vec![vec![Some((*want).to_string())]],
                 "for {sql}"
             );
+        }
+    }
+
+    #[test]
+    fn array_agg_stacks_arrays_and_rejects_invalid_array_inputs() {
+        let mut table = collect_table();
+        table.columns = vec![Column::new("a", ColumnType::Array(ElemType::Int4))];
+        let array = |values: &[i32]| {
+            Datum::Array(crabka_pgtypes::ArrayValue::new(
+                ElemType::Int4,
+                values.iter().copied().map(Datum::Int4).collect(),
+            ))
+        };
+        assert2::assert!(
+            agg_text(
+                "SELECT array_agg(a) FROM t",
+                Some(&table),
+                vec![r(&[array(&[1, 2])]), r(&[array(&[3, 4])])],
+            )
+            .expect("stacked arrays")
+                == vec![vec![Some("{{1,2},{3,4}}".into())]]
+        );
+        for (rows, code, message) in [
+            (
+                vec![r(&[Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Int4,
+                    Vec::new(),
+                ))])],
+                "2202E",
+                "cannot accumulate empty arrays",
+            ),
+            (
+                vec![r(&[Datum::Null])],
+                "22004",
+                "cannot accumulate null arrays",
+            ),
+            (
+                vec![r(&[array(&[1, 2])]), r(&[array(&[3])])],
+                "2202E",
+                "cannot accumulate arrays of different dimensionality",
+            ),
+        ] {
+            let error = agg("SELECT array_agg(a) FROM t", Some(&table), rows)
+                .expect_err("invalid array aggregate")
+                .into_pg();
+            assert2::assert!(error.code == code && error.message == message);
         }
     }
 

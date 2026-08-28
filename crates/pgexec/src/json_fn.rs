@@ -56,7 +56,12 @@ use crabka_pgtypes::{
     jsonb, numeric,
 };
 
-use crate::{clock::EvalCtx, error::ExecError, eval::ArgType, scope::Scope};
+use crate::{
+    clock::EvalCtx,
+    error::{ExecError, SqlJsonError},
+    eval::ArgType,
+    scope::Scope,
+};
 
 /// Which of the two JSON types a call is spelled for.
 ///
@@ -173,9 +178,6 @@ enum JsonFunc {
 /// spellings) have no `json_` sibling here either, so `json_pretty(…)` falls
 /// through to 42883 like any other unknown function.
 ///
-/// `_tz` jsonpath variants share their implementation with the plain ones:
-/// crabka's jsonpath datetime items are rendered strings, so no comparison in
-/// them depends on the session time zone.
 fn json_func(name: &str) -> Option<(JsonFunc, Flavour)> {
     use Flavour::{Json, Jsonb};
 
@@ -848,7 +850,7 @@ pub(crate) fn eval_json(
         | JsonFunc::PathQueryArray
         | JsonFunc::PathQueryFirst => {
             require_arity(fc, (2..=4).contains(&n))?;
-            eval_path_func(f, &fc.name, &vals)
+            eval_path_func(f, &fc.name, &vals, ctx)
         }
         JsonFunc::Operator(op) => {
             require_arity(fc, n == 2)?;
@@ -898,27 +900,50 @@ fn path_args(name: &str, args: &[Datum]) -> Result<Option<PathCall>, ExecError> 
     }))
 }
 
-fn eval_path_func(f: JsonFunc, name: &str, args: &[Datum]) -> Result<Datum, ExecError> {
+fn eval_path_func(
+    f: JsonFunc,
+    name: &str,
+    args: &[Datum],
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
     let Some(call) = path_args(name, args)? else {
         return Ok(Datum::Null);
     };
     let (target, path, silent) = (&call.target, &call.path, call.silent);
     let vars = call.vars.as_ref();
+    let use_tz = name.ends_with("_tz");
+    for warning in path.precision_warnings() {
+        ctx.warning(warning)?;
+    }
     Ok(match f {
-        JsonFunc::PathExists => match path.exists(target, vars, silent)? {
+        JsonFunc::PathExists => match if use_tz {
+            path.exists_tz(target, vars, silent, &ctx.time_zone)
+        } else {
+            path.exists_with_session_time_zone(target, vars, silent, &ctx.time_zone)
+        }? {
             Some(b) => Datum::Bool(b),
             None => Datum::Null,
         },
-        JsonFunc::PathMatch => match path.predicate(target, vars, silent)? {
+        JsonFunc::PathMatch => match if use_tz {
+            path.predicate_tz(target, vars, silent, &ctx.time_zone)
+        } else {
+            path.predicate_with_session_time_zone(target, vars, silent, &ctx.time_zone)
+        }? {
             Some(b) => Datum::Bool(b),
             None => Datum::Null,
         },
-        JsonFunc::PathQueryArray => {
-            Datum::Jsonb(JsonbValue::Array(path.query(target, vars, silent)?))
-        }
+        JsonFunc::PathQueryArray => Datum::Jsonb(JsonbValue::Array(if use_tz {
+            path.query_tz(target, vars, silent, &ctx.time_zone)?
+        } else {
+            path.query_with_session_time_zone(target, vars, silent, &ctx.time_zone)?
+        })),
         // `jsonb_path_query_first` keeps only the first item; an empty result is
         // SQL NULL, not an empty array.
-        _ => match path.query(target, vars, silent)?.into_iter().next() {
+        _ => match if use_tz {
+            path.query_first_tz(target, vars, silent, &ctx.time_zone)
+        } else {
+            path.query_first_with_session_time_zone(target, vars, silent, &ctx.time_zone)
+        }? {
             Some(v) => Datum::Jsonb(v),
             None => Datum::Null,
         },
@@ -956,7 +981,7 @@ fn json_path_operator(left: &Datum, right: &Datum, predicate: bool) -> Result<Da
 fn eval_set_lax(fc: &FuncCall, vals: &[Datum]) -> Result<Datum, ExecError> {
     let treatment = match vals.get(4) {
         None => "use_json_null".to_string(),
-        Some(Datum::Null) => return Ok(Datum::Null),
+        Some(Datum::Null) => String::new(),
         Some(v) => text_arg(v, &fc.name)?.to_ascii_lowercase(),
     };
     if !matches!(
@@ -981,10 +1006,7 @@ fn eval_set_lax(fc: &FuncCall, vals: &[Datum]) -> Result<Datum, ExecError> {
     let path = text_path(&vals[1], &fc.name)?;
     if vals[2].is_null() {
         return match treatment.as_str() {
-            "raise_exception" => Err(ExecError::FunctionError {
-                sqlstate: "22004",
-                message: "JSON value must not be null".into(),
-            }),
+            "raise_exception" => Err(null_value_treatment_error()),
             "return_target" => Ok(Datum::Jsonb(target.into_owned())),
             "delete_key" => {
                 if !matches!(
@@ -1010,11 +1032,15 @@ fn eval_set_lax(fc: &FuncCall, vals: &[Datum]) -> Result<Datum, ExecError> {
 /// only in the result — `json_object` writes [`Layout::Spaced`] text keeping
 /// duplicate keys in input order, `jsonb_object` a de-duplicated [`JsonbValue`].
 fn eval_json_object(name: &str, flavour: Flavour, vals: &[Datum]) -> Result<Datum, ExecError> {
-    let flat = |d: &Datum| -> Result<Vec<Datum>, ExecError> {
+    fn array<'a>(d: &'a Datum, name: &str) -> Result<&'a ArrayValue, ExecError> {
         match d {
-            Datum::Array(a) => Ok(a.elems.clone()),
+            Datum::Array(a) => Ok(a),
             other => Err(type_error(name, other)),
         }
+    }
+    let array_error = |message: &str| ExecError::FunctionError {
+        sqlstate: "2202E",
+        message: message.into(),
     };
     let element = |d: &Datum| -> Option<String> {
         match d {
@@ -1038,26 +1064,29 @@ fn eval_json_object(name: &str, flavour: Flavour, vals: &[Datum]) -> Result<Datu
     };
     let mut pairs: Vec<(String, Option<String>)> = Vec::new();
     if vals.len() == 1 {
-        let items = flat(&vals[0])?;
-        if items.len() % 2 != 0 {
-            return Err(ExecError::FunctionError {
-                sqlstate: "2202E",
-                message: "array must have even number of elements".into(),
-            });
+        let items = array(&vals[0], name)?;
+        if items.ndims() > 2 {
+            return Err(array_error("wrong number of array subscripts"));
         }
-        for pair in items.chunks_exact(2) {
+        if items.ndims() == 2 && items.dims[1].len != 2 {
+            return Err(array_error("array must have two columns"));
+        }
+        if items.elems.len() % 2 != 0 {
+            return Err(array_error("array must have even number of elements"));
+        }
+        for pair in items.elems.chunks_exact(2) {
             pairs.push((key_text(&pair[0])?, element(&pair[1])));
         }
     } else {
-        let keys = flat(&vals[0])?;
-        let values = flat(&vals[1])?;
-        if keys.len() != values.len() {
-            return Err(ExecError::FunctionError {
-                sqlstate: "2202E",
-                message: "mismatched array dimensions".into(),
-            });
+        let keys = array(&vals[0], name)?;
+        let values = array(&vals[1], name)?;
+        if keys.ndims() > 1 || values.ndims() > 1 {
+            return Err(array_error("wrong number of array subscripts"));
         }
-        for (k, v) in keys.iter().zip(&values) {
+        if keys.dims != values.dims {
+            return Err(array_error("mismatched array dimensions"));
+        }
+        for (k, v) in keys.elems.iter().zip(&values.elems) {
             pairs.push((key_text(k)?, element(v)));
         }
     }
@@ -1115,21 +1144,34 @@ pub(crate) fn eval_sql_json(
             returning,
         } => {
             let mut pairs: Vec<(String, String)> = Vec::with_capacity(entries.len());
+            let mut seen_keys = Vec::with_capacity(entries.len());
             for (key, value) in entries {
                 let value = eval_child(value)?;
-                if *absent_on_null && value.is_null() {
-                    continue;
-                }
                 let key = eval_child(key)?;
                 if key.is_null() {
                     return Err(object_key_null());
                 }
-                let key = json_object_key_text(&key, ctx)?;
-                if *unique_keys && pairs.iter().any(|(k, _)| *k == key) {
+                let key = match &key {
+                    Datum::Json(_) | Datum::Jsonb(_) | Datum::Array(_) | Datum::Record(_) => {
+                        return Err(invalid_parameter(
+                            "key value must be scalar, not array, composite, or json",
+                        ));
+                    }
+                    other => json_object_key_text(other, ctx)?,
+                };
+                if *unique_keys && seen_keys.iter().any(|seen| seen == &key) {
                     return Err(ExecError::FunctionError {
                         sqlstate: "22030",
-                        message: "duplicate JSON object key value".into(),
+                        message: if *returning == Some(ColumnType::Jsonb) {
+                            "duplicate JSON object key value".into()
+                        } else {
+                            format!("duplicate JSON object key value: \"{key}\"")
+                        },
                     });
+                }
+                seen_keys.push(key.clone());
+                if *absent_on_null && value.is_null() {
+                    continue;
                 }
                 pairs.push((key, to_json_text(&value, Layout::Compact, ctx)?));
             }
@@ -1166,6 +1208,20 @@ pub(crate) fn eval_sql_json(
             Ok(Datum::Json(to_json_text(&value, Layout::Compact, ctx)?))
         }
         SqlJsonExpr::Serialize { expr, returning } => {
+            if let Some(ty) = returning
+                && !ty.storage_type().is_string()
+                && ty.storage_type() != ColumnType::Bytea
+            {
+                return Err(ExecError::SqlJson(Box::new(SqlJsonError {
+                    sqlstate: "0A000",
+                    message: format!(
+                        "cannot use type {} in RETURNING clause of JSON_SERIALIZE()",
+                        ty.name(),
+                    ),
+                    detail: None,
+                    hint: Some("Try returning a string type or bytea.".into()),
+                })));
+            }
             let value = eval_child(expr)?;
             if value.is_null() {
                 return Ok(Datum::Null);
@@ -1185,6 +1241,11 @@ pub(crate) fn eval_sql_json(
             let value = eval_child(expr)?;
             if value.is_null() {
                 return Ok(Datum::Null);
+            }
+            if *unique_keys && !matches!(value, Datum::Text(_)) {
+                return Err(ExecError::TypeMismatch(
+                    "cannot use non-string types with WITH UNIQUE KEYS clause".into(),
+                ));
             }
             // `JSON(x)` is `json_in` over `x`'s text, so — like the cast — it
             // keeps every byte, and `WITH UNIQUE KEYS` is the only reason it has
@@ -1224,15 +1285,19 @@ fn returning_json(
     returning: Option<ColumnType>,
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
-    let datum = Datum::Json(text);
     match returning {
-        None | Some(ColumnType::Json) => Ok(datum),
-        Some(ty) => Ok(crabka_pgtypes::cast::cast(&datum, ty, &ctx.time_zone)?),
+        None | Some(ColumnType::Json) => Ok(Datum::Json(text)),
+        Some(ty) if ty.storage_type() == ColumnType::Bytea => Ok(Datum::Bytea(text.into_bytes())),
+        Some(ty) => Ok(crabka_pgtypes::cast::cast(
+            &Datum::Json(text),
+            ty,
+            &ctx.time_zone,
+        )?),
     }
 }
 
 /// `IS [NOT] JSON [<item>] [WITH UNIQUE KEYS]` over an already-evaluated,
-/// non-NULL value. Only the string family, `json` and `jsonb` have a JSON
+/// non-NULL value. Only the string family, `bytea`, `json` and `jsonb` have a JSON
 /// reading at all; every other type is 42804, as in `PostgreSQL`.
 fn is_json(
     value: &Datum,
@@ -1250,6 +1315,22 @@ fn is_json(
             // Text that does not parse is simply not JSON.
             Err(_) => return Ok(false),
         },
+        Datum::Bytea(bytes) => {
+            if bytes.contains(&0) {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "22021",
+                    message: "invalid byte sequence for encoding \"UTF8\": 0x00".into(),
+                });
+            }
+            let text = std::str::from_utf8(bytes).map_err(|_| ExecError::FunctionError {
+                sqlstate: "22021",
+                message: "invalid byte sequence for encoding \"UTF8\"".into(),
+            })?;
+            match jsonb::parse_with_options(text, false) {
+                Ok(pair) => pair,
+                Err(_) => return Ok(false),
+            }
+        }
         other => {
             return Err(ExecError::TypeMismatch(format!(
                 "cannot use type {} in IS JSON predicate",
@@ -1268,10 +1349,14 @@ fn is_json(
     })
 }
 
-/// The plan-time counterpart: `IS JSON` accepts only the string family, `json`
-/// and `jsonb`, so `1 IS JSON` is 42804 before a row is ever read.
+/// The plan-time counterpart: `IS JSON` accepts only the string family,
+/// `bytea`, `json` and `jsonb`, so `1 IS JSON` is 42804 before a row is ever read.
 pub(crate) fn is_json_operand_type(ty: ColumnType) -> Result<(), ExecError> {
-    if ty.is_string() || ty == ColumnType::Json || ty == ColumnType::Jsonb {
+    if ty.storage_type().is_string()
+        || ty.storage_type() == ColumnType::Bytea
+        || ty.storage_type() == ColumnType::Json
+        || ty.storage_type() == ColumnType::Jsonb
+    {
         Ok(())
     } else {
         Err(ExecError::TypeMismatch(format!(
@@ -1714,13 +1799,30 @@ pub(crate) enum JsonbSrf {
 pub(crate) fn jsonb_path_query_rows(
     name: &str,
     args: &[Datum],
+    ctx: &EvalCtx,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let Some(call) = path_args(name, args)? else {
         return Ok(Vec::new());
     };
-    Ok(call
-        .path
-        .query(&call.target, call.vars.as_ref(), call.silent)?
+    for warning in call.path.precision_warnings() {
+        ctx.warning(warning)?;
+    }
+    let items = if name.ends_with("_tz") {
+        call.path.query_tz(
+            &call.target,
+            call.vars.as_ref(),
+            call.silent,
+            &ctx.time_zone,
+        )?
+    } else {
+        call.path.query_with_session_time_zone(
+            &call.target,
+            call.vars.as_ref(),
+            call.silent,
+            &ctx.time_zone,
+        )?
+    };
+    Ok(items
         .into_iter()
         .map(|item| vec![Datum::Jsonb(item)])
         .collect())
@@ -1874,7 +1976,7 @@ fn insert_path(
         JsonbValue::Object(pairs) => {
             let existing = pairs.iter().position(|(k, _)| k == step);
             match (existing, rest.is_empty()) {
-                (Some(_), true) => return Err(invalid_parameter("cannot replace existing key")),
+                (Some(_), true) => return Err(insert_existing_key_error()),
                 (Some(at), false) => {
                     let mut pairs = pairs.clone();
                     pairs[at].1 = insert_path(&pairs[at].1, rest, new_value, after)?;
@@ -1966,15 +2068,13 @@ fn delete_path(target: &JsonbValue, path: &[String]) -> JsonbValue {
 /// key keeps the last value through `JsonbValue::object_from_pairs`.
 fn build_object(vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
     if !vals.len().is_multiple_of(2) {
-        return Err(invalid_parameter(
-            "argument list must have even number of elements",
-        ));
+        return Err(object_arity_error("jsonb_build_object"));
     }
     let mut pairs = Vec::with_capacity(vals.len() / 2);
     for pair in vals.chunks_exact(2) {
         let key = match &pair[0] {
-            Datum::Null => return Err(invalid_parameter("argument: key must not be null")),
-            Datum::Jsonb(_) | Datum::Array(_) => {
+            Datum::Null => return Err(invalid_parameter("argument 1: key must not be null")),
+            Datum::Json(_) | Datum::Jsonb(_) | Datum::Array(_) | Datum::Record(_) => {
                 return Err(invalid_parameter(
                     "key value must be scalar, not array, composite, or json",
                 ));
@@ -2248,16 +2348,7 @@ fn write_json(d: &Datum, punct: Punct, ctx: &EvalCtx, out: &mut String) -> Resul
         // `jsonb` reaches `json` through its output function, so it keeps its
         // own canonical rendering rather than adopting `punct`.
         Datum::Jsonb(j) => out.push_str(&j.to_text()),
-        Datum::Array(a) | Datum::OidVector(a) => {
-            out.push('[');
-            for (i, e) in a.elems.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(punct.comma);
-                }
-                write_json(e, Punct::COMPACT, ctx, out)?;
-            }
-            out.push(']');
-        }
+        Datum::Array(a) | Datum::OidVector(a) => write_json_array(a, punct, ctx, out)?,
         // A composite keeps every field, duplicate names included — the
         // difference from `to_jsonb`, whose object collapses them last-wins.
         Datum::Record(r) => {
@@ -2284,6 +2375,47 @@ fn write_json(d: &Datum, punct: Punct, ctx: &EvalCtx, out: &mut String) -> Resul
         other => json::write_string(&datum_text(other, ctx), out),
     }
     Ok(())
+}
+
+/// Render the flat row-major array storage through its dimension header.
+fn write_json_array(
+    a: &ArrayValue,
+    punct: Punct,
+    ctx: &EvalCtx,
+    out: &mut String,
+) -> Result<(), ExecError> {
+    fn write_level(
+        elems: &mut std::slice::Iter<'_, Datum>,
+        dims: &[crabka_pgtypes::ArrayDim],
+        punct: Punct,
+        ctx: &EvalCtx,
+        out: &mut String,
+    ) -> Result<(), ExecError> {
+        out.push('[');
+        for index in 0..usize::try_from(dims[0].len).expect("array dimensions are non-negative") {
+            if index > 0 {
+                out.push_str(punct.comma);
+            }
+            if dims.len() == 1 {
+                write_json(
+                    elems.next().expect("array dimensions match elements"),
+                    Punct::COMPACT,
+                    ctx,
+                    out,
+                )?;
+            } else {
+                write_level(elems, &dims[1..], Punct::COMPACT, ctx, out)?;
+            }
+        }
+        out.push(']');
+        Ok(())
+    }
+
+    if a.dims.is_empty() {
+        out.push_str("[]");
+        return Ok(());
+    }
+    write_level(&mut a.elems.iter(), &a.dims, punct, ctx, out)
 }
 
 /// `IsValidJsonNumber`: would this output text lex as a JSON number, so that it
@@ -2315,9 +2447,7 @@ fn write_object<'a>(layout: Layout, pairs: impl IntoIterator<Item = (&'a str, St
 /// kept in the order they were given (`jsonb_build_object` keeps only the last).
 fn build_json_object(vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
     if !vals.len().is_multiple_of(2) {
-        return Err(invalid_parameter(
-            "argument list must have even number of elements",
-        ));
+        return Err(object_arity_error("json_build_object"));
     }
     let mut pairs = Vec::with_capacity(vals.len() / 2);
     for pair in vals.chunks_exact(2) {
@@ -2358,6 +2488,39 @@ fn object_key_null() -> ExecError {
         sqlstate: "22004",
         message: "null value not allowed for object key".into(),
     }
+}
+
+/// The paired-argument constructors share PostgreSQL's 22023 diagnostic.
+fn object_arity_error(name: &str) -> ExecError {
+    ExecError::SqlJson(Box::new(SqlJsonError {
+        sqlstate: "22023",
+        message: "argument list must have even number of elements".into(),
+        detail: None,
+        hint: Some(format!(
+            "The arguments of {name}() must consist of alternating keys and values."
+        )),
+    }))
+}
+
+fn null_value_treatment_error() -> ExecError {
+    ExecError::SqlJson(Box::new(SqlJsonError {
+        sqlstate: "22004",
+        message: "JSON value must not be null".into(),
+        detail: Some("Exception was raised because null_value_treatment is \"raise_exception\".".into()),
+        hint: Some(
+            "To avoid, either change the null_value_treatment argument or ensure that an SQL NULL is not passed."
+                .into(),
+        ),
+    }))
+}
+
+fn insert_existing_key_error() -> ExecError {
+    ExecError::SqlJson(Box::new(SqlJsonError {
+        sqlstate: "22023",
+        message: "cannot replace existing key".into(),
+        detail: None,
+        hint: Some("Try using the function jsonb_set to replace key value.".into()),
+    }))
 }
 
 // ---- the `json` text reader ----
@@ -2948,7 +3111,7 @@ fn jsonb_set(
     if !matches!(target, JsonbValue::Object(_) | JsonbValue::Array(_)) {
         return Err(invalid_parameter("cannot set path in scalar"));
     }
-    Ok(Datum::Jsonb(set_path(target, path, new_value, create)?))
+    Ok(Datum::Jsonb(set_path(target, path, new_value, create, 1)?))
 }
 
 fn set_path(
@@ -2956,6 +3119,7 @@ fn set_path(
     path: &[String],
     new_value: &JsonbValue,
     create: bool,
+    position: usize,
 ) -> Result<JsonbValue, ExecError> {
     let Some((step, rest)) = path.split_first() else {
         return Ok(target.clone());
@@ -2971,7 +3135,7 @@ fn set_path(
                 }
                 (Some(at), false) => {
                     let mut pairs = pairs.clone();
-                    pairs[at].1 = set_path(&pairs[at].1, rest, new_value, create)?;
+                    pairs[at].1 = set_path(&pairs[at].1, rest, new_value, create, position + 1)?;
                     JsonbValue::Object(pairs)
                 }
                 // Only the *final* step is created; PostgreSQL never invents
@@ -2989,10 +3153,12 @@ fn set_path(
                 // PostgreSQL reports a non-integer array subscript in a
                 // `jsonb_set` path as 22P02, not as the 22023 the rest of the
                 // jsonb domain errors use.
-                ExecError::Type(TypeError::Domain {
+                ExecError::FunctionError {
                     sqlstate: "22P02",
-                    message: "path element is not an integer",
-                })
+                    message: format!(
+                        "path element at position {position} is not an integer: {step:?}"
+                    ),
+                }
             })?;
             match (resolve_index(index, items.len()), rest.is_empty()) {
                 (Some(at), true) => {
@@ -3002,7 +3168,7 @@ fn set_path(
                 }
                 (Some(at), false) => {
                     let mut items = items.clone();
-                    items[at] = set_path(&items[at], rest, new_value, create)?;
+                    items[at] = set_path(&items[at], rest, new_value, create, position + 1)?;
                     JsonbValue::Array(items)
                 }
                 (None, true) if create => {
@@ -3345,12 +3511,13 @@ fn text_path(d: &Datum, name: &str) -> Result<Vec<String>, ExecError> {
         Datum::Array(a) if a.elem == ElemType::Text => a
             .elems
             .iter()
-            .map(|e| match e {
+            .enumerate()
+            .map(|(index, e)| match e {
                 Datum::Text(s) => Ok(s.clone()),
-                _ => Err(ExecError::Type(TypeError::Domain {
+                _ => Err(ExecError::FunctionError {
                     sqlstate: "22004",
-                    message: "path element is null",
-                })),
+                    message: format!("path element at position {} is null", index + 1),
+                }),
             })
             .collect(),
         other => Err(type_error(name, other)),
@@ -3443,6 +3610,63 @@ mod tests {
                 .map(|s| Datum::Text((*s).to_string()))
                 .collect(),
         ))
+    }
+
+    #[test]
+    fn json_arrays_preserve_sql_dimensions() {
+        let square = Datum::Array(ArrayValue::with_dims(
+            ElemType::Int4,
+            vec![
+                Datum::Int4(1),
+                Datum::Int4(5),
+                Datum::Int4(99),
+                Datum::Int4(100),
+            ],
+            vec![
+                crabka_pgtypes::ArrayDim::from_len(2),
+                crabka_pgtypes::ArrayDim::from_len(2),
+            ],
+        ));
+        assert!(
+            to_json_text(&square, Layout::Compact, &ctx()).expect("array JSON")
+                == "[[1,5],[99,100]]"
+        );
+    }
+
+    #[test]
+    fn json_object_checks_sql_array_dimensions() {
+        let matrix = |columns| {
+            Datum::Array(ArrayValue::with_dims(
+                ElemType::Text,
+                (0..2 * columns)
+                    .map(|i| Datum::Text(i.to_string()))
+                    .collect(),
+                vec![
+                    crabka_pgtypes::ArrayDim::from_len(2),
+                    crabka_pgtypes::ArrayDim::from_len(columns),
+                ],
+            ))
+        };
+        let message = |vals: &[Datum]| {
+            eval_json_object("json_object", Flavour::Json, vals)
+                .expect_err("invalid array shape")
+                .into_pg()
+                .message
+        };
+        assert!(message(&[matrix(1)]) == "array must have two columns");
+        assert!(message(&[matrix(3)]) == "array must have two columns");
+        assert!(
+            message(&[Datum::Array(ArrayValue::with_dims(
+                ElemType::Text,
+                (0..8).map(|i| Datum::Text(i.to_string())).collect(),
+                vec![
+                    crabka_pgtypes::ArrayDim::from_len(2),
+                    crabka_pgtypes::ArrayDim::from_len(2),
+                    crabka_pgtypes::ArrayDim::from_len(2),
+                ],
+            ))]) == "wrong number of array subscripts"
+        );
+        assert!(message(&[matrix(2), matrix(2)]) == "wrong number of array subscripts");
     }
 
     fn jsonb_expr(text: &str) -> Expr {
@@ -3677,6 +3901,20 @@ mod tests {
         assert!(!is_json_func("jsonb_each"));
         assert!(!is_json_func("jsonb_path_query"));
         assert!(!is_json_func("json_nope"));
+    }
+
+    #[test]
+    fn jsonpath_tz_functions_authorize_temporal_promotion() {
+        let path = Expr::Cast {
+            expr: Box::new(Expr::StringLiteral(
+                r#"$[*] ? (@.datetime() < "2015-08-02".datetime())"#.into(),
+            )),
+            ty: ColumnType::JsonPath,
+        };
+        let args = vec![jsonb_expr(r#"["2015-08-01 12:00:00-05"]"#), path];
+
+        assert!(sqlstate(call("jsonb_path_exists", args.clone()).expect_err("plain")) == "0A000");
+        assert!(call("jsonb_path_exists_tz", args).expect("_tz") == Datum::Bool(true));
     }
 
     #[test]
@@ -4117,6 +4355,149 @@ mod tests {
                 )
                 .expect_err("path")
             ) == "22P02"
+        );
+        let error = call(
+            "jsonb_set",
+            vec![
+                jsonb_expr(r#"{"a":[1,2,3]}"#),
+                text_array_expr(&["a", "non_integer"]),
+                jsonb_expr(r#""new_value""#),
+            ],
+        )
+        .expect_err("bad array path")
+        .into_pg();
+        assert!(
+            (error.code.as_str(), error.message.as_str())
+                == (
+                    "22P02",
+                    "path element at position 2 is not an integer: \"non_integer\""
+                )
+        );
+        let null_path = Datum::Array(ArrayValue::new(
+            ElemType::Text,
+            vec![Datum::Text("a".into()), Datum::Null],
+        ));
+        let error = text_path(&null_path, "jsonb_set")
+            .expect_err("NULL path element")
+            .into_pg();
+        assert!(
+            (error.code.as_str(), error.message.as_str())
+                == ("22004", "path element at position 2 is null")
+        );
+        let non_text_path = Datum::Array(ArrayValue::new(ElemType::Int4, vec![Datum::Int4(1)]));
+        assert!(
+            text_path(&non_text_path, "jsonb_set")
+                .expect_err("non-text path")
+                .into_pg()
+                .code
+                .as_str()
+                == "42804"
+        );
+        let error = call(
+            "jsonb_set_lax",
+            vec![
+                jsonb_expr(r#"{"a":1}"#),
+                text_array_expr(&["a"]),
+                Expr::NullLiteral,
+                Expr::BoolLiteral(true),
+                Expr::NullLiteral,
+            ],
+        )
+        .expect_err("NULL null_value_treatment")
+        .into_pg();
+        assert!(
+            (error.code.as_str(), error.message.as_str())
+                == (
+                    "22023",
+                    "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\""
+                )
+        );
+        assert!(
+            call(
+                "jsonb_set_lax",
+                vec![
+                    Expr::NullLiteral,
+                    text_array_expr(&["a"]),
+                    jsonb_expr("1"),
+                    Expr::BoolLiteral(true),
+                    u("use_json_null"),
+                ],
+            )
+            .expect("NULL target")
+                == Datum::Null
+        );
+        let error = call(
+            "jsonb_set_lax",
+            vec![
+                jsonb_expr(r#"{"a":1}"#),
+                text_array_expr(&["a"]),
+                Expr::NullLiteral,
+                Expr::BoolLiteral(true),
+                u("raise_exception"),
+            ],
+        )
+        .expect_err("raise_exception")
+        .into_pg();
+        let diagnostics = error.diagnostics.expect("raise_exception diagnostics");
+        assert!(
+            (
+                error.code.as_str(),
+                error.message.as_str(),
+                diagnostics.detail.as_deref(),
+                diagnostics.hint.as_deref()
+            ) == (
+                "22004",
+                "JSON value must not be null",
+                Some("Exception was raised because null_value_treatment is \"raise_exception\"."),
+                Some(
+                    "To avoid, either change the null_value_treatment argument or ensure that an SQL NULL is not passed."
+                ),
+            )
+        );
+        assert!(
+            call(
+                "jsonb_set_lax",
+                vec![
+                    jsonb_expr(r#"{"a":1}"#),
+                    text_array_expr(&["a"]),
+                    Expr::NullLiteral,
+                    Expr::BoolLiteral(true),
+                    u("return_target"),
+                ],
+            )
+            .expect("return target")
+                == j(r#"{"a": 1}"#)
+        );
+        assert!(
+            call(
+                "jsonb_set_lax",
+                vec![
+                    jsonb_expr(r#"{"a":1}"#),
+                    text_array_expr(&["a"]),
+                    Expr::NullLiteral,
+                    Expr::BoolLiteral(true),
+                    u("delete_key"),
+                ],
+            )
+            .expect("delete key")
+                == j("{}")
+        );
+        let error = call(
+            "jsonb_insert",
+            vec![
+                jsonb_expr(r#"{"a":{"b":"value"}}"#),
+                text_array_expr(&["a", "b"]),
+                jsonb_expr(r#""new_value""#),
+            ],
+        )
+        .expect_err("existing object key")
+        .into_pg();
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|fields| fields.hint.as_deref())
+                == Some("Try using the function jsonb_set to replace key value.")
         );
     }
 
@@ -5141,11 +5522,11 @@ mod tests {
         assert!(err.into_pg().message == "cannot call jsonb_each on a non-object");
     }
 
-    /// The two builders' NULL-key errors differ between the families, and
-    /// `json_build_object` rejects a container key.
+    /// The two builders' NULL-key errors differ between the families, and both
+    /// reject a JSON or composite key.
     #[test]
     fn the_json_builders_report_postgres_json_errors() {
-        let cases: [(&str, Vec<Expr>, &str, &str); 5] = [
+        let cases: [(&str, Vec<Expr>, &str, &str); 7] = [
             (
                 "json_build_object",
                 vec![Expr::NullLiteral, Expr::IntLiteral("2".to_string())],
@@ -5161,6 +5542,21 @@ mod tests {
             (
                 "json_build_object",
                 vec![jsonb_expr("{}"), Expr::IntLiteral("2".to_string())],
+                "22023",
+                "key value must be scalar, not array, composite, or json",
+            ),
+            (
+                "jsonb_build_object",
+                vec![json_expr("{}"), Expr::IntLiteral("2".to_string())],
+                "22023",
+                "key value must be scalar, not array, composite, or json",
+            ),
+            (
+                "jsonb_build_object",
+                vec![
+                    Expr::Row(vec![Expr::IntLiteral("1".to_string())]),
+                    Expr::IntLiteral("2".to_string()),
+                ],
                 "22023",
                 "key value must be scalar, not array, composite, or json",
             ),
@@ -5181,6 +5577,19 @@ mod tests {
             let reported = call(name, args).expect_err(name).into_pg();
             assert!(
                 (reported.code.as_str(), reported.message.as_str()) == (code, message),
+                "{name}"
+            );
+        }
+        for name in ["json_build_object", "jsonb_build_object"] {
+            let reported = call(name, vec![u("a")]).expect_err(name).into_pg();
+            let expected =
+                format!("The arguments of {name}() must consist of alternating keys and values.");
+            assert!(
+                reported
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|fields| fields.hint.as_deref())
+                    == Some(expected.as_str()),
                 "{name}"
             );
         }
@@ -5242,9 +5651,163 @@ mod tests {
         )
         .expect("serialize");
         assert!(serialized == t(nested));
+        assert!(
+            returning_json("{}".into(), Some(ColumnType::Bytea), &ctx).expect("bytea output")
+                == Datum::Bytea(b"{}".to_vec())
+        );
+        assert!(
+            eval_sql_json(
+                &SqlJsonExpr::Parse {
+                    expr: json_expr(nested),
+                    unique_keys: false,
+                },
+                &ctx,
+                |e| crate::eval::eval(e, &Scope::empty(), &[], &ctx),
+            )
+            .expect("JSON input without WITH UNIQUE KEYS")
+                == jn(nested)
+        );
+        let error = eval_sql_json(
+            &SqlJsonExpr::Parse {
+                expr: json_expr(nested),
+                unique_keys: true,
+            },
+            &ctx,
+            |e| crate::eval::eval(e, &Scope::empty(), &[], &ctx),
+        )
+        .expect_err("WITH UNIQUE KEYS requires text input")
+        .into_pg();
+        assert!(
+            (error.code.as_str(), error.message.as_str())
+                == (
+                    "42804",
+                    "cannot use non-string types with WITH UNIQUE KEYS clause",
+                )
+        );
+        let error = eval_sql_json(
+            &SqlJsonExpr::Serialize {
+                expr: json_expr(nested),
+                returning: Some(ColumnType::Jsonb),
+            },
+            &ctx,
+            |e| crate::eval::eval(e, &Scope::empty(), &[], &ctx),
+        )
+        .expect_err("jsonb is not a JSON_SERIALIZE output type")
+        .into_pg();
+        assert!(
+            (
+                error.code.as_str(),
+                error.message.as_str(),
+                error
+                    .diagnostics
+                    .as_ref()
+                    .and_then(|diagnostics| diagnostics.hint.as_deref()),
+            ) == (
+                "0A000",
+                "cannot use type jsonb in RETURNING clause of JSON_SERIALIZE()",
+                Some("Try returning a string type or bytea."),
+            )
+        );
         // `IS JSON` accepts a `json` operand rather than reporting 42804.
         assert!(is_json_operand_type(ColumnType::Json).is_ok());
+        assert!(is_json_operand_type(ColumnType::Bytea).is_ok());
         assert!(is_json(&jn("{}"), JsonItemType::Object, false).expect("is json"));
+        assert!(
+            is_json(&Datum::Bytea(b"{}".to_vec()), JsonItemType::Object, false)
+                .expect("bytea is json")
+        );
+        let error = is_json(&Datum::Bytea(vec![0]), JsonItemType::Value, false)
+            .expect_err("NUL byte is not valid PostgreSQL text")
+            .into_pg();
+        assert!(
+            (error.code.as_str(), error.message.as_str())
+                == ("22021", "invalid byte sequence for encoding \"UTF8\": 0x00")
+        );
         assert!(!is_json(&jn("{}"), JsonItemType::Array, false).expect("is json"));
+        assert!(is_json(&jn("1"), JsonItemType::Scalar, false).expect("scalar json"));
+        assert!(!is_json(&jn("{}"), JsonItemType::Scalar, false).expect("object is not scalar"));
+        assert!(
+            is_json(&jn(r#"{"a": 1, "a": 2}"#), JsonItemType::Object, false)
+                .expect("duplicate keys without uniqueness check")
+        );
+        assert!(is_json_operand_type(ColumnType::Int4).is_err());
+
+        let duplicate = |returning| SqlJsonExpr::Object {
+            entries: vec![
+                (u("1"), Expr::IntLiteral("1".to_string())),
+                (u("1"), Expr::NullLiteral),
+            ],
+            absent_on_null: false,
+            unique_keys: true,
+            returning,
+        };
+        for (returning, message) in [
+            (None, "duplicate JSON object key value: \"1\""),
+            (Some(ColumnType::Jsonb), "duplicate JSON object key value"),
+        ] {
+            let error = eval_sql_json(&duplicate(returning), &ctx, |e| {
+                crate::eval::eval(e, &Scope::empty(), &[], &ctx)
+            })
+            .expect_err("duplicate key")
+            .into_pg();
+            assert!(
+                (error.code.as_str(), error.message.as_str()) == ("22030", message),
+                "{returning:?}"
+            );
+        }
+        let omitted_duplicate = SqlJsonExpr::Object {
+            entries: vec![
+                (u("1"), Expr::IntLiteral("1".to_string())),
+                (u("1"), Expr::NullLiteral),
+            ],
+            absent_on_null: true,
+            unique_keys: true,
+            returning: None,
+        };
+        let error = eval_sql_json(&omitted_duplicate, &ctx, |e| {
+            crate::eval::eval(e, &Scope::empty(), &[], &ctx)
+        })
+        .expect_err("omitted duplicate key")
+        .into_pg();
+        assert!(
+            (error.code.as_str(), error.message.as_str())
+                == ("22030", "duplicate JSON object key value: \"1\"")
+        );
+        let repeated = SqlJsonExpr::Object {
+            entries: vec![
+                (u("1"), Expr::IntLiteral("1".to_string())),
+                (u("1"), Expr::NullLiteral),
+            ],
+            absent_on_null: false,
+            unique_keys: false,
+            returning: None,
+        };
+        assert!(
+            eval_sql_json(&repeated, &ctx, |e| {
+                crate::eval::eval(e, &Scope::empty(), &[], &ctx)
+            })
+            .expect("duplicate keys without WITH UNIQUE")
+                == jn(r#"{"1" : 1, "1" : null}"#)
+        );
+        for key in [json_expr("[1]"), text_array_expr(&["1", "2"])] {
+            let invalid_key = SqlJsonExpr::Object {
+                entries: vec![(key, Expr::IntLiteral("1".to_string()))],
+                absent_on_null: false,
+                unique_keys: false,
+                returning: None,
+            };
+            let error = eval_sql_json(&invalid_key, &ctx, |e| {
+                crate::eval::eval(e, &Scope::empty(), &[], &ctx)
+            })
+            .expect_err("container key")
+            .into_pg();
+            assert!(
+                (error.code.as_str(), error.message.as_str())
+                    == (
+                        "22023",
+                        "key value must be scalar, not array, composite, or json",
+                    )
+            );
+        }
     }
 }

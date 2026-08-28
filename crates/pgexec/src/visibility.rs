@@ -425,15 +425,17 @@ fn locate_function(kv: &dyn Kv, oid: i32) -> Result<Option<Located>, ExecError> 
     let routine = crabka_pgcatalog::routine::list_routines(kv)?
         .into_iter()
         .find(|routine| i32::try_from(routine.oid) == Ok(oid));
-    routine.map(|routine| {
-        Ok::<_, ExecError>(Located {
-            schema: crabka_pgcatalog::PUBLIC_SCHEMA.to_string(),
-            key: ShadowKey::Signature {
-                name: routine.name.clone(),
-                args: crate::routine::routine_arg_type_oids(kv, &routine)?,
-            },
+    routine
+        .map(|routine| {
+            Ok::<_, ExecError>(Located {
+                schema: crabka_pgcatalog::PUBLIC_SCHEMA.to_string(),
+                key: ShadowKey::Signature {
+                    name: routine.name.clone(),
+                    args: crate::routine::routine_arg_type_oids(kv, &routine)?,
+                },
+            })
         })
-    }).transpose()
+        .transpose()
 }
 
 /// Is a routine of this exact signature declared in `schema`?
@@ -820,10 +822,10 @@ mod tests {
             distinct: false,
             args: crabka_pgparser::ast::FuncArgs::Exprs(vec![
                 crabka_pgparser::ast::Expr::IntLiteral("0".into()),
-           ]),
-           order_by: Vec::new(),
+            ]),
+            order_by: Vec::new(),
             within_group: false,
-           filter: None,
+            filter: None,
         };
         let publishable =
             crate::catalog_fn::eval_catalog(&call, &session, |_| Ok(oid.clone())).expect("answer");

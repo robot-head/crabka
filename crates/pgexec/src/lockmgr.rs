@@ -486,6 +486,23 @@ impl RowLockManager {
             .collect()
     }
 
+    pub(crate) fn row_holds(&self) -> Vec<(crabka_pgcatalog::TableId, u64, LockMode, LockOwner)> {
+        self.inner
+            .lock()
+            .expect("lockmgr")
+            .locks
+            .iter()
+            .flat_map(|(key, lock)| match key {
+                LockKey::Row(table, rowid) => lock
+                    .holders
+                    .iter()
+                    .map(|&owner| (*table, *rowid, lock.mode, owner))
+                    .collect(),
+                LockKey::UniqueKey(_) | LockKey::UniqueIndexRelation(_) => Vec::new(),
+            })
+            .collect()
+    }
+
     /// Restore `my_xid`'s lock set to a savepoint snapshot, releasing locks
     /// acquired later and undoing a later shared-to-exclusive upgrade.
     pub(crate) fn restore_locks_as(&self, owner: LockOwner, snapshot: &HashMap<LockKey, LockMode>) {
@@ -603,6 +620,37 @@ fn check_cycle(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionLockId(pub u64);
 
+/// The catalog relation an S3 relation lock protects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelationLockTarget {
+    Table(crabka_pgcatalog::TableId),
+    Index(crabka_pgcatalog::IndexId),
+}
+
+/// One live hold the `pg_locks` catalog can expose.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SessionLockSnapshot {
+    Relation {
+        session: SessionLockId,
+        pid: i32,
+        target: RelationLockTarget,
+        mode: crabka_pgparser::ast::TableLockMode,
+    },
+    Advisory {
+        session: SessionLockId,
+        pid: i32,
+        key: i64,
+        shared: bool,
+    },
+    Tuple {
+        session: SessionLockId,
+        pid: i32,
+        table: crabka_pgcatalog::TableId,
+        rowid: u64,
+        shared: bool,
+    },
+}
+
 /// One session's hold on a relation, with the re-entrancy count `PostgreSQL`
 /// keeps (`LOCK TABLE t; LOCK TABLE t;` is two holds of the same mode).
 #[derive(Debug, Clone, Copy)]
@@ -619,7 +667,7 @@ struct TableHold {
 /// transaction can escalate freely.
 #[derive(Debug, Default)]
 pub struct TableLockManager {
-    holds: Mutex<Vec<(crabka_pgcatalog::TableId, TableHold)>>,
+    holds: Mutex<Vec<(RelationLockTarget, TableHold)>>,
 }
 
 /// Why a table-lock acquisition failed.
@@ -636,16 +684,16 @@ impl TableLockManager {
         Self::default()
     }
 
-    /// The session that currently blocks `mode` on `table`, if any.
+    /// The session that currently blocks `mode` on `target`, if any.
     fn conflicting_holder(
-        holds: &[(crabka_pgcatalog::TableId, TableHold)],
-        table: crabka_pgcatalog::TableId,
+        holds: &[(RelationLockTarget, TableHold)],
+        target: RelationLockTarget,
         session: SessionLockId,
         mode: crabka_pgparser::ast::TableLockMode,
     ) -> Option<SessionLockId> {
         holds
             .iter()
-            .filter(|(held_table, hold)| *held_table == table && hold.session != session)
+            .filter(|(held_target, hold)| *held_target == target && hold.session != session)
             .find(|(_, hold)| mode.conflicts_with(hold.mode))
             .map(|(_, hold)| hold.session)
     }
@@ -662,11 +710,20 @@ impl TableLockManager {
         session: SessionLockId,
         mode: crabka_pgparser::ast::TableLockMode,
     ) -> Result<(), TableLockError> {
+        self.acquire_relation(RelationLockTarget::Table(table), session, mode)
+    }
+
+    pub(crate) fn acquire_relation(
+        &self,
+        target: RelationLockTarget,
+        session: SessionLockId,
+        mode: crabka_pgparser::ast::TableLockMode,
+    ) -> Result<(), TableLockError> {
         let mut holds = self.holds.lock().expect("table lock manager");
-        if Self::conflicting_holder(&holds, table, session, mode).is_some() {
+        if Self::conflicting_holder(&holds, target, session, mode).is_some() {
             return Err(TableLockError::NotAvailable);
         }
-        holds.push((table, TableHold { session, mode }));
+        holds.push((target, TableHold { session, mode }));
         Ok(())
     }
 
@@ -714,7 +771,9 @@ impl TableLockManager {
             .lock()
             .expect("table lock manager")
             .iter()
-            .filter(|(held_table, hold)| *held_table == table && hold.session == session)
+            .filter(|(held_target, hold)| {
+                *held_target == RelationLockTarget::Table(table) && hold.session == session
+            })
             .map(|(_, hold)| hold.mode)
             .collect();
         modes.sort_unstable();
@@ -874,6 +933,7 @@ pub struct SessionLocks {
     pub tables: TableLockManager,
     pub advisory: AdvisoryLockManager,
     next_session: std::sync::atomic::AtomicU64,
+    backend_pids: Mutex<HashMap<SessionLockId, i32>>,
 }
 
 impl SessionLocks {
@@ -883,21 +943,81 @@ impl SessionLocks {
             tables: TableLockManager::new(),
             advisory: AdvisoryLockManager::new(),
             next_session: std::sync::atomic::AtomicU64::new(0),
+            backend_pids: Mutex::new(HashMap::new()),
         }
     }
 
     /// Hand out a fresh session lock identity.
-    pub fn next_session_id(&self) -> SessionLockId {
-        SessionLockId(
+    pub fn next_session_id(&self, backend_pid: i32) -> SessionLockId {
+        let session = SessionLockId(
             self.next_session
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        )
+        );
+        self.backend_pids
+            .lock()
+            .expect("session lock manager")
+            .insert(session, backend_pid);
+        session
+    }
+
+    /// Snapshot the live relation and advisory holds for `pg_locks`.
+    pub(crate) fn snapshot(&self) -> Vec<SessionLockSnapshot> {
+        let pids = self
+            .backend_pids
+            .lock()
+            .expect("session lock manager")
+            .clone();
+        let mut rows = self
+            .tables
+            .holds
+            .lock()
+            .expect("table lock manager")
+            .iter()
+            .filter_map(|(target, hold)| {
+                pids.get(&hold.session)
+                    .map(|&pid| SessionLockSnapshot::Relation {
+                        session: hold.session,
+                        pid,
+                        target: *target,
+                        mode: hold.mode,
+                    })
+            })
+            .collect::<Vec<_>>();
+        rows.extend(
+            self.advisory
+                .holds
+                .lock()
+                .expect("advisory lock manager")
+                .iter()
+                .filter_map(|hold| {
+                    pids.get(&hold.session)
+                        .map(|&pid| SessionLockSnapshot::Advisory {
+                            session: hold.session,
+                            pid,
+                            key: hold.key,
+                            shared: hold.shared,
+                        })
+                }),
+        );
+        rows
+    }
+
+    pub(crate) fn backend_pid(&self, session: SessionLockId) -> Option<i32> {
+        self.backend_pids
+            .lock()
+            .expect("session lock manager")
+            .get(&session)
+            .copied()
     }
 
     /// Drop every lock `session` holds, at disconnect.
     pub fn release_session(&self, session: SessionLockId) {
         self.tables.release_all(session);
         self.advisory.release_session(session);
+        self.backend_pids
+            .lock()
+            .expect("session lock manager")
+            .remove(&session);
     }
 }
 
@@ -957,6 +1077,34 @@ mod session_lock_tests {
         assert!(
             manager.held_modes(7, me)
                 == vec![TableLockMode::AccessShare, TableLockMode::AccessExclusive]
+        );
+    }
+
+    #[test]
+    fn disconnect_removes_a_sessions_locks_and_backend_pid() {
+        let locks = SessionLocks::new();
+        let session = locks.next_session_id(4242);
+        assert!(
+            locks
+                .tables
+                .acquire(7, session, TableLockMode::Share)
+                .is_ok()
+        );
+        assert!(
+            locks
+                .advisory
+                .try_lock(9, session, false, AdvisoryScope::Session)
+        );
+
+        locks.release_session(session);
+
+        assert!(locks.snapshot().is_empty());
+        assert!(
+            !locks
+                .backend_pids
+                .lock()
+                .expect("session lock manager")
+                .contains_key(&session)
         );
     }
 

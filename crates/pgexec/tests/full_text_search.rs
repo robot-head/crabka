@@ -513,11 +513,8 @@ async fn json_to_tsvector_validates_the_documents_escapes() {
     );
 }
 
-/// `ts_lexize` reports the lexemes of *one* dictionary, so it answers only for
-/// the two templates crabka implements. A name that resolves to nothing — every
-/// `ispell`, `synonym` and `thesaurus` dictionary, whose `CREATE` fails for want
-/// of the template — is a missing dictionary and says so, rather than inventing
-/// lexemes that would quietly change what a search matches.
+/// `ts_lexize` reports the lexemes of one dictionary, including SQL-created
+/// ISpell dictionaries backed by PostgreSQL's regression sample.
 #[tokio::test]
 async fn ts_lexize_answers_for_the_dictionaries_crabka_has() {
     let client = connect().await;
@@ -551,7 +548,265 @@ async fn ts_lexize_answers_for_the_dictionaries_crabka_has() {
             == Some("{sky}")
     );
 
-    for name in ["ispell", "synonym", "thesaurus", "snowball"] {
+    client
+        .simple_query(
+            "CREATE TEXT SEARCH DICTIONARY ispell (TEMPLATE = ispell, DictFile = ispell_sample, AffFile = ispell_sample)",
+        )
+        .await
+        .expect("create ispell dictionary");
+    assert2::assert!(
+        scalar(&client, "SELECT ts_lexize('ispell', 'bookings')")
+            .await
+            .as_deref()
+            == Some("{booking,book}")
+    );
+    assert2::assert!(
+        scalar(&client, "SELECT ts_lexize('ispell', 'Booking')")
+            .await
+            .as_deref()
+            == Some("{booking,book}")
+    );
+    for (name, dict_file, aff_file, token, expected) in [
+        (
+            "hunspell_long",
+            "hunspell_sample_long",
+            "hunspell_sample_long",
+            "ex-machina",
+            "{ex-,machina}",
+        ),
+        (
+            "hunspell_num",
+            "hunspell_sample_num",
+            "hunspell_sample_num",
+            "sk",
+            "{sky}",
+        ),
+    ] {
+        client
+            .simple_query(&format!(
+                "CREATE TEXT SEARCH DICTIONARY {name} (TEMPLATE = ispell, DictFile = {dict_file}, AffFile = {aff_file})"
+            ))
+            .await
+            .expect("create hunspell dictionary");
+        let sql = format!("SELECT ts_lexize('{name}', '{token}')");
+        assert2::assert!(
+            scalar(&client, &sql).await.as_deref() == Some(expected),
+            "{sql}"
+        );
+    }
+
+    client
+        .simple_query(
+            "CREATE TEXT SEARCH DICTIONARY synonym (TEMPLATE = synonym, Synonyms = synonym_sample)",
+        )
+        .await
+        .expect("create synonym dictionary");
+    assert2::assert!(
+        scalar(&client, "SELECT ts_lexize('synonym', 'PoStGrEs')")
+            .await
+            .as_deref()
+            == Some("{pgsql}")
+    );
+    client
+        .simple_query("ALTER TEXT SEARCH DICTIONARY synonym (CaseSensitive = 1)")
+        .await
+        .expect("enable case-sensitive synonym dictionary");
+    assert2::assert!(scalar(&client, "SELECT ts_lexize('synonym', 'PoStGrEs')").await == None);
+    client
+        .simple_query("ALTER TEXT SEARCH DICTIONARY synonym (CaseSensitive = off)")
+        .await
+        .expect("disable case-sensitive synonym dictionary");
+    assert2::assert!(
+        scalar(&client, "SELECT ts_lexize('synonym', 'indices')")
+            .await
+            .as_deref()
+            == Some("{index}")
+    );
+    assert2::assert!(
+        scalar(
+            &client,
+            "SELECT dictinitoption FROM pg_ts_dict WHERE dictname = 'synonym'",
+        )
+        .await
+        .as_deref()
+            == Some("synonyms = 'synonym_sample', casesensitive = 'off'")
+    );
+    let error = client
+        .simple_query("ALTER TEXT SEARCH DICTIONARY synonym (CaseSensitive = 2)")
+        .await
+        .expect_err("case-sensitive synonym setting must be Boolean");
+    assert2::assert!(
+        error
+            .as_db_error()
+            .map(|error| error.message().to_owned())
+            .as_deref()
+            == Some("casesensitive requires a Boolean value")
+    );
+    client
+        .simple_query(
+            "CREATE TEXT SEARCH DICTIONARY thesaurus (TEMPLATE = thesaurus, DictFile = thesaurus_sample, Dictionary = english_stem)",
+        )
+        .await
+        .expect("create thesaurus dictionary");
+    assert2::assert!(
+        scalar(&client, "SELECT ts_lexize('thesaurus', 'one')")
+            .await
+            .as_deref()
+            == Some("{1}")
+    );
+    client
+        .simple_query("CREATE TEXT SEARCH CONFIGURATION ispell_tst (COPY = english)")
+        .await
+        .expect("create ispell configuration");
+    client
+        .simple_query(
+            "ALTER TEXT SEARCH CONFIGURATION ispell_tst ALTER MAPPING FOR word, numword WITH ispell, english_stem",
+        )
+        .await
+        .expect("map ISpell configuration");
+    assert2::assert!(
+        scalar(
+            &client,
+            "SELECT to_tsvector('ispell_tst', 'Booking the skies after rebookings for footballklubber from a foot')",
+        )
+        .await
+        .as_deref()
+            == Some("'ball':7 'book':1,5 'booking':1,5 'foot':7,10 'football':7 'footballklubber':7 'klubber':7 'sky':3")
+    );
+    assert2::assert!(
+        scalar(
+            &client,
+            "SELECT to_tsquery('ispell_tst', 'footballklubber')"
+        )
+        .await
+        .as_deref()
+            == Some("'footballklubber' | 'foot' & 'ball' & 'klubber' | 'football' & 'klubber'")
+    );
+    client
+        .simple_query("CREATE TEXT SEARCH CONFIGURATION hunspell_tst (COPY = ispell_tst)")
+        .await
+        .expect("copy ISpell configuration");
+    client
+        .simple_query("ALTER TEXT SEARCH CONFIGURATION hunspell_tst ALTER MAPPING REPLACE ispell WITH hunspell_long")
+        .await
+        .expect("replace inherited ISpell mapping");
+    assert2::assert!(
+        scalar(
+            &client,
+            "SELECT to_tsquery('hunspell_tst', 'footballklubber')"
+        )
+        .await
+        .as_deref()
+            == Some("'footballklubber' | 'foot' & 'ball' & 'klubber' | 'football' & 'klubber'")
+    );
+    client
+        .simple_query("CREATE TEXT SEARCH CONFIGURATION synonym_tst (COPY = english)")
+        .await
+        .expect("create synonym configuration");
+    client
+        .simple_query(
+            "ALTER TEXT SEARCH CONFIGURATION synonym_tst ALTER MAPPING FOR asciiword WITH synonym, english_stem",
+        )
+        .await
+        .expect("map synonym configuration");
+    client
+        .simple_query("CREATE TEXT SEARCH CONFIGURATION thesaurus_tst (COPY = synonym_tst)")
+        .await
+        .expect("copy synonym configuration");
+    client
+        .simple_query(
+            "ALTER TEXT SEARCH CONFIGURATION thesaurus_tst ALTER MAPPING FOR asciiword WITH synonym, thesaurus, english_stem",
+        )
+        .await
+        .expect("map thesaurus configuration");
+    assert2::assert!(
+        scalar(
+            &client,
+            "SELECT to_tsvector('thesaurus_tst', 'one postgres one two one two three one')"
+        )
+        .await
+        .as_deref()
+            == Some("'1':1,5 '12':3 '123':4 'pgsql':2")
+    );
+    assert2::assert!(
+        scalar(&client, "SELECT to_tsvector('thesaurus_tst', 'Booking tickets is looking like a booking a tickets')")
+            .await
+            .as_deref()
+            == Some("'card':3,10 'invit':2,9 'like':6 'look':5 'order':1,8")
+    );
+    assert2::assert!(
+        scalar(&client, "SELECT to_tsvector('thesaurus_tst', 'Supernovae star is very new star and usually called supernovae (abbreviation SN)')")
+            .await
+            .as_deref()
+            == Some("'abbrevi':10 'call':8 'new':4 'sn':1,9,11 'star':5 'usual':7")
+    );
+    client
+        .simple_query("CREATE TEXT SEARCH CONFIGURATION mapping_tst (COPY = english)")
+        .await
+        .expect("create mapping configuration");
+    client
+        .simple_query(
+            "ALTER TEXT SEARCH CONFIGURATION mapping_tst ADD MAPPING FOR word WITH ispell",
+        )
+        .await
+        .expect("add mapping");
+    assert2::assert!(
+        scalar(&client, "SELECT to_tsvector('mapping_tst', 'skies')")
+            .await
+            .as_deref()
+            == Some("'sky':1")
+    );
+    client
+        .simple_query("ALTER TEXT SEARCH CONFIGURATION mapping_tst DROP MAPPING FOR word")
+        .await
+        .expect("drop mapping");
+    let error = client
+        .simple_query("ALTER TEXT SEARCH CONFIGURATION mapping_tst DROP MAPPING FOR word")
+        .await
+        .expect_err("missing mapping errors without IF EXISTS");
+    assert2::assert!(
+        error
+            .as_db_error()
+            .map(|error| error.message().to_owned())
+            .as_deref()
+            == Some("mapping for token type \"word\" does not exist")
+    );
+    client
+        .simple_query("ALTER TEXT SEARCH CONFIGURATION mapping_tst DROP MAPPING IF EXISTS FOR word")
+        .await
+        .expect("missing mapping is accepted with IF EXISTS");
+    for sql in [
+        "ALTER TEXT SEARCH CONFIGURATION mapping_tst DROP MAPPING FOR not_a_token, not_a_token",
+        "ALTER TEXT SEARCH CONFIGURATION mapping_tst DROP MAPPING IF EXISTS FOR not_a_token, not_a_token",
+        "ALTER TEXT SEARCH CONFIGURATION mapping_tst ADD MAPPING FOR not_a_token WITH ispell",
+    ] {
+        let error = client
+            .simple_query(sql)
+            .await
+            .expect_err("unknown token types are always refused");
+        assert2::assert!(
+            error
+                .as_db_error()
+                .map(|error| error.message().to_owned())
+                .as_deref()
+                == Some("token type \"not_a_token\" does not exist")
+        );
+    }
+    let error = client
+        .simple_query(
+            "CREATE TEXT SEARCH DICTIONARY ispell_case (TEMPLATE = ispell, \"DictFile\" = ispell_sample, AffFile = ispell_sample)",
+        )
+        .await
+        .expect_err("quoted ISpell options keep their case and are rejected");
+    assert2::assert!(
+        error
+            .as_db_error()
+            .map(|error| error.message().to_owned())
+            .as_deref()
+            == Some("unrecognized Ispell parameter: \"DictFile\"")
+    );
+
+    for name in ["snowball"] {
         let refused = client
             .simple_query(&format!("SELECT ts_lexize('{name}', 'skies')"))
             .await

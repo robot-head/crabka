@@ -266,7 +266,7 @@ async fn update_set_applies_assignment_casts_through_the_session_time_zone() {
 }
 
 #[tokio::test]
-async fn assignment_context_keeps_io_conversion_casts_explicit_only() {
+async fn assignment_context_allows_io_conversion_casts_into_string_types() {
     use assert2::assert;
     let client = connect(spawn().await).await;
     client
@@ -276,11 +276,16 @@ async fn assignment_context_keeps_io_conversion_casts_explicit_only() {
         )
         .await
         .expect("create + seed");
-    // int → text and (typed) text → int are NOT assignment casts in
-    // PostgreSQL — both keep erroring with 42804.
-    assert!(err_code(&client, "INSERT INTO t (label) VALUES (42)").await == "42804");
+    client
+        .batch_execute("INSERT INTO t (label) VALUES (42); UPDATE t SET label = 42")
+        .await
+        .expect("assignment casts into text");
+    assert_eq!(
+        text(&client, "SELECT label FROM t ORDER BY label DESC LIMIT 1").await,
+        Some("42".into())
+    );
+    // I/O casts away from string types remain explicit-only.
     assert!(err_code(&client, "INSERT INTO t (n) VALUES ('12'::text)").await == "42804");
-    assert!(err_code(&client, "UPDATE t SET label = 42").await == "42804");
     // Temporal truncation stays explicit-only in this conservative subset.
     assert!(err_code(&client, "INSERT INTO t (mtime) VALUES ('12:34:56'::time)").await == "42804");
 }

@@ -191,6 +191,10 @@ pub struct ScannedRow {
     pub rowid: u64,
     /// Creating xid of the visible tuple version.
     pub xmin: u64,
+    /// Creating command ID of the visible tuple version.
+    pub cmin: u32,
+    /// Deleting command ID of the visible tuple version, or zero when live.
+    pub cmax: u32,
     /// Decoded tuple payload.
     pub row: Vec<crabka_pgtypes::Datum>,
 }
@@ -207,6 +211,8 @@ pub struct ScanRequest<'a> {
     pub snapshot: &'a Snapshot,
     /// Optional caller xid for read-your-writes.
     pub own_xid: Option<u64>,
+    /// Optional command counter for own-xid tuple visibility.
+    pub command_id: Option<u32>,
     /// Optional timestamp read point for sharded-table G-9 visibility.
     pub read_ts: Option<crate::timestamp_txn::ReadTimestamp>,
     /// Optional timestamp transaction whose pending intents belong to this reader.
@@ -1518,12 +1524,13 @@ impl RangeCursor for LocalRangeCursor<'_> {
                 interval,
             )?
         } else {
-            crate::exec::scan_live_interval(
+            crate::exec::scan_live_interval_at_command(
                 self.request.local,
                 self.request.global,
                 self.request.global_snapshot,
                 self.request.snapshot,
                 self.request.own_xid,
+                self.request.command_id,
                 self.request.table,
                 interval,
             )?
@@ -1575,12 +1582,13 @@ impl RangeScanner for LocalRangeScanner {
             record_scan_rows(&span, scanned, rows.len());
             return Ok(rows);
         }
-        let rows = crate::exec::scan_live_interval(
+        let rows = crate::exec::scan_live_interval_at_command(
             request.local,
             request.global,
             request.global_snapshot,
             request.snapshot,
             request.own_xid,
+            request.command_id,
             request.table,
             request.interval,
         )?;
@@ -1714,6 +1722,8 @@ fn apply_partial_aggregate_pushdown(
             output.push(ScannedRow {
                 rowid: 0,
                 xmin: 0,
+                cmin: 0,
+                cmax: 0,
                 row: key,
             });
         }
@@ -1729,6 +1739,8 @@ fn apply_partial_aggregate_pushdown(
     Ok(vec![ScannedRow {
         rowid: 0,
         xmin: 0,
+        cmin: 0,
+        cmax: 0,
         row,
     }])
 }
@@ -1759,6 +1771,8 @@ pub fn merge_partial_aggregate_rows(
             let state = ScannedRow {
                 rowid: row.rowid,
                 xmin: row.xmin,
+                cmin: row.cmin,
+                cmax: row.cmax,
                 row: row.row[key_len..].to_vec(),
             };
             if let Some((_, partials)) = groups
@@ -1785,6 +1799,8 @@ pub fn merge_partial_aggregate_rows(
             output.push(ScannedRow {
                 rowid: 0,
                 xmin: 0,
+                cmin: 0,
+                cmax: 0,
                 row: key,
             });
         }
@@ -1796,6 +1812,8 @@ pub fn merge_partial_aggregate_rows(
         return Ok(vec![ScannedRow {
             rowid: 0,
             xmin: 0,
+            cmin: 0,
+            cmax: 0,
             row: parts,
         }]);
     }
@@ -1808,6 +1826,8 @@ pub fn merge_partial_aggregate_rows(
         Ok(ScannedRow {
             rowid: row.rowid,
             xmin: row.xmin,
+            cmin: row.cmin,
+            cmax: row.cmax,
             row: vec![value.clone()],
         })
     });
@@ -1817,6 +1837,8 @@ pub fn merge_partial_aggregate_rows(
             return Ok(vec![ScannedRow {
                 rowid: 0,
                 xmin: 0,
+                cmin: 0,
+                cmax: 0,
                 row: vec![value],
             }]);
         }
@@ -1836,6 +1858,8 @@ pub fn merge_partial_aggregate_rows(
     Ok(vec![ScannedRow {
         rowid: 0,
         xmin: 0,
+        cmin: 0,
+        cmax: 0,
         row: vec![value],
     }])
 }
@@ -1862,6 +1886,8 @@ pub fn finalize_partial_aggregate_rows(
                 Ok(ScannedRow {
                     rowid: 0,
                     xmin: 0,
+                    cmin: 0,
+                    cmax: 0,
                     row: output,
                 })
             })
@@ -1875,6 +1901,8 @@ pub fn finalize_partial_aggregate_rows(
     Ok(vec![ScannedRow {
         rowid: 0,
         xmin: 0,
+        cmin: 0,
+        cmax: 0,
         row: vec![finalize_avg_parts(&row.row)?],
     }])
 }
@@ -2447,6 +2475,8 @@ mod cursor_contract_tests {
         super::ScannedRow {
             rowid,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Int8(i64::try_from(rowid).expect("test rowid fits"))],
         }
     }
@@ -2541,6 +2571,7 @@ mod cursor_contract_tests {
                 global_snapshot: &snapshot,
                 snapshot: &snapshot,
                 own_xid: None,
+                command_id: None,
                 read_ts: None,
                 own_start_ts: None,
                 table: &table,
@@ -2584,6 +2615,8 @@ mod cursor_contract_tests {
             &MaterializedOnlyScanner(vec![super::ScannedRow {
                 rowid: 1,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Text("x".repeat(128))],
             }]),
             ScanRequest {
@@ -2592,6 +2625,7 @@ mod cursor_contract_tests {
                 global_snapshot: &snapshot,
                 snapshot: &snapshot,
                 own_xid: None,
+                command_id: None,
                 read_ts: None,
                 own_start_ts: None,
                 table: &table,
@@ -2670,6 +2704,7 @@ mod streaming_aggregate_tests {
             global_snapshot: snapshot,
             snapshot,
             own_xid: None,
+            command_id: None,
             read_ts: None,
             own_start_ts: None,
             table,
@@ -2694,6 +2729,8 @@ mod streaming_aggregate_tests {
             .map(|rowid| ScannedRow {
                 rowid,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Int8(i64::try_from(rowid).expect("test rowid fits"))],
             })
             .collect()
@@ -2776,6 +2813,8 @@ mod streaming_aggregate_tests {
         let scanner = FixedRowsScanner(vec![ScannedRow {
             rowid: 1,
             xmin: 1,
+            cmin: 0,
+            cmax: 0,
             row: vec![Datum::Text("x".repeat(4096))],
         }]);
         let (local, snapshot, table) = (MemKv::new(), snapshot(), table());
@@ -2800,6 +2839,8 @@ mod streaming_aggregate_tests {
             .map(|rowid| ScannedRow {
                 rowid,
                 xmin: 1,
+                cmin: 0,
+                cmax: 0,
                 row: vec![Datum::Text(format!("{rowid:08}{}", "k".repeat(504)))],
             })
             .collect::<Vec<_>>();

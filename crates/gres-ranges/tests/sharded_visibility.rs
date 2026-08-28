@@ -452,6 +452,7 @@ impl VisibilityWorld {
                 global_snapshot: &snapshot,
                 snapshot: &snapshot,
                 own_xid: None,
+                command_id: None,
                 read_ts: Some(read_ts),
                 own_start_ts: None,
                 table: &table,
@@ -526,6 +527,8 @@ fn scan_ts_visible_shard(
             visible.push(ScannedRow {
                 rowid,
                 xmin: start_ts,
+                cmin: 0,
+                cmax: 0,
                 row,
             });
         }
@@ -545,7 +548,7 @@ fn scan_visible_shard(
         if !request.interval.contains(rowid) {
             continue;
         }
-        let (xmin, xmax, row) = version::decode_tuple(&value)?;
+        let (xmin, xmax, cmin, cmax, row) = version::decode_tuple_with_command_ids(&value)?;
         if crabka_pgmvcc::visibility::satisfies_mvcc(
             xmin,
             xmax,
@@ -553,7 +556,13 @@ fn scan_visible_shard(
             request.own_xid,
             |xid| resolve_status(shard.as_ref(), request.global, request.global_snapshot, xid),
         )? {
-            visible.push(ScannedRow { rowid, xmin, row });
+            visible.push(ScannedRow {
+                rowid,
+                xmin,
+                cmin,
+                cmax,
+                row,
+            });
         }
     }
     Ok(visible)

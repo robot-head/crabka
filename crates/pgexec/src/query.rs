@@ -12,7 +12,7 @@ pub(crate) fn query_to_relation_with_ctes(
     ctx: &SubCtx<'_>,
     q: &QueryExpr,
 ) -> Result<Relation, ExecError> {
-    let query_ctes = crate::cte::evaluate_with_clause(ctx, q.with.as_ref())?;
+    let query_ctes = crate::cte::evaluate_with_clause(ctx, q.with.as_ref(), simple_cte_limit(q))?;
     let query_ctx = ctx.with_ctes(&query_ctes);
     match &q.body {
         SetExpr::Query(QueryBody::Select(s)) => {
@@ -24,6 +24,7 @@ pub(crate) fn query_to_relation_with_ctes(
             let s = crate::plan::exec::select_with_query_tail(q, s);
             crate::window::reject_misplaced_calls(&s)?;
             crate::grouping::reject_misplaced_calls(&s)?;
+            crate::srf::reject_misplaced_calls(&s)?;
             if !crate::exec::select_contains_subquery(&s) {
                 let planned = crate::subquery::resolve_in_select(&query_ctx, &s)?;
                 if let Some((relation, state)) =
@@ -34,6 +35,12 @@ pub(crate) fn query_to_relation_with_ctes(
                 }
                 let refs = crate::scope::StatementRefs::of_select(&planned);
                 let plan_ctx = query_ctx.with_refs(&refs);
+                if !crate::scope::wants_system_column(plan_ctx.refs)
+                    && let Some(relation) =
+                        crate::exec::try_execute_local_streaming_aggregate(&plan_ctx, &planned)?
+                {
+                    return Ok(relation);
+                }
                 if let Some((relation, state)) =
                     crate::plan::exec::try_execute_seq_scan_with_state(&plan_ctx, &planned)?
                 {
@@ -63,6 +70,51 @@ pub(crate) fn query_to_relation_with_ctes(
             crate::setops::set_expr_to_relation(&query_ctx, &q.body, &order_by, window)
         }
     }
+}
+
+/// A plain CTE scan can stop producing when its enclosing query has a literal
+/// `LIMIT`. Other shapes can need rows beyond their output limit (for example,
+/// a filter, sort, or join), so they intentionally retain CTE materialization.
+fn simple_cte_limit(q: &QueryExpr) -> Option<(&str, usize)> {
+    let SetExpr::Query(QueryBody::Select(select)) = &q.body else {
+        return None;
+    };
+    let [
+        crabka_pgparser::ast::TableExpr::Table {
+            name,
+            only: false,
+            columns: None,
+            sample: None,
+            ..
+        },
+    ] = select.from.as_slice()
+    else {
+        return None;
+    };
+    if name.schema.is_some()
+        || !q.order_by.is_empty()
+        || q.offset.is_some()
+        || q.with_ties
+        || q.locking.is_some()
+        || !matches!(q.limit, Some(crabka_pgparser::ast::Expr::IntLiteral(_)))
+        || !matches!(
+            select.projection.as_slice(),
+            [crabka_pgparser::ast::SelectItem::Wildcard]
+        )
+        || !matches!(select.distinct, crabka_pgparser::ast::DistinctClause::All)
+        || select.filter.is_some()
+        || !select.group_by.is_empty()
+        || select.grouping.is_some()
+        || select.having.is_some()
+        || !select.windows.is_empty()
+        || !select.window_calls.is_empty()
+    {
+        return None;
+    }
+    let crabka_pgparser::ast::Expr::IntLiteral(limit) = q.limit.as_ref()? else {
+        return None;
+    };
+    limit.parse().ok().map(|limit| (name.name.as_str(), limit))
 }
 
 pub(crate) fn describe_query_expr(
@@ -124,7 +176,14 @@ fn describe_query_expr_inner(
             // projection resolves against, so Describe types it exactly as
             // execution does.
             let scope = crate::window::describe_scope(s, &scope)?;
-            let (fields, _exprs, _tys) = crate::exec::resolve_projection(&projection, &scope)?;
+            let (mut fields, _exprs, _tys) = crate::exec::resolve_projection(&projection, &scope)?;
+            for (field, item) in fields.iter_mut().zip(&s.projection) {
+                if let crabka_pgparser::ast::SelectItem::Expr { expr, alias } = item {
+                    field.name = alias
+                        .clone()
+                        .unwrap_or_else(|| crate::exec::derived_name(expr));
+                }
+            }
             Ok(fields)
         }
         SetExpr::Query(QueryBody::Values(v)) => {

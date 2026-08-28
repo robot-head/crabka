@@ -120,7 +120,7 @@ fn compare(left: &[Datum], right: &[Datum], equality: bool) -> Result<Option<Ord
             "unequal number of entries in row expressions".into(),
         ));
     }
-    if left.is_empty() && right.is_empty() {
+    if left.is_empty() {
         return Err(ExecError::Unsupported(
             "cannot compare rows of zero length".into(),
         ));
@@ -326,6 +326,7 @@ pub(crate) fn eval_in_list(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_pgtypes::{ArrayDim, ArrayValue, ElemType};
 
     use super::*;
 
@@ -399,6 +400,17 @@ mod tests {
     }
 
     #[test]
+    fn comparison_rejects_unequal_row_lengths() {
+        assert!(
+            compare(&[int(1)], &[int(1), int(2)], false)
+                .expect_err("row arity mismatch")
+                .into_pg()
+                .code
+                == "42601"
+        );
+    }
+
+    #[test]
     fn distinct_is_null_safe_and_field_wise() {
         assert!(distinct(&[int(1), Datum::Null], &[int(1), Datum::Null]).expect("ok") == false);
         assert!(distinct(&[int(1), Datum::Null], &[int(1), int(2)]).expect("ok") == true);
@@ -406,12 +418,49 @@ mod tests {
     }
 
     #[test]
+    fn distinct_uses_array_shape_before_jsonpath_element_equality() {
+        let value = Datum::JsonPath("$".into());
+        let one_dimensional = Datum::Array(ArrayValue::with_dims(
+            ElemType::JsonPath,
+            vec![value.clone()],
+            vec![ArrayDim::from_len(1)],
+        ));
+        let two_dimensional = Datum::Array(ArrayValue::with_dims(
+            ElemType::JsonPath,
+            vec![value],
+            vec![ArrayDim::from_len(1), ArrayDim::from_len(1)],
+        ));
+        assert!(is_distinct(&one_dimensional, &two_dimensional).expect("shape differs"));
+    }
+
+    #[test]
+    fn row_null_tests_are_field_wise_in_both_directions() {
+        for (values, is_null, is_not_null) in [
+            (vec![Datum::Null, Datum::Null], true, false),
+            (vec![int(1), int(2)], false, true),
+            (vec![int(1), Datum::Null], false, false),
+        ] {
+            assert!(field_wise_is_null(&values, false) == Datum::Bool(is_null));
+            assert!(field_wise_is_null(&values, true) == Datum::Bool(is_not_null));
+        }
+    }
+
+    #[test]
     fn temporal_row_pairs_overlap_only_when_their_half_open_periods_intersect() {
         let ctx = crate::clock::EvalCtx::test_default();
         for (sql, expected) in [
-            ("(date '2024-01-01', date '2024-01-03') OVERLAPS (date '2024-01-02', date '2024-01-04')", true),
-            ("(date '2024-01-01', date '2024-01-02') OVERLAPS (date '2024-01-02', date '2024-01-03')", false),
-            ("(date '2024-01-03', date '2024-01-01') OVERLAPS (date '2024-01-02', date '2024-01-04')", true),
+            (
+                "(date '2024-01-01', date '2024-01-03') OVERLAPS (date '2024-01-02', date '2024-01-04')",
+                true,
+            ),
+            (
+                "(date '2024-01-01', date '2024-01-02') OVERLAPS (date '2024-01-02', date '2024-01-03')",
+                false,
+            ),
+            (
+                "(date '2024-01-03', date '2024-01-01') OVERLAPS (date '2024-01-02', date '2024-01-04')",
+                true,
+            ),
         ] {
             let expr = crabka_pgparser::parser::parse_expr_for_test(sql).expect("parse");
             assert!(

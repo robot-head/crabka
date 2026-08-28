@@ -24,8 +24,9 @@
 
 use std::fmt::Write as _;
 
-use bigdecimal::{BigDecimal, One, ToPrimitive, Zero};
+use bigdecimal::{BigDecimal, One, RoundingMode, ToPrimitive, Zero};
 use crabka_pgtypes::{ArrayValue, Datum, ElemType, JsonbValue, TypeError};
+use jiff::ToSpan;
 
 use crate::error::ExecError;
 
@@ -162,9 +163,14 @@ enum Accessor {
     /// `[*]`: every element of an array.
     IndexAll,
     /// `.**`, `.**{n}`, `.**{n to m}`: recursive descent, at the given depths.
-    Any { from: u32, to: u32 },
-    /// `.type()`, `.size()`, …: an item method.
-    Method(Method),
+    Any {
+        from: DepthBound,
+        to: DepthBound,
+        explicit_bounds: bool,
+    },
+    /// `.type()`, `.size()`, …: an item method, with `.datetime`'s optional
+    /// format template.
+    Method(Method, MethodArgs),
     /// `? (predicate)`: keep only the items the predicate is true for.
     Filter(Box<Pred>),
 }
@@ -191,6 +197,23 @@ enum Method {
     Timestamp,
     TimestampTz,
     Datetime,
+}
+
+/// The only item-method arguments PostgreSQL accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MethodArgs {
+    None,
+    Datetime(String),
+    Decimal { precision: i32, scale: Option<i32> },
+    TemporalPrecision(BigDecimal),
+}
+
+/// A recursive-descent bound. `last` behaves as an unbounded depth while
+/// retaining PostgreSQL's canonical spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DepthBound {
+    Number(u32),
+    Last,
 }
 
 /// The arithmetic operators, in `PostgreSQL`'s spelling.
@@ -305,6 +328,140 @@ impl PathError {
 }
 
 type PathResult<T> = Result<T, PathError>;
+
+fn collect_precision_warnings_node(node: &Node, warnings: &mut Vec<String>) {
+    match node {
+        Node::Accessor { base, op } => {
+            collect_precision_warnings_node(base, warnings);
+            match op {
+                Accessor::Index(items) => {
+                    for (lower, upper) in items {
+                        collect_precision_warnings_node(lower, warnings);
+                        if let Some(upper) = upper {
+                            collect_precision_warnings_node(upper, warnings);
+                        }
+                    }
+                }
+                Accessor::Method(method, MethodArgs::TemporalPrecision(precision))
+                    if precision
+                        .to_i32()
+                        .is_some_and(|precision| (7..=i32::MAX).contains(&precision)) =>
+                {
+                    let precision = precision.to_i32().expect("guard admits an int4");
+                    let type_name = match method {
+                        Method::Time => format!("TIME({precision})"),
+                        Method::TimeTz => format!("TIME({precision}) WITH TIME ZONE"),
+                        Method::Timestamp => format!("TIMESTAMP({precision})"),
+                        Method::TimestampTz => {
+                            format!("TIMESTAMP({precision}) WITH TIME ZONE")
+                        }
+                        _ => unreachable!("only temporal methods have temporal precision"),
+                    };
+                    warnings.push(format!(
+                        "{type_name} precision reduced to maximum allowed, 6"
+                    ));
+                }
+                Accessor::Filter(predicate) => {
+                    collect_precision_warnings_pred(predicate, warnings);
+                }
+                _ => {}
+            }
+        }
+        Node::Neg { arg, .. } => collect_precision_warnings_node(arg, warnings),
+        Node::Arith { left, right, .. } => {
+            collect_precision_warnings_node(left, warnings);
+            collect_precision_warnings_node(right, warnings);
+        }
+        Node::Predicate(predicate) => collect_precision_warnings_pred(predicate, warnings),
+        Node::Root | Node::Current | Node::Last | Node::Var(_) | Node::Literal(_) => {}
+    }
+}
+
+fn collect_precision_warnings_pred(predicate: &Pred, warnings: &mut Vec<String>) {
+    match predicate {
+        Pred::And(left, right) | Pred::Or(left, right) => {
+            collect_precision_warnings_pred(left, warnings);
+            collect_precision_warnings_pred(right, warnings);
+        }
+        Pred::Not(inner) | Pred::IsUnknown(inner) => {
+            collect_precision_warnings_pred(inner, warnings);
+        }
+        Pred::Exists(node) => collect_precision_warnings_node(node, warnings),
+        Pred::Compare { left, right, .. }
+        | Pred::StartsWith {
+            value: left,
+            prefix: right,
+        } => {
+            collect_precision_warnings_node(left, warnings);
+            collect_precision_warnings_node(right, warnings);
+        }
+        Pred::LikeRegex { value, .. } => collect_precision_warnings_node(value, warnings),
+    }
+}
+
+fn validate_context_node(
+    node: &Node,
+    in_subscript: bool,
+    in_filter: bool,
+) -> Result<(), ExecError> {
+    match node {
+        Node::Last if !in_subscript => Err(syntax("LAST is allowed only in array subscripts")),
+        Node::Current if !in_filter => Err(syntax("@ is not allowed in root expressions")),
+        Node::Accessor { base, op } => {
+            validate_context_node(base, in_subscript, in_filter)?;
+            match op {
+                Accessor::Index(items) => {
+                    for (lower, upper) in items {
+                        validate_context_node(lower, true, in_filter)?;
+                        if let Some(upper) = upper {
+                            validate_context_node(upper, true, in_filter)?;
+                        }
+                    }
+                    Ok(())
+                }
+                Accessor::Filter(predicate) => validate_context_pred(predicate, in_subscript, true),
+                Accessor::Member(_)
+                | Accessor::MemberAll
+                | Accessor::IndexAll
+                | Accessor::Any { .. }
+                | Accessor::Method(..) => Ok(()),
+            }
+        }
+        Node::Neg { arg, .. } => validate_context_node(arg, in_subscript, in_filter),
+        Node::Arith { left, right, .. } => {
+            validate_context_node(left, in_subscript, in_filter)?;
+            validate_context_node(right, in_subscript, in_filter)
+        }
+        Node::Predicate(predicate) => validate_context_pred(predicate, in_subscript, in_filter),
+        Node::Root | Node::Current | Node::Last | Node::Var(_) | Node::Literal(_) => Ok(()),
+    }
+}
+
+fn validate_context_pred(
+    predicate: &Pred,
+    in_subscript: bool,
+    in_filter: bool,
+) -> Result<(), ExecError> {
+    match predicate {
+        Pred::And(left, right) | Pred::Or(left, right) => {
+            validate_context_pred(left, in_subscript, in_filter)?;
+            validate_context_pred(right, in_subscript, in_filter)
+        }
+        Pred::Not(inner) | Pred::IsUnknown(inner) => {
+            validate_context_pred(inner, in_subscript, in_filter)
+        }
+        Pred::Exists(node) => validate_context_node(node, in_subscript, in_filter),
+        Pred::Compare { left, right, .. }
+        | Pred::StartsWith {
+            value: left,
+            prefix: right,
+        } => {
+            validate_context_node(left, in_subscript, in_filter)?;
+            validate_context_node(right, in_subscript, in_filter)
+        }
+        Pred::LikeRegex { value, .. } => validate_context_node(value, in_subscript, in_filter),
+    }
+}
 
 /// A jsonpath *syntax* error.
 ///
@@ -484,13 +641,13 @@ fn lex(src: &str) -> Result<Vec<Tok>, ExecError> {
                 i += len;
                 continue;
             }
+            ('_', Some(d)) if d.is_ascii_digit() => {
+                return Err(syntax("syntax error at end of jsonpath input"));
+            }
             (w, _) if is_ident_start(w) => {
-                let mut j = i;
-                while j < chars.len() && is_ident_cont(chars[j]) {
-                    j += 1;
-                }
-                out.push(Tok::Word(chars[i..j].iter().collect()));
-                i = j;
+                let (word, len) = lex_word(&chars, i)?;
+                out.push(Tok::Word(word));
+                i += len;
                 continue;
             }
             _ => {
@@ -506,6 +663,38 @@ fn lex(src: &str) -> Result<Vec<Tok>, ExecError> {
     Ok(out)
 }
 
+fn lex_word(chars: &[char], start: usize) -> Result<(String, usize), ExecError> {
+    let mut end = start;
+    while end < chars.len() {
+        if is_ident_cont(chars[end]) {
+            end += 1;
+            continue;
+        }
+        if chars[end] != '\\' {
+            break;
+        }
+        end += match chars.get(end + 1) {
+            Some('x') => 4,
+            Some('u') if chars.get(end + 2) == Some(&'{') => {
+                let offset = chars[end + 3..]
+                    .iter()
+                    .position(|c| *c == '}')
+                    .ok_or_else(|| syntax("invalid unicode escape of jsonpath input"))?;
+                offset + 4
+            }
+            Some('u') => 6,
+            Some(_) => 2,
+            None => 1,
+        };
+    }
+    let mut quoted = Vec::with_capacity(end - start + 2);
+    quoted.push('"');
+    quoted.extend_from_slice(&chars[start..end]);
+    quoted.push('"');
+    let (word, _) = lex_quoted(&quoted, 0)?;
+    Ok((word, end - start))
+}
+
 fn is_ident_start(c: char) -> bool {
     c == '_' || c.is_alphabetic() || !c.is_ascii()
 }
@@ -515,43 +704,130 @@ fn is_ident_cont(c: char) -> bool {
 }
 
 /// A number literal: optional integer part, optional fraction, optional
-/// exponent.
-///
-/// `PostgreSQL` also accepts `0x`/`0o`/`0b` and `_` separators. This parser
-/// deliberately does not accept those. See the module divergence list.
+/// exponent, PostgreSQL digit separators, or a PostgreSQL non-decimal integer.
 fn lex_number(chars: &[char], start: usize) -> Result<(BigDecimal, usize), ExecError> {
     let mut j = start;
-    while j < chars.len() && chars[j].is_ascii_digit() {
-        j += 1;
-    }
-    if chars.get(j) == Some(&'.') && chars.get(j + 1).is_some_and(char::is_ascii_digit) {
-        j += 1;
-        while j < chars.len() && chars[j].is_ascii_digit() {
+    let nondecimal = matches!(
+        (chars.get(start), chars.get(start + 1)),
+        (Some('0'), Some('x' | 'X' | 'o' | 'O' | 'b' | 'B'))
+    );
+    if nondecimal {
+        let radix = match chars[start + 1].to_ascii_lowercase() {
+            'x' => 16,
+            'o' => 8,
+            'b' => 2,
+            _ => unreachable!("matched non-decimal prefix"),
+        };
+        j += 2;
+        if chars.get(j) == Some(&'_') {
+            return Err(syntax("syntax error at end of jsonpath input"));
+        }
+        while chars.get(j).is_some_and(|c| c.is_digit(radix) || *c == '_') {
             j += 1;
         }
-    }
-    if matches!(chars.get(j), Some('e' | 'E')) {
-        let mut k = j + 1;
-        if matches!(chars.get(k), Some('+' | '-')) {
-            k += 1;
+    } else {
+        while chars
+            .get(j)
+            .is_some_and(|c| c.is_ascii_digit() || *c == '_')
+        {
+            j += 1;
         }
-        if chars.get(k).is_some_and(char::is_ascii_digit) {
-            while k < chars.len() && chars[k].is_ascii_digit() {
-                k += 1;
+        if chars.get(j) == Some(&'.') {
+            j += 1;
+            while chars
+                .get(j)
+                .is_some_and(|c| c.is_ascii_digit() || *c == '_')
+            {
+                j += 1;
             }
-            j = k;
+        }
+        if matches!(chars.get(j), Some('e' | 'E')) {
+            j += 1;
+            if matches!(chars.get(j), Some('+' | '-')) {
+                j += 1;
+            }
+            while chars
+                .get(j)
+                .is_some_and(|c| c.is_ascii_digit() || *c == '_')
+            {
+                j += 1;
+            }
         }
     }
     let text: String = chars[start..j].iter().collect();
-    let value = text.parse::<BigDecimal>().map_err(|_| {
-        syntax(format!(
-            "syntax error at or near \"{text}\" of jsonpath input"
-        ))
-    })?;
+    if !nondecimal && text.contains('_') {
+        if text.contains("__") {
+            return Err(syntax("syntax error at end of jsonpath input"));
+        }
+        let prefix = text
+            .find("_.")
+            .map(|index| &text[..index + 1])
+            .or_else(|| text.find("._").map(|index| &text[..index + 2]))
+            .or_else(|| {
+                text.find("e_")
+                    .or_else(|| text.find("E_"))
+                    .map(|index| &text[..index + 1])
+            })
+            .or_else(|| text.ends_with('_').then_some(text.as_str()));
+        if let Some(prefix) = prefix {
+            return Err(syntax(format!(
+                "trailing junk after numeric literal at or near \"{prefix}\" of jsonpath input"
+            )));
+        }
+    }
+    if nondecimal && chars.get(j).is_some_and(|c| is_ident_start(*c)) {
+        return Err(syntax("syntax error at end of jsonpath input"));
+    }
+    if !nondecimal && chars.get(j).is_some_and(|c| is_ident_start(*c)) {
+        let end = if chars[j - 1] == '.' {
+            j + 1
+        } else {
+            let mut end = j;
+            while chars.get(end).is_some_and(|c| is_ident_cont(*c)) {
+                end += 1;
+            }
+            end
+        };
+        let token: String = chars[start..end].iter().collect();
+        return Err(syntax(format!(
+            "trailing junk after numeric literal at or near \"{token}\" of jsonpath input"
+        )));
+    }
+    if nondecimal && j == start + 2 {
+        return Err(syntax(format!(
+            "trailing junk after numeric literal at or near \"{text}\" of jsonpath input"
+        )));
+    }
+    if !nondecimal
+        && chars[start] == '0'
+        && chars
+            .get(start + 1)
+            .is_some_and(|c| c.is_ascii_digit() || *c == '_')
+    {
+        if chars.get(start + 1) != Some(&'0') {
+            return Err(syntax("syntax error at end of jsonpath input"));
+        }
+        return Err(syntax(format!(
+            "trailing junk after numeric literal at or near \"{text}\" of jsonpath input"
+        )));
+    }
+    let value = match crabka_pgtypes::numeric::parse(&text) {
+        Some(crabka_pgtypes::numeric::NumericValue::Finite(value)) => value,
+        _ if !nondecimal && !text.contains('_') => {
+            return Err(syntax(format!(
+                "trailing junk after numeric literal at or near \"{text}\" of jsonpath input"
+            )));
+        }
+        _ => {
+            return Err(syntax(format!(
+                "syntax error at or near \"{text}\" of jsonpath input"
+            )));
+        }
+    };
     Ok((value, j - start))
 }
 
-/// A `"…"` string, with JSON's escape set.
+/// A `"…"` string, with PostgreSQL JSONPath escapes.
 fn lex_quoted(chars: &[char], start: usize) -> Result<(String, usize), ExecError> {
     let mut out = String::new();
     let mut j = start + 1;
@@ -578,22 +854,67 @@ fn lex_quoted(chars: &[char], start: usize) -> Result<(String, usize), ExecError
                     'n' => out.push('\n'),
                     'r' => out.push('\r'),
                     't' => out.push('\t'),
+                    'v' => out.push('\u{b}'),
+                    'x' => {
+                        let hex: String = chars.get(j..j + 2).unwrap_or_default().iter().collect();
+                        let code = u32::from_str_radix(&hex, 16)
+                            .map_err(|_| syntax("invalid hexadecimal escape of jsonpath input"))?;
+                        j += 2;
+                        out.push(char::from_u32(code).ok_or_else(|| {
+                            syntax("invalid hexadecimal escape of jsonpath input")
+                        })?);
+                    }
                     'u' => {
-                        let hex: String = chars.get(j..j + 4).unwrap_or_default().iter().collect();
+                        let hex: String;
+                        if chars.get(j) == Some(&'{') {
+                            let end = chars[j + 1..]
+                                .iter()
+                                .position(|c| *c == '}')
+                                .map(|i| j + 1 + i)
+                                .ok_or_else(|| {
+                                    syntax("invalid unicode escape of jsonpath input")
+                                })?;
+                            if end == j + 1 || end > j + 7 {
+                                return Err(syntax("invalid unicode escape of jsonpath input"));
+                            }
+                            hex = chars[j + 1..end].iter().collect();
+                            j = end + 1;
+                        } else {
+                            hex = chars.get(j..j + 4).unwrap_or_default().iter().collect();
+                            j += 4;
+                        }
                         let code = u32::from_str_radix(&hex, 16)
                             .map_err(|_| syntax("invalid unicode escape of jsonpath input"))?;
-                        j += 4;
-                        out.push(
-                            char::from_u32(code).ok_or_else(|| {
+                        if (0xD800..=0xDBFF).contains(&code) {
+                            if chars.get(j) != Some(&'\\') || chars.get(j + 1) != Some(&'u') {
+                                return Err(syntax(
+                                    "Unicode low surrogate must follow a high surrogate",
+                                ));
+                            }
+                            let low_hex: String =
+                                chars.get(j + 2..j + 6).unwrap_or_default().iter().collect();
+                            let low = u32::from_str_radix(&low_hex, 16).map_err(|_| {
+                                syntax("Unicode low surrogate must follow a high surrogate")
+                            })?;
+                            if !(0xDC00..=0xDFFF).contains(&low) {
+                                return Err(syntax(
+                                    "Unicode low surrogate must follow a high surrogate",
+                                ));
+                            }
+                            j += 6;
+                            let scalar = 0x1_0000 + ((code - 0xD800) << 10) + low - 0xDC00;
+                            out.push(char::from_u32(scalar).ok_or_else(|| {
                                 syntax("invalid unicode escape of jsonpath input")
-                            })?,
-                        );
+                            })?);
+                        } else if (0xDC00..=0xDFFF).contains(&code) {
+                            return Err(syntax("Unicode low surrogate without a high surrogate"));
+                        } else {
+                            out.push(char::from_u32(code).ok_or_else(|| {
+                                syntax("invalid unicode escape of jsonpath input")
+                            })?);
+                        }
                     }
-                    other => {
-                        return Err(syntax(format!(
-                            "syntax error at or near \"\\{other}\" of jsonpath input"
-                        )));
-                    }
+                    other => out.push(other),
                 }
             }
             other => {
@@ -714,7 +1035,7 @@ impl Parser {
         let pred = self.predicate_or_expr()?;
         Ok(match pred {
             Either::Expr(node) => (node, false),
-            Either::Pred(p) => (Node::Predicate(Box::new(p)), true),
+            Either::Pred(p) | Either::GroupedPred(p) => (Node::Predicate(Box::new(p)), true),
         })
     }
 
@@ -802,6 +1123,11 @@ impl Parser {
                 };
                 flags = f;
             }
+            validate_like_regex(&pattern, &flags)?;
+            flags = ['i', 's', 'm', 'x', 'q']
+                .into_iter()
+                .filter(|flag| flags.contains(*flag))
+                .collect();
             return Ok(Either::Pred(Pred::LikeRegex {
                 value: Box::new(left.into_expr()?),
                 pattern,
@@ -874,21 +1200,24 @@ impl Parser {
     }
 
     fn unary(&mut self) -> Result<Either, ExecError> {
-        if self.eat(&Tok::Minus) {
-            let arg = self.unary()?.into_expr()?;
-            return Ok(Either::Expr(Node::Neg {
+        let negate = if self.eat(&Tok::Minus) {
+            true
+        } else if self.eat(&Tok::Plus) {
+            false
+        } else {
+            return self.accessor_expr();
+        };
+        let arg = self.unary()?.into_expr()?;
+        let arg = match arg {
+            Node::Literal(JsonbValue::Number(number)) => {
+                Node::Literal(JsonbValue::Number(if negate { -number } else { number }))
+            }
+            arg => Node::Neg {
                 arg: Box::new(arg),
-                negate: true,
-            }));
-        }
-        if self.eat(&Tok::Plus) {
-            let arg = self.unary()?.into_expr()?;
-            return Ok(Either::Expr(Node::Neg {
-                arg: Box::new(arg),
-                negate: false,
-            }));
-        }
-        self.accessor_expr()
+                negate,
+            },
+        };
+        Ok(Either::Expr(arg))
     }
 
     /// `exists ( expr )` or `( predicate )`, the two forms `!` and the
@@ -984,22 +1313,23 @@ impl Parser {
             // `.**` — recursive descent, optionally depth-bounded by `{…}`.
             if self.eat(&Tok::Star) {
                 if self.eat(&Tok::LBrace) {
-                    let from = self.level_number()?;
+                    let from = self.depth_bound()?;
                     let to = if self.eat_word("to") {
-                        if self.eat_word("last") {
-                            u32::MAX
-                        } else {
-                            self.level_number()?
-                        }
+                        self.depth_bound()?
                     } else {
                         from
                     };
                     self.expect(&Tok::RBrace)?;
-                    return Ok(Accessor::Any { from, to });
+                    return Ok(Accessor::Any {
+                        from,
+                        to,
+                        explicit_bounds: true,
+                    });
                 }
                 return Ok(Accessor::Any {
-                    from: 0,
-                    to: u32::MAX,
+                    from: DepthBound::Number(0),
+                    to: DepthBound::Last,
+                    explicit_bounds: false,
                 });
             }
             return Ok(Accessor::MemberAll);
@@ -1012,18 +1342,47 @@ impl Parser {
                         return Err(self.error_here());
                     };
                     self.bump();
-                    // `.datetime("template")` takes an optional template; the
-                    // template is parsed and rejected (see the divergence list).
-                    if let Tok::Str(_) = self.peek() {
-                        if method == Method::Datetime {
-                            return Err(ExecError::Unsupported(
-                                "jsonpath .datetime(template) is not supported".into(),
-                            ));
+                    let args = match self.peek() {
+                        Tok::Str(template) if method == Method::Datetime => {
+                            let template = template.clone();
+                            self.bump();
+                            MethodArgs::Datetime(template)
                         }
-                        return Err(self.error_here());
-                    }
+                        Tok::Num(_) | Tok::Plus | Tok::Minus if method == Method::Decimal => {
+                            let precision = self.decimal_argument("precision")?;
+                            let scale = self
+                                .eat(&Tok::Comma)
+                                .then(|| self.decimal_argument("scale"))
+                                .transpose()?;
+                            MethodArgs::Decimal { precision, scale }
+                        }
+                        Tok::Num(_)
+                            if matches!(
+                                method,
+                                Method::Time
+                                    | Method::TimeTz
+                                    | Method::Timestamp
+                                    | Method::TimestampTz
+                            ) =>
+                        {
+                            MethodArgs::TemporalPrecision(self.temporal_precision_argument()?)
+                        }
+                        Tok::Minus
+                            if matches!(
+                                method,
+                                Method::Time
+                                    | Method::TimeTz
+                                    | Method::Timestamp
+                                    | Method::TimestampTz
+                            ) =>
+                        {
+                            MethodArgs::TemporalPrecision(self.temporal_precision_argument()?)
+                        }
+                        Tok::RParen => MethodArgs::None,
+                        _ => return Err(self.error_here()),
+                    };
                     self.expect(&Tok::RParen)?;
-                    return Ok(Accessor::Method(method));
+                    return Ok(Accessor::Method(method, args));
                 }
                 Ok(Accessor::Member(w))
             }
@@ -1034,15 +1393,53 @@ impl Parser {
         }
     }
 
-    fn level_number(&mut self) -> Result<u32, ExecError> {
+    fn depth_bound(&mut self) -> Result<DepthBound, ExecError> {
         match self.bump() {
             Tok::Num(n) => n
                 .to_u32()
+                .map(DepthBound::Number)
                 .ok_or_else(|| syntax("invalid nesting level in jsonpath input")),
+            Tok::Word(word) if word == "last" => Ok(DepthBound::Last),
             _ => {
                 self.pos -= 1;
                 Err(self.error_here())
             }
+        }
+    }
+
+    fn decimal_argument(&mut self, name: &str) -> Result<i32, ExecError> {
+        let sign = if self.eat(&Tok::Plus) {
+            1
+        } else if self.eat(&Tok::Minus) {
+            -1
+        } else {
+            1
+        };
+        match self.bump() {
+            Tok::Num(value) if value.fractional_digit_count() == 0 => value
+                .to_i32()
+                .and_then(|value| value.checked_mul(sign))
+                .ok_or_else(|| ExecError::FunctionError {
+                    sqlstate: "22031",
+                    message: format!(
+                        "{name} of jsonpath item method .decimal() is out of range for type integer"
+                    ),
+                }),
+            _ => Err(self.error_here()),
+        }
+    }
+
+    fn temporal_precision_argument(&mut self) -> Result<BigDecimal, ExecError> {
+        let negative = self.eat(&Tok::Minus);
+        match self.bump() {
+            Tok::Num(value) if value.fractional_digit_count() == 0 => {
+                if negative {
+                    Ok(-value)
+                } else {
+                    Ok(value)
+                }
+            }
+            _ => Err(self.error_here()),
         }
     }
 
@@ -1059,7 +1456,10 @@ impl Parser {
                 self.leave();
                 let inner = inner?;
                 self.expect(&Tok::RParen)?;
-                Ok(inner)
+                Ok(match inner {
+                    Either::Pred(pred) | Either::GroupedPred(pred) => Either::GroupedPred(pred),
+                    expr => expr,
+                })
             }
             Tok::Word(w) => Ok(Either::Expr(match w.to_ascii_lowercase().as_str() {
                 "null" => Node::Literal(JsonbValue::Null),
@@ -1086,12 +1486,15 @@ impl Parser {
 enum Either {
     Expr(Node),
     Pred(Pred),
+    /// A parenthesized predicate may itself be the base of an accessor.
+    GroupedPred(Pred),
 }
 
 impl Either {
     fn into_expr(self) -> Result<Node, ExecError> {
         match self {
             Either::Expr(node) => Ok(node),
+            Either::GroupedPred(pred) => Ok(Node::Predicate(Box::new(pred))),
             // `$ ? (@.a == 1 == 2)` and friends: a predicate cannot be an
             // operand, which is what `%nonassoc` on the comparison level means.
             Either::Pred(_) => Err(syntax(
@@ -1102,7 +1505,7 @@ impl Either {
 
     fn into_pred(self) -> Result<Pred, ExecError> {
         match self {
-            Either::Pred(p) => Ok(p),
+            Either::Pred(p) | Either::GroupedPred(p) => Ok(p),
             Either::Expr(_) => Err(syntax(
                 "syntax error, expected a predicate of jsonpath input",
             )),
@@ -1135,11 +1538,20 @@ impl JsonPath {
         if *p.peek() != Tok::Eof {
             return Err(p.error_here());
         }
+        validate_context_node(&root, false, false)?;
         Ok(JsonPath {
             strict,
             is_predicate,
             root,
         })
+    }
+
+    /// Warnings emitted when temporal item methods exceed PostgreSQL's
+    /// microsecond precision ceiling.
+    pub(crate) fn precision_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        collect_precision_warnings_node(&self.root, &mut warnings);
+        warnings
     }
 
     /// Every item the path produces over `target`.
@@ -1154,15 +1566,98 @@ impl JsonPath {
         vars: Option<&JsonbValue>,
         silent: bool,
     ) -> Result<Vec<JsonbValue>, ExecError> {
+        self.query_in(target, vars, silent, None, false)
+    }
+
+    /// The normal function family still renders zone-aware methods in the
+    /// session zone; unlike its `_tz` counterpart it cannot promote operands.
+    pub(crate) fn query_with_session_time_zone(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: &jiff::tz::TimeZone,
+    ) -> Result<Vec<JsonbValue>, ExecError> {
+        self.query_in(target, vars, silent, Some(time_zone), false)
+    }
+
+    pub(crate) fn query_first_with_session_time_zone(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: &jiff::tz::TimeZone,
+    ) -> Result<Option<JsonbValue>, ExecError> {
+        self.query_first_in(target, vars, silent, Some(time_zone), false)
+    }
+
+    /// The time-zone-aware `jsonb_path_*_tz` query entry point.
+    pub fn query_tz(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: &jiff::tz::TimeZone,
+    ) -> Result<Vec<JsonbValue>, ExecError> {
+        self.query_in(target, vars, silent, Some(time_zone), true)
+    }
+
+    pub(crate) fn query_first_tz(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: &jiff::tz::TimeZone,
+    ) -> Result<Option<JsonbValue>, ExecError> {
+        self.query_first_in(target, vars, silent, Some(time_zone), true)
+    }
+
+    fn query_in(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: Option<&jiff::tz::TimeZone>,
+        allow_zone_conversions: bool,
+    ) -> Result<Vec<JsonbValue>, ExecError> {
         let exec = Exec {
             strict: self.strict,
+            stop_after_one: false,
             vars,
             root: target,
             last: None,
+            time_zone: time_zone.cloned(),
+            allow_zone_conversions,
+            current_temporal: None,
         };
         match exec.eval(&self.root, target) {
-            Ok(items) => Ok(items),
+            Ok(items) => Ok(items.into_iter().map(Item::into_json).collect()),
             Err(e) if silent && is_structural(&e) => Ok(Vec::new()),
+            Err(e) => Err(e.into_exec()),
+        }
+    }
+
+    fn query_first_in(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: Option<&jiff::tz::TimeZone>,
+        allow_zone_conversions: bool,
+    ) -> Result<Option<JsonbValue>, ExecError> {
+        let exec = Exec {
+            strict: self.strict,
+            stop_after_one: true,
+            vars,
+            root: target,
+            last: None,
+            time_zone: time_zone.cloned(),
+            allow_zone_conversions,
+            current_temporal: None,
+        };
+        match exec.eval(&self.root, target) {
+            Ok(items) => Ok(items.into_iter().next().map(Item::into_json)),
+            Err(e) if silent && is_structural(&e) => Ok(None),
             Err(e) => Err(e.into_exec()),
         }
     }
@@ -1174,11 +1669,47 @@ impl JsonPath {
         vars: Option<&JsonbValue>,
         silent: bool,
     ) -> Result<Option<bool>, ExecError> {
+        self.exists_in(target, vars, silent, None, false)
+    }
+
+    pub(crate) fn exists_with_session_time_zone(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: &jiff::tz::TimeZone,
+    ) -> Result<Option<bool>, ExecError> {
+        self.exists_in(target, vars, silent, Some(time_zone), false)
+    }
+
+    /// The time-zone-aware `jsonb_path_exists_tz` entry point.
+    pub fn exists_tz(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: &jiff::tz::TimeZone,
+    ) -> Result<Option<bool>, ExecError> {
+        self.exists_in(target, vars, silent, Some(time_zone), true)
+    }
+
+    fn exists_in(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: Option<&jiff::tz::TimeZone>,
+        allow_zone_conversions: bool,
+    ) -> Result<Option<bool>, ExecError> {
         let exec = Exec {
             strict: self.strict,
+            stop_after_one: false,
             vars,
             root: target,
             last: None,
+            time_zone: time_zone.cloned(),
+            allow_zone_conversions,
+            current_temporal: None,
         };
         match exec.eval(&self.root, target) {
             Ok(items) => Ok(Some(!items.is_empty())),
@@ -1194,11 +1725,47 @@ impl JsonPath {
         vars: Option<&JsonbValue>,
         silent: bool,
     ) -> Result<Option<bool>, ExecError> {
+        self.predicate_in(target, vars, silent, None, false)
+    }
+
+    pub(crate) fn predicate_with_session_time_zone(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: &jiff::tz::TimeZone,
+    ) -> Result<Option<bool>, ExecError> {
+        self.predicate_in(target, vars, silent, Some(time_zone), false)
+    }
+
+    /// The time-zone-aware `jsonb_path_match_tz` entry point.
+    pub fn predicate_tz(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: &jiff::tz::TimeZone,
+    ) -> Result<Option<bool>, ExecError> {
+        self.predicate_in(target, vars, silent, Some(time_zone), true)
+    }
+
+    fn predicate_in(
+        &self,
+        target: &JsonbValue,
+        vars: Option<&JsonbValue>,
+        silent: bool,
+        time_zone: Option<&jiff::tz::TimeZone>,
+        allow_zone_conversions: bool,
+    ) -> Result<Option<bool>, ExecError> {
         let exec = Exec {
             strict: self.strict,
+            stop_after_one: false,
             vars,
             root: target,
             last: None,
+            time_zone: time_zone.cloned(),
+            allow_zone_conversions,
+            current_temporal: None,
         };
         let items = match exec.eval(&self.root, target) {
             Ok(items) => items,
@@ -1206,8 +1773,11 @@ impl JsonPath {
             Err(e) => return Err(e.into_exec()),
         };
         match items.as_slice() {
-            [JsonbValue::Bool(b)] => Ok(Some(*b)),
-            [JsonbValue::Null] => Ok(None),
+            [item] if matches!(&item.json, JsonbValue::Bool(_)) => match &item.json {
+                JsonbValue::Bool(b) => Ok(Some(*b)),
+                _ => unreachable!(),
+            },
+            [item] if matches!(&item.json, JsonbValue::Null) => Ok(None),
             [] => {
                 if silent {
                     Ok(None)
@@ -1244,29 +1814,101 @@ fn is_structural(e: &PathError) -> bool {
 
 struct Exec<'a> {
     strict: bool,
+    stop_after_one: bool,
     vars: Option<&'a JsonbValue>,
     root: &'a JsonbValue,
     /// The array length `last` resolves against.
     ///
     /// The evaluator sets this while it evaluates a subscript.
     last: Option<usize>,
+    /// The session zone used to render zone-aware item methods.
+    time_zone: Option<jiff::tz::TimeZone>,
+    /// Only the `_tz` family may use that zone for implicit conversions.
+    allow_zone_conversions: bool,
+    /// A filter's current item can be a datetime result whose JSON rendering
+    /// alone no longer carries its SQL temporal type.
+    current_temporal: Option<Datum>,
+}
+
+/// A JSONPath item is normally a JSON value. Date/time methods also retain the
+/// parsed SQL datum until the public query boundary, where it becomes its JSON
+/// string representation.
+#[derive(Clone)]
+struct Item {
+    json: JsonbValue,
+    temporal: Option<Datum>,
+}
+
+impl Item {
+    fn json(value: JsonbValue) -> Self {
+        Self {
+            json: value,
+            temporal: None,
+        }
+    }
+
+    fn temporal(value: Datum, json: JsonbValue) -> Self {
+        Self {
+            json,
+            temporal: Some(value),
+        }
+    }
+
+    fn into_json(self) -> JsonbValue {
+        self.json
+    }
+
+    fn json_ref(&self) -> &JsonbValue {
+        &self.json
+    }
+
+    fn type_name(&self) -> &str {
+        match self.temporal.as_ref() {
+            Some(Datum::Date(_)) => "date",
+            Some(Datum::Time(_)) => "time without time zone",
+            Some(Datum::Timetz(_)) => "time with time zone",
+            Some(Datum::Timestamp(_)) => "timestamp without time zone",
+            Some(Datum::Timestamptz(_)) => "timestamp with time zone",
+            _ => self.json.type_name(),
+        }
+    }
 }
 
 impl Exec<'_> {
     fn with_last(&self, last: Option<usize>) -> Exec<'_> {
         Exec {
             strict: self.strict,
+            stop_after_one: self.stop_after_one,
             vars: self.vars,
             root: self.root,
             last,
+            time_zone: self.time_zone.clone(),
+            allow_zone_conversions: self.allow_zone_conversions,
+            current_temporal: self.current_temporal.clone(),
         }
     }
 
-    fn eval(&self, node: &Node, current: &JsonbValue) -> PathResult<Vec<JsonbValue>> {
+    fn with_current_temporal(&self, temporal: Option<Datum>) -> Exec<'_> {
+        Exec {
+            strict: self.strict,
+            stop_after_one: self.stop_after_one,
+            vars: self.vars,
+            root: self.root,
+            last: self.last,
+            time_zone: self.time_zone.clone(),
+            allow_zone_conversions: self.allow_zone_conversions,
+            current_temporal: temporal,
+        }
+    }
+
+    fn eval(&self, node: &Node, current: &JsonbValue) -> PathResult<Vec<Item>> {
         match node {
-            Node::Root => Ok(vec![self.root.clone()]),
-            Node::Current => Ok(vec![current.clone()]),
-            Node::Literal(v) => Ok(vec![v.clone()]),
+            Node::Root => Ok(vec![Item::json(self.root.clone())]),
+            Node::Current => Ok(vec![Item {
+                json: current.clone(),
+                temporal: self.current_temporal.clone(),
+            }]),
+            Node::Literal(v) => Ok(vec![Item::json(v.clone())]),
             Node::Last => {
                 let Some(last) = self.last else {
                     return Err(PathError::new(
@@ -1274,9 +1916,9 @@ impl Exec<'_> {
                         "LAST is allowed only in array subscripts",
                     ));
                 };
-                Ok(vec![JsonbValue::Number(BigDecimal::from(
+                Ok(vec![Item::json(JsonbValue::Number(BigDecimal::from(
                     i64::try_from(last).unwrap_or(i64::MAX) - 1,
-                ))])
+                )))])
             }
             Node::Var(name) => {
                 let value = self
@@ -1289,13 +1931,13 @@ impl Exec<'_> {
                         )
                     })?
                     .clone();
-                Ok(vec![value])
+                Ok(vec![Item::json(value)])
             }
-            Node::Predicate(p) => Ok(vec![match self.eval_pred(p, current)? {
+            Node::Predicate(p) => Ok(vec![Item::json(match self.eval_pred(p, current)? {
                 Tri::True => JsonbValue::Bool(true),
                 Tri::False => JsonbValue::Bool(false),
                 Tri::Unknown => JsonbValue::Null,
-            }]),
+            })]),
             Node::Neg { arg, negate } => {
                 let items = self.eval(arg, current)?;
                 let items = if self.strict {
@@ -1305,26 +1947,32 @@ impl Exec<'_> {
                 };
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    let JsonbValue::Number(n) = item else {
+                    let JsonbValue::Number(n) = item.json else {
                         return Err(PathError::new(
                             "22033",
-                            "operand of unary jsonpath operator - is not a numeric value",
+                            format!(
+                                "operand of unary jsonpath operator {} is not a numeric value",
+                                if *negate { '-' } else { '+' }
+                            ),
                         ));
                     };
-                    out.push(JsonbValue::Number(if *negate { -n } else { n }));
+                    out.push(Item::json(JsonbValue::Number(if *negate { -n } else { n })));
                 }
                 Ok(out)
             }
             Node::Arith { op, left, right } => {
                 let l = self.single_number(left, current, *op, "left")?;
                 let r = self.single_number(right, current, *op, "right")?;
-                Ok(vec![JsonbValue::Number(arith(*op, &l, &r)?)])
+                Ok(vec![Item::json(JsonbValue::Number(arith(*op, &l, &r)?))])
             }
             Node::Accessor { base, op } => {
                 let items = self.eval(base, current)?;
                 let mut out = Vec::new();
                 for item in &items {
                     self.apply(op, item, current, &mut out)?;
+                    if self.stop_after_one && !out.is_empty() {
+                        break;
+                    }
                     if out.len() > MAX_ITEMS {
                         return Err(PathError::new(
                             "54000",
@@ -1353,7 +2001,16 @@ impl Exec<'_> {
             unwrap_arrays(items)
         };
         match items.as_slice() {
-            [JsonbValue::Number(n)] => Ok(n.clone()),
+            [item] => match &item.json {
+                JsonbValue::Number(n) => Ok(n.clone()),
+                _ => Err(PathError::new(
+                    "22033",
+                    format!(
+                        "{side} operand of jsonpath operator {} is not a single numeric value",
+                        op.symbol()
+                    ),
+                )),
+            },
             _ => Err(PathError::new(
                 "22033",
                 format!(
@@ -1368,32 +2025,41 @@ impl Exec<'_> {
     fn apply(
         &self,
         op: &Accessor,
-        item: &JsonbValue,
+        item: &Item,
         current: &JsonbValue,
-        out: &mut Vec<JsonbValue>,
+        out: &mut Vec<Item>,
     ) -> PathResult<()> {
+        let value = item.json_ref();
         match op {
-            Accessor::Member(key) => self.member(item, key, out),
-            Accessor::MemberAll => self.member_all(item, out),
-            Accessor::Index(subs) => self.index(item, subs, current, out),
-            Accessor::IndexAll => self.index_all(item, out),
-            Accessor::Any { from, to } => {
-                descend(item, 0, *from, *to, out);
+            Accessor::Member(key) => self.member(value, key, out),
+            Accessor::MemberAll => self.member_all(value, out),
+            Accessor::Index(subs) => self.index(value, subs, current, out),
+            Accessor::IndexAll => self.index_all(value, out),
+            Accessor::Any { from, to, .. } => {
+                let last = descendant_depth(value);
+                let bound = |bound| match bound {
+                    DepthBound::Number(value) => value,
+                    DepthBound::Last => last,
+                };
+                descend(value, 0, bound(*from), bound(*to), out);
                 Ok(())
             }
-            Accessor::Method(m) => self.method(*m, item, out),
+            Accessor::Method(m, args) => self.method(*m, args, item, out),
             Accessor::Filter(pred) => {
-                let candidates: Vec<&JsonbValue> = match item {
-                    JsonbValue::Array(items) if !self.strict => items.iter().collect(),
-                    other => vec![other],
+                let candidates: Vec<Item> = match value {
+                    JsonbValue::Array(items) if !self.strict => {
+                        items.iter().cloned().map(Item::json).collect()
+                    }
+                    _ => vec![item.clone()],
                 };
                 for candidate in candidates {
                     // A *structural* error inside a filter is Unknown, never
                     // raised — that is what makes `$ ? (@.missing > 1)` a quiet
                     // no-match. A missing variable is not structural and still
                     // reaches the caller.
-                    if self.eval_pred(pred, candidate)? == Tri::True {
-                        out.push(candidate.clone());
+                    let scoped = self.with_current_temporal(candidate.temporal.clone());
+                    if scoped.eval_pred(pred, candidate.json_ref())? == Tri::True {
+                        out.push(Item::json(candidate.json));
                     }
                 }
                 Ok(())
@@ -1401,11 +2067,11 @@ impl Exec<'_> {
         }
     }
 
-    fn member(&self, item: &JsonbValue, key: &str, out: &mut Vec<JsonbValue>) -> PathResult<()> {
+    fn member(&self, item: &JsonbValue, key: &str, out: &mut Vec<Item>) -> PathResult<()> {
         match item {
             JsonbValue::Object(_) => {
                 if let Some(v) = item.object_get(key) {
-                    out.push(v.clone());
+                    out.push(Item::json(v.clone()));
                 } else if self.strict {
                     return Err(PathError::new(
                         "2203A",
@@ -1421,7 +2087,7 @@ impl Exec<'_> {
                     if let JsonbValue::Object(_) = elem
                         && let Some(v) = elem.object_get(key)
                     {
-                        out.push(v.clone());
+                        out.push(Item::json(v.clone()));
                     }
                 }
                 Ok(())
@@ -1439,16 +2105,16 @@ impl Exec<'_> {
         }
     }
 
-    fn member_all(&self, item: &JsonbValue, out: &mut Vec<JsonbValue>) -> PathResult<()> {
+    fn member_all(&self, item: &JsonbValue, out: &mut Vec<Item>) -> PathResult<()> {
         match item {
             JsonbValue::Object(pairs) => {
-                out.extend(pairs.iter().map(|(_, v)| v.clone()));
+                out.extend(pairs.iter().map(|(_, v)| Item::json(v.clone())));
                 Ok(())
             }
             JsonbValue::Array(items) if !self.strict => {
                 for elem in items {
                     if let JsonbValue::Object(pairs) = elem {
-                        out.extend(pairs.iter().map(|(_, v)| v.clone()));
+                        out.extend(pairs.iter().map(|(_, v)| Item::json(v.clone())));
                     }
                 }
                 Ok(())
@@ -1471,7 +2137,7 @@ impl Exec<'_> {
         item: &JsonbValue,
         subs: &[(Node, Option<Node>)],
         current: &JsonbValue,
-        out: &mut Vec<JsonbValue>,
+        out: &mut Vec<Item>,
     ) -> PathResult<()> {
         let wrapped;
         let items: &[JsonbValue] = match item {
@@ -1513,7 +2179,7 @@ impl Exec<'_> {
                 let Some(v) = items.get(idx) else {
                     break;
                 };
-                out.push(v.clone());
+                out.push(Item::json(v.clone()));
                 i += 1;
             }
         }
@@ -1524,9 +2190,12 @@ impl Exec<'_> {
     fn subscript(&self, node: &Node, current: &JsonbValue) -> PathResult<i64> {
         let items = self.eval(node, current)?;
         match items.as_slice() {
-            [JsonbValue::Number(n)] => n.to_i64().ok_or_else(|| {
-                PathError::new("22033", "jsonpath array subscript is out of integer range")
-            }),
+            [item] if matches!(&item.json, JsonbValue::Number(_)) => match &item.json {
+                JsonbValue::Number(n) => n.to_i32().map(i64::from).ok_or_else(|| {
+                    PathError::new("22033", "jsonpath array subscript is out of integer range")
+                }),
+                _ => unreachable!(),
+            },
             _ => Err(PathError::new(
                 "22033",
                 "jsonpath array subscript is not a single numeric value",
@@ -1534,10 +2203,10 @@ impl Exec<'_> {
         }
     }
 
-    fn index_all(&self, item: &JsonbValue, out: &mut Vec<JsonbValue>) -> PathResult<()> {
+    fn index_all(&self, item: &JsonbValue, out: &mut Vec<Item>) -> PathResult<()> {
         match item {
             JsonbValue::Array(items) => {
-                out.extend(items.iter().cloned());
+                out.extend(items.iter().cloned().map(Item::json));
                 Ok(())
             }
             other => {
@@ -1547,7 +2216,7 @@ impl Exec<'_> {
                         "jsonpath wildcard array accessor can only be applied to an array",
                     ))
                 } else {
-                    out.push(other.clone());
+                    out.push(Item::json(other.clone()));
                     Ok(())
                 }
             }
@@ -1559,17 +2228,24 @@ impl Exec<'_> {
     /// `.type()`, `.size()` and `.keyvalue()` inspect the item as a whole. The
     /// numeric and string methods auto-unwrap an array in lax mode and apply
     /// element-wise.
-    fn method(&self, m: Method, item: &JsonbValue, out: &mut Vec<JsonbValue>) -> PathResult<()> {
+    fn method(
+        &self,
+        m: Method,
+        args: &MethodArgs,
+        item: &Item,
+        out: &mut Vec<Item>,
+    ) -> PathResult<()> {
+        let value = item.json_ref();
         match m {
             Method::Type => {
-                out.push(JsonbValue::String(item.type_name().to_string()));
+                out.push(Item::json(JsonbValue::String(item.type_name().to_string())));
                 Ok(())
             }
-            Method::Size => match item {
+            Method::Size => match value {
                 JsonbValue::Array(items) => {
-                    out.push(JsonbValue::Number(BigDecimal::from(
+                    out.push(Item::json(JsonbValue::Number(BigDecimal::from(
                         i64::try_from(items.len()).unwrap_or(i64::MAX),
-                    )));
+                    ))));
                     Ok(())
                 }
                 _ if self.strict => Err(PathError::new(
@@ -1577,13 +2253,13 @@ impl Exec<'_> {
                     "jsonpath item method .size() can only be applied to an array",
                 )),
                 _ => {
-                    out.push(JsonbValue::Number(BigDecimal::one()));
+                    out.push(Item::json(JsonbValue::Number(BigDecimal::one())));
                     Ok(())
                 }
             },
             Method::KeyValue => {
-                let objects: Vec<&JsonbValue> = match item {
-                    JsonbValue::Object(_) => vec![item],
+                let objects: Vec<&JsonbValue> = match value {
+                    JsonbValue::Object(_) => vec![value],
                     JsonbValue::Array(items) if !self.strict => items.iter().collect(),
                     _ => {
                         return Err(PathError::new(
@@ -1600,22 +2276,30 @@ impl Exec<'_> {
                         ));
                     };
                     for (key, value) in pairs {
-                        out.push(JsonbValue::object_from_pairs(vec![
+                        out.push(Item::json(JsonbValue::object_from_pairs(vec![
                             ("id".into(), JsonbValue::Number(BigDecimal::zero())),
                             ("key".into(), JsonbValue::String(key.clone())),
                             ("value".into(), value.clone()),
-                        ]));
+                        ])));
                     }
                 }
                 Ok(())
             }
             _ => {
-                let targets: Vec<&JsonbValue> = match item {
-                    JsonbValue::Array(items) if !self.strict => items.iter().collect(),
-                    other => vec![other],
+                let targets: Vec<Item> = match value {
+                    JsonbValue::Array(items) if !self.strict => {
+                        items.iter().cloned().map(Item::json).collect()
+                    }
+                    _ => vec![item.clone()],
                 };
                 for target in targets {
-                    out.push(scalar_method(m, target)?);
+                    out.push(scalar_method(
+                        m,
+                        args,
+                        &target,
+                        self.time_zone.as_ref(),
+                        self.allow_zone_conversions,
+                    )?);
                 }
                 Ok(())
             }
@@ -1651,7 +2335,7 @@ impl Exec<'_> {
                 let mut saw_unknown = false;
                 for l in &ls {
                     for r in &rs {
-                        match compare(*op, l, r) {
+                        match self.compare(*op, l, r)? {
                             Tri::True => return Ok(Tri::True),
                             Tri::Unknown => saw_unknown = true,
                             Tri::False => {}
@@ -1674,7 +2358,7 @@ impl Exec<'_> {
                 let mut saw_unknown = false;
                 for v in &vs {
                     for p in &ps {
-                        match (v, p) {
+                        match (&v.json, &p.json) {
                             (JsonbValue::String(v), JsonbValue::String(p)) => {
                                 if v.starts_with(p.as_str()) {
                                     return Ok(Tri::True);
@@ -1701,7 +2385,7 @@ impl Exec<'_> {
                 let re = compile_regex(pattern, flags)?;
                 let mut saw_unknown = false;
                 for v in &vs {
-                    match v {
+                    match &v.json {
                         JsonbValue::String(s) => {
                             if re.is_match(s) {
                                 return Ok(Tri::True);
@@ -1723,11 +2407,7 @@ impl Exec<'_> {
     ///
     /// A structural error makes the whole predicate Unknown (`None`) and raises
     /// nothing.
-    fn pred_operand(
-        &self,
-        node: &Node,
-        current: &JsonbValue,
-    ) -> PathResult<Option<Vec<JsonbValue>>> {
+    fn pred_operand(&self, node: &Node, current: &JsonbValue) -> PathResult<Option<Vec<Item>>> {
         match self.eval(node, current) {
             Ok(items) => Ok(Some(if self.strict {
                 items
@@ -1738,16 +2418,34 @@ impl Exec<'_> {
             Err(e) => Err(e),
         }
     }
+
+    fn compare(&self, op: CmpOp, left: &Item, right: &Item) -> PathResult<Tri> {
+        let (Some(left), Some(right)) = (&left.temporal, &right.temporal) else {
+            return Ok(compare_json(op, &left.json, &right.json));
+        };
+        let promotion_zone = if self.allow_zone_conversions {
+            self.time_zone.as_ref()
+        } else {
+            None
+        };
+        let (left, right) = promote_temporal_pair(left, right, promotion_zone)?;
+        let Some(ord) = crabka_pgtypes::ops::compare(&left, &right).ok().flatten() else {
+            return Ok(Tri::Unknown);
+        };
+        Ok(compare_ordering(op, ord))
+    }
 }
 
 /// `PostgreSQL`'s lax-mode operand unwrapping: an array operand contributes its
 /// elements, everything else contributes itself.
-fn unwrap_arrays(items: Vec<JsonbValue>) -> Vec<JsonbValue> {
+fn unwrap_arrays(items: Vec<Item>) -> Vec<Item> {
     let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        match item {
-            JsonbValue::Array(elems) => out.extend(elems),
-            other => out.push(other),
+    for Item { json, temporal } in items {
+        match (json, temporal) {
+            (JsonbValue::Array(elems), None) => {
+                out.extend(elems.into_iter().map(Item::json));
+            }
+            (json, temporal) => out.push(Item { json, temporal }),
         }
     }
     out
@@ -1757,9 +2455,9 @@ fn unwrap_arrays(items: Vec<JsonbValue>) -> Vec<JsonbValue> {
 /// item itself counts as depth 0.
 ///
 /// Pre-order, which matches `PostgreSQL`'s output order.
-fn descend(item: &JsonbValue, depth: u32, from: u32, to: u32, out: &mut Vec<JsonbValue>) {
+fn descend(item: &JsonbValue, depth: u32, from: u32, to: u32, out: &mut Vec<Item>) {
     if depth >= from && depth <= to {
-        out.push(item.clone());
+        out.push(Item::json(item.clone()));
     }
     if depth >= to || out.len() > MAX_ITEMS {
         return;
@@ -1779,9 +2477,25 @@ fn descend(item: &JsonbValue, depth: u32, from: u32, to: u32, out: &mut Vec<Json
     }
 }
 
+fn descendant_depth(item: &JsonbValue) -> u32 {
+    match item {
+        JsonbValue::Array(items) => items
+            .iter()
+            .map(|item| descendant_depth(item).saturating_add(1))
+            .max()
+            .unwrap_or(0),
+        JsonbValue::Object(items) => items
+            .iter()
+            .map(|(_, item)| descendant_depth(item).saturating_add(1))
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// `PostgreSQL`'s `compareItems`: values of different types never compare equal
 /// (except against JSON `null`), and arrays/objects are not comparable at all.
-fn compare(op: CmpOp, left: &JsonbValue, right: &JsonbValue) -> Tri {
+fn compare_json(op: CmpOp, left: &JsonbValue, right: &JsonbValue) -> Tri {
     use std::cmp::Ordering;
 
     let ord: Ordering = match (left, right) {
@@ -1796,6 +2510,12 @@ fn compare(op: CmpOp, left: &JsonbValue, right: &JsonbValue) -> Tri {
         // Non-null items of different types, and containers, are not comparable.
         _ => return Tri::Unknown,
     };
+    compare_ordering(op, ord)
+}
+
+fn compare_ordering(op: CmpOp, ord: std::cmp::Ordering) -> Tri {
+    use std::cmp::Ordering;
+
     Tri::of(match op {
         CmpOp::Eq => ord == Ordering::Equal,
         CmpOp::Ne => ord != Ordering::Equal,
@@ -1804,6 +2524,54 @@ fn compare(op: CmpOp, left: &JsonbValue, right: &JsonbValue) -> Tri {
         CmpOp::Gt => ord == Ordering::Greater,
         CmpOp::Ge => ord != Ordering::Less,
     })
+}
+
+fn promote_temporal_pair(
+    left: &Datum,
+    right: &Datum,
+    time_zone: Option<&jiff::tz::TimeZone>,
+) -> PathResult<(Datum, Datum)> {
+    use crabka_pgtypes::ColumnType;
+
+    let (target, source) = match (left, right) {
+        (Datum::Date(_), Datum::Timestamptz(_)) => (ColumnType::Timestamptz, left),
+        (Datum::Timestamptz(_), Datum::Date(_)) => (ColumnType::Timestamptz, right),
+        (Datum::Timestamp(_), Datum::Timestamptz(_)) => (ColumnType::Timestamptz, left),
+        (Datum::Timestamptz(_), Datum::Timestamp(_)) => (ColumnType::Timestamptz, right),
+        (Datum::Time(_), Datum::Timetz(_)) => (ColumnType::Timetz, left),
+        (Datum::Timetz(_), Datum::Time(_)) => (ColumnType::Timetz, right),
+        _ => return Ok((left.clone(), right.clone())),
+    };
+    let Some(time_zone) = time_zone else {
+        return Err(PathError::new(
+            "0A000",
+            format!(
+                "cannot convert value from {} to {} without time zone usage\nHINT:  Use *_tz() function for time zone support.",
+                temporal_name(source),
+                match target {
+                    ColumnType::Timetz => "timetz",
+                    ColumnType::Timestamptz => "timestamptz",
+                    _ => unreachable!("only zoned temporal target types are selected"),
+                },
+            ),
+        ));
+    };
+    let left = crabka_pgtypes::cast::cast(left, target, time_zone)
+        .map_err(|error| PathError::new("22008", error.to_string()))?;
+    let right = crabka_pgtypes::cast::cast(right, target, time_zone)
+        .map_err(|error| PathError::new("22008", error.to_string()))?;
+    Ok((left, right))
+}
+
+fn temporal_name(value: &Datum) -> &'static str {
+    match value {
+        Datum::Date(_) => "date",
+        Datum::Time(_) => "time",
+        Datum::Timetz(_) => "timetz",
+        Datum::Timestamp(_) => "timestamp",
+        Datum::Timestamptz(_) => "timestamptz",
+        _ => "unknown",
+    }
 }
 
 /// jsonpath arithmetic is `numeric` arithmetic, so it goes through the same
@@ -1840,9 +2608,41 @@ fn arith(op: ArithOp, l: &BigDecimal, r: &BigDecimal) -> PathResult<BigDecimal> 
 }
 
 /// The per-item numeric/string conversion methods.
-fn scalar_method(m: Method, item: &JsonbValue) -> PathResult<JsonbValue> {
+fn scalar_method(
+    m: Method,
+    args: &MethodArgs,
+    item: &Item,
+    time_zone: Option<&jiff::tz::TimeZone>,
+    allow_zone_conversions: bool,
+) -> PathResult<Item> {
     let name = method_name(m);
-    match m {
+    if matches!(
+        m,
+        Method::Date
+            | Method::Time
+            | Method::TimeTz
+            | Method::Timestamp
+            | Method::TimestampTz
+            | Method::Datetime
+    ) {
+        let precision = match args {
+            MethodArgs::TemporalPrecision(precision) => Some(temporal_precision(m, precision)?),
+            _ => None,
+        };
+        return datetime_method(
+            m,
+            match args {
+                MethodArgs::Datetime(template) => Some(template),
+                _ => None,
+            },
+            precision,
+            item.json_ref(),
+            time_zone,
+            allow_zone_conversions,
+        );
+    }
+    let item = item.json_ref();
+    Ok(Item::json(match m {
         Method::Abs | Method::Ceiling | Method::Floor => {
             let JsonbValue::Number(n) = item else {
                 return Err(PathError::new(
@@ -1858,6 +2658,12 @@ fn scalar_method(m: Method, item: &JsonbValue) -> PathResult<JsonbValue> {
         }
         Method::Double => {
             let text = numeric_source(item, name)?;
+            if jsonpath_nonfinite(&text) {
+                return Err(PathError::new(
+                    "22036",
+                    format!("NaN or Infinity is not allowed for jsonpath item method {name}"),
+                ));
+            }
             let value: f64 = text
                 .trim()
                 .parse()
@@ -1887,8 +2693,15 @@ fn scalar_method(m: Method, item: &JsonbValue) -> PathResult<JsonbValue> {
             let decimal = text
                 .parse::<BigDecimal>()
                 .map_err(|_| invalid_for(name, &text, target))?;
-            let rounded = decimal.round(0);
-            let value = rounded
+            let integer = match item {
+                JsonbValue::String(_) if decimal.fractional_digit_count() != 0 => {
+                    return Err(invalid_for(name, &text, target));
+                }
+                JsonbValue::String(_) => decimal,
+                JsonbValue::Number(_) => decimal.round(0),
+                _ => unreachable!("numeric_source rejects non-string and non-numeric values"),
+            };
+            let value = integer
                 .to_i64()
                 .ok_or_else(|| invalid_for(name, &text, target))?;
             if m == Method::Integer && i32::try_from(value).is_err() {
@@ -1896,16 +2709,58 @@ fn scalar_method(m: Method, item: &JsonbValue) -> PathResult<JsonbValue> {
             }
             Ok(JsonbValue::Number(BigDecimal::from(value)))
         }
-        Method::Number | Method::Decimal => {
+        Method::Number => {
             let text = numeric_source(item, name)?;
+            if jsonpath_nonfinite(&text) {
+                return Err(PathError::new(
+                    "22036",
+                    format!("NaN or Infinity is not allowed for jsonpath item method {name}"),
+                ));
+            }
             let decimal = text
                 .parse::<BigDecimal>()
                 .map_err(|_| invalid_for(name, &text, "numeric"))?;
             Ok(JsonbValue::Number(decimal))
         }
+        Method::Decimal => {
+            let text = numeric_source(item, name)?;
+            if jsonpath_nonfinite(&text) {
+                return Err(PathError::new(
+                    "22036",
+                    "NaN or Infinity is not allowed for jsonpath item method .decimal()",
+                ));
+            }
+            let decimal = text
+                .parse::<BigDecimal>()
+                .map_err(|_| invalid_for(name, &text, "numeric"))?;
+            let decimal = match args {
+                MethodArgs::Decimal { precision, scale } => {
+                    decimal_with_typmod(decimal, *precision, scale.unwrap_or(0)).map_err(
+                        |error| {
+                            if error.sqlstate == "22003" {
+                                invalid_for(name, &text, "numeric")
+                            } else {
+                                error
+                            }
+                        },
+                    )?
+                }
+                _ => decimal,
+            };
+            Ok(JsonbValue::Number(decimal))
+        }
         Method::Boolean => match item {
             JsonbValue::Bool(b) => Ok(JsonbValue::Bool(*b)),
-            JsonbValue::Number(n) => Ok(JsonbValue::Bool(!n.is_zero())),
+            JsonbValue::Number(n)
+                if n.fractional_digit_count() == 0 && n.to_f64().is_some_and(f64::is_finite) =>
+            {
+                Ok(JsonbValue::Bool(!n.is_zero()))
+            }
+            JsonbValue::Number(n) => Err(invalid_for(
+                name,
+                &crabka_pgtypes::numeric::finite_to_text(n),
+                "boolean",
+            )),
             JsonbValue::String(s) => match s.to_ascii_lowercase().as_str() {
                 "true" | "t" | "yes" | "y" | "on" | "1" => Ok(JsonbValue::Bool(true)),
                 "false" | "f" | "no" | "n" | "off" | "0" => Ok(JsonbValue::Bool(false)),
@@ -1937,10 +2792,10 @@ fn scalar_method(m: Method, item: &JsonbValue) -> PathResult<JsonbValue> {
         | Method::TimeTz
         | Method::Timestamp
         | Method::TimestampTz
-        | Method::Datetime => datetime_method(m, item),
+        | Method::Datetime => unreachable!(),
         // `type`, `size` and `keyvalue` never reach here.
         Method::Type | Method::Size | Method::KeyValue => Ok(item.clone()),
-    }
+    }?))
 }
 
 fn method_name(m: Method) -> &'static str {
@@ -1987,56 +2842,314 @@ fn invalid_for(name: &'static str, text: &str, target: &str) -> PathError {
     )
 }
 
-/// The date/time methods, rendered back as JSON strings in `PostgreSQL`'s
-/// canonical ISO-8601 output.
-///
-/// See the module divergence list: crabka has no jsonpath datetime item type,
-/// so these results compare as strings.
-fn datetime_method(m: Method, item: &JsonbValue) -> PathResult<JsonbValue> {
-    use crabka_pgtypes::{ColumnType, Datum};
+fn jsonpath_nonfinite(text: &str) -> bool {
+    matches!(text.to_ascii_lowercase().as_str(), "nan" | "inf" | "-inf")
+}
+
+fn decimal_with_typmod(value: BigDecimal, precision: i32, scale: i32) -> PathResult<BigDecimal> {
+    if !(1..=1000).contains(&precision) {
+        return Err(PathError::new(
+            "22023",
+            format!("NUMERIC precision {precision} must be between 1 and 1000"),
+        ));
+    }
+    if !(-1000..=1000).contains(&scale) {
+        return Err(PathError::new(
+            "22023",
+            format!("NUMERIC scale {scale} must be between -1000 and 1000"),
+        ));
+    }
+    let rounded = value.with_scale_round(i64::from(scale), RoundingMode::HalfUp);
+    // JSON number rendering stores the coefficient with a nonnegative scale.
+    let rounded = if scale < 0 {
+        rounded
+            .to_string()
+            .parse()
+            .map_err(|_| PathError::new("22003", "numeric field overflow"))?
+    } else {
+        rounded
+    };
+    if !rounded.is_zero() {
+        let (mantissa, decimal_scale) = rounded.as_bigint_and_exponent();
+        let digits = mantissa.to_string().trim_start_matches('-').len() as i64;
+        let integer_digits = digits - decimal_scale;
+        if integer_digits > i64::from(precision) - i64::from(scale) {
+            return Err(PathError::new("22003", "numeric field overflow"));
+        }
+    }
+    Ok(rounded)
+}
+
+fn temporal_precision(m: Method, precision: &BigDecimal) -> PathResult<i32> {
+    let precision = precision.to_i32().ok_or_else(|| {
+        PathError::new(
+            "22031",
+            format!(
+                "time precision of jsonpath item method {} is out of range for type integer",
+                method_name(m)
+            ),
+        )
+    })?;
+    if precision < 0 {
+        let type_name = match m {
+            Method::Time => "TIME",
+            Method::TimeTz => "TIME WITH TIME ZONE",
+            Method::Timestamp => "TIMESTAMP",
+            Method::TimestampTz => "TIMESTAMP WITH TIME ZONE",
+            _ => unreachable!("only explicit temporal methods accept a precision"),
+        };
+        return Err(PathError::new(
+            "22023",
+            format!("{type_name}({precision}) precision must not be negative"),
+        ));
+    }
+    Ok(precision)
+}
+
+/// The date/time methods retain their parsed value for comparisons and render
+/// the canonical ISO-8601 string only when a query returns the item.
+fn datetime_method(
+    m: Method,
+    template: Option<&str>,
+    precision: Option<i32>,
+    item: &JsonbValue,
+    time_zone: Option<&jiff::tz::TimeZone>,
+    allow_zone_conversions: bool,
+) -> PathResult<Item> {
+    use crabka_pgtypes::{ColumnType, Datum, TemporalType};
 
     let name = method_name(m);
+    let format_name = name.trim_start_matches('.').trim_end_matches("()");
     let JsonbValue::String(text) = item else {
         return Err(PathError::new(
             "22031",
             format!("jsonpath item method {name} can only be applied to a string"),
         ));
     };
-    // `.datetime()` with no template tries each type in PostgreSQL's order and
-    // keeps the first that parses.
-    let targets: &[ColumnType] = match m {
-        Method::Date => &[ColumnType::Date],
-        Method::Time => &[ColumnType::Time],
-        Method::TimeTz => &[ColumnType::Timetz],
-        Method::Timestamp => &[ColumnType::Timestamp],
-        Method::TimestampTz => &[ColumnType::Timestamptz],
-        _ => &[
-            ColumnType::Date,
-            ColumnType::Timetz,
-            ColumnType::Time,
-            ColumnType::Timestamptz,
-            ColumnType::Timestamp,
-        ],
+    if let Some(template) = template {
+        let fields = crabka_pgtypes::datetime::template_fields(template);
+        let parsed =
+            crabka_pgtypes::datetime::parse_by_template_exact(template, text).map_err(|e| {
+                let error = ExecError::from(e).into_pg();
+                let sqlstate = match error.code.as_str() {
+                    "22008" => "22008",
+                    "22009" => "22009",
+                    _ => "22007",
+                };
+                PathError::new(sqlstate, error.message)
+            })?;
+        let date = jiff::civil::Date::new(
+            i16::try_from(parsed.year).map_err(|_| invalid_for(name, text, "datetime"))?,
+            i8::try_from(parsed.month).map_err(|_| invalid_for(name, text, "datetime"))?,
+            i8::try_from(parsed.day).map_err(|_| invalid_for(name, text, "datetime"))?,
+        )
+        .map_err(|_| invalid_for(name, text, "datetime"))?;
+        let micros = match fields.fractional_precision {
+            Some(precision) if precision < 6 => {
+                let scale = 10_i64.pow(u32::from(6 - precision));
+                (i64::from(parsed.micros) + scale / 2) / scale * scale
+            }
+            _ => i64::from(parsed.micros),
+        };
+        let time = jiff::civil::Time::new(
+            i8::try_from(parsed.hour).map_err(|_| invalid_for(name, text, "datetime"))?,
+            i8::try_from(parsed.minute).map_err(|_| invalid_for(name, text, "datetime"))?,
+            i8::try_from(parsed.second).map_err(|_| invalid_for(name, text, "datetime"))?,
+            i32::try_from(parsed.micros).map_err(|_| invalid_for(name, text, "datetime"))? * 1_000,
+        )
+        .map_err(|_| invalid_for(name, text, "datetime"))?;
+        let datetime = date
+            .to_datetime(time)
+            .checked_add((micros - i64::from(parsed.micros)).microseconds())
+            .map_err(|_| invalid_for(name, text, "datetime"))?;
+        let mut rendered = match (fields.has_date, fields.has_time) {
+            (true, false) => date.to_string(),
+            (false, true) => datetime.time().to_string(),
+            (true, true) => datetime.to_string(),
+            (false, false) => return Err(invalid_for(name, text, "datetime")),
+        };
+        if let Some(offset) = parsed.tz_offset_secs {
+            let sign = if offset < 0 { '-' } else { '+' };
+            let minutes = offset.unsigned_abs() / 60;
+            let _ = write!(rendered, "{sign}{:02}:{:02}", minutes / 60, minutes % 60);
+        }
+        let target = match (
+            fields.has_date,
+            fields.has_time,
+            parsed.tz_offset_secs.is_some(),
+        ) {
+            (true, false, _) => ColumnType::Date,
+            (false, true, true) => ColumnType::Timetz,
+            (false, true, false) => ColumnType::Time,
+            (true, true, true) => ColumnType::Timestamptz,
+            (true, true, false) => ColumnType::Timestamp,
+            (false, false, _) => return Err(invalid_for(name, text, "datetime")),
+        };
+        let datum = crabka_pgtypes::cast::cast(
+            &Datum::Text(rendered.clone()),
+            target,
+            &jiff::tz::TimeZone::UTC,
+        )
+        .map_err(|_| invalid_for(name, text, "datetime"))?;
+        return Ok(Item::temporal(datum, JsonbValue::String(rendered)));
+    }
+    // `.datetime()` chooses the temporal family from the spelling before
+    // parsing. `date_in` accepts a timestamp prefix, but JSONPath must retain
+    // an explicit offset so the plain and `_tz` comparison families differ.
+    let has_time = text.contains(':');
+    let has_date = text.contains('/')
+        || text
+            .find('-')
+            .is_some_and(|dash| text.find(':').is_none_or(|clock| dash < clock));
+    let has_offset = text.ends_with('Z')
+        || text
+            .rfind(['+', '-'])
+            .is_some_and(|at| text[..at].contains(':'))
+        || (has_time && text.as_bytes().last().is_some_and(u8::is_ascii_alphabetic));
+    let source_type = match (has_date, has_time, has_offset) {
+        (true, true, true) => ColumnType::Timestamptz,
+        (true, true, false) => ColumnType::Timestamp,
+        (false, true, true) => ColumnType::Timetz,
+        (false, true, false) => ColumnType::Time,
+        _ => ColumnType::Date,
     };
-    let tz = jiff::tz::TimeZone::UTC;
-    let source = Datum::Text(text.clone());
-    let parsed = targets
-        .iter()
-        .find_map(|target| crabka_pgtypes::cast::cast(&source, *target, &tz).ok())
-        .ok_or_else(|| {
+    let target = match m {
+        Method::Date => ColumnType::Date,
+        Method::Time => ColumnType::Time,
+        Method::TimeTz => ColumnType::Timetz,
+        Method::Timestamp => ColumnType::Timestamp,
+        Method::TimestampTz => ColumnType::Timestamptz,
+        _ => source_type,
+    };
+    let source_is_zoned = matches!(source_type, ColumnType::Timetz | ColumnType::Timestamptz);
+    let target_is_zoned = matches!(target, ColumnType::Timetz | ColumnType::Timestamptz);
+    let can_convert_zone = match target {
+        ColumnType::Date | ColumnType::Timestamp | ColumnType::Timestamptz => has_date,
+        ColumnType::Time => has_time,
+        ColumnType::Timetz => has_time,
+        _ => false,
+    };
+    let default_tz = jiff::tz::TimeZone::UTC;
+    let tz = time_zone.unwrap_or(&default_tz);
+    let source = Datum::Text(
+        text.get(10..11)
+            .filter(|separator| *separator == "T")
+            .map_or_else(
+                || text.clone(),
+                |_| format!("{} {}", &text[..10], &text[11..]),
+            ),
+    );
+    let parsed = if source_type != target && can_convert_zone {
+        if source_is_zoned != target_is_zoned && !allow_zone_conversions {
+            let source_name = match source_type {
+                ColumnType::Date => "date",
+                ColumnType::Time => "time",
+                ColumnType::Timetz => "timetz",
+                ColumnType::Timestamp => "timestamp",
+                ColumnType::Timestamptz => "timestamptz",
+                _ => unreachable!("only temporal source types are selected"),
+            };
+            let target_name = match target {
+                ColumnType::Date => "date",
+                ColumnType::Time => "time",
+                ColumnType::Timetz => "timetz",
+                ColumnType::Timestamp => "timestamp",
+                ColumnType::Timestamptz => "timestamptz",
+                _ => unreachable!("only temporal target types are selected"),
+            };
+            return Err(PathError::new(
+                "0A000",
+                format!(
+                    "cannot convert value from {source_name} to {target_name} without time zone usage\nHINT:  Use *_tz() function for time zone support."
+                ),
+            ));
+        }
+        let parsed = crabka_pgtypes::cast::cast(&source, source_type, tz).map_err(|_| {
             PathError::new(
                 "22007",
-                format!("{name} format is not recognized: \"{text}\""),
+                format!("{format_name} format is not recognized: \"{text}\""),
             )
         })?;
-    let mut rendered = String::from_utf8(crabka_pgtypes::encoding::encode_text(&parsed, &tz))
-        .map_err(|_| PathError::new("22007", format!("{name} produced invalid text")))?;
+        match (&parsed, target) {
+            // The normal SQL cast deliberately only removes the `timetz`
+            // offset. JSONPath's `_tz` variant instead expresses it in the
+            // supplied session zone before discarding that zone.
+            (Datum::Timetz(value), ColumnType::Time) => {
+                let offset = tz.to_offset(jiff::Timestamp::now());
+                let micros = (value.utc_micros() + i64::from(offset.seconds()) * 1_000_000)
+                    .rem_euclid(86_400_000_000);
+                Datum::Time(crabka_pgtypes::datetime::time_from_micros_of_day_public(
+                    micros,
+                ))
+            }
+            _ => crabka_pgtypes::cast::cast(&parsed, target, tz).map_err(|_| {
+                PathError::new(
+                    "22007",
+                    format!("{format_name} format is not recognized: \"{text}\""),
+                )
+            })?,
+        }
+    } else {
+        crabka_pgtypes::cast::cast(&source, target, tz).map_err(|_| {
+            PathError::new(
+                "22007",
+                format!("{format_name} format is not recognized: \"{text}\""),
+            )
+        })?
+    };
+    let parsed = match precision {
+        Some(precision) => {
+            let temporal = match m {
+                Method::Time => TemporalType::Time,
+                Method::TimeTz => TemporalType::Timetz,
+                Method::Timestamp => TemporalType::Timestamp,
+                Method::TimestampTz => TemporalType::Timestamptz,
+                _ => unreachable!("only explicit temporal methods accept a precision"),
+            };
+            crabka_pgtypes::cast::cast(
+                &parsed,
+                ColumnType::Temporal(temporal, precision.min(6) as u8),
+                tz,
+            )
+            .map_err(|_| invalid_for(name, text, "datetime"))?
+        }
+        None => parsed,
+    };
+    let render_tz = if matches!(source_type, ColumnType::Timestamptz)
+        && matches!(target, ColumnType::Timestamptz)
+    {
+        let Datum::Timetz(value) = crabka_pgtypes::cast::cast(&source, ColumnType::Timetz, tz)
+            .map_err(|_| {
+                PathError::new(
+                    "22007",
+                    format!("{format_name} format is not recognized: \"{text}\""),
+                )
+            })?
+        else {
+            unreachable!("a timestamp with time zone has a time with time zone projection")
+        };
+        jiff::tz::TimeZone::fixed(value.offset)
+    } else {
+        tz.clone()
+    };
+    let mut rendered =
+        String::from_utf8(crabka_pgtypes::encoding::encode_text(&parsed, &render_tz))
+            .map_err(|_| PathError::new("22007", format!("{format_name} produced invalid text")))?;
     // A jsonpath datetime renders ISO-8601 with a `T` separator, unlike SQL's
     // space-separated `timestamp` output.
     if let Some(space) = rendered.find(' ') {
         rendered.replace_range(space..=space, "T");
     }
-    Ok(JsonbValue::String(rendered))
+    if matches!(&parsed, Datum::Timetz(_) | Datum::Timestamptz(_))
+        && let Some(start) = rendered.len().checked_sub(3)
+        && matches!(rendered.as_bytes()[start], b'+' | b'-')
+        && rendered.as_bytes()[start + 1..]
+            .iter()
+            .all(u8::is_ascii_digit)
+    {
+        rendered.push_str(":00");
+    }
+    Ok(Item::temporal(parsed, JsonbValue::String(rendered)))
 }
 
 fn ceiling(n: &BigDecimal) -> BigDecimal {
@@ -2062,23 +3175,22 @@ fn floor(n: &BigDecimal) -> BigDecimal {
 /// operator does.
 fn compile_regex(pattern: &str, flags: &str) -> PathResult<regex::Regex> {
     let mut builder = String::new();
-    let mut literal = false;
-    for flag in flags.chars() {
-        match flag {
-            'i' => builder.push('i'),
-            's' => builder.push('s'),
-            'm' => builder.push('m'),
-            'x' => builder.push('x'),
-            'q' => literal = true,
-            other => {
-                return Err(PathError::new(
-                    "22025",
-                    format!(
-                        "invalid input syntax for type jsonpath: unrecognized flag character \"{other}\" in LIKE_REGEX predicate"
-                    ),
-                ));
-            }
+    for flag in ['i', 'm', 's', 'x'] {
+        if flags.contains(flag) {
+            builder.push(flag);
         }
+    }
+    let literal = flags.contains('q');
+    if let Some(other) = flags
+        .chars()
+        .find(|flag| !matches!(flag, 'i' | 's' | 'm' | 'x' | 'q'))
+    {
+        return Err(PathError::new(
+            "22025",
+            format!(
+                "invalid input syntax for type jsonpath: unrecognized flag character \"{other}\" in LIKE_REGEX predicate"
+            ),
+        ));
     }
     let body = if literal {
         regex::escape(pattern)
@@ -2098,6 +3210,35 @@ fn compile_regex(pattern: &str, flags: &str) -> PathResult<regex::Regex> {
     })
 }
 
+/// PostgreSQL validates `like_regex` when it constructs the jsonpath value,
+/// before that path is evaluated against any JSON document.
+fn validate_like_regex(pattern: &str, flags: &str) -> Result<(), ExecError> {
+    if flags.contains('x') && !flags.contains('q') {
+        return Err(ExecError::Unsupported(
+            "XQuery \"x\" flag (expanded regular expressions) is not implemented".into(),
+        ));
+    }
+    for flag in flags.chars() {
+        match flag {
+            'i' | 's' | 'm' | 'x' | 'q' => {}
+            other => {
+                return Err(ExecError::Remote(
+                    crabka_pgwire::error::PgError::error(
+                        "42601",
+                        "invalid input syntax for type jsonpath",
+                    )
+                    .with_detail(format!(
+                        "Unrecognized flag character \"{other}\" in LIKE_REGEX predicate."
+                    )),
+                ));
+            }
+        }
+    }
+    compile_regex(pattern, flags)
+        .map(|_| ())
+        .map_err(PathError::into_exec)
+}
+
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or_default().trim().to_string()
 }
@@ -2115,33 +3256,82 @@ impl std::fmt::Display for JsonPath {
     }
 }
 
+fn write_depth_bound(bound: DepthBound, out: &mut String) {
+    match bound {
+        DepthBound::Number(value) => {
+            let _ = write!(out, "{value}");
+        }
+        DepthBound::Last => out.push_str("last"),
+    }
+}
+
 fn write_node(node: &Node, out: &mut String) {
+    if matches!(
+        node,
+        Node::Predicate(_) | Node::Arith { .. } | Node::Neg { .. }
+    ) {
+        out.push('(');
+        write_node_prec(node, 0, out);
+        out.push(')');
+    } else {
+        write_node_prec(node, 0, out);
+    }
+}
+
+fn node_precedence(node: &Node) -> u8 {
+    match node {
+        Node::Predicate(_) => 0,
+        Node::Arith { op, .. } => match op {
+            ArithOp::Add | ArithOp::Sub => 1,
+            ArithOp::Mul | ArithOp::Div | ArithOp::Mod => 2,
+        },
+        Node::Neg { .. } => 3,
+        Node::Root
+        | Node::Current
+        | Node::Last
+        | Node::Var(_)
+        | Node::Literal(_)
+        | Node::Accessor { .. } => 4,
+    }
+}
+
+fn write_node_prec(node: &Node, min_precedence: u8, out: &mut String) {
+    let needs_parens = node_precedence(node) < min_precedence;
+    if needs_parens {
+        out.push('(');
+    }
     match node {
         Node::Root => out.push('$'),
         Node::Current => out.push('@'),
         Node::Last => out.push_str("last"),
         Node::Var(name) => {
             out.push('$');
-            out.push_str(name);
+            out.push_str(&JsonbValue::String(name.clone()).to_text());
         }
         Node::Literal(v) => out.push_str(&v.to_text()),
         Node::Neg { arg, negate } => {
             out.push(if *negate { '-' } else { '+' });
-            write_node(arg, out);
+            write_node_prec(arg, 4, out);
         }
         Node::Arith { op, left, right } => {
-            out.push('(');
-            write_node(left, out);
+            let precedence = node_precedence(node);
+            write_node_prec(left, precedence, out);
             let _ = write!(out, " {} ", op.symbol());
-            write_node(right, out);
-            out.push(')');
+            write_node_prec(right, precedence + 1, out);
         }
         Node::Predicate(p) => write_pred(p, out),
         Node::Accessor { base, op } => {
-            write_node(base, out);
+            if matches!(base.as_ref(), Node::Literal(JsonbValue::Number(_))) {
+                out.push('(');
+                write_node_prec(base, 0, out);
+                out.push(')');
+            } else {
+                write_node_prec(base, 4, out);
+            }
             match op {
                 Accessor::Member(key) => {
-                    let _ = write!(out, ".\"{key}\"");
+                    out.push('.');
+                    out.push_str(&JsonbValue::String(key.clone()).to_text());
                 }
                 Accessor::MemberAll => out.push_str(".*"),
                 Accessor::IndexAll => out.push_str("[*]"),
@@ -2151,25 +3341,56 @@ fn write_node(node: &Node, out: &mut String) {
                         if i > 0 {
                             out.push(',');
                         }
-                        write_node(lo, out);
+                        write_node_prec(lo, 0, out);
                         if let Some(hi) = hi {
                             out.push_str(" to ");
-                            write_node(hi, out);
+                            write_node_prec(hi, 0, out);
                         }
                     }
                     out.push(']');
                 }
-                Accessor::Any { from, to } => {
+                Accessor::Any {
+                    from,
+                    to,
+                    explicit_bounds,
+                } => {
                     out.push_str(".**");
-                    if !(*from == 0 && *to == u32::MAX) {
+                    if *explicit_bounds {
                         if from == to {
-                            let _ = write!(out, "{{{from}}}");
+                            out.push('{');
+                            write_depth_bound(*from, out);
+                            out.push('}');
                         } else {
-                            let _ = write!(out, "{{{from} to {to}}}");
+                            out.push('{');
+                            write_depth_bound(*from, out);
+                            out.push_str(" to ");
+                            write_depth_bound(*to, out);
+                            out.push('}');
                         }
                     }
                 }
-                Accessor::Method(m) => out.push_str(method_name(*m)),
+                Accessor::Method(m, args) => match args {
+                    MethodArgs::None => out.push_str(method_name(*m)),
+                    MethodArgs::Datetime(template) => {
+                        out.push_str(".datetime(");
+                        out.push_str(&JsonbValue::String(template.clone()).to_text());
+                        out.push(')');
+                    }
+                    MethodArgs::Decimal { precision, scale } => {
+                        let _ = write!(out, ".decimal({precision}");
+                        if let Some(scale) = scale {
+                            let _ = write!(out, ",{scale}");
+                        }
+                        out.push(')');
+                    }
+                    MethodArgs::TemporalPrecision(precision) => {
+                        let _ = write!(
+                            out,
+                            "{}({precision})",
+                            method_name(*m).trim_end_matches("()")
+                        );
+                    }
+                },
                 Accessor::Filter(p) => {
                     out.push_str("?(");
                     write_pred(p, out);
@@ -2178,23 +3399,22 @@ fn write_node(node: &Node, out: &mut String) {
             }
         }
     }
+    if needs_parens {
+        out.push(')');
+    }
 }
 
 fn write_pred(pred: &Pred, out: &mut String) {
     match pred {
         Pred::And(a, b) => {
-            out.push('(');
-            write_pred(a, out);
+            write_pred_prec(a, 2, out);
             out.push_str(" && ");
-            write_pred(b, out);
-            out.push(')');
+            write_pred_prec(b, 2, out);
         }
         Pred::Or(a, b) => {
-            out.push('(');
-            write_pred(a, out);
+            write_pred_prec(a, 1, out);
             out.push_str(" || ");
-            write_pred(b, out);
-            out.push(')');
+            write_pred_prec(b, 1, out);
         }
         Pred::Not(a) => {
             out.push_str("!(");
@@ -2208,12 +3428,11 @@ fn write_pred(pred: &Pred, out: &mut String) {
         }
         Pred::Exists(node) => {
             out.push_str("exists (");
-            write_node(node, out);
+            write_node_prec(node, 0, out);
             out.push(')');
         }
         Pred::Compare { op, left, right } => {
-            out.push('(');
-            write_node(left, out);
+            write_node_prec(left, 0, out);
             let _ = write!(
                 out,
                 " {} ",
@@ -2226,29 +3445,48 @@ fn write_pred(pred: &Pred, out: &mut String) {
                     CmpOp::Ge => ">=",
                 }
             );
-            write_node(right, out);
-            out.push(')');
+            write_node_prec(right, 0, out);
         }
         Pred::StartsWith { value, prefix } => {
-            out.push('(');
-            write_node(value, out);
+            write_node_prec(value, 0, out);
             out.push_str(" starts with ");
-            write_node(prefix, out);
-            out.push(')');
+            write_node_prec(prefix, 0, out);
         }
         Pred::LikeRegex {
             value,
             pattern,
             flags,
         } => {
-            out.push('(');
-            write_node(value, out);
+            write_node_prec(value, 0, out);
             let _ = write!(out, " like_regex \"{pattern}\"");
             if !flags.is_empty() {
                 let _ = write!(out, " flag \"{flags}\"");
             }
-            out.push(')');
         }
+    }
+}
+
+fn pred_precedence(pred: &Pred) -> u8 {
+    match pred {
+        Pred::Or(_, _) => 1,
+        Pred::And(_, _) => 2,
+        Pred::Not(_) => 3,
+        Pred::IsUnknown(_)
+        | Pred::Exists(_)
+        | Pred::Compare { .. }
+        | Pred::StartsWith { .. }
+        | Pred::LikeRegex { .. } => 4,
+    }
+}
+
+fn write_pred_prec(pred: &Pred, min_precedence: u8, out: &mut String) {
+    let needs_parens = pred_precedence(pred) < min_precedence;
+    if needs_parens {
+        out.push('(');
+    }
+    write_pred(pred, out);
+    if needs_parens {
+        out.push(')');
     }
 }
 
@@ -2257,9 +3495,10 @@ pub fn check_vars(vars: &JsonbValue) -> Result<(), ExecError> {
     if matches!(vars, JsonbValue::Object(_)) {
         Ok(())
     } else {
-        Err(ExecError::FunctionError {
+        Err(ExecError::FunctionErrorWithMessageDetail {
             sqlstate: "22023",
             message: "\"vars\" argument is not an object".into(),
+            detail: "Jsonpath parameters should be encoded as key-value pairs of \"vars\" object.",
         })
     }
 }

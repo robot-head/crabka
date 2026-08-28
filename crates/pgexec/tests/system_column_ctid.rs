@@ -440,11 +440,9 @@ async fn a_delete_filters_on_an_expression_over_the_ctid() {
 /// `RETURNING` projects the `ctid` of the row the statement wrote, whichever of
 /// the three statements wrote it, and through either spelling.
 ///
-/// `old.ctid` and `new.ctid` answer the SAME value here, where `PostgreSQL`
-/// answers two: an `UPDATE` writes the new version under the row's existing
-/// rowid, so the row keeps its identity. `PostgreSQL`'s update writes a fresh
-/// heap tuple somewhere else and the `ctid` moves. Nothing may depend on
-/// either — a `ctid` is documented as valid only until the row is updated.
+/// UPDATE writes a fresh heap tuple, so `old.ctid` and `new.ctid` differ.
+/// Nothing may depend on either — a `ctid` is documented as valid only until
+/// the row is updated.
 #[tokio::test]
 async fn returning_projects_the_ctid_of_the_row_that_was_written() {
     let engine = fixture().await;
@@ -462,16 +460,13 @@ async fn returning_projects_the_ctid_of_the_row_that_was_written() {
         "UPDATE w SET b = 'two' WHERE a = 1 RETURNING ctid, old.ctid, new.ctid, old.b, new.b",
     )
     .await;
-    assert!(
-        updated
-            == vec![vec![
-                Some(written.clone()),
-                Some(written.clone()),
-                Some(written.clone()),
-                Some("one".to_string()),
-                Some("two".to_string()),
-            ]]
-    );
+    assert!(updated.len() == 1, "{updated:?}");
+    let replacement = updated[0][0].clone().expect("a replacement ctid");
+    assert!(updated[0][0] == updated[0][2]);
+    assert!(updated[0][1] == Some(written));
+    assert!(updated[0][0] != updated[0][1]);
+    assert!(updated[0][3] == Some("one".to_string()));
+    assert!(updated[0][4] == Some("two".to_string()));
 
     let deleted = grid(
         &engine,
@@ -481,11 +476,195 @@ async fn returning_projects_the_ctid_of_the_row_that_was_written() {
     assert!(
         deleted
             == vec![vec![
-                Some(written.clone()),
-                Some(written),
+                Some(replacement.clone()),
+                Some(replacement),
                 Some("1".to_string())
             ]]
     );
+}
+
+/// A partitioned INSERT writes one leaf, so its `RETURNING` system columns
+/// describe that leaf rather than the storage-less partitioned parent.
+#[tokio::test]
+async fn partitioned_insert_returning_uses_the_leaf_system_columns() {
+    let engine = fixture().await;
+    run(&engine, "CREATE TABLE p (a int) PARTITION BY RANGE (a)").await;
+    run(
+        &engine,
+        "CREATE TABLE p0 PARTITION OF p FOR VALUES FROM (0) TO (10)",
+    )
+    .await;
+
+    let returned = grid(
+        &engine,
+        "INSERT INTO p VALUES (1) RETURNING tableoid::regclass, xmin::text, ctid, a",
+    )
+    .await;
+    assert!(returned.len() == 1, "{returned:?}");
+    assert!(returned[0][0] == Some("p0".to_string()));
+    assert!(returned[0][1].is_some());
+    assert!(returned[0][2].is_some());
+    assert!(returned[0][3] == Some("1".to_string()));
+    assert!(
+        grid(
+            &engine,
+            "SELECT tableoid::regclass, xmin::text, ctid, a FROM p"
+        )
+        .await
+            == returned
+    );
+}
+
+/// `xmin` is the creating transaction ID carried by the stored tuple, so an
+/// INSERT's `RETURNING` value is the value a later scan reads back.
+#[tokio::test]
+async fn xmin_is_visible_on_insert_returning_and_a_later_scan() {
+    let engine = fixture().await;
+    run(&engine, "CREATE TABLE xmin_rows (a int)").await;
+
+    let inserted = grid(
+        &engine,
+        "INSERT INTO xmin_rows VALUES (1) RETURNING xmin::text",
+    )
+    .await;
+    assert!(inserted.len() == 1, "{inserted:?}");
+    assert!(inserted[0][0].is_some());
+    assert!(grid(&engine, "SELECT xmin::text FROM xmin_rows").await == inserted);
+}
+
+/// An UPDATE creates the visible tuple version, while its OLD image keeps the
+/// version that the statement replaced.
+#[tokio::test]
+async fn update_returning_reports_the_old_and_new_xmin_versions() {
+    let engine = fixture().await;
+    run(&engine, "CREATE TABLE xmin_updates (a int)").await;
+    let inserted = grid(
+        &engine,
+        "INSERT INTO xmin_updates VALUES (1) RETURNING xmin::text",
+    )
+    .await;
+    let updated = grid(
+        &engine,
+        "UPDATE xmin_updates SET a = 2 RETURNING xmin::text, old.xmin::text, new.xmin::text",
+    )
+    .await;
+    assert!(updated.len() == 1, "{updated:?}");
+    assert!(updated[0][0] == updated[0][2]);
+    assert!(updated[0][1] == inserted[0][0]);
+    assert!(updated[0][0] != inserted[0][0]);
+    assert!(
+        grid(&engine, "SELECT xmin::text FROM xmin_updates").await
+            == vec![vec![updated[0][0].clone()]]
+    );
+}
+
+/// UPDATE writes a successor tuple at the heap tail. Its `ctid` differs from
+/// the OLD image and is the value subsequent scans return.
+#[tokio::test]
+async fn update_returning_reports_distinct_old_and_new_ctids() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE ctid_updates (a int)").await;
+    run(&engine, "INSERT INTO ctid_updates VALUES (1)").await;
+
+    let returned = grid(
+        &engine,
+        "UPDATE ctid_updates SET a = 2 RETURNING ctid, old.ctid, new.ctid",
+    )
+    .await;
+    assert!(returned.len() == 1, "{returned:?}");
+    assert!(returned[0][0] == returned[0][2]);
+    assert!(returned[0][0] != returned[0][1]);
+    assert!(
+        grid(&engine, "SELECT ctid FROM ctid_updates").await == vec![vec![returned[0][2].clone()]]
+    );
+}
+
+/// Each command in a transaction stamps the replacement tuple with its own
+/// command ID. A second UPDATE must not retain the INSERT's `cmin`.
+#[tokio::test]
+async fn update_replaces_the_visible_tuples_command_id() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE command_versions (a int)").await;
+    let mut session = engine.connect();
+    for sql in [
+        "BEGIN",
+        "INSERT INTO command_versions VALUES (1)",
+        "UPDATE command_versions SET a = 2",
+        "UPDATE command_versions SET a = 3",
+    ] {
+        session.simple_query(sql).await.expect("command succeeds");
+    }
+    let QueryResult::Rows { rows, .. } = session
+        .simple_query("SELECT cmin::text, cmax::text, xmax::text FROM command_versions")
+        .await
+        .expect("system-column scan")
+        .pop()
+        .expect("one result")
+    else {
+        panic!("expected rows");
+    };
+    assert!(
+        rows.into_iter()
+            .map(|row| row
+                .into_iter()
+                .map(|cell| cell.map(|cell| text_of(&cell)))
+                .collect())
+            .collect::<Vec<Vec<Option<String>>>>()
+            == vec![vec![
+                Some("2".to_string()),
+                Some("0".to_string()),
+                Some("0".to_string()),
+            ]]
+    );
+    session
+        .simple_query("ROLLBACK")
+        .await
+        .expect("rollback succeeds");
+}
+
+/// `RETURNING` exposes the header each image carries: the OLD image receives
+/// this UPDATE's command xmax while the NEW image starts at this command.
+#[tokio::test]
+async fn update_returning_reports_command_ids_for_old_and_new_images() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE returning_commands (a int)").await;
+    let mut session = engine.connect();
+    for sql in ["BEGIN", "INSERT INTO returning_commands VALUES (1)"] {
+        session.simple_query(sql).await.expect("command succeeds");
+    }
+    let QueryResult::Rows { rows, .. } = session
+        .simple_query(
+            "UPDATE returning_commands SET a = 2 \
+             RETURNING cmin::text, cmax::text, old.cmin::text, old.cmax::text, \
+                       new.cmin::text, new.cmax::text",
+        )
+        .await
+        .expect("update succeeds")
+        .pop()
+        .expect("one result")
+    else {
+        panic!("expected rows");
+    };
+    assert!(
+        rows.into_iter()
+            .map(|row| row
+                .into_iter()
+                .map(|cell| cell.map(|cell| text_of(&cell)))
+                .collect())
+            .collect::<Vec<Vec<Option<String>>>>()
+            == vec![vec![
+                Some("1".to_string()),
+                Some("0".to_string()),
+                Some("0".to_string()),
+                Some("1".to_string()),
+                Some("1".to_string()),
+                Some("0".to_string()),
+            ]]
+    );
+    session
+        .simple_query("ROLLBACK")
+        .await
+        .expect("rollback succeeds");
 }
 
 /// A system column stays out of every expansion a `RETURNING` clause makes,
@@ -831,4 +1010,90 @@ async fn an_image_reference_is_projected_under_its_own_column_name() {
         let names: Vec<String> = fields.into_iter().map(|field| field.name).collect();
         assert!(names == expected, "{sql} named {names:?}");
     }
+}
+
+#[tokio::test]
+async fn ordinary_tuple_command_system_columns_come_from_its_header() {
+    let engine = fixture().await;
+    let mut session = engine.connect();
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .simple_query("INSERT INTO t VALUES (3)")
+        .await
+        .expect("insert");
+    let QueryResult::Rows { rows, .. } = session
+        .simple_query("SELECT cmin::text, cmax::text, xmax::text FROM t WHERE a = 3")
+        .await
+        .expect("system-column scan")
+        .pop()
+        .expect("one result")
+    else {
+        panic!("expected rows");
+    };
+    let rendered = rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| cell.as_ref().map(text_of))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(rendered == vec![vec![Some("0".into()), Some("0".into()), Some("0".into())]]);
+    session.simple_query("ROLLBACK").await.expect("rollback");
+}
+
+/// A data-modifying CTE shares the surrounding statement's command counter.
+/// Its scan therefore sees the pre-update tuple, while the following command
+/// sees the replacement.
+#[tokio::test]
+async fn data_modifying_cte_reads_the_pre_command_tuple_version() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE command_cte (a int)").await;
+    let mut session = engine.connect();
+    for sql in ["BEGIN", "INSERT INTO command_cte VALUES (1)"] {
+        session.simple_query(sql).await.expect("setup succeeds");
+    }
+    let QueryResult::Rows { rows, .. } = session
+        .simple_query(
+            "WITH changed AS (UPDATE command_cte SET a = 2 RETURNING a) \
+             SELECT a FROM command_cte",
+        )
+        .await
+        .expect("CTE succeeds")
+        .pop()
+        .expect("one result")
+    else {
+        panic!("expected rows");
+    };
+    let rendered = rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| cell.as_ref().map(text_of))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        rendered == vec![vec![Some("1".to_string())]],
+        "the main query must see the tuple as it stood before the CTE update"
+    );
+    let QueryResult::Rows { rows, .. } = session
+        .simple_query("SELECT a FROM command_cte")
+        .await
+        .expect("following command succeeds")
+        .pop()
+        .expect("one result")
+    else {
+        panic!("expected rows");
+    };
+    let rendered = rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| cell.as_ref().map(text_of))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(rendered == vec![vec![Some("2".to_string())]]);
+    session.simple_query("ROLLBACK").await.expect("rollback");
 }

@@ -251,12 +251,18 @@ fn walk_table_expr<'a>(
         TableExpr::Function { functions, .. } => {
             visit(Node::ComputedFrom);
             for call in functions {
-                for argument in &call.args {
+                for argument in call.arguments() {
                     walk_expr(argument, scope, visit);
                 }
             }
         }
         TableExpr::JsonTable(table) => {
+            visit(Node::ComputedFrom);
+            for expression in table.exprs() {
+                walk_expr(expression, scope, visit);
+            }
+        }
+        TableExpr::XmlTable(table) => {
             visit(Node::ComputedFrom);
             for expression in table.exprs() {
                 walk_expr(expression, scope, visit);

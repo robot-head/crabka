@@ -10,8 +10,11 @@ pub(crate) fn inheritance_merge_notices(
     kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
     stmt: &Statement,
-) -> Result<Vec<String>, ExecError> {
-    let Statement::CreateTable { inherits, .. } = stmt else {
+) -> Result<Vec<(String, bool)>, ExecError> {
+    let Statement::CreateTable {
+        inherits, columns, ..
+    } = stmt
+    else {
         return Ok(Vec::new());
     };
     let mut seen = std::collections::HashSet::new();
@@ -27,9 +30,16 @@ pub(crate) fn inheritance_merge_notices(
             continue;
         };
         for column in table.columns {
-            if !seen.insert(column.name.clone()) && !notices.contains(&column.name) {
-                notices.push(column.name);
+            if !seen.insert(column.name.clone())
+                && !notices.iter().any(|(name, _)| name == &column.name)
+            {
+                notices.push((column.name, true));
             }
+        }
+    }
+    for column in columns {
+        if seen.contains(&column.name) && !notices.iter().any(|(name, _)| name == &column.name) {
+            notices.push((column.name.clone(), false));
         }
     }
     Ok(notices)
@@ -196,13 +206,26 @@ pub(crate) fn inherited_table_definition(
     let (local_columns, mut checks, sequences, indexes, foreign_keys) =
         create_table_definition(kv, name, columns, constraints, like, &merged, ctx)?;
     for column in local_columns {
-        if merged.iter().any(|item| item.name == column.name) {
-            return Err(ExecError::InvalidTableDefinition(format!(
-                "column \"{}\" specified more than once",
-                column.name
-            )));
+        if let Some(existing) = merged.iter_mut().find(|item| item.name == column.name) {
+            if existing.ty != column.ty {
+                return Err(ExecError::InvalidTableDefinition(format!(
+                    "inherited column \"{}\" has a type conflict",
+                    column.name
+                )));
+            }
+            if existing.collation != column.collation {
+                return Err(ExecError::InvalidTableDefinition(format!(
+                    "inherited column \"{}\" has a collation conflict",
+                    column.name
+                )));
+            }
+            existing.not_null |= column.not_null;
+            if existing.default.is_none() {
+                existing.default = column.default;
+            }
+        } else {
+            merged.push(column);
         }
-        merged.push(column);
     }
     inherited_checks.append(&mut checks);
     Ok((merged, inherited_checks, sequences, indexes, foreign_keys))

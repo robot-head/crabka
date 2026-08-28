@@ -288,10 +288,10 @@ async fn whole_row_references_describe_the_relation_rowtype() {
         .await,
         0,
     )[0]
-        .as_deref()
-        .expect("row type oid")
-        .parse::<u32>()
-        .expect("valid oid");
+    .as_deref()
+    .expect("row type oid")
+    .parse::<u32>()
+    .expect("valid oid");
     for sql in [
         "SELECT whole_row_type FROM whole_row_type",
         "SELECT q FROM whole_row_type AS q",
@@ -310,8 +310,11 @@ async fn whole_row_references_describe_the_relation_rowtype() {
         panic!("expected rows");
     };
     assert!(fields[0].type_oid == 23);
-    let QueryResult::Rows { fields, .. } =
-        run(&engine, "SELECT (SELECT (whole_row_type).id) FROM whole_row_type").await
+    let QueryResult::Rows { fields, .. } = run(
+        &engine,
+        "SELECT (SELECT (whole_row_type).id) FROM whole_row_type",
+    )
+    .await
     else {
         panic!("expected rows");
     };
@@ -376,7 +379,11 @@ async fn whole_row_references_describe_the_relation_rowtype() {
     )
     .await;
     run(&engine, "INSERT INTO whole_row_type (id) VALUES (7)").await;
-    let result = run(&engine, "SELECT whole_row_id(whole_row_type) FROM whole_row_type").await;
+    let result = run(
+        &engine,
+        "SELECT whole_row_id(whole_row_type) FROM whole_row_type",
+    )
+    .await;
     assert!(row_text(&result, 0) == vec![Some("7".into())]);
     run(
         &engine,
@@ -404,6 +411,14 @@ async fn whole_row_references_describe_the_relation_rowtype() {
     assert!(row_text(&result, 0) == vec![Some("7".into()), Some("7".into())]);
     run(&engine, "CREATE TABLE whole_row_shadow_source (id int4)").await;
     run(&engine, "INSERT INTO whole_row_shadow_source VALUES (9)").await;
+    let result = run(&engine, "SELECT id FROM whole_row_shadow_source AS t").await;
+    assert!(row_text(&result, 0) == vec![Some("9".into())]);
+    let result = run(&engine, "SELECT t.id FROM whole_row_shadow_source AS t").await;
+    let QueryResult::Rows { fields, .. } = &result else {
+        panic!("expected rows");
+    };
+    assert!(fields[0].type_oid == 23);
+    assert!(row_text(&result, 0) == vec![Some("9".into())]);
     run(
         &engine,
         "CREATE FUNCTION whole_row_shadow(t whole_row_type) RETURNS int4 \
@@ -422,6 +437,120 @@ async fn whole_row_references_describe_the_relation_rowtype() {
          LANGUAGE sql AS 'SELECT ROW($1)::whole_row_type'",
     )
     .await;
+    let result = run(&engine, "SELECT whole_row_return(9)").await;
+    let QueryResult::Rows { fields, .. } = &result else {
+        panic!("expected rows");
+    };
+    assert!(fields[0].type_oid == rowtype);
+    assert!(row_text(&result, 0) == vec![Some("(9)".into())]);
+    let result = run(&engine, "SELECT * FROM whole_row_return(9)").await;
+    assert!(row_text(&result, 0) == vec![Some("9".into())]);
+    run(
+        &engine,
+        "CREATE FUNCTION whole_row_returns() RETURNS SETOF whole_row_type \
+         LANGUAGE sql AS 'SELECT whole_row_type FROM whole_row_type'",
+    )
+    .await;
+    let result = run(&engine, "SELECT * FROM whole_row_returns()").await;
+    assert!(row_text(&result, 0) == vec![Some("7".into())]);
+    let result = run(
+        &engine,
+        "SELECT * FROM whole_row_returns() WITH ORDINALITY AS returned(id, position)",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("7".into()), Some("1".into())]);
+    run(
+        &engine,
+        "CREATE VIEW whole_row_return_view AS SELECT * FROM whole_row_returns()",
+    )
+    .await;
+    let result = run(&engine, "SELECT * FROM whole_row_return_view").await;
+    assert!(row_text(&result, 0) == vec![Some("7".into())]);
+    run(
+        &engine,
+        "CREATE FUNCTION whole_row_scalar(value int4) RETURNS int4 \
+         LANGUAGE sql AS 'SELECT $1'",
+    )
+    .await;
+    let result = run(&engine, "SELECT * FROM whole_row_scalar(4)").await;
+    assert!(row_text(&result, 0) == vec![Some("4".into())]);
+    run(
+        &engine,
+        "CREATE FUNCTION whole_row_out_rows(IN limit_value int4, OUT a text, OUT b text) \
+         RETURNS SETOF record LANGUAGE sql \
+         AS 'SELECT value::text, (value + 1)::text FROM generate_series(1, $1) AS value'",
+    )
+    .await;
+    let result = run(
+        &engine,
+        "SELECT t.a, t, t.a FROM whole_row_out_rows(2) AS t LIMIT 1",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("1".into()), Some("(1,2)".into()), Some("1".into())]);
+    run(&engine, "CREATE TABLE whole_row_pair (id int4, label text)").await;
+    run(
+        &engine,
+        "CREATE FUNCTION whole_row_pair_return() RETURNS whole_row_pair \
+         LANGUAGE sql AS 'SELECT ROW(1, ''packed'')::whole_row_pair'; \
+         CREATE FUNCTION whole_row_pair_columns() RETURNS whole_row_pair \
+         LANGUAGE sql AS 'SELECT 2, ''columns''::text'",
+    )
+    .await;
+    let result = run(&engine, "SELECT * FROM whole_row_pair_return()").await;
+    assert!(row_text(&result, 0) == vec![Some("1".into()), Some("packed".into())]);
+    let result = run(&engine, "SELECT * FROM whole_row_pair_columns()").await;
+    assert!(row_text(&result, 0) == vec![Some("2".into()), Some("columns".into())]);
+    run(
+        &engine,
+        "CREATE TYPE whole_row_composite AS (id int4, label text)",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE FUNCTION whole_row_composite_rows() RETURNS SETOF whole_row_composite \
+         LANGUAGE sql AS 'SELECT ROW(5, ''composite'')::whole_row_composite'",
+    )
+    .await;
+    let result = run(
+        &engine,
+        "SELECT * FROM whole_row_composite_rows() WITH ORDINALITY AS emitted(id, label, position)",
+    )
+    .await;
+    assert!(
+        row_text(&result, 0) == vec![Some("5".into()), Some("composite".into()), Some("1".into())]
+    );
+    let result = run(
+        &engine,
+        "SELECT * FROM ROWS FROM (whole_row_returns(), generate_series(10, 11)) \
+         WITH ORDINALITY AS rows_from_result(id, generated, position)",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("7".into()), Some("10".into()), Some("1".into())]);
+    assert!(row_text(&result, 1) == vec![None, Some("11".into()), Some("2".into())]);
+    let result = engine
+        .connect()
+        .simple_query(
+            "CREATE TEMP TABLE whole_row_temp (id int4, discarded bool, label text); \
+             INSERT INTO whole_row_temp VALUES (3, true, 'temporary'); \
+             ALTER TABLE whole_row_temp DROP COLUMN discarded; \
+             CREATE FUNCTION whole_row_temp_rows() RETURNS SETOF whole_row_temp \
+             LANGUAGE sql AS 'SELECT * FROM whole_row_temp'; \
+             SELECT * FROM whole_row_temp_rows()",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("temporary rowtype: {error:?}"))
+        .pop()
+        .expect("temporary rowtype result");
+    assert!(row_text(&result, 0) == vec![Some("3".into()), Some("temporary".into())]);
+    run(&engine, "CREATE SEQUENCE whole_row_sequence").await;
+    run(
+        &engine,
+        "CREATE FUNCTION whole_row_sequence_return() RETURNS whole_row_sequence \
+         LANGUAGE sql AS 'SELECT ROW(1, 0, false)::whole_row_sequence'",
+    )
+    .await;
+    let result = run(&engine, "SELECT * FROM whole_row_sequence_return()").await;
+    assert!(row_text(&result, 0) == vec![Some("1".into()), Some("0".into()), Some("f".into())]);
     let result = run(&engine, "SELECT (whole_row_return(9)).id").await;
     assert!(row_text(&result, 0) == vec![Some("9".into())]);
     run(
@@ -439,10 +568,7 @@ async fn whole_row_references_describe_the_relation_rowtype() {
          WHERE p.proname = 'whole_row_out'",
     )
     .await;
-    assert!(
-        row_text(&result, 0)
-            == vec![Some("t".into()), Some("t".into()), Some("t".into())]
-    );
+    assert!(row_text(&result, 0) == vec![Some("t".into()), Some("t".into()), Some("t".into())]);
 
     run(
         &engine,
@@ -457,12 +583,15 @@ async fn whole_row_references_describe_the_relation_rowtype() {
         .await,
         0,
     )[0]
-        .as_deref()
-        .expect("view row type oid")
-        .parse::<u32>()
-        .expect("valid oid");
-    let QueryResult::Rows { fields, .. } =
-        run(&engine, "SELECT whole_row_type_view FROM whole_row_type_view").await
+    .as_deref()
+    .expect("view row type oid")
+    .parse::<u32>()
+    .expect("valid oid");
+    let QueryResult::Rows { fields, .. } = run(
+        &engine,
+        "SELECT whole_row_type_view FROM whole_row_type_view",
+    )
+    .await
     else {
         panic!("expected rows");
     };
@@ -474,28 +603,24 @@ async fn whole_row_references_describe_the_relation_rowtype() {
 async fn relation_rowtype_casts_follow_the_catalog() {
     let engine = SqlEngine::new();
     run(&engine, "CREATE TABLE relation_type_cast (first int4)").await;
-    let result = run(
-        &engine,
-        "SELECT (ROW(1)::relation_type_cast).first",
-    )
-    .await;
+    let result = run(&engine, "SELECT (ROW(1)::relation_type_cast).first").await;
     assert!(row_text(&result, 0) == vec![Some("1".into())]);
 
-    run(&engine, "ALTER TABLE relation_type_cast ADD COLUMN second text").await;
-    let result = run(
+    run(
         &engine,
-        "SELECT (ROW(1, 'x')::relation_type_cast).second",
+        "ALTER TABLE relation_type_cast ADD COLUMN second text",
     )
     .await;
+    let result = run(&engine, "SELECT (ROW(1, 'x')::relation_type_cast).second").await;
     assert!(row_text(&result, 0) == vec![Some("x".into())]);
 
-    run(&engine, "CREATE TYPE relation_type_unrelated AS (value int4)").await;
-    run(&engine, "DROP TABLE relation_type_cast").await;
-    let result = run(
+    run(
         &engine,
-        "SELECT (ROW(2)::relation_type_unrelated).value",
+        "CREATE TYPE relation_type_unrelated AS (value int4)",
     )
     .await;
+    run(&engine, "DROP TABLE relation_type_cast").await;
+    let result = run(&engine, "SELECT (ROW(2)::relation_type_unrelated).value").await;
     assert!(row_text(&result, 0) == vec![Some("2".into())]);
 
     run(&engine, "CREATE SEQUENCE relation_type_sequence").await;
@@ -519,6 +644,28 @@ async fn relation_rowtype_casts_follow_the_catalog() {
     assert!(error.code == "42704");
 }
 
+/// A composite value written before its type grows still accepts a field
+/// assignment through the new catalog shape.
+#[tokio::test]
+async fn composite_field_assignment_after_type_growth_uses_field_names() {
+    let engine = SqlEngine::new();
+    for sql in [
+        "CREATE TYPE indirection_growth AS (first int4, second int4)",
+        "CREATE TABLE indirection_growth_table (value indirection_growth)",
+        "INSERT INTO indirection_growth_table VALUES (ROW(1, 2))",
+        "ALTER TYPE indirection_growth ADD ATTRIBUTE third int4",
+        "UPDATE indirection_growth_table SET value.third = 3",
+    ] {
+        run(&engine, sql).await;
+    }
+    let result = run(
+        &engine,
+        "SELECT (value).first, (value).second, (value).third FROM indirection_growth_table",
+    )
+    .await;
+    assert!(row_text(&result, 0) == vec![Some("1".into()), Some("2".into()), Some("3".into())]);
+}
+
 /// Array alignment follows its element type, including the fixed `int8` case.
 #[tokio::test]
 async fn pg_type_keeps_d_alignment_for_builtin_and_rowtype_arrays() {
@@ -538,10 +685,7 @@ async fn pg_type_keeps_d_alignment_for_builtin_and_rowtype_arrays() {
             == vec![
                 vec![Some("_int4".into()), Some("i".into())],
                 vec![Some("_int8".into()), Some("d".into())],
-                vec![
-                    Some("_rowtype_alignment_table".into()),
-                    Some("d".into()),
-                ],
+                vec![Some("_rowtype_alignment_table".into()), Some("d".into()),],
                 vec![Some("int8".into()), Some("d".into())],
             ]
     );

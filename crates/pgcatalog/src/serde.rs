@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 13;
+pub const SCHEMA_VERSION: u8 = 17;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -514,35 +514,55 @@ fn read_type_with(
             if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            if precision == u8::MAX { ColumnType::Time } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Time, precision) }
+            if precision == u8::MAX {
+                ColumnType::Time
+            } else {
+                ColumnType::Temporal(crabka_pgtypes::TemporalType::Time, precision)
+            }
         }
         type_tag::TIMETZ => {
             let precision = take_u8(cur)?;
             if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            if precision == u8::MAX { ColumnType::Timetz } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Timetz, precision) }
+            if precision == u8::MAX {
+                ColumnType::Timetz
+            } else {
+                ColumnType::Temporal(crabka_pgtypes::TemporalType::Timetz, precision)
+            }
         }
         type_tag::TIMESTAMP => {
             let precision = take_u8(cur)?;
             if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            if precision == u8::MAX { ColumnType::Timestamp } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Timestamp, precision) }
+            if precision == u8::MAX {
+                ColumnType::Timestamp
+            } else {
+                ColumnType::Temporal(crabka_pgtypes::TemporalType::Timestamp, precision)
+            }
         }
         type_tag::TIMESTAMPTZ => {
             let precision = take_u8(cur)?;
             if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            if precision == u8::MAX { ColumnType::Timestamptz } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Timestamptz, precision) }
+            if precision == u8::MAX {
+                ColumnType::Timestamptz
+            } else {
+                ColumnType::Temporal(crabka_pgtypes::TemporalType::Timestamptz, precision)
+            }
         }
         type_tag::INTERVAL => {
             let precision = take_u8(cur)?;
             if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
-            if precision == u8::MAX { ColumnType::Interval } else { ColumnType::Temporal(crabka_pgtypes::TemporalType::Interval, precision) }
+            if precision == u8::MAX {
+                ColumnType::Interval
+            } else {
+                ColumnType::Temporal(crabka_pgtypes::TemporalType::Interval, precision)
+            }
         }
         type_tag::BYTEA => ColumnType::Bytea,
         type_tag::UUID => ColumnType::Uuid,
@@ -615,7 +635,7 @@ fn read_elem_type_with(
     let Some(code) = cur.first().copied() else {
         return Err(KvError::CorruptRow("unknown array element type encoding".into()).into());
     };
-    if !matches!(code, 18 | 19) {
+    if !matches!(code, 18 | 19 | 25 | 26) {
         return crabka_pgtypes::ElemType::read_code(cur).ok_or_else(|| {
             KvError::CorruptRow("unknown array element type encoding".into()).into()
         });
@@ -629,8 +649,12 @@ fn read_elem_type_with(
     );
     let ty = if code == 18 {
         ColumnType::builtin_range(oid).or_else(|| resolve_user_type(oid))
-    } else {
+    } else if code == 19 {
         ColumnType::builtin_multirange(oid).or_else(|| resolve_user_type(oid))
+    } else if code == 25 && oid == crabka_pgtypes::oids::RECORD {
+        Some(ColumnType::Record(None))
+    } else {
+        resolve_user_type(oid)
     }
     .ok_or(UserTypeDecodeError::UnresolvedUserType(oid))?;
     match (code, ty) {
@@ -638,6 +662,10 @@ fn read_elem_type_with(
         (19, ColumnType::Multirange(multirange)) => {
             Ok(crabka_pgtypes::ElemType::Multirange(multirange))
         }
+        (25, ColumnType::Record(record)) => Ok(crabka_pgtypes::ElemType::Record(record)),
+        (26, ColumnType::Enum(user)) => Ok(crabka_pgtypes::ElemType::User(user)),
+        (26, ColumnType::Domain(domain)) => Ok(crabka_pgtypes::ElemType::User(domain.as_ref())),
+        (26, ColumnType::Base(base)) => Ok(crabka_pgtypes::ElemType::User(base.as_ref())),
         _ => Err(
             KvError::CorruptRow(format!("array element oid {oid} has the wrong type kind")).into(),
         ),
@@ -705,6 +733,10 @@ fn write_default(out: &mut Vec<u8>, default: Option<&ColumnDefault>) {
         ColumnDefault::NextVal(sequence) => {
             out.push(2);
             write_str(out, sequence);
+        }
+        ColumnDefault::Expression(source) => {
+            out.push(3);
+            write_str(out, source);
         }
     }
 }
@@ -861,6 +893,7 @@ fn read_default(cur: &mut &[u8]) -> Result<Option<ColumnDefault>, KvError> {
         0 => None,
         1 => Some(ColumnDefault::Value(read_default_value(cur)?)),
         2 => Some(ColumnDefault::NextVal(read_string(cur)?)),
+        3 => Some(ColumnDefault::Expression(read_string(cur)?)),
         flag => {
             return Err(KvError::CorruptRow(format!(
                 "unknown column default flag {flag}"
@@ -2045,6 +2078,17 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
                 write_str(&mut out, label);
             }
         }
+        UserTypeBody::EnumOrdered {
+            labels,
+            sort_orders,
+        } => {
+            out.push(USER_TYPE_ENUM_ORDERED);
+            write_count(&mut out, labels.len());
+            for (label, sort_order) in labels.iter().zip(sort_orders) {
+                write_str(&mut out, label);
+                out.extend_from_slice(&sort_order.to_be_bytes());
+            }
+        }
         UserTypeBody::Range(range) => {
             out.push(USER_TYPE_RANGE);
             write_type(&mut out, range.subtype);
@@ -2071,9 +2115,16 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
             }
         }
         UserTypeBody::Domain(domain) => {
-            out.push(USER_TYPE_DOMAIN);
+            out.push(USER_TYPE_DOMAIN_V3);
             write_type(&mut out, domain.base);
             out.push(u8::from(domain.not_null));
+            match &domain.not_null_name {
+                Some(name) => {
+                    out.push(1);
+                    write_str(&mut out, name);
+                }
+                None => out.push(0),
+            }
             match &domain.default {
                 Some(default) => {
                     out.push(1);
@@ -2085,6 +2136,7 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
             for check in &domain.checks {
                 write_str(&mut out, &check.name);
                 write_str(&mut out, &check.expr);
+                out.push(u8::from(check.validated));
             }
         }
         UserTypeBody::Shell => out.push(USER_TYPE_SHELL),
@@ -2139,7 +2191,8 @@ pub(crate) fn deserialize_user_type_with(
     let mut cur = bytes;
     let oid = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4 bytes fit u32"));
     let legacy_name = read_string(&mut cur)?;
-    let mut body = match take_u8(&mut cur)? {
+    let kind = take_u8(&mut cur)?;
+    let mut body = match kind {
         USER_TYPE_COMPOSITE => {
             let count = read_count(&mut cur)?;
             let mut fields = Vec::with_capacity(count.min(1024));
@@ -2160,6 +2213,21 @@ pub(crate) fn deserialize_user_type_with(
             }
             UserTypeBody::Enum(labels)
         }
+        USER_TYPE_ENUM_ORDERED => {
+            let count = read_count(&mut cur)?;
+            let mut labels = Vec::with_capacity(count.min(1024));
+            let mut sort_orders = Vec::with_capacity(count.min(1024));
+            for _ in 0..count {
+                labels.push(read_string(&mut cur)?);
+                sort_orders.push(u32::from_be_bytes(
+                    take_n(&mut cur, 4)?.try_into().expect("4 bytes fit u32"),
+                ));
+            }
+            UserTypeBody::EnumOrdered {
+                labels,
+                sort_orders,
+            }
+        }
         USER_TYPE_RANGE => {
             let subtype = read_type_with(&mut cur, resolve_user_type)?;
             let collation = match take_u8(&mut cur)? {
@@ -2178,9 +2246,23 @@ pub(crate) fn deserialize_user_type_with(
                 multirange_name,
             })
         }
-        USER_TYPE_DOMAIN => {
+        USER_TYPE_DOMAIN | USER_TYPE_DOMAIN_V2 | USER_TYPE_DOMAIN_V3 => {
             let base = read_type_with(&mut cur, resolve_user_type)?;
             let not_null = take_u8(&mut cur)? != 0;
+            let not_null_name = if kind == USER_TYPE_DOMAIN_V3 {
+                match take_u8(&mut cur)? {
+                    0 => None,
+                    1 => Some(read_string(&mut cur)?),
+                    value => {
+                        return Err(KvError::CorruptRow(format!(
+                            "unknown domain NOT NULL name tag {value}"
+                        ))
+                        .into());
+                    }
+                }
+            } else {
+                None
+            };
             let default = match take_u8(&mut cur)? {
                 0 => None,
                 _ => Some(read_string(&mut cur)?),
@@ -2192,11 +2274,13 @@ pub(crate) fn deserialize_user_type_with(
                 checks.push(DomainCheck {
                     name: check_name,
                     expr: read_string(&mut cur)?,
+                    validated: kind == USER_TYPE_DOMAIN || take_u8(&mut cur)? != 0,
                 });
             }
             UserTypeBody::Domain(DomainBody {
                 base,
                 not_null,
+                not_null_name,
                 default,
                 checks,
             })
@@ -2278,6 +2362,7 @@ pub(crate) fn deserialize_user_type_with(
     }
     Ok(UserType {
         oid,
+        array_oid: crabka_pgtypes::usertype::user_array_oid(oid),
         schema,
         name,
         body,
@@ -2311,7 +2396,13 @@ fn legacy_default_multirange_name(range_name: &str) -> String {
 
 const USER_TYPE_COMPOSITE: u8 = 1;
 const USER_TYPE_ENUM: u8 = 2;
+const USER_TYPE_ENUM_ORDERED: u8 = 9;
 const USER_TYPE_DOMAIN: u8 = 3;
+/// Domain records with a per-constraint validation state. The old tag remains
+/// readable and treats its checks as validated.
+const USER_TYPE_DOMAIN_V2: u8 = 7;
+/// Domain records with a named `NOT NULL` constraint.
+const USER_TYPE_DOMAIN_V3: u8 = 8;
 const USER_TYPE_RANGE: u8 = 4;
 /// `CREATE TYPE name;` — a shell, with no body at all.
 const USER_TYPE_SHELL: u8 = 5;
@@ -2833,6 +2924,10 @@ mod tests {
                 ColumnType::Array(elem),
             ));
         }
+        columns.push(Column::new(
+            "records",
+            ColumnType::Array(ElemType::Record(None)),
+        ));
         let ColumnType::Range(range) =
             ColumnType::builtin_range(crabka_pgtypes::oids::INT8RANGE).expect("int8range")
         else {
@@ -2858,6 +2953,130 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_schema_with_every_user_array_element_kind() {
+        let users = [
+            crabka_pgtypes::usertype::UserType {
+                oid: 301_120,
+                array_oid: crabka_pgtypes::usertype::user_array_oid(301_120),
+                schema: crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA.into(),
+                name: "serde_enum_array".into(),
+                body: crabka_pgtypes::usertype::UserTypeBody::Enum(vec!["ok".into()]),
+            },
+            crabka_pgtypes::usertype::UserType {
+                oid: 301_124,
+                array_oid: crabka_pgtypes::usertype::user_array_oid(301_124),
+                schema: crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA.into(),
+                name: "serde_domain_array".into(),
+                body: crabka_pgtypes::usertype::UserTypeBody::Domain(
+                    crabka_pgtypes::usertype::DomainBody {
+                        base: ColumnType::Int4,
+                        not_null: false,
+                        not_null_name: None,
+                        default: None,
+                        checks: Vec::new(),
+                    },
+                ),
+            },
+            crabka_pgtypes::usertype::UserType {
+                oid: 301_128,
+                array_oid: crabka_pgtypes::usertype::user_array_oid(301_128),
+                schema: crabka_pgtypes::usertype::USER_TYPE_DEFAULT_SCHEMA.into(),
+                name: "serde_base_array".into(),
+                body: crabka_pgtypes::usertype::UserTypeBody::Base(
+                    crabka_pgtypes::usertype::BaseBody {
+                        representation: ColumnType::Int4,
+                        input: "int4in".into(),
+                        output: "int4out".into(),
+                        category: "N".into(),
+                        preferred: false,
+                        delimiter: ",".into(),
+                    },
+                ),
+            },
+        ];
+        for user in &users {
+            crabka_pgtypes::usertype::replace(user);
+        }
+        let columns = users
+            .iter()
+            .map(|user| {
+                Column::new(
+                    &user.name,
+                    ColumnType::Array(crabka_pgtypes::ElemType::User(user.type_ref())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let bytes = serialize_schema(
+            22,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+
+        let (_, decoded, ..) = deserialize_schema(&bytes).expect("decode user array schema");
+        assert_eq!(decoded, columns);
+
+        let enum_type = users[0].type_ref();
+        let cursor = [25]
+            .into_iter()
+            .chain(enum_type.oid.to_be_bytes())
+            .collect::<Vec<_>>();
+        assert!(
+            read_elem_type_with(&mut cursor.as_slice(), &|oid| {
+                (oid == enum_type.oid).then_some(ColumnType::Enum(enum_type))
+            })
+            .is_err()
+        );
+        for user in &users {
+            crabka_pgtypes::usertype::unregister(&user.name);
+        }
+    }
+
+    #[test]
+    fn builtin_array_descriptors_roundtrip_through_schema_encoding() {
+        let columns = [
+            Column::new(
+                "point_values",
+                ColumnType::array_of(ColumnType::Point).expect("point[]"),
+            ),
+            Column::new(
+                "bit_values",
+                ColumnType::array_of(ColumnType::Bit(Some(3))).expect("bit(3)[]"),
+            ),
+            Column::new(
+                "role_values",
+                ColumnType::array_of(ColumnType::Regrole).expect("regrole[]"),
+            ),
+            Column::new(
+                "multirange_values",
+                ColumnType::array_of(
+                    ColumnType::builtin_multirange(crabka_pgtypes::oids::INT4MULTIRANGE)
+                        .expect("int4multirange"),
+                )
+                .expect("int4multirange[]"),
+            ),
+        ];
+        let bytes = serialize_schema(
+            23,
+            &columns,
+            TableOptions::default(),
+            "postgres",
+            None,
+            None,
+            &[],
+        );
+        let (_, decoded, ..) = deserialize_schema(&bytes).expect("decode builtin array schema");
+        assert_eq!(decoded, columns);
+
+        let mut malformed = vec![27];
+        malformed.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(read_elem_type_with(&mut malformed.as_slice(), &|_| None).is_err());
+    }
+
+    #[test]
     fn unknown_array_element_code_is_a_corrupt_row() {
         use assert2::assert;
 
@@ -2877,7 +3096,9 @@ mod tests {
         // The element code is the byte after the ARRAY tag; corrupt it.
         let tag_at = bytes
             .iter()
-            .position(|b| *b == type_tag::ARRAY)
+            .enumerate()
+            .skip(1)
+            .find_map(|(index, byte)| (*byte == type_tag::ARRAY).then_some(index))
             .expect("array tag");
         bytes[tag_at + 1] = 200;
         assert!(deserialize_schema(&bytes).is_err());
@@ -3134,6 +3355,7 @@ mod tests {
     fn roundtrip_range_type_metadata() {
         let ty = UserType {
             oid: 300_000,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(300_000),
             schema: "catalog_types".into(),
             name: "textrange".into(),
             body: UserTypeBody::Range(RangeBody {
@@ -3147,9 +3369,32 @@ mod tests {
     }
 
     #[test]
+    fn domain_constraint_validation_state_roundtrips() {
+        let ty = UserType {
+            oid: 300_004,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(300_004),
+            schema: "catalog_types".into(),
+            name: "unvalidated_domain".into(),
+            body: UserTypeBody::Domain(DomainBody {
+                base: ColumnType::Int4,
+                not_null: false,
+                not_null_name: None,
+                default: None,
+                checks: vec![DomainCheck {
+                    name: "unvalidated_check".into(),
+                    expr: "VALUE < 0".into(),
+                    validated: false,
+                }],
+            }),
+        };
+        assert_eq!(deserialize_user_type(&serialize_user_type(&ty)), Ok(ty));
+    }
+
+    #[test]
     fn user_type_identity_roundtrips_dotted_identifiers() {
         let ty = UserType {
             oid: 300_004,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(300_004),
             schema: "schema.with.dot".into(),
             name: "type.with.dot".into(),
             body: UserTypeBody::Composite(Vec::new()),
@@ -3660,7 +3905,7 @@ mod tests {
     /// metadata moved it to `11`, and every other value is refused rather than
     /// decoded on a guess.
     #[test]
-    fn the_schema_version_byte_is_thirteen_and_no_other_value_decodes() {
+    fn the_schema_version_byte_is_current_and_no_other_value_decodes() {
         use assert2::assert;
 
         let columns = vec![Column::new("x", ColumnType::Int4)];
@@ -3676,12 +3921,12 @@ mod tests {
             }),
             &[],
         );
-        assert!(bytes[0] == 13);
+        assert!(bytes[0] == SCHEMA_VERSION);
 
         for version in u8::MIN..=u8::MAX {
             let mut written = bytes.clone();
             written[0] = version;
-            assert!(deserialize_schema(&written).is_ok() == (version == 13));
+            assert!(deserialize_schema(&written).is_ok() == (version == SCHEMA_VERSION));
         }
     }
 

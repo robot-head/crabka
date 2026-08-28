@@ -27,6 +27,66 @@ pub use self::{
     tzdb::zone_by_name,
 };
 
+/// PostgreSQL's finite `date` epoch, expressed as a Julian day number.
+///
+/// Keeping calendar arithmetic in this integer domain is what lets the type
+/// reach PostgreSQL's 5,874,897 AD upper bound; `jiff::civil::Date` stops at
+/// year 9,999 and remains only the timezone bridge.
+const POSTGRES_EPOCH_JULIAN_DAY: i64 = 2_451_545; // 2000-01-01
+
+/// Convert a proleptic-Gregorian astronomical date to its Julian day number.
+///
+/// Year zero is 1 BC, matching PostgreSQL's internal convention.
+fn gregorian_to_julian_day(year: i32, month: i32, day: i32) -> i64 {
+    let a = (14 - month) / 12;
+    let year = i64::from(year) + 4_800 - i64::from(a);
+    let month = i64::from(month) + 12 * i64::from(a) - 3;
+    i64::from(day) + (153 * month + 2) / 5 + 365 * year + year.div_euclid(4) - year.div_euclid(100)
+        + year.div_euclid(400)
+        - 32_045
+}
+
+/// Invert [`gregorian_to_julian_day`] using the same proleptic-Gregorian
+/// calendar PostgreSQL uses for finite dates.
+fn julian_day_to_gregorian(julian_day: i64) -> (i32, i32, i32) {
+    let a = julian_day + 32_044;
+    let b = (4 * a + 3) / 146_097;
+    let c = a - (146_097 * b) / 4;
+    let d = (4 * c + 3) / 1_461;
+    let e = c - (1_461 * d) / 4;
+    let month_index = (5 * e + 2) / 153;
+    let day = e - (153 * month_index + 2) / 5 + 1;
+    let month = month_index + 3 - 12 * (month_index / 10);
+    let year = 100 * b + d - 4_800 + month_index / 10;
+    (
+        i32::try_from(year).expect("PostgreSQL date year fits i32"),
+        i32::try_from(month).expect("Gregorian month fits i32"),
+        i32::try_from(day).expect("Gregorian day fits i32"),
+    )
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    use super::{POSTGRES_EPOCH_JULIAN_DAY, gregorian_to_julian_day, julian_day_to_gregorian};
+
+    #[test]
+    fn julian_calendar_round_trips_postgres_date_boundaries() {
+        for date in [
+            (-4_713, 11, 24), // 4714-11-24 BC
+            (0, 1, 1),        // 1 BC
+            (2_000, 1, 1),
+            (5_874_897, 12, 31),
+        ] {
+            let day = gregorian_to_julian_day(date.0, date.1, date.2);
+            assert_eq!(julian_day_to_gregorian(day), date);
+        }
+        assert_eq!(
+            gregorian_to_julian_day(2_000, 1, 1),
+            POSTGRES_EPOCH_JULIAN_DAY
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Non-finite values. `date`, `timestamp`, `timestamptz` and `interval` each have
 // a `+infinity` and a `-infinity` that sort outside every finite value and are
@@ -65,10 +125,6 @@ pub enum PgDate {
 
 impl PgDate {
     /// The civil date, or `None` for a non-finite value.
-    ///
-    /// Call this only where the calendar fields are necessary. The arithmetic
-    /// and formatting helpers in this module take a whole [`PgDate`] and carry
-    /// the non-finite values themselves.
     #[must_use]
     pub fn finite(self) -> Option<Date> {
         match self {
@@ -876,10 +932,11 @@ fn round_typmod_micros(micros: i64, precision: Option<u8>) -> Option<i64> {
 
 /// Round a `time(p)` value to its declared fractional-second precision.
 pub fn apply_time_typmod(value: PgTime, precision: Option<u8>) -> Result<PgTime, TypeError> {
-    let micros = round_typmod_micros(value.micros_of_day(), precision)
-        .ok_or_else(|| TypeError::DatetimeFieldOverflow {
+    let micros = round_typmod_micros(value.micros_of_day(), precision).ok_or_else(|| {
+        TypeError::DatetimeFieldOverflow {
             value: time_to_text(value),
-        })?;
+        }
+    })?;
     PgTime::from_micros_of_day(micros).ok_or_else(|| TypeError::DatetimeFieldOverflow {
         value: time_to_text(value),
     })
@@ -894,32 +951,43 @@ pub fn apply_timetz_typmod(value: TimeTz, precision: Option<u8>) -> Result<TimeT
 }
 
 /// Round a `timestamp(p)` value about PostgreSQL's 2000-01-01 epoch.
-pub fn apply_timestamp_typmod(value: DateTime, precision: Option<u8>) -> Result<DateTime, TypeError> {
+pub fn apply_timestamp_typmod(
+    value: DateTime,
+    precision: Option<u8>,
+) -> Result<DateTime, TypeError> {
     if timestamp_is_infinite(value) {
         return Ok(value);
     }
     let micros = i64::from_be_bytes(timestamp_to_binary(value));
-    let rounded = round_typmod_micros(micros, precision).ok_or_else(|| TypeError::DatetimeFieldOverflow {
-        value: timestamp_to_text(value),
-    })?;
+    let rounded =
+        round_typmod_micros(micros, precision).ok_or_else(|| TypeError::DatetimeFieldOverflow {
+            value: timestamp_to_text(value),
+        })?;
     timestamp_from_binary(&rounded.to_be_bytes())
 }
 
 /// Round a `timestamptz(p)` value about PostgreSQL's 2000-01-01 epoch.
-pub fn apply_timestamptz_typmod(value: Timestamp, precision: Option<u8>) -> Result<Timestamp, TypeError> {
+pub fn apply_timestamptz_typmod(
+    value: Timestamp,
+    precision: Option<u8>,
+) -> Result<Timestamp, TypeError> {
     if timestamptz_is_infinite(value) {
         return Ok(value);
     }
     let micros = i64::from_be_bytes(timestamptz_to_binary(value));
-    let rounded = round_typmod_micros(micros, precision).ok_or_else(|| TypeError::DatetimeFieldOverflow {
-        value: timestamptz_to_text(value, &TimeZone::UTC),
-    })?;
+    let rounded =
+        round_typmod_micros(micros, precision).ok_or_else(|| TypeError::DatetimeFieldOverflow {
+            value: timestamptz_to_text(value, &TimeZone::UTC),
+        })?;
     timestamptz_from_binary(&rounded.to_be_bytes())
 }
 
 /// Round the microsecond field of `interval(p)`. Field masks are applied while
 /// parsing interval literals; a plain type modifier always has the full range.
-pub fn apply_interval_typmod(value: Interval, precision: Option<u8>) -> Result<Interval, TypeError> {
+pub fn apply_interval_typmod(
+    value: Interval,
+    precision: Option<u8>,
+) -> Result<Interval, TypeError> {
     if value.is_infinite() {
         return Ok(value);
     }
@@ -1661,9 +1729,7 @@ pub fn parse_timetz_in_at(
             None => zone.to_fixed_offset().map_err(|_| syntax())?,
         },
         None => {
-            let date = parts
-                .date
-                .unwrap_or_else(|| tz.to_datetime(now).date());
+            let date = parts.date.unwrap_or_else(|| tz.to_datetime(now).date());
             zone_offset_for(instant_on(date), tz)
         }
     };
@@ -4446,6 +4512,77 @@ impl Default for ParsedDateTime {
     }
 }
 
+/// The calendar and clock fields a date/time template supplies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TemplateFields {
+    /// The template supplies one or more calendar fields.
+    pub has_date: bool,
+    /// The template supplies one or more clock fields.
+    pub has_time: bool,
+    /// The `FFn` precision requested by the template, when present.
+    pub fractional_precision: Option<u8>,
+}
+
+/// Identify which parts of a value [`parse_by_template`] will read.
+pub fn template_fields(template: &str) -> TemplateFields {
+    let mut fields = TemplateFields {
+        has_date: false,
+        has_time: false,
+        fractional_precision: None,
+    };
+    for node in tokenize_template(template) {
+        let Node::Action { key, .. } = node else {
+            continue;
+        };
+        fields.has_time |= matches!(
+            key,
+            Key::MeridiemDotted
+                | Key::Meridiem
+                | Key::Hh12
+                | Key::Hh24
+                | Key::Mi
+                | Key::Ss
+                | Key::Ssss
+                | Key::Ms
+                | Key::Us
+                | Key::Ff(_)
+        );
+        fields.has_date |= matches!(
+            key,
+            Key::EraDotted
+                | Key::Era
+                | Key::MonthName { .. }
+                | Key::Rm
+                | Key::DayName { .. }
+                | Key::Mm
+                | Key::Ddd
+                | Key::Iddd
+                | Key::Dd
+                | Key::D
+                | Key::Id
+                | Key::Ww
+                | Key::Iw
+                | Key::W
+                | Key::Q
+                | Key::J
+                | Key::Cc
+                | Key::YComma
+                | Key::Yyyy
+                | Key::Iyyy
+                | Key::Yyy
+                | Key::Iyy
+                | Key::Yy
+                | Key::Iy
+                | Key::Y
+                | Key::I
+        );
+        if let Key::Ff(precision) = key {
+            fields.fractional_precision = Some(precision);
+        }
+    }
+    fields
+}
+
 // ---------------------------------------------------------------------------
 // SP38: `to_timestamp`/`to_date` template parsing.
 //
@@ -4903,11 +5040,7 @@ fn template_error(message: String) -> TypeError {
 }
 
 /// A template failure with PostgreSQL's optional diagnostics.
-fn template_error_with(
-    message: String,
-    detail: Option<String>,
-    hint: Option<String>,
-) -> TypeError {
+fn template_error_with(message: String, detail: Option<String>, hint: Option<String>) -> TypeError {
     TypeError::InvalidDatetimeTemplate {
         message,
         detail,
@@ -4922,11 +5055,11 @@ fn template_error_with(
 /// not an oversight to correct here.
 fn set_int(dest: &mut i32, value: i32, name: &str) -> Result<(), TypeError> {
     if *dest != 0 && *dest != value {
-            return Err(template_error_with(
-                format!("conflicting values for \"{name}\" field in formatting string"),
-                Some("This value contradicts a previous setting for the same field type.".into()),
-                None,
-            ));
+        return Err(template_error_with(
+            format!("conflicting values for \"{name}\" field in formatting string"),
+            Some("This value contradicts a previous setting for the same field type.".into()),
+            None,
+        ));
     }
     *dest = value;
     Ok(())
@@ -5073,8 +5206,13 @@ fn parse_int(
         if used < len {
             return Err(template_error_with(
                 format!("source string too short for \"{name}\" formatting field"),
-                Some(format!("Field requires {len} characters, but only {used} remain.")),
-                Some("If your source string is not fixed-width, try using the \"FM\" modifier.".into()),
+                Some(format!(
+                    "Field requires {len} characters, but only {used} remain."
+                )),
+                Some(
+                    "If your source string is not fixed-width, try using the \"FM\" modifier."
+                        .into(),
+                ),
             ));
         }
         let limit = (input.pos + len).min(input.chars.len());
@@ -5086,8 +5224,13 @@ fn parse_int(
         if consumed > 0 && consumed < len {
             return Err(template_error_with(
                 format!("invalid value \"{}\" for \"{name}\"", copy()),
-                Some(format!("Field requires {len} characters, but only {consumed} could be parsed.")),
-                Some("If your source string is not fixed-width, try using the \"FM\" modifier.".into()),
+                Some(format!(
+                    "Field requires {len} characters, but only {consumed} could be parsed."
+                )),
+                Some(
+                    "If your source string is not fixed-width, try using the \"FM\" modifier."
+                        .into(),
+                ),
             ));
         }
         input.pos = end;
@@ -5241,9 +5384,24 @@ impl<'a> Scanner<'a> {
     /// Run the scan. It stops when the input runs out, leaving any remaining
     /// template nodes unconsumed — `PostgreSQL` does the same, which is why a
     /// template may name more fields than the input supplies.
-    fn run(mut self) -> Result<TmFromChar, TypeError> {
+    fn run(self) -> Result<TmFromChar, TypeError> {
+        self.run_inner(false)
+    }
+
+    /// JSONPath's `.datetime(template)` accepts neither a partial format nor a
+    /// mismatched quoted literal, unlike `to_timestamp`'s permissive scan.
+    fn run_exact(self) -> Result<TmFromChar, TypeError> {
+        self.run_inner(true)
+    }
+
+    fn run_inner(mut self, exact: bool) -> Result<TmFromChar, TypeError> {
         for idx in 0..self.nodes.len() {
             if self.input.at_end() {
+                if exact && self.nodes[idx].key() != Some(Key::Fx) {
+                    return Err(template_error(
+                        "input string is too short for datetime format".to_string(),
+                    ));
+                }
                 break;
             }
             let node = &self.nodes[idx];
@@ -5255,7 +5413,7 @@ impl<'a> Scanner<'a> {
             }
             match node {
                 Node::Space | Node::Separator => self.literal_separator(),
-                Node::Char(_) => self.literal_char(),
+                Node::Char(c) => self.literal_char(*c, exact)?,
                 Node::Action {
                     key,
                     name,
@@ -5276,6 +5434,11 @@ impl<'a> Scanner<'a> {
                     }
                 }
             }
+        }
+        if exact && !self.input.at_end() {
+            return Err(template_error(
+                "trailing characters remain in input string after datetime format".to_string(),
+            ));
         }
         Ok(self.out)
     }
@@ -5300,7 +5463,12 @@ impl<'a> Scanner<'a> {
 
     /// Any other literal character in the template. The input character it lines
     /// up against never has to match it.
-    fn literal_char(&mut self) {
+    fn literal_char(&mut self, expected: char, exact: bool) -> Result<(), TypeError> {
+        if exact && self.input.peek() != Some(expected) {
+            return Err(template_error(format!(
+                "unmatched format character \"{expected}\""
+            )));
+        }
         if !self.fx_mode && self.extra_skip > 0 {
             // Characters already skipped stand in for this literal, so the
             // cursor holds still — it may be sitting on a field.
@@ -5308,6 +5476,7 @@ impl<'a> Scanner<'a> {
         } else {
             self.input.pos += 1;
         }
+        Ok(())
     }
 
     /// Read one integer for `action`, at its nominal field width.
@@ -5651,6 +5820,16 @@ pub fn parse_by_template(template: &str, input: &str) -> Result<ParsedDateTime, 
     let nodes = tokenize_template(template);
     let ichars: Vec<char> = input.chars().collect();
     let tm = Scanner::new(&nodes, &ichars).run()?;
+    Assembly::new(tm, input).finish()
+}
+
+/// Parse a JSONPath `.datetime(template)` input. Unlike `to_timestamp`, a
+/// JSONPath template must consume the whole input and quoted literals match
+/// exactly.
+pub fn parse_by_template_exact(template: &str, input: &str) -> Result<ParsedDateTime, TypeError> {
+    let nodes = tokenize_template(template);
+    let ichars: Vec<char> = input.chars().collect();
+    let tm = Scanner::new(&nodes, &ichars).run_exact()?;
     Assembly::new(tm, input).finish()
 }
 
@@ -8369,16 +8548,23 @@ mod make_justify_tests {
     fn temporal_typmods_round_half_away_from_zero() {
         use super::{
             Interval, apply_interval_typmod, apply_time_typmod, apply_timestamp_typmod,
-            apply_timestamptz_typmod, parse_time, parse_timestamp, parse_timestamptz,
-            time_to_text, timestamp_to_text, timestamptz_to_text,
+            apply_timestamptz_typmod, parse_time, parse_timestamp, parse_timestamptz, time_to_text,
+            timestamp_to_text, timestamptz_to_text,
         };
         use jiff::tz::TimeZone;
 
         let time = parse_time("12:34:56.500001").expect("time");
-        assert_eq!(time_to_text(apply_time_typmod(time, Some(0)).expect("round")), "12:34:57");
+        assert_eq!(
+            time_to_text(apply_time_typmod(time, Some(0)).expect("round")),
+            "12:34:57"
+        );
         assert_eq!(
             time_to_text(apply_time_typmod(time, Some(2)).expect("round")),
             "12:34:56.5"
+        );
+        assert_eq!(
+            time_to_text(apply_time_typmod(time, Some(6)).expect("round")),
+            "12:34:56.500001"
         );
 
         let timestamp = parse_timestamp("1999-12-31 23:59:59.500000").expect("timestamp");
@@ -8387,8 +8573,8 @@ mod make_justify_tests {
             "1999-12-31 23:59:59"
         );
 
-        let timestamptz = parse_timestamptz("2000-01-01 00:00:00.500000", &TimeZone::UTC)
-            .expect("timestamptz");
+        let timestamptz =
+            parse_timestamptz("2000-01-01 00:00:00.500000", &TimeZone::UTC).expect("timestamptz");
         assert_eq!(
             timestamptz_to_text(
                 apply_timestamptz_typmod(timestamptz, Some(0)).expect("round"),

@@ -78,6 +78,18 @@ struct CommandProbe {
 
 const COMMAND_PROBES: &[CommandProbe] = &[
     CommandProbe {
+        command: "ALTER LARGE OBJECT",
+        sql: "ALTER LARGE OBJECT 4242 OWNER TO postgres",
+        expected_statement: "AlterLargeObject",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER DEFAULT PRIVILEGES",
+        sql: "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC",
+        expected_statement: "AlterDefaultTablePrivileges",
+        refusal: None,
+    },
+    CommandProbe {
         command: "ALTER DATABASE",
         sql: "ALTER DATABASE postgres RENAME TO other",
         expected_statement: "CompatibilityRefusal",
@@ -129,6 +141,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         command: "CREATE TABLE",
         sql: "CREATE TABLE parser_commands_probe (id int4)",
         expected_statement: "CreateTable",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE ACCESS METHOD",
+        sql: "CREATE ACCESS METHOD parser_commands_am TYPE TABLE HANDLER heap_tableam_handler",
+        expected_statement: "CreateAccessMethod",
         refusal: None,
     },
     CommandProbe {
@@ -203,6 +221,24 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         command: "DROP TRIGGER",
         sql: "DROP TRIGGER parser_commands_trigger ON parser_commands_probe",
         expected_statement: "DropTrigger",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE RULE",
+        sql: "CREATE RULE parser_commands_rule AS ON INSERT TO parser_commands_probe DO INSTEAD NOTHING",
+        expected_statement: "CreateRule",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER RULE",
+        sql: "ALTER RULE parser_commands_rule ON parser_commands_probe RENAME TO parser_commands_rule_renamed",
+        expected_statement: "AlterRule",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP RULE",
+        sql: "DROP RULE parser_commands_rule ON parser_commands_probe",
+        expected_statement: "DropRule",
         refusal: None,
     },
     CommandProbe {
@@ -1077,6 +1113,9 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::CompatibilityRefusal(_) => "CompatibilityRefusal",
         Statement::CreateTable { .. } => "CreateTable",
         Statement::CreateView { .. } => "CreateView",
+        Statement::CreateRule(_) => "CreateRule",
+        Statement::AlterRule { .. } => "AlterRule",
+        Statement::DropRule { .. } => "DropRule",
         Statement::CreateTrigger(_) => "CreateTrigger",
         Statement::AlterTrigger { .. } => "AlterTrigger",
         Statement::DropTrigger { .. } => "DropTrigger",
@@ -1121,6 +1160,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::CreateType { .. } => "CreateType",
         Statement::CreateCast { .. } => "CreateCast",
         Statement::DropCast { .. } => "DropCast",
+        Statement::CreateAccessMethod { .. } => "CreateAccessMethod",
         Statement::AlterType { .. } => "AlterType",
         Statement::DropType { .. } => "DropType",
         Statement::CreateDomain { .. } => "CreateDomain",
@@ -1223,11 +1263,15 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::Reset { .. } => "Reset",
         Statement::CreateRole { .. } => "CreateRole",
         Statement::AlterRole { .. } => "AlterRole",
+        Statement::AlterLargeObject { .. } => "AlterLargeObject",
         Statement::DropRole { .. } => "DropRole",
         Statement::GrantTablePrivileges { .. } => "GrantTablePrivileges",
+        Statement::GrantLargeObjectPrivileges { .. } => "GrantLargeObjectPrivileges",
         Statement::GrantSchemaPrivileges { .. } => "GrantSchemaPrivileges",
         Statement::RevokeTablePrivileges { .. } => "RevokeTablePrivileges",
+        Statement::RevokeLargeObjectPrivileges { .. } => "RevokeLargeObjectPrivileges",
         Statement::RevokeSchemaPrivileges { .. } => "RevokeSchemaPrivileges",
+        Statement::AlterDefaultTablePrivileges { .. } => "AlterDefaultTablePrivileges",
         Statement::SetRole { .. } => "SetRole",
         Statement::CreateFdw { .. } => "CreateFdw",
         Statement::DropFdw { .. } => "DropFdw",
@@ -1273,7 +1317,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 172,
+            report.commands.len() == 173,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1331,7 +1375,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(172));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(173));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

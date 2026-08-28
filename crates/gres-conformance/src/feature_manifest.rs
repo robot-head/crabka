@@ -356,10 +356,10 @@ pub const FEATURE_PROBES: &[FeatureProbe] = &[
         item: "Recursive CTE SEARCH / CYCLE",
         sql: "WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3) \
               SEARCH DEPTH FIRST BY n SET ordercol SELECT n FROM t",
-        behavior: FeatureBehavior::SessionRefuse,
+        behavior: FeatureBehavior::SessionExecute,
         setup: NONE,
-        sqlstate: Some("0A000"),
-        message_fragment: Some("SEARCH and CYCLE"),
+        sqlstate: None,
+        message_fragment: None,
     },
     FeatureProbe {
         item: "Sequence functions",

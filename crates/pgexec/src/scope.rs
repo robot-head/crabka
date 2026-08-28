@@ -5,6 +5,8 @@
 //! replaces the single-`crabka_pgcatalog::Table` column lookup that every prior
 //! slice used.
 
+use std::collections::BTreeMap;
+
 use crabka_pgcatalog::{Table, TableId};
 use crabka_pgparser::ast::{
     ArraySubscript, Assignment, AssignmentValue, Cte, CteBody, DistinctClause, Expr, FrameBound,
@@ -13,7 +15,6 @@ use crabka_pgparser::ast::{
     SetExpr, Statement, TableExpr, WindowCall, WindowRef, WindowSpec, WithClause,
 };
 use crabka_pgtypes::{ColumnType, Datum, RecordValue, usertype::UserTypeRef};
-use std::collections::BTreeMap;
 
 use crate::error::ExecError;
 
@@ -134,14 +135,8 @@ pub(crate) fn reject_system_column_names<'a>(
 /// one-based ordinal in the projection for a relation the engine synthesises,
 /// which has no other storage to name.
 ///
-/// A rowid is the key every version of one row hangs under, so it outlives an
-/// `UPDATE`: the new version is written beside the old one under the same key,
-/// and the row keeps its `ctid`. `PostgreSQL`'s moves, because there the update
-/// writes a new tuple somewhere else in the heap. `CLUSTER` reassigns rowids in
-/// index order, which is the one event that moves a `ctid` in both. Nothing may
-/// depend on either behaviour — `PostgreSQL` documents a `ctid` as valid only
-/// until the row is updated or the table is rewritten, so a statement that
-/// survives one of those was already outside the contract.
+/// Every update writes a new rowid at the heap tail, so its `ctid` moves just as
+/// it does in PostgreSQL. `CLUSTER` also reassigns rowids in index order.
 ///
 /// The identity is laid out over the two fields a `tid` has as though it were a
 /// heap: consecutive identities fill one block, and the next one starts the
@@ -163,6 +158,11 @@ pub(crate) fn row_ctid(identity: u64) -> Datum {
     })
 }
 
+/// Render Gres's 64-bit transaction sequence as PostgreSQL's wrapping `xid`.
+pub(crate) fn row_xmin(xid: u64) -> Datum {
+    Datum::Xid(u32::try_from(xid).unwrap_or(xid as u32))
+}
+
 /// The lowest storage identity [`row_ctid`] places in `block`.
 ///
 /// The inverse of [`row_ctid`]'s block arithmetic, for the one question asked
@@ -171,6 +171,14 @@ pub(crate) fn row_ctid(identity: u64) -> Datum {
 /// [`crate::tid_fn`] answers it by looking for a row at or above this identity.
 pub(crate) fn first_identity_in_block(block: u32) -> u64 {
     u64::from(block) * ROWS_PER_BLOCK + 1
+}
+
+/// The physical identity named by a `ctid` emitted by [`row_ctid`].
+pub(crate) fn ctid_identity(tid: crabka_pgtypes::Tid) -> Option<u64> {
+    let offset = u64::from(tid.offset);
+    (1..=ROWS_PER_BLOCK)
+        .contains(&offset)
+        .then(|| first_identity_in_block(tid.block).saturating_add(offset - 1))
 }
 
 /// How many rows one block of [`row_ctid`]'s address space holds.
@@ -309,6 +317,10 @@ pub(crate) struct StatementRefs {
     columns: std::collections::HashSet<String>,
     wildcard: bool,
     tableoid: bool,
+    cmax: bool,
+    xmax: bool,
+    cmin: bool,
+    xmin: bool,
     ctid: bool,
 }
 
@@ -392,6 +404,23 @@ pub(crate) fn wants_ctid(refs: Option<&StatementRefs>) -> bool {
     refs.is_some_and(StatementRefs::reads_ctid)
 }
 
+/// Must a scan carry each visible tuple's creating transaction ID?
+pub(crate) fn wants_xmin(refs: Option<&StatementRefs>) -> bool {
+    refs.is_some_and(StatementRefs::reads_xmin)
+}
+
+pub(crate) fn wants_xmax(refs: Option<&StatementRefs>) -> bool {
+    refs.is_some_and(StatementRefs::reads_xmax)
+}
+
+pub(crate) fn wants_cmin(refs: Option<&StatementRefs>) -> bool {
+    refs.is_some_and(StatementRefs::reads_cmin)
+}
+
+pub(crate) fn wants_cmax(refs: Option<&StatementRefs>) -> bool {
+    refs.is_some_and(StatementRefs::reads_cmax)
+}
+
 /// Must a read path that builds no system column at all decline the statement?
 ///
 /// The fast paths resolve a select list against a bare [`Scope::single`], which
@@ -413,6 +442,10 @@ pub(crate) fn wants_system_column(refs: Option<&StatementRefs>) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SystemColumns {
     pub(crate) tableoid: bool,
+    pub(crate) cmax: bool,
+    pub(crate) xmax: bool,
+    pub(crate) cmin: bool,
+    pub(crate) xmin: bool,
     pub(crate) ctid: bool,
 }
 
@@ -436,6 +469,18 @@ impl SystemColumns {
     pub(crate) fn of(refs: Option<&StatementRefs>, table: &Table) -> Self {
         Self {
             tableoid: wants_tableoid(refs) && table.column_index(TABLEOID_COLUMN).is_none(),
+            cmax: wants_cmax(refs)
+                && table.column_index("cmax").is_none()
+                && table.foreign.is_none(),
+            xmax: wants_xmax(refs)
+                && table.column_index("xmax").is_none()
+                && table.foreign.is_none(),
+            cmin: wants_cmin(refs)
+                && table.column_index("cmin").is_none()
+                && table.foreign.is_none(),
+            xmin: wants_xmin(refs)
+                && table.column_index("xmin").is_none()
+                && table.foreign.is_none(),
             ctid: wants_ctid(refs)
                 && table.column_index(CTID_COLUMN).is_none()
                 && table.foreign.is_none(),
@@ -446,6 +491,18 @@ impl SystemColumns {
     pub(crate) fn extend_scope(self, scope: &mut Scope, qualifier: &str) {
         if self.tableoid {
             scope.push_tableoid(qualifier);
+        }
+        if self.cmax {
+            scope.push_cmax(qualifier);
+        }
+        if self.xmax {
+            scope.push_xmax(qualifier);
+        }
+        if self.cmin {
+            scope.push_cmin(qualifier);
+        }
+        if self.xmin {
+            scope.push_xmin(qualifier);
         }
         if self.ctid {
             scope.push_ctid(qualifier);
@@ -493,7 +550,12 @@ impl SystemStamp {
 
     /// How many columns this stamp adds to a scope, and to a row.
     pub(crate) fn width(&self) -> usize {
-        usize::from(self.columns.tableoid) + usize::from(self.columns.ctid)
+        usize::from(self.columns.tableoid)
+            + usize::from(self.columns.cmax)
+            + usize::from(self.columns.xmax)
+            + usize::from(self.columns.cmin)
+            + usize::from(self.columns.xmin)
+            + usize::from(self.columns.ctid)
     }
 
     /// Append the values to `row`, in the order [`Self::extend_scope`] appends
@@ -504,9 +566,29 @@ impl SystemStamp {
     /// no identity to give may pass any value as long as it also asked for no
     /// `ctid` — which [`SystemColumns::of`] guarantees for a relation that
     /// stores no rows, because such a relation never reaches it.
-    pub(crate) fn extend_row(&self, row: &mut Vec<Datum>, identity: u64) {
+    pub(crate) fn extend_row(
+        &self,
+        row: &mut Vec<Datum>,
+        identity: u64,
+        xmin: u64,
+        xmax: u64,
+        cmin: u32,
+        cmax: u32,
+    ) {
         if let Some(oid) = &self.oid {
             row.push(oid.clone());
+        }
+        if self.columns.cmax {
+            row.push(Datum::Cid(cmax));
+        }
+        if self.columns.xmax {
+            row.push(row_xmin(xmax));
+        }
+        if self.columns.cmin {
+            row.push(Datum::Cid(cmin));
+        }
+        if self.columns.xmin {
+            row.push(row_xmin(xmin));
         }
         if self.columns.ctid {
             row.push(row_ctid(identity));
@@ -563,6 +645,10 @@ impl StatementRefs {
             columns: std::collections::HashSet::new(),
             wildcard: true,
             tableoid: true,
+            cmax: true,
+            xmax: true,
+            cmin: true,
+            xmin: true,
             ctid: true,
         }
     }
@@ -584,10 +670,27 @@ impl StatementRefs {
         self.ctid
     }
 
+    /// Does the statement spell the visible tuple's creating transaction ID?
+    pub(crate) const fn reads_xmin(&self) -> bool {
+        self.xmin
+    }
+
+    pub(crate) const fn reads_xmax(&self) -> bool {
+        self.xmax
+    }
+
+    pub(crate) const fn reads_cmin(&self) -> bool {
+        self.cmin
+    }
+
+    pub(crate) const fn reads_cmax(&self) -> bool {
+        self.cmax
+    }
+
     /// Does the statement spell either system column? See
     /// [`wants_system_column`], the one thing that asks.
     pub(crate) const fn reads_system_column(&self) -> bool {
-        self.tableoid || self.ctid
+        self.tableoid || self.cmax || self.xmax || self.cmin || self.xmin || self.ctid
     }
 
     /// Every DML statement is destructured without `..`, for the reason
@@ -598,7 +701,9 @@ impl StatementRefs {
         match stmt {
             Statement::Insert {
                 table: _,
+                alias: _,
                 columns: _,
+                indirections,
                 source,
                 with,
                 on_conflict,
@@ -612,6 +717,28 @@ impl StatementRefs {
                     }
                     InsertSource::Query(query) => self.add_query(query),
                     InsertSource::DefaultValues => {}
+                }
+                if let Some(chains) = indirections {
+                    for chain in chains {
+                        for indirection in chain {
+                            match indirection {
+                                crabka_pgparser::ast::TargetIndirection::Field(_) => {}
+                                crabka_pgparser::ast::TargetIndirection::Subscript(subscript) => {
+                                    match subscript {
+                                        ArraySubscript::Index(expr) => self.add_expr(expr),
+                                        ArraySubscript::Slice { lower, upper } => {
+                                            if let Some(expr) = lower {
+                                                self.add_expr(expr);
+                                            }
+                                            if let Some(expr) = upper {
+                                                self.add_expr(expr);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 self.add_with(with.as_ref());
                 if let Some(on_conflict) = on_conflict {
@@ -628,6 +755,7 @@ impl StatementRefs {
                 from,
                 filter,
                 returning,
+                ..
             } => {
                 self.add_with(with.as_ref());
                 for assignment in assignments {
@@ -649,6 +777,7 @@ impl StatementRefs {
                 using,
                 filter,
                 returning,
+                ..
             } => {
                 self.add_with(with.as_ref());
                 for item in using {
@@ -696,6 +825,7 @@ impl StatementRefs {
                         MergeAction::Insert {
                             columns: _,
                             values: Some(values),
+                            ..
                         } => {
                             for expr in values {
                                 self.add_expr(expr);
@@ -736,10 +866,13 @@ impl StatementRefs {
     fn add_assignment(&mut self, assignment: &Assignment) {
         let Assignment {
             targets: _,
-            subscripts,
+            indirections,
             value,
         } = assignment;
-        for subscript in subscripts {
+        for indirection in indirections {
+            let crabka_pgparser::ast::TargetIndirection::Subscript(subscript) = indirection else {
+                continue;
+            };
             match subscript {
                 ArraySubscript::Index(expr) => self.add_expr(expr),
                 ArraySubscript::Slice { lower, upper } => {
@@ -766,6 +899,7 @@ impl StatementRefs {
             OnConflictTarget::Columns {
                 columns: _,
                 index_predicate,
+                ..
             } => {
                 if let Some(expr) = index_predicate {
                     self.add_expr(expr);
@@ -971,12 +1105,17 @@ impl StatementRefs {
                 column_aliases: _,
             } => {
                 for call in functions {
-                    for arg in &call.args {
+                    for arg in call.arguments() {
                         self.add_expr(arg);
                     }
                 }
             }
             TableExpr::JsonTable(table) => {
+                for expr in table.exprs() {
+                    self.add_expr(expr);
+                }
+            }
+            TableExpr::XmlTable(table) => {
                 for expr in table.exprs() {
                     self.add_expr(expr);
                 }
@@ -1032,6 +1171,10 @@ impl StatementRefs {
             // Qualified or not: `a.tableoid` is the spelling an inheritance
             // query uses most, and it reaches the same hidden column.
             self.tableoid |= name == TABLEOID_COLUMN;
+            self.cmax |= name == "cmax";
+            self.xmax |= name == "xmax";
+            self.cmin |= name == "cmin";
+            self.xmin |= name == "xmin";
             self.ctid |= name == CTID_COLUMN;
         }
         for child in crate::exec::expr_children(expr) {
@@ -1191,6 +1334,23 @@ impl Scope {
     /// the `tid` literals a statement compares it against already parse as.
     pub fn push_ctid(&mut self, qualifier: &str) {
         self.push_system_column(qualifier, CTID_COLUMN, ColumnType::Tid);
+    }
+
+    /// Append the hidden `xmin` system column between `tableoid` and `ctid`.
+    pub fn push_xmin(&mut self, qualifier: &str) {
+        self.push_system_column(qualifier, "xmin", ColumnType::Xid);
+    }
+
+    pub fn push_xmax(&mut self, qualifier: &str) {
+        self.push_system_column(qualifier, "xmax", ColumnType::Xid);
+    }
+
+    pub fn push_cmin(&mut self, qualifier: &str) {
+        self.push_system_column(qualifier, "cmin", ColumnType::Cid);
+    }
+
+    pub fn push_cmax(&mut self, qualifier: &str) {
+        self.push_system_column(qualifier, "cmax", ColumnType::Cid);
     }
 
     fn push_system_column(&mut self, qualifier: &str, name: &str, ty: ColumnType) {
@@ -1862,11 +2022,15 @@ mod tests {
     }
 
     #[test]
-    fn ctid_goes_after_tableoid_and_is_a_system_column() {
+    fn xmin_goes_between_tableoid_and_ctid_and_is_a_system_column() {
         let t = tbl("t", &[("a", ColumnType::Int4)]);
         let mut s = Scope::single(&t, "t");
         SystemColumns {
             tableoid: true,
+            cmax: false,
+            xmax: false,
+            cmin: false,
+            xmin: true,
             ctid: true,
         }
         .extend_scope(&mut s, "t");
@@ -1881,6 +2045,12 @@ mod tests {
                 },
                 ColumnBinding {
                     qualifier: Some("t".to_string()),
+                    name: "xmin".to_string(),
+                    ty: ColumnType::Xid,
+                    exposure: Exposure::SystemColumn,
+                },
+                ColumnBinding {
+                    qualifier: Some("t".to_string()),
                     name: "ctid".to_string(),
                     ty: ColumnType::Tid,
                     exposure: Exposure::SystemColumn,
@@ -1891,10 +2061,10 @@ mod tests {
         };
         assert!(s == expected);
         // Reachable both ways, and hidden from every expansion of the relation.
-        assert!(s.resolve(None, "ctid") == Ok(2));
-        assert!(s.resolve(Some("t"), "ctid") == Ok(2));
+        assert!(s.resolve(None, "ctid") == Ok(3));
+        assert!(s.resolve(Some("t"), "ctid") == Ok(3));
         assert!(s.whole_row("t") == Some(vec![0]));
-        assert!(s.columns[2].is_join_input() == true);
+        assert!(s.columns[3].is_join_input() == true);
     }
 
     /// `PostgreSQL` refuses `CREATE TABLE t (ctid int)`; this engine accepts
@@ -1908,6 +2078,10 @@ mod tests {
                 tbl("plain", &[("a", ColumnType::Int4)]),
                 SystemColumns {
                     tableoid: true,
+                    cmax: true,
+                    xmax: true,
+                    cmin: true,
+                    xmin: true,
                     ctid: true,
                 },
             ),
@@ -1915,6 +2089,10 @@ mod tests {
                 tbl("shadowed", &[("ctid", ColumnType::Int4)]),
                 SystemColumns {
                     tableoid: true,
+                    cmax: true,
+                    xmax: true,
+                    cmin: true,
+                    xmin: true,
                     ctid: false,
                 },
             ),
@@ -1925,6 +2103,10 @@ mod tests {
                 ),
                 SystemColumns {
                     tableoid: false,
+                    cmax: true,
+                    xmax: true,
+                    cmin: true,
+                    xmin: true,
                     ctid: false,
                 },
             ),

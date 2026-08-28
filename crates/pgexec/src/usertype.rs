@@ -38,7 +38,13 @@ use crate::{
 ///
 /// Propagates catalog read errors.
 pub fn hydrate(kv: &dyn Kv) -> Result<(), ExecError> {
-    crabka_pgcatalog::hydrate_user_types(kv)?;
+    crate::catalog_rel::sync_relation_rowtypes(kv)?;
+    crabka_pgcatalog::hydrate_user_types_with(kv, &|oid| {
+        crate::catalog_rel::relation_rowtype_by_oid(kv, oid)
+            .ok()
+            .flatten()
+            .map(|rowtype| ColumnType::Record(Some(rowtype)))
+    })?;
     Ok(())
 }
 
@@ -89,6 +95,16 @@ pub fn create_type(
     register(kv, name, body, "CREATE TYPE")
 }
 
+/// Create the shell PostgreSQL makes for an unknown `CREATE FUNCTION` return
+/// type before it records the function that names the shell.
+pub(crate) fn create_routine_return_shell(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<Vec<WriteOp>, ExecError> {
+    let (_, ops) = register(kv, name, UserTypeBody::Shell, "CREATE FUNCTION")?;
+    Ok(ops)
+}
+
 /// `CREATE DOMAIN name [AS] base [constraint …]`.
 ///
 /// # Errors
@@ -101,14 +117,10 @@ pub fn create_domain(
     base: ColumnType,
     constraints: &[DomainConstraint],
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
-    if matches!(base, ColumnType::Record(_)) {
-        return Err(ExecError::Unsupported(
-            "domains over composite types are not supported".into(),
-        ));
-    }
     let mut body = DomainBody {
         base,
         not_null: false,
+        not_null_name: None,
         default: None,
         checks: Vec::new(),
     };
@@ -116,8 +128,19 @@ pub fn create_domain(
     for constraint in constraints {
         match constraint {
             DomainConstraint::Default(expr) => body.default = Some(expr.clone()),
-            DomainConstraint::NotNull => body.not_null = true,
-            DomainConstraint::Null => body.not_null = false,
+            DomainConstraint::NotNull { name } => {
+                if body.not_null {
+                    return Err(ExecError::InvalidObjectDefinition(
+                        "redundant NOT NULL constraint definition".into(),
+                    ));
+                }
+                body.not_null = true;
+                body.not_null_name = name.clone();
+            }
+            DomainConstraint::Null => {
+                body.not_null = false;
+                body.not_null_name = None;
+            }
             DomainConstraint::Check {
                 name: check_name,
                 text,
@@ -129,6 +152,7 @@ pub fn create_domain(
                 body.checks.push(DomainCheck {
                     name: check_name,
                     expr: text.clone(),
+                    validated: true,
                 });
             }
         }
@@ -502,7 +526,7 @@ fn composite_fields(fields: &[CompositeFieldDef]) -> Result<Vec<CompositeField>,
     Ok(out)
 }
 
-fn enum_labels(name: &str, labels: &[String]) -> Result<Vec<String>, ExecError> {
+fn enum_labels(_name: &str, labels: &[String]) -> Result<Vec<String>, ExecError> {
     let mut seen: Vec<&str> = Vec::with_capacity(labels.len());
     for label in labels {
         if seen.contains(&label.as_str()) {
@@ -510,20 +534,23 @@ fn enum_labels(name: &str, labels: &[String]) -> Result<Vec<String>, ExecError> 
                 "enum label \"{label}\" already exists"
             )));
         }
-        check_label_length(name, label)?;
+        check_label_length(label)?;
         seen.push(label);
     }
     Ok(labels.to_vec())
 }
 
 /// `PostgreSQL`'s `NAMEDATALEN - 1` limit on an enum label (22023).
-fn check_label_length(type_name: &str, label: &str) -> Result<(), ExecError> {
+fn check_label_length(label: &str) -> Result<(), ExecError> {
     const NAMEDATALEN: usize = 63;
     if label.len() > NAMEDATALEN {
-        return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
-            "22023",
-            format!("invalid enum label \"{label}\" for type {type_name}"),
-        )));
+        return Err(ExecError::Remote(
+            crabka_pgwire::error::PgError::error(
+                "22023",
+                format!("invalid enum label \"{label}\""),
+            )
+            .with_detail("Labels must be 63 bytes or less."),
+        ));
     }
     Ok(())
 }
@@ -711,7 +738,7 @@ pub fn alter_type(
             if_not_exists,
             position,
         } => {
-            let UserTypeBody::Enum(labels) = &mut ty.body else {
+            let Some((labels, sort_orders)) = ordered_enum_parts(&mut ty.body) else {
                 return Err(wrong_kind(name, "an enum"));
             };
             if labels.iter().any(|existing| existing == label) {
@@ -722,29 +749,27 @@ pub fn alter_type(
                     "enum label \"{label}\" already exists"
                 )));
             }
-            check_label_length(&lookup_name, label)?;
+            check_label_length(label)?;
             let index = match position {
                 None => labels.len(),
-                Some(EnumValuePosition::Before(neighbour)) => {
-                    label_position(&lookup_name, labels, neighbour)?
-                }
-                Some(EnumValuePosition::After(neighbour)) => {
-                    label_position(&lookup_name, labels, neighbour)? + 1
-                }
+                Some(EnumValuePosition::Before(neighbour)) => label_position(labels, neighbour)?,
+                Some(EnumValuePosition::After(neighbour)) => label_position(labels, neighbour)? + 1,
             };
+            let sort_order = enum_insert_sort_order(sort_orders, index);
+            sort_orders.insert(index, sort_order);
             labels.insert(index, label.clone());
         }
         AlterTypeAction::RenameValue { from, to } => {
-            let UserTypeBody::Enum(labels) = &mut ty.body else {
+            let Some((labels, _)) = ordered_enum_parts(&mut ty.body) else {
                 return Err(wrong_kind(name, "an enum"));
             };
+            let index = label_position(labels, from)?;
             if labels.iter().any(|existing| existing == to) {
                 return Err(ExecError::DuplicateObject(format!(
                     "enum label \"{to}\" already exists"
                 )));
             }
-            let index = label_position(&lookup_name, labels, from)?;
-            check_label_length(&lookup_name, to)?;
+            check_label_length(to)?;
             labels[index] = to.clone();
         }
         AlterTypeAction::RenameTo(new_name) => return rename(kv, ty, new_name, "ALTER TYPE"),
@@ -834,19 +859,21 @@ pub fn alter_domain(
     match action {
         AlterDomainAction::SetDefault(expr) => domain.default = Some(expr.clone()),
         AlterDomainAction::DropDefault => domain.default = None,
-        AlterDomainAction::SetNotNull(not_null) => domain.not_null = *not_null,
+        AlterDomainAction::SetNotNull(not_null) => {
+            domain.not_null = *not_null;
+            domain.not_null_name = None;
+        }
+        AlterDomainAction::AddNotNull { name } => {
+            if !domain.not_null {
+                domain.not_null = true;
+                domain.not_null_name = name.clone();
+            }
+        }
         AlterDomainAction::AddConstraint {
             name: constraint_name,
             text,
             not_valid,
         } => {
-            if *not_valid {
-                return Err(ExecError::Unsupported(
-                    "ALTER DOMAIN … ADD CONSTRAINT … NOT VALID is not supported: an unvalidated \
-                     domain constraint would silently accept existing values that violate it"
-                        .into(),
-                ));
-            }
             let ordinal = domain.checks.len() + 1;
             let constraint_name = constraint_name
                 .clone()
@@ -863,12 +890,21 @@ pub fn alter_domain(
             domain.checks.push(DomainCheck {
                 name: constraint_name,
                 expr: text.clone(),
+                validated: !*not_valid,
             });
         }
         AlterDomainAction::DropConstraint {
             name: constraint_name,
             if_exists,
         } => {
+            if domain.not_null_name.as_deref() == Some(constraint_name) {
+                domain.not_null = false;
+                domain.not_null_name = None;
+                return Ok((
+                    command("ALTER DOMAIN"),
+                    crabka_pgcatalog::put_user_type_ops(kv, &ty)?,
+                ));
+            }
             let before = domain.checks.len();
             domain.checks.retain(|check| check.name != *constraint_name);
             if domain.checks.len() == before && !*if_exists {
@@ -877,26 +913,32 @@ pub fn alter_domain(
                 )));
             }
         }
-        // Every constraint the engine stores has already been validated
-        // against nothing (a domain has no existing rows of its own to scan),
-        // so validating one is a successful no-op, as in PostgreSQL when the
-        // constraint is already valid.
         AlterDomainAction::ValidateConstraint(constraint_name) => {
-            if !domain
+            let Some(check) = domain
                 .checks
-                .iter()
-                .any(|check| check.name == *constraint_name)
-            {
+                .iter_mut()
+                .find(|check| check.name == *constraint_name)
+            else {
                 return Err(ExecError::UndefinedObject(format!(
                     "constraint \"{constraint_name}\" of domain \"{lookup_name}\" does not exist"
                 )));
-            }
+            };
+            check.validated = true;
         }
         AlterDomainAction::RenameConstraint { from, to } => {
-            if domain.checks.iter().any(|check| check.name == *to) {
+            if domain.not_null_name.as_deref() == Some(to)
+                || domain.checks.iter().any(|check| check.name == *to)
+            {
                 return Err(ExecError::DuplicateObject(format!(
                     "constraint \"{to}\" for domain \"{lookup_name}\" already exists"
                 )));
+            }
+            if domain.not_null_name.as_deref() == Some(from) {
+                domain.not_null_name = Some(to.clone());
+                return Ok((
+                    command("ALTER DOMAIN"),
+                    crabka_pgcatalog::put_user_type_ops(kv, &ty)?,
+                ));
             }
             let Some(check) = domain.checks.iter_mut().find(|check| check.name == *from) else {
                 return Err(ExecError::UndefinedObject(format!(
@@ -1003,6 +1045,7 @@ pub fn drop_types(
             )));
         }
         let dependents = dependent_user_types(kv, ty.oid)?;
+        let typed_tables = typed_tables_using_type(kv, ty.oid)?;
         if !cascade && let Some(dependent) = dependents.first() {
             return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
                 "2BP01",
@@ -1019,24 +1062,30 @@ pub fn drop_types(
         // resolves, or a `pg_cast` row pointing at a vanished oid.
         let routines = dependent_routines(kv, &ty)?;
         let casts = dependent_casts(kv, ty.oid)?;
-        if !cascade && let Some(routine) = routines.first() {
-            return Err(dependency_refusal(
-                name,
-                &format!("function {} depends on type {name}", routine.identity()),
-            ));
+        if !cascade {
+            let mut details = typed_table_dependency_lines(&typed_tables, &routines, name);
+            details.extend(
+                casts
+                    .iter()
+                    .map(|cast| format!("{} depends on type {name}", cast_dependency_line(cast))),
+            );
+            if let Some(user) = column_using_type(kv, &ty)? {
+                details.push(format!("column {user} depends on type {name}"));
+            }
+            if !details.is_empty() {
+                return Err(dependency_refusal(name, &details));
+            }
         }
-        if !cascade && let Some(cast) = casts.first() {
-            return Err(dependency_refusal(
-                name,
-                &format!("{} depends on type {name}", cast_dependency_line(cast)),
-            ));
+        let dropping = typed_tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect::<HashSet<_>>();
+        for table in &typed_tables {
+            ops.extend(crate::exec::drop_table_and_dependents_ops(
+                kv, table, &dropping, true,
+            )?);
         }
-        if !cascade && let Some(user) = column_using_type(kv, &ty)? {
-            return Err(dependency_refusal(
-                name,
-                &format!("column {user} depends on type {name}"),
-            ));
-        }
+        ops.extend(crate::inheritance::drop_metadata_ops(kv, &dropping)?);
         for dependent in dependents.into_iter().rev() {
             ops.extend(crabka_pgcatalog::drop_user_type_ops(kv, &dependent)?);
         }
@@ -1086,11 +1135,9 @@ pub(crate) fn type_cascade_lines(
         .iter()
         .map(|dependent| format!("drop cascades to type {}", dependent.qualified_name()))
         .collect();
-    lines.extend(
-        dependent_routines(kv, &ty)?
-            .iter()
-            .map(|routine| format!("drop cascades to function {}", routine.identity())),
-    );
+    let typed_tables = typed_tables_using_type(kv, ty.oid)?;
+    let routines = dependent_routines(kv, &ty)?;
+    lines.extend(typed_table_cascade_lines(&typed_tables, &routines));
     lines.extend(
         dependent_casts(kv, ty.oid)?
             .iter()
@@ -1101,11 +1148,55 @@ pub(crate) fn type_cascade_lines(
 
 /// PostgreSQL's 2BP01 for a drop that would orphan something, with the one
 /// dependency it names first.
-fn dependency_refusal(name: &RelationName, detail: &str) -> ExecError {
-    ExecError::Remote(crabka_pgwire::error::PgError::error(
-        "2BP01",
-        format!("cannot drop type {name} because other objects depend on it\nDETAIL:  {detail}"),
-    ))
+fn dependency_refusal(name: &RelationName, details: &[String]) -> ExecError {
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "2BP01",
+            format!(
+                "cannot drop type {name} because other objects depend on it\nDETAIL:  {}",
+                details.join("\n")
+            ),
+        )
+        .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+    )
+}
+
+fn typed_table_dependency_lines(
+    tables: &[crabka_pgcatalog::Table],
+    routines: &[crabka_pgcatalog::routine::Routine],
+    name: &RelationName,
+) -> Vec<String> {
+    typed_table_cascade_lines(tables, routines)
+        .into_iter()
+        .map(|line| match line.strip_prefix("drop cascades to ") {
+            Some(object) => format!("{object} depends on type {name}"),
+            None => line,
+        })
+        .collect()
+}
+
+fn typed_table_cascade_lines(
+    tables: &[crabka_pgcatalog::Table],
+    routines: &[crabka_pgcatalog::routine::Routine],
+) -> Vec<String> {
+    let (first, rest) = tables
+        .split_first()
+        .map_or((&[][..], &[][..]), |(first, rest)| {
+            (std::slice::from_ref(first), rest)
+        });
+    first
+        .iter()
+        .map(|table| format!("drop cascades to table {}", table.name))
+        .chain(
+            routines
+                .iter()
+                .map(|routine| format!("drop cascades to function {}", routine.identity())),
+        )
+        .chain(
+            rest.iter()
+                .map(|table| format!("drop cascades to table {}", table.name)),
+        )
+        .collect()
 }
 
 /// Every routine whose signature names `ty`, in oid order — which is creation
@@ -1184,6 +1275,20 @@ fn dependent_user_types(kv: &dyn Kv, root_oid: u32) -> Result<Vec<UserType>, Exe
     Ok(dependents)
 }
 
+fn typed_tables_using_type(
+    kv: &dyn Kv,
+    oid: u32,
+) -> Result<Vec<crabka_pgcatalog::Table>, ExecError> {
+    let mut tables = Vec::new();
+    for table in crabka_pgcatalog::list_tables(kv)? {
+        if crabka_pgcatalog::typed_table_type(kv, &table.name)? == Some(oid) {
+            tables.push(table);
+        }
+    }
+    tables.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(tables)
+}
+
 fn user_type_references_any(ty: &UserType, oids: &HashSet<u32>) -> bool {
     match &ty.body {
         UserTypeBody::Composite(fields) => fields
@@ -1193,7 +1298,7 @@ fn user_type_references_any(ty: &UserType, oids: &HashSet<u32>) -> bool {
         UserTypeBody::Domain(domain) => column_type_references_any(domain.base, oids),
         UserTypeBody::Base(base) => column_type_references_any(base.representation, oids),
         // A shell names nothing, which is the point of it.
-        UserTypeBody::Enum(_) | UserTypeBody::Shell => false,
+        UserTypeBody::Enum(_) | UserTypeBody::EnumOrdered { .. } | UserTypeBody::Shell => false,
     }
 }
 
@@ -1280,16 +1385,59 @@ fn column_using_type(kv: &dyn Kv, ty: &UserType) -> Result<Option<String>, ExecE
     Ok(None)
 }
 
-fn label_position(type_name: &str, labels: &[String], label: &str) -> Result<usize, ExecError> {
+fn label_position(labels: &[String], label: &str) -> Result<usize, ExecError> {
     labels
         .iter()
         .position(|existing| existing == label)
         .ok_or_else(|| {
             ExecError::Remote(crabka_pgwire::error::PgError::error(
                 "22P02",
-                format!("\"{label}\" is not an existing enum label of type {type_name}"),
+                format!("\"{label}\" is not an existing enum label"),
             ))
         })
+}
+
+fn ordered_enum_parts(body: &mut UserTypeBody) -> Option<(&mut Vec<String>, &mut Vec<u32>)> {
+    if let UserTypeBody::Enum(labels) = body {
+        let labels = std::mem::take(labels);
+        let sort_orders = (1..=labels.len())
+            .map(|position| (position as f32).to_bits())
+            .collect();
+        *body = UserTypeBody::EnumOrdered {
+            labels,
+            sort_orders,
+        };
+    }
+    match body {
+        UserTypeBody::EnumOrdered {
+            labels,
+            sort_orders,
+        } => Some((labels, sort_orders)),
+        _ => None,
+    }
+}
+
+fn enum_insert_sort_order(sort_orders: &mut [u32], index: usize) -> u32 {
+    let before = index
+        .checked_sub(1)
+        .map(|index| f32::from_bits(sort_orders[index]));
+    let after = sort_orders.get(index).map(|bits| f32::from_bits(*bits));
+    let order = match (before, after) {
+        (None, Some(after)) => after - 1.0,
+        (Some(before), None) => before + 1.0,
+        (Some(before), Some(after)) => (before + after) / 2.0,
+        (None, None) => 1.0,
+    };
+    if order.is_finite()
+        && before.is_none_or(|before| order > before)
+        && after.is_none_or(|after| order < after)
+    {
+        return order.to_bits();
+    }
+    for (position, slot) in sort_orders.iter_mut().enumerate() {
+        *slot = (position as f32 + 1.0).to_bits();
+    }
+    enum_insert_sort_order(sort_orders, index)
 }
 
 fn require_type(kv: &dyn Kv, name: &RelationName) -> Result<UserType, ExecError> {
@@ -1474,8 +1622,53 @@ mod tests {
                 == 2
         );
         let long = "x".repeat(64);
-        let err = check_label_length("e", &long).expect_err("too long");
-        assert!(err.into_pg().code == "22023");
+        let err = check_label_length(&long).expect_err("too long").into_pg();
+        assert!(err.code == "22023");
+        assert!(err.message == format!("invalid enum label \"{long}\""));
+        assert!(
+            err.diagnostics
+                .as_ref()
+                .and_then(|fields| fields.detail.as_deref())
+                == Some("Labels must be 63 bytes or less.")
+        );
+    }
+
+    #[test]
+    fn enum_alter_reports_the_missing_source_or_neighbor_first() {
+        let kv = MemKv::default();
+        let name = RelationName::public("enum_alter_errors");
+        let (_, ops) = crabka_pgcatalog::create_user_type_ops(
+            &kv,
+            &name,
+            UserTypeBody::Enum(vec!["a".into(), "b".into()]),
+        )
+        .expect("create enum");
+        kv.write_batch(&ops).expect("store enum");
+
+        let err = alter_type(
+            &kv,
+            &name,
+            &AlterTypeAction::RenameValue {
+                from: "missing".into(),
+                to: "b".into(),
+            },
+        )
+        .expect_err("source must be checked before duplicate target")
+        .into_pg();
+        assert!(err.message == "\"missing\" is not an existing enum label");
+
+        let err = alter_type(
+            &kv,
+            &name,
+            &AlterTypeAction::AddValue {
+                label: "c".into(),
+                if_not_exists: false,
+                position: Some(EnumValuePosition::Before("missing".into())),
+            },
+        )
+        .expect_err("missing neighbor")
+        .into_pg();
+        assert!(err.message == "\"missing\" is not an existing enum label");
     }
 
     #[test]

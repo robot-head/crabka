@@ -17,8 +17,14 @@ use std::fmt::Write as _;
 use crabka_pgparser::ast::{
     ArraySubscript, BinaryOp, DistinctClause, ExplainFormat, ExplainOptions, Expr, FuncArgs,
     MatchKind, OrderItem, QueryBody, QueryExpr, SelectItem, SelectStmt, SetExpr, Statement,
-    TableExpr, UnaryOp,
+    TableExpr, UnaryOp, WithClause,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CtePlan {
+    name: String,
+    plan: Box<PlanNode>,
+}
 
 /// One node of the rendered plan tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +38,7 @@ pub(crate) struct PlanNode {
     pub(crate) alias: Option<String>,
     /// `key: value` detail lines printed under the node, in `PostgreSQL`'s order.
     pub(crate) details: Vec<(String, String)>,
+    init_plans: Vec<CtePlan>,
     pub(crate) children: Vec<PlanNode>,
     output: Vec<String>,
     actual: Option<PlanActual>,
@@ -52,6 +59,7 @@ impl PlanNode {
             relation: None,
             alias: None,
             details: Vec::new(),
+            init_plans: Vec::new(),
             children: Vec::new(),
             output: Vec::new(),
             actual: None,
@@ -119,10 +127,7 @@ pub(crate) fn plan_runtime_state(state: &crate::plan::query::PlanState) -> PlanN
 /// Apply executor counters to the syntactic tree that supplies PostgreSQL's
 /// relation names and detail text. The executor has an explicit `Filter` node;
 /// PostgreSQL prints that state on its scan or join child instead.
-pub(crate) fn apply_runtime_state(
-    rendered: &mut PlanNode,
-    runtime: &PlanNode,
-) {
+pub(crate) fn apply_runtime_state(rendered: &mut PlanNode, runtime: &PlanNode) {
     rendered.actual = runtime.actual;
     for (child, runtime_child) in rendered.children.iter_mut().zip(&runtime.children) {
         apply_runtime_state(child, runtime_child);
@@ -131,9 +136,14 @@ pub(crate) fn apply_runtime_state(
 
 /// Build the plan tree the interpreter will execute for `statement`.
 pub(crate) fn plan_statement(statement: &Statement) -> PlanNode {
-    match statement {
-        Statement::Query(query) => plan_query(query),
-        Statement::Insert { table, source, .. } => {
+    let (mut node, with) = match statement {
+        Statement::Query(query) => (plan_query(query), None),
+        Statement::Insert {
+            table,
+            source,
+            with,
+            ..
+        } => {
             let child = match source {
                 crabka_pgparser::ast::InsertSource::Values(rows) if rows.len() > 1 => {
                     PlanNode::new("Values Scan").with_relation("*VALUES*")
@@ -143,20 +153,219 @@ pub(crate) fn plan_statement(statement: &Statement) -> PlanNode {
             };
             let mut node = PlanNode::new("Insert");
             node.relation = Some(table.name.clone());
-            node.with_child(child)
+            (node.with_child(child), with.as_ref())
         }
-        Statement::Update { table, filter, .. } => {
+        Statement::Update {
+            table,
+            filter,
+            with,
+            ..
+        } => {
             let mut node = PlanNode::new("Update");
             node.relation = Some(table.name.clone());
-            node.with_child(scan_node(&table.name, None, filter.as_ref()))
+            (
+                node.with_child(scan_node(&table.name, None, filter.as_ref())),
+                with.as_ref(),
+            )
         }
-        Statement::Delete { table, filter, .. } => {
+        Statement::Delete {
+            table,
+            filter,
+            with,
+            ..
+        } => {
             let mut node = PlanNode::new("Delete");
             node.relation = Some(table.name.clone());
-            node.with_child(scan_node(&table.name, None, filter.as_ref()))
+            (
+                node.with_child(scan_node(&table.name, None, filter.as_ref())),
+                with.as_ref(),
+            )
         }
-        other => PlanNode::new(utility_node_type(other)),
+        other => (PlanNode::new(utility_node_type(other)), None),
+    };
+    attach_ctes(&mut node, with);
+    mark_cte_scans(&mut node, with);
+    node
+}
+
+/// Plan a statement after the unconditional `DO INSTEAD` rewrite that its
+/// executor path applies.  The action keeps its target and conflict clause;
+/// the client statement supplies the source and outer `WITH` list.
+pub(crate) fn plan_statement_with_rewrite(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
+    statement: &Statement,
+) -> Result<PlanNode, crate::error::ExecError> {
+    let Some((event, reference)) = (match statement {
+        Statement::Insert { table, .. } => Some((crabka_pgcatalog::rule::RuleEvent::Insert, table)),
+        Statement::Update { table, .. } => Some((crabka_pgcatalog::rule::RuleEvent::Update, table)),
+        Statement::Delete { table, .. } => Some((crabka_pgcatalog::rule::RuleEvent::Delete, table)),
+        _ => None,
+    }) else {
+        return Ok(plan_statement(statement));
+    };
+    let name = crate::relname::resolve_relation(
+        catalog_kv,
+        resolution,
+        reference,
+        crate::relname::SchemaDisposition::Reference,
+    )?;
+    let Ok(table) = crabka_pgcatalog::get_table(catalog_kv, &name) else {
+        return Ok(plan_statement(statement));
+    };
+    let mut actions = crabka_pgcatalog::rule::rules_for_table(catalog_kv, table.id)?
+        .into_iter()
+        .filter(|rule| {
+            rule.instead
+                && rule.event == event
+                && rule.condition.is_none()
+                && crate::exec::rule_is_enabled(rule.enabled)
+                && !rule.action.eq_ignore_ascii_case("nothing")
+        });
+    let Some(rule) = actions.next() else {
+        return Ok(plan_statement(statement));
+    };
+    if actions.next().is_some() {
+        return Ok(plan_statement(statement));
     }
+    let source = rule
+        .action
+        .strip_prefix('(')
+        .and_then(|action| action.strip_suffix(')'))
+        .unwrap_or(&rule.action);
+    let mut actions = crabka_pgparser::parse(source)?;
+    let [action] = actions.as_mut_slice() else {
+        return Ok(plan_statement(statement));
+    };
+    if let (
+        Statement::Insert {
+            source: action_source,
+            with: action_with,
+            ..
+        },
+        Statement::Insert { source, with, .. },
+    ) = (&mut *action, statement)
+    {
+        *action_source = source.clone();
+        *action_with = with.clone();
+    }
+    let mut plan = plan_statement(&action);
+    if let Statement::Insert {
+        table,
+        on_conflict: Some(conflict),
+        ..
+    } = &action
+    {
+        let name = crate::relname::resolve_relation(
+            catalog_kv,
+            resolution,
+            table,
+            crate::relname::SchemaDisposition::Reference,
+        )?;
+        let table = crabka_pgcatalog::get_table(catalog_kv, &name)?;
+        let indexes = crate::exec::writable_local_indexes(catalog_kv, &table)?;
+        let arbiters = crate::exec::resolve_arbiter_indexes(&table, &indexes, &conflict.target)?;
+        plan.details.push((
+            "Conflict Resolution".into(),
+            match conflict.action {
+                crabka_pgparser::ast::OnConflictAction::DoNothing => "NOTHING",
+                crabka_pgparser::ast::OnConflictAction::DoUpdate { .. } => "UPDATE",
+            }
+            .into(),
+        ));
+        if !arbiters.is_empty() {
+            plan.details.push((
+                "Conflict Arbiter Indexes".into(),
+                arbiters
+                    .iter()
+                    .map(|index| index.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+        if let crabka_pgparser::ast::OnConflictAction::DoUpdate {
+            filter: Some(filter),
+            ..
+        } = &conflict.action
+        {
+            plan.details.push((
+                "Conflict Filter".into(),
+                deparse(&type_conflict_literals(filter, &table)),
+            ));
+        }
+    }
+    Ok(plan)
+}
+
+fn attach_ctes(node: &mut PlanNode, with: Option<&WithClause>) {
+    let Some(with) = with else {
+        return;
+    };
+    node.init_plans = with
+        .ctes
+        .iter()
+        .map(|cte| CtePlan {
+            name: cte.name.clone(),
+            plan: Box::new(match &cte.body {
+                crabka_pgparser::ast::CteBody::Query(query) => plan_query(query),
+                crabka_pgparser::ast::CteBody::Dml(statement) => plan_statement(statement),
+            }),
+        })
+        .collect();
+}
+
+fn mark_cte_scans(node: &mut PlanNode, with: Option<&WithClause>) {
+    let Some(with) = with else {
+        return;
+    };
+    for child in &mut node.children {
+        if child.node_type == "Seq Scan"
+            && child
+                .relation
+                .as_ref()
+                .is_some_and(|relation| with.ctes.iter().any(|cte| &cte.name == relation))
+        {
+            child.node_type = "CTE Scan".into();
+        }
+        mark_cte_scans(child, Some(with));
+    }
+}
+
+fn type_conflict_literals(expr: &Expr, table: &crabka_pgcatalog::Table) -> Expr {
+    let scope = crate::scope::Scope::single(table, "excluded");
+    crate::viewwrite::map_expr(expr, false, &mut |node, _| match node {
+        Expr::Binary { op, left, right } => {
+            let cast = |literal: &Expr, other: &Expr| {
+                matches!(literal, Expr::StringLiteral(_))
+                    && matches!(
+                        crate::eval::infer_type(other, &scope),
+                        Ok(crabka_pgtypes::ColumnType::Char(_))
+                    )
+            };
+            if cast(left, right) {
+                Some(Expr::Binary {
+                    op: *op,
+                    left: Box::new(Expr::Cast {
+                        expr: left.clone(),
+                        ty: crabka_pgtypes::ColumnType::Char(None),
+                    }),
+                    right: right.clone(),
+                })
+            } else if cast(right, left) {
+                Some(Expr::Binary {
+                    op: *op,
+                    left: left.clone(),
+                    right: Box::new(Expr::Cast {
+                        expr: right.clone(),
+                        ty: crabka_pgtypes::ColumnType::Char(None),
+                    }),
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    })
 }
 
 impl PlanNode {
@@ -187,6 +396,7 @@ fn plan_query(query: &QueryExpr) -> PlanNode {
     if query.limit.is_some() || query.offset.is_some() {
         node = PlanNode::new("Limit").with_child(node);
     }
+    attach_ctes(&mut node, query.with.as_ref());
     node
 }
 
@@ -281,9 +491,7 @@ fn plan_select(select: &SelectStmt) -> PlanNode {
         .map(|item| match item {
             SelectItem::Wildcard => "*".to_string(),
             SelectItem::QualifiedWildcard(table) => format!("{table}.*"),
-            SelectItem::Expr { expr, alias } => {
-                alias.clone().unwrap_or_else(|| deparse_bare(expr))
-            }
+            SelectItem::Expr { expr, alias } => alias.clone().unwrap_or_else(|| deparse_bare(expr)),
         })
         .collect();
     node
@@ -654,9 +862,11 @@ fn deparse_plain_call(call: &crabka_pgparser::ast::FuncCall, qualify: bool) -> S
         FuncArgs::Named { positional, named } => positional
             .iter()
             .map(|arg| deparse_bare_with(arg, qualify))
-            .chain(named.iter().map(|(label, arg)| {
-                format!("{label} => {}", deparse_bare_with(arg, qualify))
-            }))
+            .chain(
+                named
+                    .iter()
+                    .map(|(label, arg)| format!("{label} => {}", deparse_bare_with(arg, qualify))),
+            )
             .collect::<Vec<_>>()
             .join(", "),
         FuncArgs::Variadic { positional, array } => positional
@@ -758,7 +968,12 @@ fn deparse_bare_with(expr: &Expr, qualify: bool) -> String {
             }
         }
         Expr::Func(call) => deparse_plain_call(call, qualify),
-        Expr::Cast { expr, ty } => format!("{}::{}", cast_operand(expr, qualify), ty.name()),
+        Expr::Cast { expr, ty } => match (&**expr, ty) {
+            (Expr::StringLiteral(text), crabka_pgtypes::ColumnType::Char(_)) => {
+                format!("'{}'::bpchar", text.replace('\'', "''"))
+            }
+            _ => format!("{}::{}", cast_operand(expr, qualify), ty.name()),
+        },
         // A sign on a numeric literal is not an operator by the time
         // PostgreSQL deparses anything: `doNegate` folds it into the literal's
         // own spelling, so what reaches `ruleutils` is one `Const` and
@@ -950,26 +1165,29 @@ pub(crate) fn render_with_rows(
 
 fn render_text(node: &PlanNode, options: &ExplainOptions, actual_rows: usize) -> Vec<String> {
     let mut lines = Vec::new();
-    render_text_node(node, options, 0, actual_rows, &mut lines);
+    render_text_node(node, options, None, actual_rows, &mut lines);
     lines
 }
 
 fn render_text_node(
     node: &PlanNode,
     options: &ExplainOptions,
-    depth: usize,
+    arrow_indent: Option<usize>,
     actual_rows: usize,
     lines: &mut Vec<String>,
 ) {
-    let root = depth == 0;
+    let root = arrow_indent.is_none();
     // PostgreSQL puts a child's `->` arrow two columns in from its parent's
     // detail column, and every node's detail lines six columns in from its
     // parent's: arrow at `2 + 6*(depth-1)`, details at `2 + 6*depth`.
     let mut headline = if root {
         node.headline()
     } else {
-        let arrow_indent = " ".repeat(2 + (depth - 1) * 6);
-        format!("{arrow_indent}->  {}", node.headline())
+        format!(
+            "{}->  {}",
+            " ".repeat(arrow_indent.expect("child indent")),
+            node.headline()
+        )
     };
     if options.costs {
         headline.push_str(" (cost=0.00..0.00 rows=0 width=0)");
@@ -978,12 +1196,17 @@ fn render_text_node(
         if actual.loops == 0 {
             headline.push_str(" (never executed)");
         } else {
-            write!(headline, " (actual rows={}.00 loops={})", actual.rows, actual.loops)
-                .expect("String write");
+            write!(
+                headline,
+                " (actual rows={}.00 loops={})",
+                actual.rows, actual.loops
+            )
+            .expect("String write");
         }
     }
     lines.push(headline);
-    let detail_indent = " ".repeat(2 + depth * 6);
+    let detail = arrow_indent.map_or(2, |indent| indent + 6);
+    let detail_indent = " ".repeat(detail);
     if options.verbose && !node.output.is_empty() {
         lines.push(format!("{detail_indent}Output: {}", node.output.join(", ")));
     }
@@ -1000,8 +1223,13 @@ fn render_text_node(
             actual.rows_removed
         ));
     }
+    for cte in &node.init_plans {
+        lines.push(format!("{detail_indent}CTE {}", cte.name));
+        render_text_node(&cte.plan, options, Some(detail + 2), actual_rows, lines);
+    }
+    let child_indent = arrow_indent.map_or(2, |indent| indent + 6);
     for child in &node.children {
-        render_text_node(child, options, depth + 1, actual_rows, lines);
+        render_text_node(child, options, Some(child_indent), actual_rows, lines);
     }
 }
 
@@ -1133,7 +1361,10 @@ fn yaml_node(
         lines.push(format!("{pad}Actual Rows: {}", actual.rows));
         lines.push(format!("{pad}Actual Loops: {}", actual.loops));
         if actual.rows_removed > 0 {
-            lines.push(format!("{pad}Rows Removed by Filter: {}", actual.rows_removed));
+            lines.push(format!(
+                "{pad}Rows Removed by Filter: {}",
+                actual.rows_removed
+            ));
         }
     }
     for (key, value) in &node.details {
@@ -1193,7 +1424,10 @@ fn xml_node(
     }
     if let Some(actual) = explain_actual(node, options, actual_rows, root) {
         lines.push(format!("{inner}<Actual-Rows>{}</Actual-Rows>", actual.rows));
-        lines.push(format!("{inner}<Actual-Loops>{}</Actual-Loops>", actual.loops));
+        lines.push(format!(
+            "{inner}<Actual-Loops>{}</Actual-Loops>",
+            actual.loops
+        ));
         if actual.rows_removed > 0 {
             lines.push(format!(
                 "{inner}<Rows-Removed-by-Filter>{}</Rows-Removed-by-Filter>",
@@ -1233,8 +1467,7 @@ fn explain_actual(
 ) -> Option<PlanActual> {
     options.analyze.then(|| {
         node.actual.unwrap_or(PlanActual {
-            rows: u64::try_from(if root { actual_rows } else { 0 })
-                .expect("row count fits u64"),
+            rows: u64::try_from(if root { actual_rows } else { 0 }).expect("row count fits u64"),
             loops: 1,
             rows_removed: 0,
         })
@@ -1300,8 +1533,10 @@ mod tests {
 
     #[test]
     fn runtime_tree_renders_each_nodes_actual_counters() {
-        use crate::plan::query::{Plan as ExecutablePlan, PlanNode as ExecutableNode, PlanState};
-        use crate::scope::Scope;
+        use crate::{
+            plan::query::{Plan as ExecutablePlan, PlanNode as ExecutableNode, PlanState},
+            scope::Scope,
+        };
 
         let scan = ExecutablePlan {
             target_list: Vec::new(),
@@ -1375,8 +1610,10 @@ mod tests {
 
     #[test]
     fn runtime_tree_marks_an_unentered_node_never_executed() {
-        use crate::plan::query::{Plan as ExecutablePlan, PlanNode as ExecutableNode, PlanState};
-        use crate::scope::Scope;
+        use crate::{
+            plan::query::{Plan as ExecutablePlan, PlanNode as ExecutableNode, PlanState},
+            scope::Scope,
+        };
 
         let plan = ExecutablePlan {
             target_list: Vec::new(),
@@ -1398,8 +1635,10 @@ mod tests {
 
     #[test]
     fn runtime_tree_omits_zero_filter_removals() {
-        use crate::plan::query::{Plan as ExecutablePlan, PlanNode as ExecutableNode, PlanState};
-        use crate::scope::Scope;
+        use crate::{
+            plan::query::{Plan as ExecutablePlan, PlanNode as ExecutableNode, PlanState},
+            scope::Scope,
+        };
 
         let scan = ExecutablePlan {
             target_list: Vec::new(),
@@ -1441,7 +1680,7 @@ mod tests {
                     },
                     0,
                 )[0]
-                    .contains(removed)
+                .contains(removed)
             );
         }
     }
@@ -1455,14 +1694,7 @@ mod tests {
         };
         let lines = plan_text("SELECT id AS key FROM d1 WHERE id = 1", &options);
 
-        assert!(
-            lines
-                == [
-                    "Seq Scan on d1",
-                    "  Output: key",
-                    "  Filter: (id = 1)",
-                ]
-        );
+        assert!(lines == ["Seq Scan on d1", "  Output: key", "  Filter: (id = 1)",]);
         assert!(
             plan_text(
                 "SELECT id AS key FROM d1",
@@ -1471,7 +1703,7 @@ mod tests {
                     ..options.clone()
                 },
             )[0]
-                .contains("\"Output\": [\"key\"]")
+            .contains("\"Output\": [\"key\"]")
         );
         assert!(
             plan_text(
@@ -1481,15 +1713,15 @@ mod tests {
                     ..options.clone()
                 },
             )[0]
-                .contains("Output: [\"key\"]")
+            .contains("Output: [\"key\"]")
         );
         let xml = plan_text(
-                "SELECT id AS key FROM d1",
-                &ExplainOptions {
-                    format: ExplainFormat::Xml,
-                    ..options
-                },
-            );
+            "SELECT id AS key FROM d1",
+            &ExplainOptions {
+                format: ExplainFormat::Xml,
+                ..options
+            },
+        );
         assert!(xml[0].contains("<Output>"));
         assert!(xml[0].contains("<Item>key</Item>"));
     }
@@ -1861,7 +2093,7 @@ mod tests {
                         ..options.clone()
                     },
                 )[0]
-                    .contains("Output")
+                .contains("Output")
             );
         }
 
@@ -1891,7 +2123,9 @@ mod tests {
                 ..options
             },
         );
-        assert!(xml[0].contains("<Plans>\n        <Plan>\n          <Node-Type>Seq Scan</Node-Type>"));
+        assert!(
+            xml[0].contains("<Plans>\n        <Plan>\n          <Node-Type>Seq Scan</Node-Type>")
+        );
         assert!(xml[0].contains("        </Plan>\n      </Plans>"));
     }
 }

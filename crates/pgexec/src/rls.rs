@@ -376,7 +376,13 @@ pub(crate) fn apply_row_security(
             // Resolve subqueries inside the qual once per scan, not per row —
             // and inside the recursion guard, since that is where a
             // self-referencing qual re-enters the read path.
-            let qual = crate::subquery::resolve_expr(read_ctx, &qual)?;
+            let qual =
+                crate::subquery::resolve_expr(read_ctx, &qual).map_err(|error| match error {
+                    ExecError::MissingFromEntry(_) | ExecError::UndefinedColumn(_) => {
+                        ExecError::PolicyRecursion(relation.clone())
+                    }
+                    other => other,
+                })?;
             let qual = crate::bind::BoundExpr::new(&qual, &scope)?;
             let mut kept = Vec::with_capacity(rows.len());
             for row in rows {

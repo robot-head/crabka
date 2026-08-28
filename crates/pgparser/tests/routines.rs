@@ -179,6 +179,7 @@ fn parses_every_definition_qualifier() {
                 RoutineOption::Set {
                     name: "work_mem".into(),
                     value: Some("64MB".into()),
+                    source: "work_mem = '64MB'".into(),
                 },
                 RoutineOption::Body(RoutineBody::Source("SELECT 1".into())),
             ]
@@ -230,6 +231,18 @@ fn parses_a_multi_statement_begin_atomic_body() {
         panic!("expected an atomic body");
     };
     assert!(statements.len() == 2);
+}
+
+#[test]
+fn parses_redundant_semicolons_in_a_begin_atomic_body() {
+    let stmt = create(
+        "CREATE FUNCTION f() RETURNS boolean LANGUAGE sql BEGIN ATOMIC ;;RETURN false;; END",
+    );
+    let RoutineOption::Body(RoutineBody::Atomic { statements, text }) = &stmt.options[1] else {
+        panic!("expected an atomic body");
+    };
+    assert!(statements.len() == 1);
+    assert!(text == ";;RETURN false");
 }
 
 #[test]
@@ -349,6 +362,7 @@ fn parses_every_alter_action() {
             AlterRoutineAction::Options(vec![RoutineOption::Set {
                 name: "search_path".into(),
                 value: Some("public".into()),
+                source: "search_path TO public".into(),
             }]),
         ),
         (
@@ -356,6 +370,7 @@ fn parses_every_alter_action() {
             AlterRoutineAction::Options(vec![RoutineOption::Set {
                 name: "all".into(),
                 value: None,
+                source: "ALL".into(),
             }]),
         ),
     ];
@@ -377,6 +392,8 @@ fn parses_call_and_do() {
                     crabka_pgparser::ast::Expr::IntLiteral("1".into()),
                     crabka_pgparser::ast::Expr::StringLiteral("x".into()),
                 ],
+                named_args: Vec::new(),
+                variadic: None,
             }
     );
     assert!(
@@ -384,8 +401,22 @@ fn parses_call_and_do() {
             == Statement::Call {
                 name: "p".into(),
                 args: Vec::new(),
+                named_args: Vec::new(),
+                variadic: None,
             }
     );
+    assert!(matches!(
+        one("CALL p(b => 2, a => 1)"),
+        Statement::Call { args, named_args, variadic, .. }
+            if args.is_empty()
+                && matches!(named_args.as_slice(), [(b, _), (a, _)] if b == "b" && a == "a")
+                && variadic.is_none()
+    ));
+    assert!(matches!(
+        one("CALL p(1, VARIADIC ARRAY[2, 3])"),
+        Statement::Call { args, named_args, variadic, .. }
+            if args.len() == 1 && named_args.is_empty() && variadic.is_some()
+    ));
     assert!(
         one("DO $$ SELECT 1 $$")
             == Statement::DoBlock {

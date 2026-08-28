@@ -34,6 +34,8 @@ enum DtFunc {
     StatementTimestamp,
     /// `clock_timestamp()`: the real-time clock, as `timestamptz`.
     ClockTimestamp,
+    /// `timeofday()`: the real-time clock rendered as text.
+    TimeOfDay,
     /// `current_date`: the transaction date in the session zone.
     CurrentDate,
     /// `current_time` / `localtime`: the transaction time-of-day in the session
@@ -70,6 +72,7 @@ fn datetime_func(name: &str) -> Option<DtFunc> {
         "now" | "current_timestamp" | "transaction_timestamp" => DtFunc::TransactionTimestamp,
         "statement_timestamp" => DtFunc::StatementTimestamp,
         "clock_timestamp" => DtFunc::ClockTimestamp,
+        "timeofday" => DtFunc::TimeOfDay,
         "current_date" => DtFunc::CurrentDate,
         "current_time" | "localtime" => DtFunc::CurrentTime,
         "localtimestamp" => DtFunc::LocalTimestamp,
@@ -141,6 +144,10 @@ pub(crate) fn datetime_func_result_type(
         DtFunc::TransactionTimestamp | DtFunc::StatementTimestamp | DtFunc::ClockTimestamp => {
             require_arity(fc, n == 0)?;
             ColumnType::Timestamptz
+        }
+        DtFunc::TimeOfDay => {
+            require_arity(fc, n == 0)?;
+            ColumnType::Text
         }
         DtFunc::CurrentDate => {
             require_arity(fc, n == 0)?;
@@ -280,6 +287,13 @@ pub(crate) fn eval_datetime(
             require_arity(fc, args.is_empty())?;
             Ok(Datum::Timestamptz(ctx.clock.now()))
         }
+        DtFunc::TimeOfDay => {
+            require_arity(fc, args.is_empty())?;
+            Ok(Datum::Text(crabka_pgtypes::datetime::timestamptz_to_text(
+                ctx.clock.now(),
+                &ctx.time_zone,
+            )))
+        }
         DtFunc::CurrentDate => {
             require_arity(fc, args.is_empty())?;
             Ok(Datum::Date(
@@ -350,8 +364,7 @@ pub(crate) fn eval_datetime(
             if value.is_null() || interval.is_null() || zone.as_ref().is_some_and(Datum::is_null) {
                 return Ok(Datum::Null);
             }
-            let (Datum::Timestamptz(value), Datum::Interval(interval)) = (&value, &interval)
-            else {
+            let (Datum::Timestamptz(value), Datum::Interval(interval)) = (&value, &interval) else {
                 return Err(undefined_function(&fc.name));
             };
             let tz = match zone.as_ref() {
@@ -1609,7 +1622,6 @@ mod tests {
     use crabka_pgtypes::{ColumnType, Datum};
 
     use super::date_bin;
-
     use crate::{
         clock::{EvalCtx, FixedClock},
         scope::Scope,
@@ -1629,16 +1641,22 @@ mod tests {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             extra_float_digits: 1,
             bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
+            xml_option: crabka_pgtypes::xml::XmlOption::Content,
+            xml_binary: crate::clock::XmlBinary::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
+            compute_query_id: false,
+            track_activities: false,
             trigger_depth: 0,
             clock: Arc::new(FixedClock(now)),
             random: None,
             sequence: None,
+            largeobject: None,
             catalog: None,
             resolution: None,
             notify: None,
+            warning_tx: None,
             transition_relations: None,
             event_trigger: None,
             txn: None,
@@ -1824,12 +1842,12 @@ mod tests {
             ),
             Datum::Timestamptz("2000-01-01T16:00:00Z".parse().expect("instant"))
         );
-        assert_eq!(
-            ev("timestamp(NULL::date, time '11:00')", &ctx),
-            Datum::Null
-        );
+        assert_eq!(ev("timestamp(NULL::date, time '11:00')", &ctx), Datum::Null);
         for (sql, expected) in [
-            ("timestamp(date '2000-01-01', time '11:00')", ColumnType::Timestamp),
+            (
+                "timestamp(date '2000-01-01', time '11:00')",
+                ColumnType::Timestamp,
+            ),
             (
                 "timestamptz(date '2000-01-01', time with time zone '11:00-05')",
                 ColumnType::Timestamptz,
@@ -2120,6 +2138,10 @@ mod tests {
         assert_eq!(ev("transaction_timestamp()", &ctx), Datum::Timestamptz(now));
         assert_eq!(ev("statement_timestamp()", &ctx), Datum::Timestamptz(now));
         assert_eq!(ev("clock_timestamp()", &ctx), Datum::Timestamptz(now));
+        assert_eq!(
+            ev("timeofday()", &ctx),
+            Datum::Text("2024-06-01 08:30:45+00".into())
+        );
         // current_time / localtime / localtimestamp render in the session zone (UTC).
         assert_eq!(
             ev("current_time", &ctx),
@@ -2150,16 +2172,22 @@ mod tests {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             extra_float_digits: 1,
             bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
+            xml_option: crabka_pgtypes::xml::XmlOption::Content,
+            xml_binary: crate::clock::XmlBinary::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
+            compute_query_id: false,
+            track_activities: false,
             trigger_depth: 0,
             clock: Arc::new(FixedClock(ny)),
             random: None,
             sequence: None,
+            largeobject: None,
             catalog: None,
             resolution: None,
             notify: None,
+            warning_tx: None,
             transition_relations: None,
             event_trigger: None,
             txn: None,
@@ -2333,16 +2361,22 @@ mod tests {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             extra_float_digits: 1,
             bytea_output: crabka_pgtypes::encoding::ByteaOutput::default(),
+            xml_option: crabka_pgtypes::xml::XmlOption::Content,
+            xml_binary: crate::clock::XmlBinary::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             backend_pid: 0,
+            compute_query_id: false,
+            track_activities: false,
             trigger_depth: 0,
             clock: Arc::new(FixedClock(ts)),
             random: None,
             sequence: None,
+            largeobject: None,
             catalog: None,
             resolution: None,
             notify: None,
+            warning_tx: None,
             transition_relations: None,
             event_trigger: None,
             txn: None,

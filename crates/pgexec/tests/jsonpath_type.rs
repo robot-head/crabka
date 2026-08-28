@@ -54,6 +54,17 @@ async fn jsonpath_is_canonicalized_and_reports_native_wire_metadata() {
         .expect_err("empty jsonpath must fail its input function");
     assert_eq!(error.code, "22P02");
 
+    let error = session
+        .simple_query("SELECT jsonb_path_query('{\"a\": 10}', '$ ? (@.a < $value)', '1')")
+        .await
+        .expect_err("jsonpath vars must be an object");
+    assert_eq!(error.code, "22023");
+    assert_eq!(error.message, "\"vars\" argument is not an object");
+    assert_eq!(
+        error.diagnostics.and_then(|diagnostics| diagnostics.detail),
+        Some("Jsonpath parameters should be encoded as key-value pairs of \"vars\" object.".into())
+    );
+
     let validity = run(
         &mut session,
         "SELECT pg_input_is_valid('lax $.a', 'jsonpath'), \

@@ -133,7 +133,7 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         Datum::Timetz(_) => return Err(unsupported("time with time zone")),
         Datum::Interval(_) => return Err(unsupported("interval")),
         Datum::Jsonb(_) => return Err(unsupported("jsonb")),
-        Datum::Array(_) => return Err(unsupported("array")),
+        Datum::Array(array) => hash_array_extended(array, seed)?,
         Datum::OidVector(_) => return Err(unsupported("oidvector")),
         Datum::Record(_) => return Err(unsupported("record")),
         Datum::Enum(_) => return Err(unsupported("enum")),
@@ -188,6 +188,20 @@ fn unsupported(type_name: &str) -> ExecError {
         "hash partitioning on {type_name} is not supported: PostgreSQL's {type_name} hash \
          function is not implemented, so a row could route to the wrong partition"
     ))
+}
+
+/// `hash_array_extended` from `src/backend/utils/adt/arrayfuncs.c`.
+///
+/// PostgreSQL hashes each element with the same seed and folds the result with
+/// `result = result * 31 + element_hash`. NULL elements contribute zero. Array
+/// dimensions and lower bounds are intentionally not part of this hash.
+fn hash_array_extended(array: &crabka_pgtypes::ArrayValue, seed: u64) -> Result<u64, ExecError> {
+    let mut result = 1_u64;
+    for element in &array.elems {
+        let element_hash = column_hash(element, seed)?.unwrap_or(0);
+        result = result.wrapping_mul(31).wrapping_add(element_hash);
+    }
+    Ok(result)
 }
 
 /// `hash_combine64` from `src/include/common/hashfn.h`.
@@ -692,6 +706,61 @@ mod tests {
     }
 
     #[test]
+    fn arrays_match_hash_array_extended() {
+        // `select hash_array_extended(value, HASH_PARTITION_SEED)` on
+        // PostgreSQL 18.4. The lower-bound pair intentionally has the same
+        // result as {1,2}: PostgreSQL hashes array elements, not dimensions.
+        let vectors: [(ArrayValue, i64); 6] = [
+            (
+                ArrayValue::new(ElemType::Int4, vec![Datum::Int4(1)]),
+                5_968_994_663_651_403_508,
+            ),
+            (
+                ArrayValue::new(ElemType::Int4, vec![Datum::Int4(1), Datum::Int4(2)]),
+                -6_212_682_626_571_898_845,
+            ),
+            (
+                ArrayValue::new(ElemType::Int4, vec![Datum::Int4(4), Datum::Int4(5)]),
+                3_440_100_327_776_779_707,
+            ),
+            (
+                ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Null, Datum::Int4(2)],
+                ),
+                -7_517_611_617_341_672_821,
+            ),
+            (
+                ArrayValue::with_dims(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Int4(2)],
+                    vec![crabka_pgtypes::ArrayDim::new(2, 2)],
+                ),
+                -6_212_682_626_571_898_845,
+            ),
+            (
+                ArrayValue::with_dims(
+                    ElemType::Int4,
+                    vec![
+                        Datum::Int4(1),
+                        Datum::Int4(2),
+                        Datum::Int4(3),
+                        Datum::Int4(4),
+                    ],
+                    vec![
+                        crabka_pgtypes::ArrayDim::from_len(2),
+                        crabka_pgtypes::ArrayDim::from_len(2),
+                    ],
+                ),
+                2_978_102_737_670_568_589,
+            ),
+        ];
+        for (array, expected) in vectors {
+            assert!(hash_of(Datum::Array(array)) == expected.cast_unsigned());
+        }
+    }
+
+    #[test]
     fn remainder_selects_the_partition_postgresql_picks() {
         // The remainder for which satisfies_hash_partition(rel, 8, r, …) is true.
         let vectors: [(Vec<Datum>, u64); 5] = [
@@ -774,7 +843,7 @@ mod tests {
 
     #[test]
     fn unsupported_key_types_are_refused() {
-        let vectors: [(Datum, &str); 9] = [
+        let vectors: [(Datum, &str); 8] = [
             (Datum::Float4(1.5), "real"),
             (Datum::Float8(1.5), "double precision"),
             (Datum::Numeric(NumericValue::from(1_i64)), "numeric"),
@@ -795,10 +864,6 @@ mod tests {
             ),
             (Datum::Jsonb(JsonbValue::Bool(true)), "jsonb"),
             (
-                Datum::Array(ArrayValue::new(ElemType::Int4, vec![Datum::Int4(1)])),
-                "array",
-            ),
-            (
                 Datum::Record(RecordValue::anonymous(vec![Datum::Int4(1)])),
                 "record",
             ),
@@ -806,6 +871,7 @@ mod tests {
                 Datum::Enum(EnumValue {
                     ty: UserTypeRef {
                         oid: 90_000,
+                        array_oid: crabka_pgtypes::usertype::user_array_oid(90_000),
                         name: "mood",
                     },
                     label: "happy".to_string(),

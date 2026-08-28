@@ -409,7 +409,6 @@ async fn a_syntax_error_postgresql_does_not_raise_stays_bare() {
     let mut session = engine.connect();
     run(&mut session, "CREATE TABLE t (a int, b int)").await;
     let cases = [
-        "CREATE RULE r AS ON INSERT TO t DO INSTEAD NOTHING",
         "COPY t FROM stdin WITH (on_error ignore)",
         "SELECT a FROM t WHERE a IN (SELECT a FROM t) FOR UPDATE OF nosuch",
     ];

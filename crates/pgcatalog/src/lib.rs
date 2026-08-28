@@ -5,12 +5,17 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-pgcatalog/0.4.0")]
 
+pub mod largeobject;
 pub mod policy;
 pub mod routine;
+pub mod rule;
 pub mod serde;
 pub mod trigger;
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use crabka_pgkv::{Kv, KvError, WriteOp, key};
 use crabka_pgtypes::{
@@ -128,6 +133,7 @@ pub const PUBLIC_SCHEMA: &str = "public";
 pub enum ColumnDefault {
     Value(Datum),
     NextVal(String),
+    Expression(String),
 }
 
 /// How a `GENERATED … AS IDENTITY` column reacts to a user-supplied value.
@@ -419,6 +425,18 @@ pub struct Index {
     /// checked. Always [`ConstraintDeferral::Immediate`] for an index that
     /// backs no constraint: `CREATE INDEX` has no deferrability to write.
     pub deferral: ConstraintDeferral,
+}
+
+/// The identity a table uses when logical replication needs to identify a row.
+///
+/// The default is absent from storage, so databases created before this record
+/// existed retain PostgreSQL's `DEFAULT` behaviour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplicaIdentity {
+    Default,
+    Full,
+    Nothing,
+    Index(String),
 }
 
 impl Index {
@@ -723,6 +741,17 @@ pub struct TablePrivilege {
     pub privilege: String,
 }
 
+/// A table privilege applied to relations a role creates in one schema, or in
+/// every schema when [`DefaultTablePrivilege::schema`] is `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultTablePrivilege {
+    pub owner: String,
+    pub schema: Option<String>,
+    pub grantee: String,
+    pub privilege: String,
+    pub grant: bool,
+}
+
 /// One recorded `GRANT … (column) ON relation TO grantee` — `PostgreSQL`'s
 /// `pg_attribute.attacl`, one row per bit rather than one array per column.
 ///
@@ -907,6 +936,10 @@ pub enum CatalogError {
     DuplicateSequence(String),
     #[error("sequence \"{0}\" does not exist")]
     UndefinedSequence(String),
+    #[error("large object {0} does not exist")]
+    UndefinedLargeObject(u32),
+    #[error("large object {0} already exists")]
+    DuplicateLargeObject(u32),
     #[error("invalid sequence definition: {0}")]
     InvalidSequence(String),
     /// A sharding definition that describes a table this engine has no encoding
@@ -986,7 +1019,9 @@ impl CatalogError {
             CatalogError::DuplicateTable(_)
             | CatalogError::DuplicateIndex(_)
             | CatalogError::DuplicateSequence(_) => "42P07",
+            CatalogError::DuplicateLargeObject(_) => "42710",
             CatalogError::UndefinedTable(_) | CatalogError::UndefinedSequence(_) => "42P01",
+            CatalogError::UndefinedLargeObject(_) => "42704",
             CatalogError::WrongObjectType(_) => "42809",
             CatalogError::UndefinedColumn(_) => "42703",
             CatalogError::UndefinedIndex(_)
@@ -1037,6 +1072,22 @@ pub struct Tablespace {
     pub owner: String,
     pub location: String,
     pub options: Vec<(String, String)>,
+}
+
+/// A user-defined row in `pg_am`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessMethodKind {
+    Index,
+    Table,
+}
+
+/// A user-created access method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessMethod {
+    pub oid: u32,
+    pub name: String,
+    pub kind: AccessMethodKind,
+    pub handler: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1285,8 +1336,12 @@ pub fn create_temp_schema_op(name: &str) -> WriteOp {
 const SCHEMA_PREFIX: &[u8] = b"\0\0\0\0catalog_schema/by-name/";
 const TABLESPACE_PREFIX: &[u8] = b"\0\0\0\0catalog_tablespace/by-name/";
 const RELATION_TABLESPACE_PREFIX: &[u8] = b"\0\0\0\0catalog_tablespace/by-relation/";
+const RELATION_ACCESS_METHOD_PREFIX: &[u8] = b"\0\0\0\0catalog_access_method/by-relation/";
 const NEXT_TABLESPACE_OID_KEY: &[u8] = b"\0\0\0\0meta/next_tablespace_oid";
 const FIRST_USER_TABLESPACE_OID: u32 = 300_000;
+const ACCESS_METHOD_PREFIX: &[u8] = b"\0\0\0\0catalog_access_method/by-name/";
+const NEXT_ACCESS_METHOD_OID_KEY: &[u8] = b"\0\0\0\0meta/next_access_method_oid";
+const FIRST_USER_ACCESS_METHOD_OID: u32 = 320_000;
 const OPERATOR_FAMILY_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_family/";
 const OPERATOR_CLASS_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_class/";
 const OPERATOR_FAMILY_OPERATOR_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_family_operator/";
@@ -1300,8 +1355,59 @@ fn tablespace_key(name: &str) -> Vec<u8> {
     key
 }
 
+fn access_method_key(name: &str) -> Vec<u8> {
+    let mut key = ACCESS_METHOD_PREFIX.to_vec();
+    key.extend_from_slice(name.as_bytes());
+    key
+}
+
+fn serialize_access_method(access_method: &AccessMethod) -> Vec<u8> {
+    let mut bytes = access_method.oid.to_be_bytes().to_vec();
+    bytes.push(match access_method.kind {
+        AccessMethodKind::Index => b'i',
+        AccessMethodKind::Table => b't',
+    });
+    bytes.extend_from_slice(access_method.handler.as_bytes());
+    bytes
+}
+
+fn deserialize_access_method(name: String, bytes: &[u8]) -> Result<AccessMethod, CatalogError> {
+    let oid = u32::from_be_bytes(
+        bytes
+            .get(..4)
+            .ok_or_else(|| KvError::CorruptRow("access method oid is missing".into()))?
+            .try_into()
+            .expect("4"),
+    );
+    let kind = match *bytes
+        .get(4)
+        .ok_or_else(|| KvError::CorruptRow("access method kind is missing".into()))?
+    {
+        b'i' => AccessMethodKind::Index,
+        b't' => AccessMethodKind::Table,
+        kind => {
+            return Err(KvError::CorruptRow(format!("unknown access method kind {kind}")).into());
+        }
+    };
+    let handler = String::from_utf8(bytes[5..].to_vec())
+        .map_err(|_| KvError::CorruptRow("access method handler is not UTF-8".into()))?;
+    Ok(AccessMethod {
+        oid,
+        name,
+        kind,
+        handler,
+    })
+}
+
 fn relation_tablespace_key(relation: &RelationName) -> Vec<u8> {
     let mut out = RELATION_TABLESPACE_PREFIX.to_vec();
+    key::push_key_part(&mut out, &relation.schema);
+    key::push_key_part(&mut out, &relation.name);
+    out
+}
+
+fn relation_access_method_key(relation: &RelationName) -> Vec<u8> {
+    let mut out = RELATION_ACCESS_METHOD_PREFIX.to_vec();
     key::push_key_part(&mut out, &relation.schema);
     key::push_key_part(&mut out, &relation.name);
     out
@@ -1354,6 +1460,47 @@ pub fn relation_tablespace_oid(kv: &dyn Kv, relation: &RelationName) -> Result<u
 fn drop_relation_tablespace_op(relation: &RelationName) -> WriteOp {
     WriteOp::Delete {
         key: relation_tablespace_key(relation),
+    }
+}
+
+/// Store an explicitly selected table access method for a relation.
+#[must_use]
+pub fn set_relation_access_method_op(relation: &RelationName, oid: u32) -> WriteOp {
+    WriteOp::Put {
+        key: relation_access_method_key(relation),
+        value: U32::new(oid).as_bytes().to_vec(),
+    }
+}
+
+/// Remove an explicit table access method and return to the relation default.
+#[must_use]
+pub fn clear_relation_access_method_op(relation: &RelationName) -> WriteOp {
+    drop_relation_access_method_op(relation)
+}
+
+/// Read a relation's explicit table access method, if it has one.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn relation_access_method_oid(
+    kv: &dyn Kv,
+    relation: &RelationName,
+) -> Result<Option<u32>, CatalogError> {
+    kv.get(&relation_access_method_key(relation))?
+        .map(|bytes| {
+            U32::read_from_prefix(&bytes)
+                .map(|(oid, _)| oid.get())
+                .map_err(|_| {
+                    KvError::CorruptRow("relation access method oid is not u32".into()).into()
+                })
+        })
+        .transpose()
+}
+
+fn drop_relation_access_method_op(relation: &RelationName) -> WriteOp {
+    WriteOp::Delete {
+        key: relation_access_method_key(relation),
     }
 }
 
@@ -2265,6 +2412,73 @@ pub fn list_tablespaces(kv: &dyn Kv) -> Result<Vec<Tablespace>, CatalogError> {
     Ok(tablespaces)
 }
 
+/// Build the atomic catalog batch for a user-created access method.
+///
+/// # Errors
+///
+/// Returns duplicate-object or catalog storage errors.
+pub fn create_access_method_ops(
+    kv: &dyn Kv,
+    name: &str,
+    kind: AccessMethodKind,
+    handler: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    if kv.get(&access_method_key(name))?.is_some() {
+        return Err(CatalogError::DuplicateObject(name.to_string()));
+    }
+    let oid = match kv.get(NEXT_ACCESS_METHOD_OID_KEY)? {
+        Some(bytes) => U32::read_from_prefix(bytes.as_slice())
+            .map_err(|_| KvError::CorruptRow("next access method oid is not u32".into()))?
+            .0
+            .get(),
+        None => FIRST_USER_ACCESS_METHOD_OID,
+    };
+    let access_method = AccessMethod {
+        oid,
+        name: name.to_string(),
+        kind,
+        handler: handler.to_string(),
+    };
+    Ok(vec![
+        WriteOp::Put {
+            key: access_method_key(name),
+            value: serialize_access_method(&access_method),
+        },
+        WriteOp::Put {
+            key: NEXT_ACCESS_METHOD_OID_KEY.to_vec(),
+            value: U32::new(oid + 1).as_bytes().to_vec(),
+        },
+    ])
+}
+
+/// List user-created access methods in oid order.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_access_methods(kv: &dyn Kv) -> Result<Vec<AccessMethod>, CatalogError> {
+    let mut methods = Vec::new();
+    for (key, value) in kv.scan_prefix(ACCESS_METHOD_PREFIX)? {
+        let name = String::from_utf8(key[ACCESS_METHOD_PREFIX.len()..].to_vec())
+            .map_err(|_| KvError::CorruptRow("non-UTF-8 access method name".into()))?;
+        methods.push(deserialize_access_method(name, &value)?);
+    }
+    methods.sort_by_key(|method| method.oid);
+    Ok(methods)
+}
+
+/// Read one user-created access method by name.
+///
+/// # Errors
+///
+/// Returns undefined-object or catalog storage errors.
+pub fn get_access_method(kv: &dyn Kv, name: &str) -> Result<AccessMethod, CatalogError> {
+    let bytes = kv
+        .get(&access_method_key(name))?
+        .ok_or_else(|| CatalogError::UndefinedObject(name.to_string()))?;
+    deserialize_access_method(name.to_string(), &bytes)
+}
+
 /// Read a user-created tablespace by name.
 ///
 /// # Errors
@@ -2343,9 +2557,175 @@ fn catalog_key(relation: &RelationName) -> Vec<u8> {
     key::catalog_key(&relation.schema, &relation.name)
 }
 
+/// The durable create order shared by relations and user types.
+const CREATION_ORDER_PREFIX: &[u8] = b"\0\0\0\0catalog_creation_order/";
+
+fn creation_order_key(name: &RelationName) -> Vec<u8> {
+    let mut key = CREATION_ORDER_PREFIX.to_vec();
+    key::push_key_part(&mut key, &name.schema);
+    key::push_key_part(&mut key, &name.name);
+    key
+}
+
+fn next_creation_order_key() -> Vec<u8> {
+    b"\0\0\0\0meta/next_creation_order".to_vec()
+}
+
+fn creation_order_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, CatalogError> {
+    if kv.get(&creation_order_key(name))?.is_some() {
+        return Ok(Vec::new());
+    }
+    let next = match kv.get(&next_creation_order_key())? {
+        Some(bytes) => U64::read_from_prefix(bytes.as_slice())
+            .map_err(|_| KvError::CorruptRow("next_creation_order is not u64".into()))?
+            .0
+            .get(),
+        None => 1,
+    };
+    Ok(vec![
+        WriteOp::Put {
+            key: creation_order_key(name),
+            value: U64::new(next).as_bytes().to_vec(),
+        },
+        WriteOp::Put {
+            key: next_creation_order_key(),
+            value: U64::new(next + 1).as_bytes().to_vec(),
+        },
+    ])
+}
+
+/// The durable creation order of `name`, if this catalog predates the index.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn creation_order(kv: &dyn Kv, name: &RelationName) -> Result<Option<u64>, CatalogError> {
+    Ok(kv
+        .get(&creation_order_key(name))?
+        .map(|bytes| {
+            U64::read_from_prefix(bytes.as_slice())
+                .map_err(|_| KvError::CorruptRow("creation_order is not u64".into()))
+                .map(|(order, _)| order.get())
+        })
+        .transpose()?)
+}
+
+fn drop_creation_order_op(name: &RelationName) -> WriteOp {
+    WriteOp::Delete {
+        key: creation_order_key(name),
+    }
+}
+
+fn move_creation_order_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+    new_name: &RelationName,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let Some(value) = kv.get(&creation_order_key(name))? else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![
+        drop_creation_order_op(name),
+        WriteOp::Put {
+            key: creation_order_key(new_name),
+            value,
+        },
+    ])
+}
+
 /// Key for a relation's optional sharding strategy.
 fn sharding_key(relation: &RelationName) -> Vec<u8> {
     key::catalog_sharding_key(&relation.schema, &relation.name)
+}
+
+const REPLICA_IDENTITY_PREFIX: &[u8] = b"\0\0\0\0catalog_replica_identity/";
+const TYPED_TABLE_PREFIX: &[u8] = b"\0\0\0\0catalog_typed_table/";
+
+fn replica_identity_key(table_id: TableId) -> Vec<u8> {
+    let mut key = REPLICA_IDENTITY_PREFIX.to_vec();
+    key.extend_from_slice(&table_id.to_be_bytes());
+    key
+}
+
+fn typed_table_key(relation: &RelationName) -> Vec<u8> {
+    let mut out = TYPED_TABLE_PREFIX.to_vec();
+    key::push_key_part(&mut out, &relation.schema);
+    key::push_key_part(&mut out, &relation.name);
+    out
+}
+
+/// Record that `relation` was created `OF` the composite type with `oid`.
+#[must_use]
+pub fn set_typed_table_type_op(relation: &RelationName, oid: u32) -> WriteOp {
+    WriteOp::Put {
+        key: typed_table_key(relation),
+        value: U32::new(oid).as_bytes().to_vec(),
+    }
+}
+
+/// The composite type a typed table was declared `OF`, if any.
+///
+/// # Errors
+///
+/// Returns storage or malformed-catalog errors.
+pub fn typed_table_type(kv: &dyn Kv, relation: &RelationName) -> Result<Option<u32>, CatalogError> {
+    let Some(bytes) = kv.get(&typed_table_key(relation))? else {
+        return Ok(None);
+    };
+    let (oid, rest) = U32::read_from_prefix(&bytes)
+        .map_err(|_| KvError::CorruptRow("typed table oid is not u32".into()))?;
+    if !rest.is_empty() {
+        return Err(KvError::CorruptRow("typed table oid has trailing bytes".into()).into());
+    }
+    Ok(Some(oid.get()))
+}
+
+/// Return a table's replica identity, with a missing record meaning `DEFAULT`.
+///
+/// # Errors
+///
+/// Returns storage or corruption errors from the catalog KV seam.
+pub fn replica_identity(kv: &dyn Kv, table_id: TableId) -> Result<ReplicaIdentity, CatalogError> {
+    let Some(bytes) = kv.get(&replica_identity_key(table_id))? else {
+        return Ok(ReplicaIdentity::Default);
+    };
+    match bytes.as_slice() {
+        b"f" => Ok(ReplicaIdentity::Full),
+        b"n" => Ok(ReplicaIdentity::Nothing),
+        [b'i', name @ ..] => String::from_utf8(name.to_vec())
+            .map(ReplicaIdentity::Index)
+            .map_err(|_| {
+                CatalogError::Storage(KvError::CorruptRow(
+                    "invalid replica identity index name".into(),
+                ))
+            }),
+        _ => Err(CatalogError::Storage(KvError::CorruptRow(
+            "invalid replica identity record".into(),
+        ))),
+    }
+}
+
+/// Build the catalog write that records a table's replica identity.
+#[must_use]
+pub fn set_replica_identity_ops(table_id: TableId, identity: &ReplicaIdentity) -> Vec<WriteOp> {
+    let key = replica_identity_key(table_id);
+    match identity {
+        ReplicaIdentity::Default => vec![WriteOp::Delete { key }],
+        ReplicaIdentity::Full => vec![WriteOp::Put {
+            key,
+            value: b"f".to_vec(),
+        }],
+        ReplicaIdentity::Nothing => vec![WriteOp::Put {
+            key,
+            value: b"n".to_vec(),
+        }],
+        ReplicaIdentity::Index(name) => {
+            let mut value = Vec::with_capacity(name.len() + 1);
+            value.push(b'i');
+            value.extend_from_slice(name.as_bytes());
+            vec![WriteOp::Put { key, value }]
+        }
+    }
 }
 
 /// The id-keyed index entry naming `relation`.
@@ -2632,15 +3012,17 @@ pub fn move_relation_to_schema_ops(
     if let Some(bytes) = kv.get(&view_key(name))? {
         let mut view = deserialize_view(&bytes)?;
         view.name = new_name.clone();
-        return Ok(vec![
+        let mut ops = vec![
             WriteOp::Delete {
                 key: view_key(name),
             },
             put_view_op(&view),
-        ]);
+        ];
+        ops.extend(move_creation_order_ops(kv, name, new_name)?);
+        return Ok(ops);
     }
     if let Some(bytes) = kv.get(&catalog_sequence_key(name))? {
-        return Ok(vec![
+        let mut ops = vec![
             WriteOp::Delete {
                 key: catalog_sequence_key(name),
             },
@@ -2648,7 +3030,9 @@ pub fn move_relation_to_schema_ops(
                 key: catalog_sequence_key(new_name),
                 value: bytes,
             },
-        ]);
+        ];
+        ops.extend(move_creation_order_ops(kv, name, new_name)?);
+        return Ok(ops);
     }
     Ok(Vec::new())
 }
@@ -2874,6 +3258,11 @@ pub fn drop_schema_ops(
             .into_iter()
             .map(|(key, _)| WriteOp::Delete { key }),
     );
+    for (key, privilege) in scan_default_table_privileges(kv)? {
+        if privilege.schema.as_deref() == Some(name) {
+            ops.push(WriteOp::Delete { key });
+        }
+    }
     if bootstrap_schema_owner(name).is_some() {
         ops.push(WriteOp::Put {
             key: dropped_schema_key(name),
@@ -2944,6 +3333,13 @@ pub fn rename_table_ops(
             value: placement,
         });
     }
+    if let Some(access_method) = kv.get(&relation_access_method_key(name))? {
+        ops.push(drop_relation_access_method_op(name));
+        ops.push(WriteOp::Put {
+            key: relation_access_method_key(new_name),
+            value: access_method,
+        });
+    }
     if let Some(sharding) = kv.get(&sharding_key(name))? {
         ops.push(WriteOp::Delete {
             key: sharding_key(name),
@@ -2951,6 +3347,15 @@ pub fn rename_table_ops(
         ops.push(WriteOp::Put {
             key: sharding_key(new_name),
             value: sharding,
+        });
+    }
+    if let Some(typed_of) = kv.get(&typed_table_key(name))? {
+        ops.push(WriteOp::Delete {
+            key: typed_table_key(name),
+        });
+        ops.push(WriteOp::Put {
+            key: typed_table_key(new_name),
+            value: typed_of,
         });
     }
     for (table_index_key, index_bytes) in kv.scan_prefix(&catalog_table_index_prefix(table_id))? {
@@ -2997,6 +3402,7 @@ pub fn rename_table_ops(
         });
     }
     ops.extend(rename_table_foreign_key_ops(kv, table_id, new_name)?);
+    ops.extend(move_creation_order_ops(kv, name, new_name)?);
     Ok(ops)
 }
 
@@ -3199,6 +3605,7 @@ pub fn create_table_with_options_ops(
         catalog_by_id_op(next, name),
     ];
     batch.extend(bump);
+    batch.extend(creation_order_ops(kv, name)?);
     Ok((next, batch))
 }
 
@@ -3228,10 +3635,12 @@ pub fn create_view_ops(
         columns,
         options,
     };
-    Ok(vec![WriteOp::Put {
+    let mut ops = vec![WriteOp::Put {
         key: view_key(name),
         value: serialize_view(&view),
-    }])
+    }];
+    ops.extend(creation_order_ops(kv, name)?);
+    Ok(ops)
 }
 
 /// Create a view and its output schema in one atomic batch.
@@ -3458,6 +3867,7 @@ pub fn drop_view_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, C
         let mut ops = vec![WriteOp::Delete {
             key: view_key(name),
         }];
+        ops.push(drop_creation_order_op(name));
         ops.extend(drop_table_privilege_ops(kv, name)?);
         ops.extend(drop_relation_column_privilege_ops(kv, name)?);
         return Ok(ops);
@@ -4764,10 +5174,12 @@ pub fn create_sequence_ops(
     if kv.get(&catalog_sequence_key(name))?.is_some() {
         return Err(CatalogError::DuplicateSequence(name.to_string()));
     }
-    Ok(vec![WriteOp::Put {
+    let mut ops = vec![WriteOp::Put {
         key: catalog_sequence_key(name),
         value: serialize_sequence(sequence),
-    }])
+    }];
+    ops.extend(creation_order_ops(kv, name)?);
+    Ok(ops)
 }
 
 /// Every sequence in the catalog, name and record, sorted by name.
@@ -4849,9 +5261,12 @@ pub fn put_sequence_op(name: &RelationName, sequence: Sequence) -> WriteOp {
 /// Returns undefined-sequence or storage/corruption errors.
 pub fn drop_sequence_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, CatalogError> {
     let _ = get_sequence(kv, name)?;
-    Ok(vec![WriteOp::Delete {
-        key: catalog_sequence_key(name),
-    }])
+    Ok(vec![
+        WriteOp::Delete {
+            key: catalog_sequence_key(name),
+        },
+        drop_creation_order_op(name),
+    ])
 }
 
 fn validate_sequence(sequence: Sequence) -> Result<(), CatalogError> {
@@ -4974,16 +5389,27 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, 
         WriteOp::Delete {
             key: catalog_key(name),
         },
+        drop_creation_order_op(name),
         WriteOp::Delete {
             key: key::seq_key(table.id),
         },
         WriteOp::Delete {
             key: key::catalog_by_id_key(table.id),
         },
+        WriteOp::Delete {
+            key: replica_identity_key(table.id),
+        },
+        WriteOp::Delete {
+            key: typed_table_key(name),
+        },
         drop_relation_tablespace_op(name),
+        drop_relation_access_method_op(name),
     ];
     for (row_key, _) in kv.scan_prefix(&key::table_prefix(table.id))? {
         ops.push(WriteOp::Delete { key: row_key });
+    }
+    for (redirect_key, _) in kv.scan_prefix(&key::update_target_prefix(table.id))? {
+        ops.push(WriteOp::Delete { key: redirect_key });
     }
     for (index_table_key, index_bytes) in kv.scan_prefix(&catalog_table_index_prefix(table.id))? {
         let index = deserialize_index(&index_bytes)?;
@@ -4994,13 +5420,16 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, 
             key: index_table_key,
         });
         ops.push(drop_relation_tablespace_op(&index.qualified_name()));
+        ops.push(drop_relation_access_method_op(&index.qualified_name()));
     }
     ops.extend(drop_table_foreign_key_ops(kv, table.id)?);
     // Row-security policies are keyed by table id, and a table id can be handed
     // out again, so leaving them behind would attach one relation's policies to
     // an unrelated later one.
     ops.extend(policy::drop_policies_for_table_ops(kv, table.id)?);
+    ops.extend(rule::drop_rules_for_table_ops(kv, table.id)?);
     ops.extend(drop_table_privilege_ops(kv, name)?);
+    ops.extend(drop_owner_table_privilege_revoke_ops(kv, name)?);
     ops.extend(drop_relation_column_privilege_ops(kv, name)?);
     Ok(ops)
 }
@@ -5016,6 +5445,17 @@ fn drop_table_privilege_ops(
 ) -> Result<Vec<WriteOp>, CatalogError> {
     Ok(kv
         .scan_prefix(&table_privilege_relation_prefix(name))?
+        .into_iter()
+        .map(|(key, _)| WriteOp::Delete { key })
+        .collect())
+}
+
+fn drop_owner_table_privilege_revoke_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    Ok(kv
+        .scan_prefix(&owner_table_privilege_revoke_relation_prefix(name))?
         .into_iter()
         .map(|(key, _)| WriteOp::Delete { key })
         .collect())
@@ -5055,6 +5495,8 @@ pub fn drop_table(kv: &dyn Kv, name: &RelationName) -> Result<(), CatalogError> 
 const ROLE_PREFIX: &[u8] = b"catalog/role/";
 const ROLE_MEMBERSHIP_PREFIX: &[u8] = b"catalog/role_membership/";
 const TABLE_PRIVILEGE_PREFIX: &[u8] = b"catalog/table_privilege/";
+const DEFAULT_TABLE_PRIVILEGE_PREFIX: &[u8] = b"catalog/default_table_privilege/";
+const OWNER_TABLE_PRIVILEGE_REVOKE_PREFIX: &[u8] = b"catalog/table_owner_privilege_revoke/";
 const COLUMN_PRIVILEGE_PREFIX: &[u8] = b"catalog/column_privilege/";
 const SCHEMA_PRIVILEGE_PREFIX: &[u8] = b"catalog/schema_privilege/";
 
@@ -5404,6 +5846,11 @@ pub fn drop_role_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogErr
             ops.push(WriteOp::Delete { key });
         }
     }
+    for (key, privilege) in scan_default_table_privileges(kv)? {
+        if privilege.owner == name || privilege.grantee == name {
+            ops.push(WriteOp::Delete { key });
+        }
+    }
     for (key, _) in kv.scan_prefix(SCHEMA_PRIVILEGE_PREFIX)? {
         let Some(parts) = key::key_parts(&key[SCHEMA_PRIVILEGE_PREFIX.len()..], 3) else {
             return Err(KvError::CorruptRow("schema privilege key is incomplete".into()).into());
@@ -5467,6 +5914,92 @@ pub fn revoke_table_privileges_ops(
     privileges: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
     table_privilege_ops(kv, table, grantees, privileges, false)
+}
+
+/// Build write ops for `ALTER DEFAULT PRIVILEGES … ON TABLES`.
+///
+/// An empty `schemas` list writes the cluster-wide default. Otherwise each
+/// named schema receives its own default, which combines with the global one
+/// when a relation is created there.
+///
+/// # Errors
+///
+/// Returns undefined-object or undefined-schema errors, or catalog storage
+/// failures.
+pub fn alter_default_table_privileges_ops(
+    kv: &dyn Kv,
+    owner: &str,
+    schemas: &[String],
+    grantees: &[String],
+    privileges: &[String],
+    grant: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    if !role_is_nameable(kv, owner)? {
+        return Err(CatalogError::UndefinedObject(owner.to_string()));
+    }
+    let scopes: Vec<Option<&str>> = if schemas.is_empty() {
+        vec![None]
+    } else {
+        schemas.iter().map(|schema| Some(schema.as_str())).collect()
+    };
+    for schema in schemas {
+        if !schema_exists(kv, schema)? {
+            return Err(CatalogError::UndefinedSchema(schema.clone()));
+        }
+    }
+    let mut ops = Vec::new();
+    for grantee in grantees {
+        if !role_is_nameable(kv, grantee)? {
+            return Err(CatalogError::UndefinedObject(grantee.clone()));
+        }
+        for privilege in expand_table_privileges(privileges) {
+            for schema in &scopes {
+                let key = default_table_privilege_key(owner, *schema, grantee, &privilege);
+                ops.push(if grant {
+                    WriteOp::Put {
+                        value: serialize_default_table_privilege(
+                            owner, *schema, grantee, &privilege, true,
+                        ),
+                        key,
+                    }
+                } else {
+                    WriteOp::Put {
+                        value: serialize_default_table_privilege(
+                            owner, *schema, grantee, &privilege, false,
+                        ),
+                        key,
+                    }
+                });
+            }
+        }
+    }
+    Ok(ops)
+}
+
+/// The table privilege defaults that apply when `owner` creates a relation in
+/// `schema`. Schema-local defaults add to the global defaults.
+///
+/// # Errors
+///
+/// Returns storage or corruption errors from the catalog KV seam.
+pub fn default_table_privileges_of(
+    kv: &dyn Kv,
+    owner: &str,
+    schema: &str,
+) -> Result<Vec<DefaultTablePrivilege>, CatalogError> {
+    let mut prefix = DEFAULT_TABLE_PRIVILEGE_PREFIX.to_vec();
+    key::push_key_part(&mut prefix, owner);
+    Ok(kv
+        .scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(_, bytes)| deserialize_default_table_privilege(&bytes))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|privilege| {
+            privilege.owner == owner
+                && (privilege.schema.is_none() || privilege.schema.as_deref() == Some(schema))
+        })
+        .collect())
 }
 
 fn table_privilege_ops(
@@ -5906,6 +6439,15 @@ fn scan_table_privileges(kv: &dyn Kv) -> Result<Vec<(Vec<u8>, TablePrivilege)>, 
         .collect()
 }
 
+fn scan_default_table_privileges(
+    kv: &dyn Kv,
+) -> Result<Vec<(Vec<u8>, DefaultTablePrivilege)>, CatalogError> {
+    kv.scan_prefix(DEFAULT_TABLE_PRIVILEGE_PREFIX)?
+        .into_iter()
+        .map(|(key, bytes)| Ok((key, deserialize_default_table_privilege(&bytes)?)))
+        .collect()
+}
+
 fn scan_column_privileges(kv: &dyn Kv) -> Result<Vec<(Vec<u8>, ColumnPrivilege)>, CatalogError> {
     kv.scan_prefix(COLUMN_PRIVILEGE_PREFIX)?
         .into_iter()
@@ -5945,6 +6487,66 @@ fn table_privilege_key(table: &RelationName, grantee: &str, privilege: &str) -> 
         key::push_key_part(&mut key, part);
     }
     key
+}
+
+fn default_table_privilege_key(
+    owner: &str,
+    schema: Option<&str>,
+    grantee: &str,
+    privilege: &str,
+) -> Vec<u8> {
+    let mut key = DEFAULT_TABLE_PRIVILEGE_PREFIX.to_vec();
+    for part in [owner, schema.unwrap_or(""), grantee, privilege] {
+        key::push_key_part(&mut key, part);
+    }
+    key
+}
+
+fn owner_table_privilege_revoke_relation_prefix(table: &RelationName) -> Vec<u8> {
+    let mut key = OWNER_TABLE_PRIVILEGE_REVOKE_PREFIX.to_vec();
+    for part in [&table.schema, &table.name] {
+        key::push_key_part(&mut key, part);
+    }
+    key
+}
+
+fn owner_table_privilege_revoke_key(table: &RelationName, privilege: &str) -> Vec<u8> {
+    let mut key = owner_table_privilege_revoke_relation_prefix(table);
+    key::push_key_part(&mut key, privilege);
+    key
+}
+
+/// Build the marker that makes an explicit default ACL revocation from a table
+/// owner effective for a table the owner creates.
+#[must_use]
+pub fn revoke_owner_table_privilege_op(table: &RelationName, privilege: &str) -> WriteOp {
+    WriteOp::Put {
+        key: owner_table_privilege_revoke_key(table, privilege),
+        value: Vec::new(),
+    }
+}
+
+/// Build the deletion that temporarily restores an owner's implicit privilege.
+#[must_use]
+pub fn restore_owner_table_privilege_op(table: &RelationName, privilege: &str) -> WriteOp {
+    WriteOp::Delete {
+        key: owner_table_privilege_revoke_key(table, privilege),
+    }
+}
+
+/// Whether an explicit default ACL revoked this privilege from the table owner.
+///
+/// # Errors
+///
+/// Returns storage errors from the catalog KV seam.
+pub fn owner_table_privilege_is_revoked(
+    kv: &dyn Kv,
+    table: &RelationName,
+    privilege: &str,
+) -> Result<bool, CatalogError> {
+    Ok(kv
+        .get(&owner_table_privilege_revoke_key(table, privilege))?
+        .is_some())
 }
 
 /// The key range holding exactly one relation's column grants.
@@ -6031,6 +6633,40 @@ fn deserialize_table_privilege(bytes: &[u8]) -> Result<TablePrivilege, CatalogEr
     })
 }
 
+fn serialize_default_table_privilege(
+    owner: &str,
+    schema: Option<&str>,
+    grantee: &str,
+    privilege: &str,
+    grant: bool,
+) -> Vec<u8> {
+    let mut bytes = vec![u8::from(grant)];
+    for part in [owner, schema.unwrap_or(""), grantee, privilege] {
+        key::push_key_part(&mut bytes, part);
+    }
+    bytes
+}
+
+fn deserialize_default_table_privilege(
+    bytes: &[u8],
+) -> Result<DefaultTablePrivilege, CatalogError> {
+    let Some((&grant, parts)) = bytes.split_first() else {
+        return Err(KvError::CorruptRow("default table privilege has invalid shape".into()).into());
+    };
+    let parts = key::key_parts(parts, 4)
+        .ok_or_else(|| KvError::CorruptRow("default table privilege has invalid shape".into()))?;
+    let [owner, schema, grantee, privilege] = parts[..] else {
+        return Err(KvError::CorruptRow("default table privilege has invalid shape".into()).into());
+    };
+    Ok(DefaultTablePrivilege {
+        owner: owner.to_string(),
+        schema: (!schema.is_empty()).then(|| schema.to_string()),
+        grantee: grantee.to_string(),
+        privilege: privilege.to_string(),
+        grant: grant != 0,
+    })
+}
+
 fn serialize_column_privilege(
     table: &RelationName,
     column: &str,
@@ -6081,11 +6717,12 @@ pub fn create_user_type_ops(
     let oid = read_next_type_oid(kv)?;
     let ty = UserType {
         oid,
+        array_oid: crabka_pgtypes::usertype::user_array_oid(oid),
         schema: name.schema.clone(),
         name: name.name.clone(),
         body,
     };
-    let ops = vec![
+    let mut ops = vec![
         WriteOp::Put {
             key: key::user_type_key(&name.schema, &name.name),
             value: serialize_user_type(&ty),
@@ -6095,6 +6732,7 @@ pub fn create_user_type_ops(
             value: U32::new(oid + USER_TYPE_OID_STRIDE).as_bytes().to_vec(),
         },
     ];
+    ops.extend(creation_order_ops(kv, name)?);
     Ok((ty, ops))
 }
 
@@ -6128,6 +6766,11 @@ pub fn rename_user_type_ops(
 ) -> Result<Vec<WriteOp>, CatalogError> {
     let mut ops = drop_user_type_ops(kv, old)?;
     ops.extend(put_user_type_ops(kv, renamed)?);
+    ops.extend(move_creation_order_ops(
+        kv,
+        &RelationName::new(&old.schema, &old.name),
+        &RelationName::new(&renamed.schema, &renamed.name),
+    )?);
     Ok(ops)
 }
 
@@ -6141,6 +6784,12 @@ pub fn drop_user_type_ops(kv: &dyn Kv, ty: &UserType) -> Result<Vec<WriteOp>, Ca
     let mut ops = vec![WriteOp::Delete {
         key: key::user_type_key(&ty.schema, &ty.name),
     }];
+    ops.push(drop_creation_order_op(&RelationName::new(
+        &ty.schema, &ty.name,
+    )));
+    let oid = ty.oid.to_string();
+    ops.push(set_comment_op("type", CommentObject::Named(&oid), None));
+    ops.push(set_comment_op("domain", CommentObject::Named(&oid), None));
     ops.extend(matching_legacy_user_type_delete(kv, ty)?);
     Ok(ops)
 }
@@ -6226,6 +6875,24 @@ fn user_type_records(kv: &dyn Kv) -> Result<BTreeMap<u32, (bool, Vec<u8>)>, Cata
 ///
 /// Returns storage/corruption errors, including an unresolved referenced oid.
 pub fn hydrate_user_types(kv: &dyn Kv) -> Result<Vec<UserType>, CatalogError> {
+    hydrate_user_types_with(kv, &|_| None)
+}
+
+/// Hydrate durable user types, resolving catalog-owned types supplied by the
+/// caller as dependencies.
+///
+/// Relation rowtypes are owned by `pgexec`, not this crate, but PostgreSQL
+/// permits a domain or composite field to name one.  The caller supplies only
+/// its own catalog types, so unrelated process-global registrations cannot
+/// make an invalid durable record appear valid.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors, including an unresolved referenced oid.
+pub fn hydrate_user_types_with(
+    kv: &dyn Kv,
+    resolve_catalog_type: &dyn Fn(u32) -> Option<ColumnType>,
+) -> Result<Vec<UserType>, CatalogError> {
     let mut pending: Vec<Vec<u8>> = user_type_records(kv)?
         .into_values()
         .map(|(_, bytes)| bytes)
@@ -6236,7 +6903,9 @@ pub fn hydrate_user_types(kv: &dyn Kv) -> Result<Vec<UserType>, CatalogError> {
         let mut deferred = Vec::new();
         let mut first_unresolved = None;
         for bytes in pending {
-            match deserialize_user_type_with(&bytes, &|oid| hydrated_column_type(&decoded, oid)) {
+            match deserialize_user_type_with(&bytes, &|oid| {
+                hydrated_column_type(&decoded, oid).or_else(|| resolve_catalog_type(oid))
+            }) {
                 Ok(ty) => {
                     decoded.insert(ty.oid, ty);
                 }
@@ -6286,15 +6955,26 @@ fn hydrated_column_type(types: &BTreeMap<u32, UserType>, oid: u32) -> Option<Col
 const FIRST_USER_TYPE_OID: u32 = 300_000;
 const USER_TYPE_OID_STRIDE: u32 = 4;
 
+/// New catalogs can coexist in this process (notably independent `SqlEngine`
+/// instances in one server). Keep their newly allocated type OIDs disjoint;
+/// every chosen value is still written to the catalog's durable counter.
+static PROCESS_NEXT_USER_TYPE_OID: AtomicU32 = AtomicU32::new(FIRST_USER_TYPE_OID);
+
 fn read_next_type_oid(kv: &dyn Kv) -> Result<u32, CatalogError> {
-    match kv.get(&key::meta_next_type_oid_key())? {
+    let stored = match kv.get(&key::meta_next_type_oid_key())? {
         Some(b) => {
             let (v, _) = U32::read_from_prefix(b.as_slice())
                 .map_err(|_| KvError::CorruptRow("next_type_oid is not u32".into()))?;
-            Ok(v.get())
+            v.get()
         }
-        None => Ok(FIRST_USER_TYPE_OID),
-    }
+        None => FIRST_USER_TYPE_OID,
+    };
+    PROCESS_NEXT_USER_TYPE_OID
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |next| {
+            next.max(stored).checked_add(USER_TYPE_OID_STRIDE)
+        })
+        .map(|previous| previous.max(stored))
+        .map_err(|_| KvError::CorruptRow("user type oid space exhausted".into()).into())
 }
 
 // ── Foreign-data wrapper ──────────────────────────────────────────────────────
@@ -6665,7 +7345,7 @@ mod tests {
     use crabka_pgkv::{FjallKv, MemKv, WriteOp};
     use crabka_pgtypes::{
         ColumnType,
-        usertype::{DomainBody, RangeBody},
+        usertype::{DomainBody, RangeBody, UserTypeRef, intern},
     };
 
     use super::*;
@@ -6780,6 +7460,7 @@ mod tests {
         let kv = MemKv::default();
         let legacy = UserType {
             oid: 300_000,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(300_000),
             schema: "a".into(),
             name: "b".into(),
             body: UserTypeBody::Composite(Vec::new()),
@@ -6791,6 +7472,7 @@ mod tests {
         .expect("legacy record");
         let dotted = UserType {
             oid: legacy.oid,
+            array_oid: legacy.array_oid,
             schema: PUBLIC_SCHEMA.into(),
             name: "a.b".into(),
             body: UserTypeBody::Composite(Vec::new()),
@@ -6801,10 +7483,41 @@ mod tests {
     }
 
     #[test]
+    fn fresh_catalogs_allocate_distinct_user_type_oids() {
+        let first = MemKv::default();
+        let second = MemKv::default();
+        let (first_type, first_ops) = create_user_type_ops(
+            &first,
+            &RelationName::public("first_catalog_type"),
+            UserTypeBody::Composite(Vec::new()),
+        )
+        .expect("first type");
+        first.write_batch(&first_ops).expect("first write");
+        let (second_type, second_ops) = create_user_type_ops(
+            &second,
+            &RelationName::public("second_catalog_type"),
+            UserTypeBody::Composite(Vec::new()),
+        )
+        .expect("second type");
+        second.write_batch(&second_ops).expect("second write");
+
+        assert_ne!(first_type.oid, second_type.oid);
+        assert_eq!(
+            first_type.array_oid,
+            crabka_pgtypes::usertype::user_array_oid(first_type.oid)
+        );
+        assert_eq!(
+            second_type.array_oid,
+            crabka_pgtypes::usertype::user_array_oid(second_type.oid)
+        );
+    }
+
+    #[test]
     fn hydration_uses_only_types_from_its_catalog() {
         let kv = MemKv::default();
         let foreign = UserType {
             oid: 1_100_000,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(1_100_000),
             schema: PUBLIC_SCHEMA.into(),
             name: "other_tenant_type".into(),
             body: UserTypeBody::Composite(Vec::new()),
@@ -6812,6 +7525,7 @@ mod tests {
         crabka_pgtypes::usertype::replace(&foreign);
         let dependent = UserType {
             oid: 1_100_004,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(1_100_004),
             schema: PUBLIC_SCHEMA.into(),
             name: "local_domain_missing_base".into(),
             body: UserTypeBody::Domain(DomainBody {
@@ -6819,6 +7533,7 @@ mod tests {
                     .column_type()
                     .expect("a composite always has a column type"),
                 not_null: false,
+                not_null_name: None,
                 default: None,
                 checks: Vec::new(),
             }),
@@ -6839,6 +7554,7 @@ mod tests {
         let kv = MemKv::default();
         let base = UserType {
             oid: 1_200_004,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(1_200_004),
             schema: PUBLIC_SCHEMA.into(),
             name: "later_oid_base".into(),
             body: UserTypeBody::Range(RangeBody {
@@ -6850,11 +7566,13 @@ mod tests {
         };
         let dependent = UserType {
             oid: 1_200_000,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(1_200_000),
             schema: PUBLIC_SCHEMA.into(),
             name: "earlier_oid_domain".into(),
             body: UserTypeBody::Domain(DomainBody {
                 base: base.multirange_type().expect("range has a multirange"),
                 not_null: false,
+                not_null_name: None,
                 default: None,
                 checks: Vec::new(),
             }),
@@ -6872,10 +7590,42 @@ mod tests {
     }
 
     #[test]
+    fn hydration_resolves_a_supplied_relation_rowtype() {
+        let kv = MemKv::default();
+        let rowtype = UserTypeRef {
+            oid: 1_250_000,
+            array_oid: 1_260_000,
+            name: intern("public.hydration_source"),
+        };
+        let dependent = UserType {
+            oid: 1_250_004,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(1_250_004),
+            schema: PUBLIC_SCHEMA.into(),
+            name: "domain_over_relation_rowtype".into(),
+            body: UserTypeBody::Domain(DomainBody {
+                base: ColumnType::Record(Some(rowtype)),
+                not_null: false,
+                not_null_name: None,
+                default: None,
+                checks: Vec::new(),
+            }),
+        };
+        store_user_type(&kv, &dependent);
+
+        let hydrated = hydrate_user_types_with(&kv, &|oid| {
+            (oid == rowtype.oid).then_some(ColumnType::Record(Some(rowtype)))
+        })
+        .expect("caller-owned rowtype resolves the durable dependency");
+
+        assert_eq!(hydrated, vec![dependent]);
+    }
+
+    #[test]
     fn corrupt_hydration_does_not_publish_valid_prefix() {
         let kv = MemKv::default();
         let original = UserType {
             oid: 1_300_000,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(1_300_000),
             schema: PUBLIC_SCHEMA.into(),
             name: "registry_before_failed_hydration".into(),
             body: UserTypeBody::Composite(Vec::new()),
@@ -6883,6 +7633,7 @@ mod tests {
         crabka_pgtypes::usertype::replace(&original);
         let catalog_type = UserType {
             oid: original.oid,
+            array_oid: original.array_oid,
             schema: PUBLIC_SCHEMA.into(),
             name: "catalog_type_not_published".into(),
             body: UserTypeBody::Composite(Vec::new()),
@@ -7314,6 +8065,58 @@ mod tests {
     }
 
     #[test]
+    fn default_table_privileges_combine_global_and_schema_scopes() {
+        let kv = MemKv::default();
+        create_role(&kv, "owner", false).expect("owner");
+        create_role(&kv, "reader", false).expect("reader");
+        kv.write_batch(&create_schema_ops(&kv, "private", "owner").expect("schema ops"))
+            .expect("schema");
+        let global = alter_default_table_privileges_ops(
+            &kv,
+            "owner",
+            &[],
+            &["reader".into()],
+            &["SELECT".into()],
+            true,
+        )
+        .expect("global ops");
+        kv.write_batch(&global).expect("global defaults");
+        let local = alter_default_table_privileges_ops(
+            &kv,
+            "owner",
+            &["private".into()],
+            &["reader".into()],
+            &["INSERT".into()],
+            true,
+        )
+        .expect("schema ops");
+        kv.write_batch(&local).expect("schema defaults");
+        let mut privileges = default_table_privileges_of(&kv, "owner", "private")
+            .expect("defaults")
+            .into_iter()
+            .map(|privilege| privilege.privilege)
+            .collect::<Vec<_>>();
+        privileges.sort();
+        assert_eq!(privileges, ["INSERT", "SELECT"]);
+        assert_eq!(
+            default_table_privileges_of(&kv, "owner", "public")
+                .expect("defaults")
+                .into_iter()
+                .map(|privilege| privilege.privilege)
+                .collect::<Vec<_>>(),
+            ["SELECT"]
+        );
+        let table = rel("owner_revoke");
+        assert!(!owner_table_privilege_is_revoked(&kv, &table, "INSERT").expect("not revoked"));
+        kv.write_batch(&[revoke_owner_table_privilege_op(&table, "INSERT")])
+            .expect("revoke marker");
+        assert!(owner_table_privilege_is_revoked(&kv, &table, "INSERT").expect("revoked"));
+        kv.write_batch(&[restore_owner_table_privilege_op(&table, "INSERT")])
+            .expect("restore marker");
+        assert!(!owner_table_privilege_is_revoked(&kv, &table, "INSERT").expect("restored"));
+    }
+
+    #[test]
     fn predefined_roles_are_pg_authid_rows_but_public_is_not() {
         let kv = MemKv::default();
         create_role(&kv, "reader", true).expect("reader");
@@ -7330,26 +8133,29 @@ mod tests {
             .map(|role| role.name)
             .collect::<Vec<_>>();
 
-        assert!(names == vec![
-            "pg_checkpoint",
-            "pg_create_subscription",
-            "pg_database_owner",
-            "pg_execute_server_program",
-            "pg_maintain",
-            "pg_monitor",
-            "pg_read_all_data",
-            "pg_read_all_settings",
-            "pg_read_all_stats",
-            "pg_read_server_files",
-            "pg_signal_autovacuum_worker",
-            "pg_signal_backend",
-            "pg_stat_scan_tables",
-            "pg_use_reserved_connections",
-            "pg_write_all_data",
-            "pg_write_server_files",
-            "postgres",
-            "reader",
-        ]);
+        assert!(
+            names
+                == vec![
+                    "pg_checkpoint",
+                    "pg_create_subscription",
+                    "pg_database_owner",
+                    "pg_execute_server_program",
+                    "pg_maintain",
+                    "pg_monitor",
+                    "pg_read_all_data",
+                    "pg_read_all_settings",
+                    "pg_read_all_stats",
+                    "pg_read_server_files",
+                    "pg_signal_autovacuum_worker",
+                    "pg_signal_backend",
+                    "pg_stat_scan_tables",
+                    "pg_use_reserved_connections",
+                    "pg_write_all_data",
+                    "pg_write_server_files",
+                    "postgres",
+                    "reader",
+                ]
+        );
         assert!(get_role(&kv, "pg_monitor").expect("pg_monitor").can_login == false);
         let bootstrap = get_role(&kv, BOOTSTRAP_ROLE).expect("bootstrap");
         assert!(bootstrap.can_login);
@@ -8960,8 +9766,8 @@ pub struct UserCast {
     pub method: char,
     /// `pg_cast.castcontext`: `e` explicit, `a` assignment, `i` implicit.
     pub context: char,
-    /// `pg_cast.castfunc`'s routine name, empty for a `WITHOUT FUNCTION` or
-    /// `WITH INOUT` cast.
+    /// `pg_cast.castfunc` as a decimal routine oid, empty for a `WITHOUT
+    /// FUNCTION` or `WITH INOUT` cast.
     pub function: String,
 }
 
@@ -9071,14 +9877,14 @@ fn decode_user_cast(source: u32, target: u32, bytes: &[u8]) -> Result<UserCast, 
     let (oid, rest) = bytes.split_at_checked(4).ok_or_else(corrupt)?;
     let oid = u32::from_be_bytes(oid.try_into().expect("four bytes fit u32"));
     let (&method, rest) = rest.split_first().ok_or_else(corrupt)?;
-    let (&context, function) = rest.split_first().ok_or_else(corrupt)?;
+    let (&context, rest) = rest.split_first().ok_or_else(corrupt)?;
     Ok(UserCast {
         oid,
         source,
         target,
         method: char::from(method),
         context: char::from(context),
-        function: String::from_utf8(function.to_vec())
+        function: String::from_utf8(rest.to_vec())
             .map_err(|_| KvError::CorruptRow("cast function name is not UTF-8".into()))?,
     })
 }
