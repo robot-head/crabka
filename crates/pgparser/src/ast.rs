@@ -541,6 +541,11 @@ pub enum AlterViewAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterIndexAction {
     SetTablespace(String),
+    /// `ALTER COLUMN <attnum> SET STATISTICS <target>`.
+    SetStatistics {
+        column: i32,
+        target: i32,
+    },
     /// `SET (name = value, …)` — the index's storage parameters. The list has
     /// already been checked against the reloption catalog, against *every*
     /// index access method's options: the statement names no method, and the

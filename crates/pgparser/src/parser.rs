@@ -4374,6 +4374,22 @@ impl Parser {
         self.expect_ident_eq("alter")?;
         self.expect(&Token::Keyword(Keyword::Index))?;
         let name = self.relation_ref()?;
+        if self.eat_ident_eq("alter") {
+            self.eat_ident_eq("column");
+            let column = self.expect_i32("column number")?;
+            self.expect(&Token::Keyword(Keyword::Set))?;
+            self.expect_ident_eq("statistics")?;
+            let negative = *self.peek() == Token::Minus;
+            if negative {
+                self.bump();
+            }
+            let target = self.expect_i32("statistics target")?;
+            let target = if negative { -target } else { target };
+            return Ok(crate::ast::Statement::AlterIndex {
+                name,
+                action: AlterIndexAction::SetStatistics { column, target },
+            });
+        }
         if self.eat_ident_eq("reset") {
             let start = self.peek_pos();
             let params = self.storage_parameter_list()?;
@@ -20098,6 +20114,36 @@ mod tests {
             "ALTER INDEX i SET TABLESPACE ts",
         ] {
             assert!(crate::parse(sql).is_ok(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn alter_index_records_statistics_target_by_attribute_number() {
+        use assert2::assert;
+
+        use crate::ast::{AlterIndexAction, Statement};
+
+        for (sql, expected) in [
+            (
+                "ALTER INDEX attmp_idx ALTER COLUMN 0 SET STATISTICS 1000",
+                AlterIndexAction::SetStatistics {
+                    column: 0,
+                    target: 1000,
+                },
+            ),
+            (
+                "ALTER INDEX attmp_idx ALTER COLUMN 2 SET STATISTICS -1",
+                AlterIndexAction::SetStatistics {
+                    column: 2,
+                    target: -1,
+                },
+            ),
+        ] {
+            let statements = crate::parse(sql).expect("parse");
+            let [Statement::AlterIndex { action, .. }] = statements.as_slice() else {
+                panic!("expected ALTER INDEX");
+            };
+            assert!(*action == expected, "{sql}");
         }
     }
 

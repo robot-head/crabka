@@ -9064,6 +9064,40 @@ async fn cluster_records_the_index_it_ordered_by() {
 }
 
 #[tokio::test]
+async fn alter_index_statistics_rejects_zero_attribute_number() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE attmp (a int4)").await;
+    run_s(&mut session, "CREATE INDEX attmp_idx ON attmp (a)").await;
+
+    assert!(
+        error_of(
+            &mut session,
+            "ALTER INDEX attmp_idx ALTER COLUMN 0 SET STATISTICS 1000",
+        )
+        .await
+            == (
+                "22023".into(),
+                "column number must be in range from 1 to 32767".into(),
+            )
+    );
+    assert!(
+        error_of(
+            &mut session,
+            "ALTER INDEX attmp_idx ALTER COLUMN 1 SET STATISTICS 1000",
+        )
+        .await
+            == (
+                "42809".into(),
+                "cannot alter statistics on non-expression column \"a\" of index \"attmp_idx\""
+                    .into(),
+            )
+    );
+}
+
+#[tokio::test]
 async fn alter_table_set_schema_moves_the_catalogued_relation() {
     use assert2::assert;
 

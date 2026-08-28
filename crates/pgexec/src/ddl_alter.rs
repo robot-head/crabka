@@ -1273,7 +1273,7 @@ pub(crate) fn execute_ddl(
             }) {
                 return Err(error);
             }
-            crabka_pgcatalog::get_index(kv, name)?;
+            let index = crabka_pgcatalog::get_index(kv, name)?;
             match action {
                 AlterIndexAction::SetTablespace(tablespace) => {
                     let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
@@ -1281,6 +1281,35 @@ pub(crate) fn execute_ddl(
                         command("ALTER INDEX"),
                         vec![crabka_pgcatalog::set_relation_tablespace_op(name, oid)],
                     ))
+                }
+                AlterIndexAction::SetStatistics { column, target: _ } => {
+                    if !(1..=32_767).contains(column) {
+                        return Err(ExecError::InvalidParameterValueMessage(
+                            "column number must be in range from 1 to 32767".into(),
+                        ));
+                    }
+                    let position =
+                        usize::try_from(*column - 1).expect("validated positive attribute number");
+                    let Some(key) = index.columns.get(position) else {
+                        return Err(ExecError::UndefinedColumn(format!(
+                            "number {column} of relation \"{}\"",
+                            index.name
+                        )));
+                    };
+                    if crabka_pgcatalog::index_key_expression(key).is_none() {
+                        return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                            "42809",
+                            format!(
+                                "cannot alter statistics on non-expression column \"{key}\" of index \"{}\"",
+                                index.name
+                            ),
+                        )
+                        .with_hint("Alter statistics on table column instead.")));
+                    }
+                    // The planner does not yet consume per-index expression
+                    // statistics, but accepting the valid statement keeps the
+                    // DDL result and catalog shape aligned until P2 persists it.
+                    Ok((command("ALTER INDEX"), Vec::new()))
                 }
                 // The written options were checked against the reloption
                 // catalog at parse time. Crabka's index storage has no page
