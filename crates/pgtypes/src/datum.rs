@@ -3459,6 +3459,8 @@ mod tests {
                     representation: ColumnType::Int4,
                     input: "int4in".to_string(),
                     output: "int4out".to_string(),
+                    typmod_in: None,
+                    typmod_out: None,
                     category: "N".to_string(),
                     preferred: false,
                     delimiter: ",".to_string(),

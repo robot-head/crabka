@@ -293,6 +293,8 @@ fn create_base_type(
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
     let mut input = None;
     let mut output = None;
+    let mut typmod_in = None;
+    let mut typmod_out = None;
     let mut like = None;
     let mut category = None;
     let mut preferred = false;
@@ -304,6 +306,8 @@ fn create_base_type(
         match option.name.as_str() {
             "input" => input = Some(option_name(option)?),
             "output" => output = Some(option_name(option)?),
+            "typmod_in" => typmod_in = Some(option_name(option)?),
+            "typmod_out" => typmod_out = Some(option_name(option)?),
             "like" => like = Some(option_type(option)?),
             "category" => category = Some(option_char(option)?),
             "preferred" => preferred = option_bool(option)?,
@@ -366,6 +370,12 @@ fn create_base_type(
     };
     require_routine(kv, &input)?;
     require_routine(kv, &output)?;
+    if let Some(typmod_in) = &typmod_in {
+        require_routine(kv, typmod_in)?;
+    }
+    if let Some(typmod_out) = &typmod_out {
+        require_routine(kv, typmod_out)?;
+    }
     // `DefineType` starts every base type at `TYPCATEGORY_USER` and only the
     // `CATEGORY` option moves it. `LIKE` copies the layout, never the category.
     let category = category.unwrap_or_else(|| "U".to_string());
@@ -377,6 +387,8 @@ fn create_base_type(
         representation,
         input,
         output,
+        typmod_in,
+        typmod_out,
         category,
         preferred,
         delimiter,

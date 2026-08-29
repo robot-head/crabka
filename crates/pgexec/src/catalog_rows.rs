@@ -2049,6 +2049,16 @@ fn pg_type_row_with_storage(
     defined: bool,
     storage: Option<char>,
 ) -> Vec<Datum> {
+    pg_type_row_with_metadata(row, proc_oids, defined, storage, [None; 6])
+}
+
+fn pg_type_row_with_metadata(
+    row: PgTypeRow<'_>,
+    proc_oids: &BTreeMap<String, i32>,
+    defined: bool,
+    storage: Option<char>,
+    routine_overrides: [Option<&str>; 6],
+) -> Vec<Datum> {
     let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
     let typalign = match row.name {
         "cstring" => "c",
@@ -2078,7 +2088,7 @@ fn pg_type_row_with_storage(
             _ => unreachable!("user type storage is validated at creation"),
         },
     );
-    let routines = pg_type_routines(&row, proc_oids);
+    let routines = pg_type_routines(&row, proc_oids, routine_overrides);
     vec![
         oid(row.oid),
         text(row.name),
@@ -2119,7 +2129,11 @@ fn pg_type_row_with_storage(
 /// source for the regproc links in `pg_type`. Most I/O function names are
 /// mechanical; the underscore fallback covers the handful of families such as
 /// `timestamp_in` and `bit_in`.
-fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [Datum; 8] {
+fn pg_type_routines(
+    row: &PgTypeRow<'_>,
+    proc_oids: &BTreeMap<String, i32>,
+    routine_overrides: [Option<&str>; 6],
+) -> [Datum; 8] {
     let routine = |name: &str| {
         proc_oids
             .get(name)
@@ -2217,7 +2231,7 @@ fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [
             |name| routine(&format!("{name}_{suffix}")),
         )
     };
-    [
+    let mut routines = [
         absent_regproc(),
         io("in"),
         io("out"),
@@ -2230,7 +2244,13 @@ fn pg_type_routines(row: &PgTypeRow<'_>, proc_oids: &BTreeMap<String, i32>) -> [
         } else {
             absent_regproc()
         },
-    ]
+    ];
+    for (index, name) in routine_overrides.into_iter().enumerate() {
+        if let Some(name) = name {
+            routines[index + 1] = routine(name);
+        }
+    }
+    routines
 }
 
 fn pg_type_routine_stem(name: &str) -> &str {
@@ -2294,6 +2314,15 @@ pub(crate) fn user_type_rows(
     proc_oids: &BTreeMap<String, i32>,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgtypes::usertype;
+    let mut proc_oids = proc_oids.clone();
+    proc_oids.extend(
+        crate::routine::user_pg_proc_rows(catalog_kv)?
+            .into_iter()
+            .filter_map(|row| match (row.first(), row.get(1)) {
+                (Some(Datum::Int4(oid)), Some(Datum::Text(name))) => Some((name.clone(), *oid)),
+                _ => None,
+            }),
+    );
     let mut rows = Vec::new();
     for ty in crabka_pgcatalog::list_user_types(catalog_kv)? {
         let column_type = ty.column_type();
@@ -2320,7 +2349,7 @@ pub(crate) fn user_type_rows(
         // A shell is the one user type with no `ColumnType`, and `TypeShellMake`
         // gives it `sizeof(int32)` regardless.
         let shell_typlen = 4;
-        rows.push(pg_type_row_with_storage(
+        rows.push(pg_type_row_with_metadata(
             PgTypeRow {
                 oid: i32::try_from(ty.oid).unwrap_or(0),
                 name: &ty.name,
@@ -2342,11 +2371,22 @@ pub(crate) fn user_type_rows(
                     _ => "i",
                 }),
             },
-            proc_oids,
+            &proc_oids,
             !ty.is_shell(),
             match &ty.body {
                 usertype::UserTypeBody::Base(base) => Some(base.storage),
                 _ => None,
+            },
+            match &ty.body {
+                usertype::UserTypeBody::Base(base) => [
+                    Some(base.input.as_str()),
+                    Some(base.output.as_str()),
+                    None,
+                    None,
+                    base.typmod_in.as_deref(),
+                    base.typmod_out.as_deref(),
+                ],
+                _ => [None; 6],
             },
         ));
         if column_type.is_some() {
@@ -2367,7 +2407,7 @@ pub(crate) fn user_type_rows(
                     domain_base: None,
                     range_align: None,
                 },
-                proc_oids,
+                &proc_oids,
             ));
         }
         if let (Some((schema, name)), Some(multirange)) =
@@ -2390,7 +2430,7 @@ pub(crate) fn user_type_rows(
                     domain_base: None,
                     range_align: None,
                 },
-                proc_oids,
+                &proc_oids,
             ));
             let array_name = format!("_{name}");
             rows.push(pg_type_row(
@@ -2409,7 +2449,7 @@ pub(crate) fn user_type_rows(
                     domain_base: None,
                     range_align: None,
                 },
-                proc_oids,
+                &proc_oids,
             ));
         }
     }

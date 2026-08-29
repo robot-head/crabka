@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 18;
+pub const SCHEMA_VERSION: u8 = 19;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -1063,6 +1063,16 @@ pub(crate) fn write_str(out: &mut Vec<u8>, s: &str) {
     write_bytes(out, s.as_bytes());
 }
 
+fn write_optional_string(out: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            write_str(out, value);
+        }
+        None => out.push(0),
+    }
+}
+
 /// Append a length-prefixed byte string, the framing `read_str` expects.
 fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(
@@ -1095,6 +1105,16 @@ pub(crate) fn read_string(cur: &mut &[u8]) -> Result<String, KvError> {
     let bytes = read_str(cur)?;
     String::from_utf8(bytes.to_vec())
         .map_err(|_| KvError::CorruptRow("non-UTF-8 string in catalog".into()))
+}
+
+fn read_optional_string(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
+    match take_u8(cur)? {
+        0 => Ok(None),
+        1 => read_string(cur).map(Some),
+        tag => Err(KvError::CorruptRow(format!(
+            "unknown optional string tag {tag}"
+        ))),
+    }
 }
 
 fn read_options(cur: &mut &[u8]) -> Result<Vec<(String, String)>, KvError> {
@@ -2145,6 +2165,8 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
             write_type(&mut out, base.representation);
             write_str(&mut out, &base.input);
             write_str(&mut out, &base.output);
+            write_optional_string(&mut out, base.typmod_in.as_deref());
+            write_optional_string(&mut out, base.typmod_out.as_deref());
             write_str(&mut out, &base.category);
             out.push(u8::from(base.preferred));
             write_str(&mut out, &base.delimiter);
@@ -2291,6 +2313,8 @@ pub(crate) fn deserialize_user_type_with(
             let representation = read_type_with(&mut cur, resolve_user_type)?;
             let input = read_string(&mut cur)?;
             let output = read_string(&mut cur)?;
+            let typmod_in = read_optional_string(&mut cur)?;
+            let typmod_out = read_optional_string(&mut cur)?;
             let category = read_string(&mut cur)?;
             let preferred = take_u8(&mut cur)? != 0;
             let delimiter = read_string(&mut cur)?;
@@ -2299,6 +2323,8 @@ pub(crate) fn deserialize_user_type_with(
                 representation,
                 input,
                 output,
+                typmod_in,
+                typmod_out,
                 category,
                 preferred,
                 delimiter,
@@ -2990,6 +3016,8 @@ mod tests {
                         representation: ColumnType::Int4,
                         input: "int4in".into(),
                         output: "int4out".into(),
+                        typmod_in: None,
+                        typmod_out: None,
                         category: "N".into(),
                         preferred: false,
                         delimiter: ",".into(),
@@ -3373,7 +3401,7 @@ mod tests {
     }
 
     #[test]
-    fn base_type_storage_roundtrips() {
+    fn base_type_metadata_roundtrips() {
         let ty = UserType {
             oid: 300_002,
             array_oid: crabka_pgtypes::usertype::user_array_oid(300_002),
@@ -3383,6 +3411,8 @@ mod tests {
                 representation: ColumnType::Text,
                 input: "stored_text_in".into(),
                 output: "stored_text_out".into(),
+                typmod_in: Some("stored_text_typmodin".into()),
+                typmod_out: Some("stored_text_typmodout".into()),
                 category: "U".into(),
                 preferred: false,
                 delimiter: ",".into(),

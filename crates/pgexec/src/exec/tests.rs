@@ -2283,8 +2283,18 @@ async fn a_base_type_takes_its_layout_written_out() {
     .await;
     run_s(
         &mut session,
+        "CREATE FUNCTION vt_mod_in(cstring) RETURNS int4 LANGUAGE internal AS 'numerictypmodin'",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE FUNCTION vt_mod_out(int4) RETURNS cstring LANGUAGE internal AS 'numerictypmodout'",
+    )
+    .await;
+    run_s(
+        &mut session,
         "CREATE TYPE vt (internallength = variable, input = vt_in, output = vt_out, \
-             alignment = int4, storage = main)",
+             typmod_in = vt_mod_in, typmod_out = vt_mod_out, alignment = int4, storage = main)",
     )
     .await;
     // A varlena pair needs no reinterpretation, so the cast is recorded and
@@ -2324,6 +2334,14 @@ async fn a_base_type_takes_its_layout_written_out() {
                 text_row(&["ft", "4", "b", "p"]),
                 text_row(&["vt", "-1", "b", "m"]),
             ]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT typinput, typoutput, typmodin, typmodout FROM pg_type WHERE typname = 'vt'"
+        )
+        .await
+            == vec![text_row(&["vt_in", "vt_out", "vt_mod_in", "vt_mod_out"])]
     );
 }
 
