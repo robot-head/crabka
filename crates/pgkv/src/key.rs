@@ -600,6 +600,27 @@ pub fn server_prefix() -> Vec<u8> {
     system_prefix("fsrv")
 }
 
+/// Key for one privilege granted on a foreign object.
+///
+/// The identity parts are length-prefixed so a wrapper named `a/b` cannot
+/// collide with a server named `a` and a grantee beginning with `b`.
+#[must_use]
+pub fn foreign_privilege_key(kind: &str, name: &str, grantee: &str, privilege: &str) -> Vec<u8> {
+    let mut key = foreign_privilege_prefix(kind, name);
+    push_key_part(&mut key, grantee);
+    push_key_part(&mut key, privilege);
+    key
+}
+
+/// Prefix for every privilege granted on one foreign object.
+#[must_use]
+pub fn foreign_privilege_prefix(kind: &str, name: &str) -> Vec<u8> {
+    let mut key = system_prefix("facl");
+    push_key_part(&mut key, kind);
+    push_key_part(&mut key, name);
+    key
+}
+
 /// Key for the replicated range-descriptor blob: `/0/meta/range_map`.
 #[must_use]
 pub fn meta_range_map_key() -> Vec<u8> {

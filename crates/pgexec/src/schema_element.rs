@@ -97,9 +97,9 @@ fn qualify(schema: &str, element: &mut Statement) -> Result<ElementKind, ExecErr
         }
         // A `GrantStmt` names objects that already exist, so upstream leaves it
         // alone and lets the prepended `search_path` find them.
-        Statement::GrantTablePrivileges { .. } | Statement::GrantSchemaPrivileges { .. } => {
-            Ok(ElementKind::Grant)
-        }
+        Statement::GrantTablePrivileges { .. }
+        | Statement::GrantSchemaPrivileges { .. }
+        | Statement::GrantForeignPrivileges { .. } => Ok(ElementKind::Grant),
         other => Err(ExecError::Unsupported(format!(
             "{} is not a CREATE SCHEMA element",
             crate::telemetry::statement_operation(other)

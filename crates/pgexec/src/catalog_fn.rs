@@ -189,20 +189,13 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
 
 /// The `has_<objectkind>_privilege` family, which shares one entry point.
 ///
-/// Three of them answer for real: `has_table_privilege`,
-/// `has_any_column_privilege` and `has_column_privilege` resolve the relation
-/// and consult its ACL, because those are the shapes
-/// [`RelationPrivilegeCall::of`] recognises. **The other eleven still return
-/// `true` unconditionally** — no privilege is stored for a database, schema,
-/// sequence, function, language, server, foreign-data wrapper, tablespace,
-/// type or parameter, so there is nothing to consult.
+/// The three relation functions and the two foreign-object functions answer
+/// from their ACLs. The remaining nine return `true` because this catalog has
+/// no ACL for their object kinds.
 ///
-/// Row-level security refuses a policy qual naming *any* of the fourteen. For
-/// the eleven that is the original reason: the qual would admit every row to
-/// every role instead of the subset it appears to describe. For the three it
-/// is no longer that — they answer correctly — but the refusal is kept because
-/// a qual whose meaning turns on an ACL is a second security surface behind
-/// the policy, and admitting it needs its own argument rather than this one.
+/// Row-level security refuses a policy qual naming any of the fourteen. A qual
+/// whose meaning turns on an ACL is a second security surface behind the
+/// policy, and admitting it needs its own argument rather than this one.
 pub(crate) const PRIVILEGE_FUNCTIONS: [&str; 14] = [
     "has_table_privilege",
     "has_column_privilege",
@@ -2201,18 +2194,9 @@ fn invalid_size_unit(input: &str, unit: &str) -> ExecError {
 
 /// The `has_*_privilege` family.
 ///
-/// The relation-scoped members answer from the grants `GRANT`/`REVOKE` actually
-/// wrote — see [`crate::privilege`], which is the same decision every `SELECT`,
-/// `INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` is gated on, so the answer and
-/// the enforcement cannot drift apart.
-///
-/// The remaining members answer `true` unconditionally, and that is a statement about
-/// what this catalog stores rather than an oversight: there is no ACL for a
-/// database, a language, a tablespace, a type, a foreign server or a routine,
-/// so there is nothing for a grant to have written and nothing an
-/// enforcement path could read. [`crate::rls::validate_policy_qual`] still
-/// refuses a policy written around one of those, for exactly the reason it once
-/// refused all of them.
+/// Relation-scoped and foreign-object members answer from the grants
+/// `GRANT`/`REVOKE` wrote. The remaining members return `true` because this
+/// catalog has no ACL record for their object kind.
 ///
 /// An unrecognized privilege name is `PostgreSQL`'s 22023, which is what callers
 /// actually depend on catching.
@@ -2229,6 +2213,9 @@ fn has_privilege(name: &str, vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, Exe
         .map_or((written, false), |bare| (bare, true));
     if name == "has_largeobject_privilege" {
         return has_largeobject_privilege(vals, ctx, bare, grant_option);
+    }
+    if let Some(target) = foreign_privilege_target(name) {
+        return has_foreign_privilege(vals, ctx, target, bare, grant_option);
     }
     if !recognized_privilege(bare) {
         return Err(ExecError::FunctionError {
@@ -2274,6 +2261,86 @@ fn has_privilege(name: &str, vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, Exe
     // function returns a boolean rather than raising one.
     let _ = kind;
     crate::privilege::holds_named(&privilege_ctx, &relation, &owner, &wanted).map(Datum::Bool)
+}
+
+fn foreign_privilege_target(name: &str) -> Option<crabka_pgcatalog::ForeignPrivilegeTarget> {
+    match name {
+        "has_server_privilege" => Some(crabka_pgcatalog::ForeignPrivilegeTarget::Server),
+        "has_foreign_data_wrapper_privilege" => {
+            Some(crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper)
+        }
+        _ => None,
+    }
+}
+
+fn has_foreign_privilege(
+    vals: &[Datum],
+    ctx: &EvalCtx,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    privilege: &str,
+    grant_option: bool,
+) -> Result<Datum, ExecError> {
+    let (role, object) = match vals {
+        [Datum::Text(object), _] => (ctx.current_user.clone(), object.as_str()),
+        [role, Datum::Text(object), _] => {
+            (role_argument_name_required(ctx, role)?, object.as_str())
+        }
+        _ => return Ok(Datum::Null),
+    };
+    let wanted = privilege.to_ascii_uppercase();
+    if !matches!(wanted.as_str(), "USAGE" | "ALL" | "ALL PRIVILEGES") {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22023",
+            message: format!("invalid privilege type {privilege} for foreign object"),
+        });
+    }
+    let Some(kv) = ctx.catalog() else {
+        return Ok(Datum::Bool(true));
+    };
+    let owner = match target {
+        crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => {
+            crabka_pgcatalog::get_fdw(kv, object)?.owner
+        }
+        crabka_pgcatalog::ForeignPrivilegeTarget::Server => {
+            crabka_pgcatalog::get_server(kv, object)?.owner
+        }
+    };
+    let role = effective_privilege_role(&role);
+    if crate::rls::role_is_superuser(kv, &role)?
+        || crabka_pgcatalog::role_has_privs_of(kv, &role, &owner)?
+    {
+        return Ok(Datum::Bool(true));
+    }
+    if grant_option {
+        return Ok(Datum::Bool(false));
+    }
+    for grantee in crabka_pgcatalog::list_roles(kv)? {
+        if crabka_pgcatalog::role_has_privs_of(kv, &role, &grantee.name)?
+            && crabka_pgcatalog::foreign_privilege_is_granted(
+                kv,
+                target,
+                object,
+                &grantee.name,
+                "USAGE",
+            )?
+        {
+            return Ok(Datum::Bool(true));
+        }
+    }
+    Ok(Datum::Bool(crabka_pgcatalog::foreign_privilege_is_granted(
+        kv,
+        target,
+        object,
+        crabka_pgcatalog::PUBLIC_ROLE,
+        "USAGE",
+    )?))
+}
+
+fn role_argument_name_required(ctx: &EvalCtx, argument: &Datum) -> Result<String, ExecError> {
+    let Some(kv) = ctx.catalog() else {
+        return Ok(ctx.current_user.clone());
+    };
+    role_argument_name(kv, argument)
 }
 
 fn has_largeobject_privilege(
@@ -3591,6 +3658,8 @@ pub(crate) fn quote_identifier(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_pgcatalog::{
         Column, ForeignKey, IndexPlacement, MatchType, ReferentialAction, RelationName, Table,
@@ -3601,9 +3670,10 @@ mod tests {
 
     use super::{
         catalog_func, char_to_encoding, coerce_rule_unknown_literals, coerce_rule_values_literals,
-        constraint_def, encoding_to_char, foreign_key_definition, indexes_size, is_catalog_func,
-        is_simple_rule_action, quote_identifier, relation_size, relation_size_with_fork,
-        size_bytes, size_pretty, table_size, total_relation_size, view_def,
+        constraint_def, encoding_to_char, foreign_key_definition, has_privilege, indexes_size,
+        is_catalog_func, is_simple_rule_action, quote_identifier, relation_size,
+        relation_size_with_fork, size_bytes, size_pretty, table_size, total_relation_size,
+        view_def,
     };
     use crate::error::ExecError;
 
@@ -3833,6 +3903,64 @@ mod tests {
     fn unknown_names_are_not_claimed() {
         assert!(catalog_func("pg_get_nonesuch").is_none());
         assert!(!is_catalog_func("upper"));
+    }
+
+    #[test]
+    fn foreign_object_privilege_functions_read_their_acls() {
+        let kv = Arc::new(MemKv::new());
+        crabka_pgcatalog::create_role(kv.as_ref(), "reader", true).expect("reader role");
+        crabka_pgcatalog::create_fdw(kv.as_ref(), "w", Vec::new()).expect("fdw");
+        crabka_pgcatalog::create_server(kv.as_ref(), "s", "w", Vec::new()).expect("server");
+        let catalog: Arc<dyn Kv> = kv.clone();
+        let mut ctx = crate::clock::EvalCtx::for_ddl(
+            &crate::relname::ResolutionScope::default(),
+            Some(&catalog),
+        );
+        ctx.current_user = "reader".into();
+
+        for (function, object) in [
+            ("has_foreign_data_wrapper_privilege", "w"),
+            ("has_server_privilege", "s"),
+        ] {
+            assert!(
+                has_privilege(
+                    function,
+                    &[Datum::Text(object.into()), Datum::Text("USAGE".into())],
+                    &ctx,
+                )
+                .expect("privilege answer")
+                    == Datum::Bool(false)
+            );
+        }
+
+        for (target, name) in [
+            (crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper, "w"),
+            (crabka_pgcatalog::ForeignPrivilegeTarget::Server, "s"),
+        ] {
+            let ops = crabka_pgcatalog::grant_foreign_privileges_ops(
+                kv.as_ref(),
+                target,
+                &[name.into()],
+                &["reader".into()],
+                &["USAGE".into()],
+            )
+            .expect("grant ops");
+            kv.write_batch(&ops).expect("apply grant");
+        }
+        for (function, object) in [
+            ("has_foreign_data_wrapper_privilege", "w"),
+            ("has_server_privilege", "s"),
+        ] {
+            assert!(
+                has_privilege(
+                    function,
+                    &[Datum::Text(object.into()), Datum::Text("USAGE".into())],
+                    &ctx,
+                )
+                .expect("privilege answer")
+                    == Datum::Bool(true)
+            );
+        }
     }
 
     #[test]

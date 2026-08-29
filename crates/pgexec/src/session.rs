@@ -2659,8 +2659,10 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::DropRole { .. }
         | Statement::GrantTablePrivileges { .. }
         | Statement::GrantSchemaPrivileges { .. }
+        | Statement::GrantForeignPrivileges { .. }
         | Statement::RevokeTablePrivileges { .. }
         | Statement::RevokeSchemaPrivileges { .. }
+        | Statement::RevokeForeignPrivileges { .. }
         | Statement::AlterDefaultTablePrivileges { .. }
         | Statement::GrantRoles { .. }
         | Statement::RevokeRoles { .. }
@@ -8170,8 +8172,10 @@ impl SqlSession {
             | Statement::DropRole { .. }
             | Statement::GrantTablePrivileges { .. }
             | Statement::GrantSchemaPrivileges { .. }
+            | Statement::GrantForeignPrivileges { .. }
             | Statement::RevokeTablePrivileges { .. }
             | Statement::RevokeSchemaPrivileges { .. }
+            | Statement::RevokeForeignPrivileges { .. }
             | Statement::AlterDefaultTablePrivileges { .. }
             | Statement::GrantRoles { .. }
             | Statement::RevokeRoles { .. }

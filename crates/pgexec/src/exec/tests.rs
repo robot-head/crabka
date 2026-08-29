@@ -7944,6 +7944,124 @@ fn fdw_and_server_are_owned_by_the_creating_role() {
 }
 
 #[test]
+fn foreign_object_usage_grants_follow_rename_and_require_the_owner() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for role in ["alice", "reader"] {
+        crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
+    }
+    let owner = super::ForeignCtx {
+        current_user: "alice",
+        session_user: "alice",
+        ..super::ForeignCtx::none()
+    };
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "GRANT USAGE ON FOREIGN DATA WRAPPER w TO reader",
+        "GRANT USAGE ON FOREIGN SERVER s TO reader",
+        "ALTER FOREIGN DATA WRAPPER w RENAME TO renamed_w",
+        "ALTER SERVER s RENAME TO renamed_s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) = super::execute_ddl(&kv, &stmt, owner, true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert!(
+        crabka_pgcatalog::foreign_privilege_is_granted(
+            &kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+            "renamed_w",
+            "reader",
+            "USAGE",
+        )
+        .expect("fdw grant survives rename")
+    );
+    assert!(
+        crabka_pgcatalog::foreign_privilege_is_granted(
+            &kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+            "renamed_s",
+            "reader",
+            "USAGE",
+        )
+        .expect("server grant survives rename")
+    );
+
+    let stmt =
+        crabka_pgparser::parser::parse("REVOKE USAGE ON FOREIGN SERVER renamed_s FROM reader")
+            .expect("parse revoke")
+            .into_iter()
+            .next()
+            .expect("one statement");
+    let reader = super::ForeignCtx {
+        current_user: "reader",
+        session_user: "reader",
+        ..super::ForeignCtx::none()
+    };
+    let error = super::execute_ddl(&kv, &stmt, reader, true).expect_err("reader is not owner");
+    assert!(matches!(error, super::ExecError::Remote(ref error) if error.code == "42501"));
+
+    let stmt =
+        crabka_pgparser::parser::parse("REVOKE USAGE ON FOREIGN SERVER renamed_s FROM reader")
+            .expect("parse owner revoke")
+            .into_iter()
+            .next()
+            .expect("one statement");
+    let (_result, ops) = super::execute_ddl(&kv, &stmt, owner, true).expect("owner revoke");
+    kv.write_batch(&ops).expect("apply owner revoke");
+    assert!(
+        !crabka_pgcatalog::foreign_privilege_is_granted(
+            &kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+            "renamed_s",
+            "reader",
+            "USAGE",
+        )
+        .expect("server ACL is revoked")
+    );
+
+    for sql in [
+        "GRANT USAGE ON FOREIGN SERVER renamed_s TO reader",
+        "DROP SERVER renamed_s",
+        "DROP FOREIGN DATA WRAPPER renamed_w",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) = super::execute_ddl(&kv, &stmt, owner, true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert!(
+        !crabka_pgcatalog::foreign_privilege_is_granted(
+            &kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+            "renamed_s",
+            "reader",
+            "USAGE",
+        )
+        .expect("server ACL is removed")
+    );
+    assert!(
+        !crabka_pgcatalog::foreign_privilege_is_granted(
+            &kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+            "renamed_w",
+            "reader",
+            "USAGE",
+        )
+        .expect("FDW ACL is removed")
+    );
+}
+
+#[test]
 fn alter_foreign_options_update_catalog_records() {
     use crabka_pgkv::{Kv, MemKv};
 

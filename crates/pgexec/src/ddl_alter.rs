@@ -1543,6 +1543,25 @@ pub(crate) fn execute_ddl(
                 crabka_pgcatalog::grant_schema_privileges_ops(kv, schemas, &grantees, privileges)?;
             Ok((command("GRANT"), ops))
         }
+        Statement::GrantForeignPrivileges {
+            target,
+            privileges,
+            names,
+            grantees,
+        } => {
+            let target = foreign_privilege_target(*target);
+            require_foreign_ownership(kv, target, names, fctx)?;
+            let grantees = resolve_grantees(kv, fctx, grantees)?;
+            let privileges = foreign_privilege_names(privileges)?;
+            let ops = crabka_pgcatalog::grant_foreign_privileges_ops(
+                kv,
+                target,
+                names,
+                &grantees,
+                &privileges,
+            )?;
+            Ok((command("GRANT"), ops))
+        }
         Statement::RevokeTablePrivileges {
             privileges,
             tables,
@@ -1570,6 +1589,25 @@ pub(crate) fn execute_ddl(
             let grantees = resolve_grantees(kv, fctx, grantees)?;
             let ops =
                 crabka_pgcatalog::revoke_schema_privileges_ops(kv, schemas, &grantees, privileges)?;
+            Ok((command("REVOKE"), ops))
+        }
+        Statement::RevokeForeignPrivileges {
+            target,
+            privileges,
+            names,
+            grantees,
+        } => {
+            let target = foreign_privilege_target(*target);
+            require_foreign_ownership(kv, target, names, fctx)?;
+            let grantees = resolve_grantees(kv, fctx, grantees)?;
+            let privileges = foreign_privilege_names(privileges)?;
+            let ops = crabka_pgcatalog::revoke_foreign_privileges_ops(
+                kv,
+                target,
+                names,
+                &grantees,
+                &privileges,
+            )?;
             Ok((command("REVOKE"), ops))
         }
         Statement::AlterDefaultTablePrivileges {
@@ -3487,6 +3525,60 @@ pub(crate) fn resolve_grantees(
             }
         })
         .collect()
+}
+
+fn foreign_privilege_target(
+    target: crabka_pgparser::ast::ForeignPrivilegeTarget,
+) -> crabka_pgcatalog::ForeignPrivilegeTarget {
+    match target {
+        crabka_pgparser::ast::ForeignPrivilegeTarget::DataWrapper => {
+            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper
+        }
+        crabka_pgparser::ast::ForeignPrivilegeTarget::Server => {
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server
+        }
+    }
+}
+
+fn foreign_privilege_names(
+    privileges: &[crabka_pgparser::ast::PrivilegeSpec],
+) -> Result<Vec<String>, ExecError> {
+    if let Some(spec) = privileges.iter().find(|spec| !spec.columns.is_empty()) {
+        return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "0LP01",
+            format!("invalid privilege type {} for foreign object", spec.name),
+        )));
+    }
+    Ok(privileges.iter().map(|spec| spec.name.clone()).collect())
+}
+
+fn require_foreign_ownership(
+    kv: &dyn Kv,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    names: &[String],
+    fctx: ForeignCtx<'_>,
+) -> Result<(), ExecError> {
+    for name in names {
+        let (owner, kind) = match target {
+            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => (
+                crabka_pgcatalog::get_fdw(kv, name)?.owner,
+                "foreign-data wrapper",
+            ),
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server => (
+                crabka_pgcatalog::get_server(kv, name)?.owner,
+                "foreign server",
+            ),
+        };
+        if !crabka_pgcatalog::role_has_privs_of(kv, fctx.effective_role(), &owner)?
+            && !crate::rls::role_is_superuser(kv, fctx.effective_role())?
+        {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42501",
+                format!("must be owner of {kind} {name}"),
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The role an `OWNER TO` or `CREATE SCHEMA AUTHORIZATION` clause names,

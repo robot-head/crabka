@@ -346,6 +346,13 @@ pub struct PrivilegeSpec {
     pub columns: Vec<String>,
 }
 
+/// The foreign object kind named by `GRANT` or `REVOKE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignPrivilegeTarget {
+    DataWrapper,
+    Server,
+}
+
 /// The boolean attributes a `CREATE`/`ALTER ROLE … WITH` list may set. `None`
 /// leaves the current value alone, which is what `ALTER ROLE` needs: only the
 /// options actually written are applied.
@@ -997,6 +1004,13 @@ pub enum Statement {
         schemas: Vec<String>,
         grantees: Vec<RoleSpec>,
     },
+    /// `GRANT ... ON FOREIGN DATA WRAPPER|SERVER ... TO ...`.
+    GrantForeignPrivileges {
+        target: ForeignPrivilegeTarget,
+        privileges: Vec<PrivilegeSpec>,
+        names: Vec<String>,
+        grantees: Vec<RoleSpec>,
+    },
     /// `GRANT … ON LARGE OBJECT oid [, …] TO role [, …] [WITH GRANT OPTION]`.
     GrantLargeObjectPrivileges {
         privileges: Vec<PrivilegeSpec>,
@@ -1016,6 +1030,13 @@ pub enum Statement {
     /* SQL parity matrix row: REVOKE. */ RevokeSchemaPrivileges {
         privileges: Vec<String>,
         schemas: Vec<String>,
+        grantees: Vec<RoleSpec>,
+    },
+    /// `REVOKE ... ON FOREIGN DATA WRAPPER|SERVER ... FROM ...`.
+    RevokeForeignPrivileges {
+        target: ForeignPrivilegeTarget,
+        privileges: Vec<PrivilegeSpec>,
+        names: Vec<String>,
         grantees: Vec<RoleSpec>,
     },
     /// `REVOKE [GRANT OPTION FOR] … ON LARGE OBJECT oid [, …] FROM role [, …]`.

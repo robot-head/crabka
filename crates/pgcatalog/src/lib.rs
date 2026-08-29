@@ -655,6 +655,28 @@ pub struct ForeignServer {
     pub options: Vec<(String, String)>,
 }
 
+/// A foreign object that can carry a `USAGE` ACL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignPrivilegeTarget {
+    DataWrapper,
+    Server,
+}
+
+impl ForeignPrivilegeTarget {
+    const fn key_name(self) -> &'static str {
+        match self {
+            Self::DataWrapper => "fdw",
+            Self::Server => "server",
+        }
+    }
+
+    /// The only privilege PostgreSQL permits on either foreign object kind.
+    #[must_use]
+    pub const fn privileges(self) -> &'static [&'static str] {
+        &["USAGE"]
+    }
+}
+
 /// A user mapping (`CREATE USER MAPPING FOR … SERVER …`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserMapping {
@@ -966,6 +988,8 @@ pub enum CatalogError {
     DuplicateLargeObject(u32),
     #[error("invalid sequence definition: {0}")]
     InvalidSequence(String),
+    #[error("invalid privilege type {0}")]
+    InvalidPrivilege(String),
     /// A sharding definition that describes a table this engine has no encoding
     /// for. The code is 0A000 rather than 22023, because the spec is well
     /// formed and only the shape it asks for is not supported.
@@ -1065,7 +1089,7 @@ impl CatalogError {
             | CatalogError::SystemSchemaDrop(_)
             | CatalogError::SystemSchemaRename(_)
             | CatalogError::SchemaNotEmpty(_) => "2BP01",
-            CatalogError::InvalidSequence(_) => "22023",
+            CatalogError::InvalidSequence(_) | CatalogError::InvalidPrivilege(_) => "22023",
             CatalogError::NotOrdinaryTable(_)
             | CatalogError::StoredViewDependency(_)
             | CatalogError::UnmovableSchemaObject { .. }
@@ -5928,6 +5952,177 @@ pub const TABLE_PRIVILEGES: &[&str] = &[
     "MAINTAIN",
 ];
 
+/// Build write operations for `GRANT ... ON FOREIGN DATA WRAPPER|SERVER`.
+///
+/// # Errors
+///
+/// Returns undefined-object for a missing foreign object or grantee, invalid
+/// parameter value for an unsupported privilege, or catalog storage failures.
+pub fn grant_foreign_privileges_ops(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    names: &[String],
+    grantees: &[String],
+    privileges: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    foreign_privilege_ops(kv, target, names, grantees, privileges, true)
+}
+
+/// Build write operations for `REVOKE ... ON FOREIGN DATA WRAPPER|SERVER`.
+///
+/// # Errors
+///
+/// Returns undefined-object for a missing foreign object or grantee, invalid
+/// parameter value for an unsupported privilege, or catalog storage failures.
+pub fn revoke_foreign_privileges_ops(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    names: &[String],
+    grantees: &[String],
+    privileges: &[String],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    foreign_privilege_ops(kv, target, names, grantees, privileges, false)
+}
+
+/// Whether a direct grant is recorded for one foreign object.
+///
+/// Ownership and inherited role membership are intentionally left to the
+/// caller because those decisions differ between ACL questions and DDL gates.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn foreign_privilege_is_granted(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    name: &str,
+    grantee: &str,
+    privilege: &str,
+) -> Result<bool, CatalogError> {
+    let privilege = privilege.to_ascii_uppercase();
+    Ok(kv
+        .get(&key::foreign_privilege_key(
+            target.key_name(),
+            name,
+            grantee,
+            &privilege,
+        ))?
+        .is_some())
+}
+
+/// Delete every ACL row owned by one foreign object.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn drop_foreign_privileges_ops(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    name: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    Ok(kv
+        .scan_prefix(&key::foreign_privilege_prefix(target.key_name(), name))?
+        .into_iter()
+        .map(|(key, _)| WriteOp::Delete { key })
+        .collect())
+}
+
+/// Move every ACL row while a foreign object is renamed.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn rename_foreign_privileges_ops(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    name: &str,
+    new_name: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let prefix = key::foreign_privilege_prefix(target.key_name(), name);
+    let mut ops = Vec::new();
+    for (key, value) in kv.scan_prefix(&prefix)? {
+        let Some(parts) = key::key_parts(&key[prefix.len()..], 2) else {
+            return Err(KvError::CorruptRow("foreign privilege key is incomplete".into()).into());
+        };
+        ops.push(WriteOp::Put {
+            key: key::foreign_privilege_key(target.key_name(), new_name, parts[0], parts[1]),
+            value,
+        });
+        ops.push(WriteOp::Delete { key });
+    }
+    Ok(ops)
+}
+
+fn foreign_privilege_ops(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    names: &[String],
+    grantees: &[String],
+    privileges: &[String],
+    grant: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    for name in names {
+        match target {
+            ForeignPrivilegeTarget::DataWrapper => {
+                let _ = get_fdw(kv, name)?;
+            }
+            ForeignPrivilegeTarget::Server => {
+                let _ = get_server(kv, name)?;
+            }
+        }
+    }
+    let privileges = expand_foreign_privileges(target, privileges)?;
+    let mut ops = Vec::new();
+    for grantee in grantees {
+        if !role_is_nameable(kv, grantee)? {
+            return Err(CatalogError::UndefinedObject(grantee.clone()));
+        }
+        for name in names {
+            for privilege in &privileges {
+                let key = key::foreign_privilege_key(target.key_name(), name, grantee, privilege);
+                ops.push(if grant {
+                    WriteOp::Put {
+                        key,
+                        value: Vec::new(),
+                    }
+                } else {
+                    WriteOp::Delete { key }
+                });
+            }
+        }
+    }
+    Ok(ops)
+}
+
+fn expand_foreign_privileges(
+    target: ForeignPrivilegeTarget,
+    privileges: &[String],
+) -> Result<Vec<String>, CatalogError> {
+    let mut expanded = Vec::new();
+    for privilege in privileges {
+        if privilege.eq_ignore_ascii_case("all") || privilege.eq_ignore_ascii_case("all privileges")
+        {
+            expanded.extend(
+                target
+                    .privileges()
+                    .iter()
+                    .map(|privilege| (*privilege).to_owned()),
+            );
+        } else if target
+            .privileges()
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(privilege))
+        {
+            expanded.push(privilege.to_ascii_uppercase());
+        } else {
+            return Err(CatalogError::InvalidPrivilege(format!(
+                "{privilege} for foreign object"
+            )));
+        }
+    }
+    Ok(expanded)
+}
+
 /// Build write ops for recording table privilege grants.
 ///
 /// # Errors
@@ -7188,6 +7383,12 @@ pub fn rename_fdw_ops(
             });
         }
     }
+    ops.extend(rename_foreign_privileges_ops(
+        kv,
+        ForeignPrivilegeTarget::DataWrapper,
+        name,
+        new_name,
+    )?);
     Ok(ops)
 }
 
@@ -7224,12 +7425,18 @@ pub fn drop_fdw(kv: &dyn Kv, name: &str) -> Result<(), CatalogError> {
 /// Returns undefined-object or storage/corruption errors from the catalog KV seam.
 pub fn drop_fdw_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
     let _ = get_fdw(kv, name)?;
-    Ok(vec![
+    let mut ops = vec![
         WriteOp::Delete {
             key: key::fdw_key(name),
         },
         set_comment_op("foreign data wrapper", CommentObject::Named(name), None),
-    ])
+    ];
+    ops.extend(drop_foreign_privileges_ops(
+        kv,
+        ForeignPrivilegeTarget::DataWrapper,
+        name,
+    )?);
+    Ok(ops)
 }
 
 /// Drop an FDW, optionally cascading to its servers and their dependents.
@@ -7459,6 +7666,12 @@ pub fn rename_server_ops(
             });
         }
     }
+    ops.extend(rename_foreign_privileges_ops(
+        kv,
+        ForeignPrivilegeTarget::Server,
+        name,
+        new_name,
+    )?);
     Ok(ops)
 }
 
@@ -7495,12 +7708,18 @@ pub fn drop_server(kv: &dyn Kv, name: &str) -> Result<(), CatalogError> {
 /// Returns undefined-object or storage/corruption errors from the catalog KV seam.
 pub fn drop_server_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
     let _ = get_server(kv, name)?;
-    Ok(vec![
+    let mut ops = vec![
         WriteOp::Delete {
             key: key::server_key(name),
         },
         set_comment_op("server", CommentObject::Named(name), None),
-    ])
+    ];
+    ops.extend(drop_foreign_privileges_ops(
+        kv,
+        ForeignPrivilegeTarget::Server,
+        name,
+    )?);
+    Ok(ops)
 }
 
 /// Drop a server, optionally cascading to its user mappings and foreign tables.

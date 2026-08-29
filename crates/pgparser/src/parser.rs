@@ -5118,6 +5118,19 @@ impl Parser {
                 grant_option,
             });
         }
+        if self.eat_keyword(Keyword::Foreign) {
+            let target = self.foreign_privilege_target()?;
+            let names = self.object_name_list()?;
+            self.expect(&Token::Keyword(Keyword::To))?;
+            let grantees = self.grantee_list()?;
+            self.eat_with_grant_option()?;
+            return Ok(crate::ast::Statement::GrantForeignPrivileges {
+                target,
+                privileges,
+                names,
+                grantees,
+            });
+        }
         // PostgreSQL's `TABLE` object-type keyword is optional: `GRANT SELECT ON
         // t TO r` names a table exactly as `... ON TABLE t ...` does.
         self.eat_keyword(Keyword::Table);
@@ -5191,6 +5204,18 @@ impl Parser {
                 grant_option_only,
             });
         }
+        if self.eat_keyword(Keyword::Foreign) {
+            let target = self.foreign_privilege_target()?;
+            let names = self.object_name_list()?;
+            self.expect(&Token::Keyword(Keyword::From))?;
+            let grantees = self.grantee_list()?;
+            return Ok(crate::ast::Statement::RevokeForeignPrivileges {
+                target,
+                privileges,
+                names,
+                grantees,
+            });
+        }
         self.eat_keyword(Keyword::Table);
         let tables = self.relation_ref_list()?;
         self.expect(&Token::Keyword(Keyword::From))?;
@@ -5200,6 +5225,18 @@ impl Parser {
             tables,
             grantees,
         })
+    }
+
+    fn foreign_privilege_target(
+        &mut self,
+    ) -> Result<crate::ast::ForeignPrivilegeTarget, ParseError> {
+        if self.eat_keyword(Keyword::Data) {
+            self.expect(&Token::Keyword(Keyword::Wrapper))?;
+            Ok(crate::ast::ForeignPrivilegeTarget::DataWrapper)
+        } else {
+            self.expect(&Token::Keyword(Keyword::Server))?;
+            Ok(crate::ast::ForeignPrivilegeTarget::Server)
+        }
     }
 
     fn alter_default_privileges(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -18387,6 +18424,28 @@ mod tests {
             .expect_err("a schema has no columns to grant on");
         assert!(refused.sqlstate() == "0LP01");
         assert!(refused.to_string() == "column privileges are only valid for relations");
+    }
+
+    #[test]
+    fn foreign_object_privilege_targets_keep_their_object_kind() {
+        use crate::ast::ForeignPrivilegeTarget;
+
+        assert!(matches!(
+            one("GRANT USAGE ON FOREIGN DATA WRAPPER w TO reader"),
+            Statement::GrantForeignPrivileges {
+                target: ForeignPrivilegeTarget::DataWrapper,
+                names,
+                ..
+            } if names == ["w"]
+        ));
+        assert!(matches!(
+            one("REVOKE USAGE ON FOREIGN SERVER s FROM reader"),
+            Statement::RevokeForeignPrivileges {
+                target: ForeignPrivilegeTarget::Server,
+                names,
+                ..
+            } if names == ["s"]
+        ));
     }
 
     /// `CREATE VIEW … WITH (…)` records the reloptions it was written with, and
