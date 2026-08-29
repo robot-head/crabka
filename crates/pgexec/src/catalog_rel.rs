@@ -1648,10 +1648,7 @@ fn pg_user_mapping_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// `pg_user_mappings` exposes every mapping, but redacts credentials unless
 /// PostgreSQL would let the querying role use that server or own its public map.
 fn pg_user_mappings_rows(kv: &dyn Kv, current_user: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let server_owners = crabka_pgcatalog::list_servers(kv)?
-        .into_iter()
-        .map(|server| (server.name, server.owner))
-        .collect::<BTreeMap<_, _>>();
+    let server_owners = foreign_server_owners(kv)?;
     crabka_pgcatalog::list_user_mappings(kv)?
         .into_iter()
         .map(|mapping| {
@@ -1660,20 +1657,7 @@ fn pg_user_mappings_rows(kv: &dyn Kv, current_user: &str) -> Result<Vec<Vec<Datu
                     mapping.server.clone(),
                 ))
             })?;
-            let visible = if crate::rls::role_is_superuser(kv, current_user)? {
-                true
-            } else if mapping.user == crabka_pgcatalog::PUBLIC_ROLE {
-                crabka_pgcatalog::role_has_privs_of(kv, current_user, owner)?
-            } else if mapping.user == current_user {
-                crate::catalog_fn::foreign_usage_is_held(
-                    kv,
-                    crabka_pgcatalog::ForeignPrivilegeTarget::Server,
-                    &mapping.server,
-                    current_user,
-                )?
-            } else {
-                false
-            };
+            let visible = user_mapping_visible(kv, &mapping, owner, current_user)?;
             Ok(vec![
                 int(i32::try_from(mapping.oid).expect("user mapping oid fits i32")),
                 text(&mapping.server),
@@ -4083,8 +4067,10 @@ fn information_schema_rows(
         "information_schema.sequences" => sequence_view_rows(kv, database),
         "information_schema.table_privileges" => table_privilege_rows(kv, database),
         "information_schema.column_privileges" => column_privilege_rows(kv, database),
-        "information_schema.user_mapping_options" => user_mapping_option_rows(kv, database),
-        "information_schema.user_mappings" => user_mapping_rows(kv, database),
+        "information_schema.user_mapping_options" => {
+            user_mapping_option_rows(kv, database, current_user)
+        }
+        "information_schema.user_mappings" => user_mapping_rows(kv, database, current_user),
         "information_schema.usage_privileges" | "information_schema.role_usage_grants" => {
             usage_privilege_rows(kv, database, current_user)
         }
@@ -4199,13 +4185,17 @@ fn foreign_table_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, Ex
         .collect())
 }
 
-fn user_mapping_option_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
-    Ok(crabka_pgcatalog::list_user_mappings(kv)?
+fn user_mapping_option_rows(
+    kv: &dyn Kv,
+    database: &str,
+    current_user: &str,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(visible_user_mappings(kv, current_user)?
         .into_iter()
         .flat_map(|mapping| {
             mapping.options.into_iter().map(move |(name, value)| {
                 vec![
-                    text(&mapping.user),
+                    text(user_mapping_authorization_identifier(&mapping.user)),
                     text(database),
                     text(&mapping.server),
                     text(&name),
@@ -4216,11 +4206,79 @@ fn user_mapping_option_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum
         .collect())
 }
 
-fn user_mapping_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
-    Ok(crabka_pgcatalog::list_user_mappings(kv)?
+fn user_mapping_rows(
+    kv: &dyn Kv,
+    database: &str,
+    current_user: &str,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(visible_user_mappings(kv, current_user)?
         .into_iter()
-        .map(|mapping| vec![text(&mapping.user), text(database), text(&mapping.server)])
+        .map(|mapping| {
+            vec![
+                text(user_mapping_authorization_identifier(&mapping.user)),
+                text(database),
+                text(&mapping.server),
+            ]
+        })
         .collect())
+}
+
+fn visible_user_mappings(
+    kv: &dyn Kv,
+    current_user: &str,
+) -> Result<Vec<crabka_pgcatalog::UserMapping>, ExecError> {
+    let server_owners = foreign_server_owners(kv)?;
+    let mut mappings = Vec::new();
+    for mapping in crabka_pgcatalog::list_user_mappings(kv)? {
+        let owner = server_owners.get(&mapping.server).ok_or_else(|| {
+            ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedObject(
+                mapping.server.clone(),
+            ))
+        })?;
+        if user_mapping_visible(kv, &mapping, owner, current_user)? {
+            mappings.push(mapping);
+        }
+    }
+    Ok(mappings)
+}
+
+fn foreign_server_owners(kv: &dyn Kv) -> Result<BTreeMap<String, String>, ExecError> {
+    Ok(crabka_pgcatalog::list_servers(kv)?
+        .into_iter()
+        .map(|server| (server.name, server.owner))
+        .collect())
+}
+
+fn user_mapping_visible(
+    kv: &dyn Kv,
+    mapping: &crabka_pgcatalog::UserMapping,
+    server_owner: &str,
+    current_user: &str,
+) -> Result<bool, ExecError> {
+    if crate::rls::role_is_superuser(kv, current_user)? {
+        return Ok(true);
+    }
+    if mapping.user == crabka_pgcatalog::PUBLIC_ROLE {
+        return crabka_pgcatalog::role_has_privs_of(kv, current_user, server_owner)
+            .map_err(Into::into);
+    }
+    if mapping.user == current_user {
+        return crate::catalog_fn::foreign_usage_is_held(
+            kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+            &mapping.server,
+            current_user,
+        );
+    }
+    Ok(false)
+}
+
+fn user_mapping_authorization_identifier(user: &str) -> &str {
+    if user == crabka_pgcatalog::PUBLIC_ROLE {
+        "PUBLIC"
+    } else {
+        user
+    }
 }
 
 fn usage_privilege_rows(
@@ -4999,7 +5057,7 @@ mod tests {
         );
         assert!(
             rows(&kv, "information_schema.user_mappings", test_session()).expect("mapping rows")
-                == vec![vec![text("public"), text(database), text("s")]]
+                == vec![vec![text("PUBLIC"), text(database), text("s")]]
         );
         assert!(
             rows(
@@ -5009,7 +5067,7 @@ mod tests {
             )
             .expect("mapping options")
                 == vec![vec![
-                    text("public"),
+                    text("PUBLIC"),
                     text(database),
                     text("s"),
                     text("user"),
