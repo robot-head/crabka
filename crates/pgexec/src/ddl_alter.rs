@@ -1663,12 +1663,7 @@ pub(crate) fn execute_ddl(
             server,
             options,
         } => {
-            // Normalize `FOR CURRENT_USER` and `FOR PUBLIC` to the catalog key
-            // `"public"` — the same key that the scan path looks up via
-            // `get_user_mapping(kv, fctx.current_user, …)` where
-            // `current_user` is always `"public"` under trust-auth.
-            // Per-named-user mappings await real SQL authentication (phase-2).
-            let resolved_user = normalize_mapping_user(user);
+            let resolved_user = role_spec_name(user, fctx);
             let ops = crabka_pgcatalog::create_user_mapping_ops(
                 kv,
                 resolved_user,
@@ -1686,8 +1681,7 @@ pub(crate) fn execute_ddl(
             // No object can depend on this one in this engine, so CASCADE and
             // RESTRICT are indistinguishable; both are accepted.
 
-            // Same normalization as CreateUserMapping so DROP matches CREATE.
-            let resolved_user = normalize_mapping_user(user);
+            let resolved_user = role_spec_name(user, fctx);
             let ops = ignore_missing_ops(
                 crabka_pgcatalog::drop_user_mapping_ops(kv, resolved_user, server),
                 *if_exists,

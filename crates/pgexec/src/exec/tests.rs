@@ -7829,28 +7829,11 @@ mod pushdown {
     }
 }
 
-// ─────────────────── Fix 2: CURRENT_USER / PUBLIC normalization ───────────
-
-/// `normalize_mapping_user` must map both `"current_user"` and `"public"`
-/// (any case) to `"public"`, and pass through any other user name unchanged.
-#[test]
-fn normalize_mapping_user_maps_current_user_and_public_to_public() {
-    use super::normalize_mapping_user;
-    assert_eq!(normalize_mapping_user("current_user"), "public");
-    assert_eq!(normalize_mapping_user("CURRENT_USER"), "public");
-    assert_eq!(normalize_mapping_user("Current_User"), "public");
-    assert_eq!(normalize_mapping_user("public"), "public");
-    assert_eq!(normalize_mapping_user("PUBLIC"), "public");
-    // Named users pass through unchanged.
-    assert_eq!(normalize_mapping_user("alice"), "alice");
-    assert_eq!(normalize_mapping_user("bob"), "bob");
-}
-
 /// `CREATE USER MAPPING FOR CURRENT_USER` must be findable via
-/// `crabka_pgcatalog::get_user_mapping(kv, "public", server)`, which confirms
-/// the key is stored under "public", not "current_user".
+/// `crabka_pgcatalog::get_user_mapping(kv, current_user, server)`, rather than
+/// under the literal `"current_user"` or the unrelated `PUBLIC` pseudo-role.
 #[test]
-fn create_user_mapping_for_current_user_stored_under_public() {
+fn create_user_mapping_for_current_user_stored_under_current_role() {
     use crabka_pgkv::{Kv, MemKv};
 
     let kv = MemKv::new();
@@ -7862,8 +7845,12 @@ fn create_user_mapping_for_current_user_stored_under_public() {
     .next()
     .expect("one statement");
 
-    // execute_ddl must succeed and store under "public".
-    let fctx = super::ForeignCtx::none();
+    // execute_ddl must resolve the keyword through the current session role.
+    let fctx = super::ForeignCtx {
+        current_user: "alice",
+        session_user: "owner",
+        ..super::ForeignCtx::none()
+    };
     let (result, ops) = super::execute_ddl(&kv, &stmt, fctx, true).expect("execute_ddl ok");
     assert!(
         matches!(result, crabka_pgwire::engine::QueryResult::Command { tag } if tag == "CREATE USER MAPPING"),
@@ -7871,9 +7858,8 @@ fn create_user_mapping_for_current_user_stored_under_public() {
     );
     kv.write_batch(&ops).expect("apply DDL ops");
 
-    // The mapping must be retrievable under the "public" key.
-    let mapping = crabka_pgcatalog::get_user_mapping(&kv, "public", "s")
-        .expect("FOR CURRENT_USER mapping must be stored under 'public'");
+    let mapping = crabka_pgcatalog::get_user_mapping(&kv, "alice", "s")
+        .expect("FOR CURRENT_USER mapping must be stored under the session role");
     assert!(
         mapping.options.iter().any(|(k, _)| k == "username"),
         "options preserved"

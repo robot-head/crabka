@@ -15107,24 +15107,14 @@ impl Parser {
     }
 
     /// Parse the `FOR <user>` clause of `CREATE/ALTER/DROP USER MAPPING`.
-    /// Returns the user name as a lowercase string. Accepts `PUBLIC`, `CURRENT_USER`,
-    /// or a plain identifier.
-    fn parse_user_mapping_user(&mut self) -> Result<String, ParseError> {
+    /// Returns the role spelling unchanged so quoted role names remain distinct
+    /// from `CURRENT_USER`. `USER` is an alias for `CURRENT_USER` here.
+    fn parse_user_mapping_user(&mut self) -> Result<crate::ast::RoleSpec, ParseError> {
         self.expect(&Token::Keyword(Keyword::For))?;
-        match self.peek().clone() {
-            Token::Keyword(Keyword::Public) => {
-                self.bump();
-                Ok("public".into())
-            }
-            Token::Keyword(Keyword::CurrentUser) => {
-                self.bump();
-                Ok("current_user".into())
-            }
-            Token::Ident(_) => self.expect_col_id(),
-            other => Err(ParseError::new(
-                format!("expected user name after FOR, found {other:?}"),
-                self.peek_pos(),
-            )),
+        if self.eat_keyword(Keyword::User) {
+            Ok(crate::ast::RoleSpec::CurrentUser)
+        } else {
+            self.role_spec()
         }
     }
 
@@ -17469,8 +17459,8 @@ mod tests {
     use super::*;
     use crate::ast::{
         AlterTableAction, BinaryOp, ColumnConstraintKind, ColumnDef, Expr, HashShardingSpec,
-        IndexPlacement, IsolationLevel, SelectItem, ShardingSpec, Statement, TableConstraint,
-        TableConstraintKind, UnaryOp,
+        IndexPlacement, IsolationLevel, RoleSpec, SelectItem, ShardingSpec, Statement,
+        TableConstraint, TableConstraintKind, UnaryOp,
     };
 
     #[test]
@@ -24291,7 +24281,7 @@ mod tests {
             "CREATE USER MAPPING FOR PUBLIC SERVER s OPTIONS (sasl_mechanism 'SCRAM-SHA-256', username 'u', password 'p')",
         ) {
             Statement::CreateUserMapping { user, server, .. } => {
-                assert_eq!(user, "public");
+                assert_eq!(user, RoleSpec::Public);
                 assert_eq!(server, "s");
             }
             other => panic!("got {other:?}"),
@@ -24372,12 +24362,35 @@ mod tests {
                 server,
                 options,
             } => {
-                assert_eq!(user, "current_user");
+                assert_eq!(user, RoleSpec::CurrentUser);
                 assert_eq!(server, "s");
                 assert_eq!(options[0], ("username".into(), "u".into()));
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_create_user_mapping_for_user_alias() {
+        assert!(matches!(
+            one("CREATE USER MAPPING FOR USER SERVER s"),
+            Statement::CreateUserMapping {
+                user: RoleSpec::CurrentUser,
+                server,
+                options,
+            } if server == "s" && options.is_empty()
+        ));
+    }
+
+    #[test]
+    fn parses_quoted_current_user_as_a_role_name() {
+        assert!(matches!(
+            one("CREATE USER MAPPING FOR \"current_user\" SERVER s"),
+            Statement::CreateUserMapping {
+                user: RoleSpec::Name(name),
+                ..
+            } if name == "current_user"
+        ));
     }
 
     #[test]
@@ -24388,7 +24401,7 @@ mod tests {
                 server,
                 options,
             } => {
-                assert_eq!(user, "public");
+                assert_eq!(user, RoleSpec::Public);
                 assert_eq!(server, "s");
                 assert_eq!(options[0], ("username".into(), "newu".into()));
             }
@@ -24401,7 +24414,7 @@ mod tests {
         assert_eq!(
             one("DROP USER MAPPING FOR PUBLIC SERVER s"),
             Statement::DropUserMapping {
-                user: "public".into(),
+                user: RoleSpec::Public,
                 server: "s".into(),
                 if_exists: false,
                 cascade: false,
@@ -24410,7 +24423,7 @@ mod tests {
         assert_eq!(
             one("DROP USER MAPPING IF EXISTS FOR PUBLIC SERVER s"),
             Statement::DropUserMapping {
-                user: "public".into(),
+                user: RoleSpec::Public,
                 server: "s".into(),
                 if_exists: true,
                 cascade: false,
@@ -24540,7 +24553,7 @@ mod tests {
         assert_eq!(
             one("DROP USER MAPPING IF EXISTS FOR PUBLIC SERVER s"),
             Statement::DropUserMapping {
-                user: "public".into(),
+                user: RoleSpec::Public,
                 server: "s".into(),
                 if_exists: true,
                 cascade: false,

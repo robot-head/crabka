@@ -43,15 +43,6 @@ pub(super) fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecE
     ))
 }
 
-/// Normalize user-mapping aliases to the catalog's trust-auth key.
-pub(super) fn normalize_mapping_user(user: &str) -> &str {
-    if user.eq_ignore_ascii_case("current_user") || user.eq_ignore_ascii_case("public") {
-        "public"
-    } else {
-        user
-    }
-}
-
 /// Swallow a missing foreign-object error when `IF EXISTS` was given.
 pub(super) fn ignore_missing_ops(
     result: Result<Vec<crabka_pgkv::WriteOp>, crabka_pgcatalog::CatalogError>,

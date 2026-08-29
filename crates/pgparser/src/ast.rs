@@ -1100,19 +1100,19 @@ pub enum Statement {
     },
     /// `CREATE USER MAPPING FOR <user> SERVER <server> OPTIONS (…)`
     CreateUserMapping {
-        user: String,
+        user: RoleSpec,
         server: String,
         options: OptionList,
     },
     /// `ALTER USER MAPPING FOR <user> SERVER <server> OPTIONS (…)`
     AlterUserMapping {
-        user: String,
+        user: RoleSpec,
         server: String,
         options: OptionList,
     },
     /// `DROP USER MAPPING [IF EXISTS] FOR <user> SERVER <server>`
     DropUserMapping {
-        user: String,
+        user: RoleSpec,
         server: String,
         if_exists: bool,
         /// `CASCADE` was written: dependent objects are dropped too rather than
