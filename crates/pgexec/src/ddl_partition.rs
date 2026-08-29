@@ -554,10 +554,9 @@ pub(crate) fn create_table_definition(
     let mut foreign_keys: Vec<PendingForeignKey> = Vec::new();
 
     for clause in like {
-        let source_name =
-            &resolve_relation(kv, resolution, &clause.source, SchemaDisposition::Utility)?;
-        let source = crabka_pgcatalog::get_table(kv, source_name)?;
-        for column in &source.columns {
+        let (source_name, source_columns, source_table) =
+            like_source(kv, resolution, &clause.source)?;
+        for column in &source_columns {
             let mut copied = column.clone();
             // NOT NULL always rides along; DEFAULT and IDENTITY only when asked.
             if !clause.includes(crabka_pgparser::ast::LikeOption::Defaults)
@@ -593,7 +592,9 @@ pub(crate) fn create_table_definition(
             }
             copied_columns.push((clause.position, copied));
         }
-        if clause.includes(crabka_pgparser::ast::LikeOption::Constraints) {
+        if clause.includes(crabka_pgparser::ast::LikeOption::Constraints)
+            && let Some(source) = &source_table
+        {
             for check in &source.checks {
                 let taken: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
                 let name = unique_constraint_name(&taken, &check.name);
@@ -604,10 +605,10 @@ pub(crate) fn create_table_definition(
                 });
             }
         }
-        if clause.includes(crabka_pgparser::ast::LikeOption::Indexes) {
+        if clause.includes(crabka_pgparser::ast::LikeOption::Indexes) && source_table.is_some() {
             let mut taken: HashSet<String> =
                 indexes.iter().map(|index| index.name.clone()).collect();
-            for index in crabka_pgcatalog::list_table_indexes(kv, source_name)? {
+            for index in crabka_pgcatalog::list_table_indexes(kv, &source_name)? {
                 let index_name =
                     available_index_name(kv, name, &cloned_index_base_name(name, &index), &taken);
                 taken.insert(index_name.clone());
@@ -631,6 +632,12 @@ pub(crate) fn create_table_definition(
         )?);
     }
     cols.extend(copied.map(|(_, column)| column));
+    let mut seen = HashSet::new();
+    for column in &cols {
+        if !seen.insert(column.name.as_str()) {
+            return Err(ExecError::DuplicateOutputColumn(column.name.clone()));
+        }
+    }
     // A `CHECK`'s generated name is `<table>_<column>_check` when the predicate
     // references exactly one of the relation's columns, so the name depends on
     // the columns the relation *has* — inherited ones included.
@@ -823,6 +830,52 @@ pub(crate) fn create_table_definition(
         }
     }
     Ok((cols, checks, sequences, indexes, foreign_keys))
+}
+
+/// Resolve a `LIKE` source to its columns and, for tables, its metadata.
+fn like_source(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+) -> Result<
+    (
+        crabka_pgcatalog::RelationName,
+        Vec<Column>,
+        Option<crabka_pgcatalog::Table>,
+    ),
+    ExecError,
+> {
+    let source_name = resolve_relation(kv, resolution, reference, SchemaDisposition::Utility)?;
+    match crabka_pgcatalog::get_table(kv, &source_name) {
+        Ok(table) => return Ok((source_name, table.columns.clone(), Some(table))),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    match crabka_pgcatalog::get_view(kv, &source_name) {
+        Ok(view) => return Ok((source_name, view.columns, None)),
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let type_name = super::resolve_user_type(kv, resolution, reference)?;
+    if let Some(ty) = crabka_pgcatalog::get_user_type(kv, &type_name)?
+        && let Some(fields) = ty.fields()
+    {
+        let columns = fields
+            .iter()
+            .map(|field| Column::new(field.name.clone(), field.ty))
+            .collect();
+        return Ok((type_name, columns, None));
+    }
+    if let Some(kind) = super::relation_kind(kv, &source_name) {
+        return Err(super::relkind_not_supported(
+            format!(
+                "relation \"{}\" is invalid in LIKE clause",
+                source_name.name
+            ),
+            kind,
+        ));
+    }
+    Err(crabka_pgcatalog::CatalogError::UndefinedTable(source_name.to_string()).into())
 }
 
 /// One `FOREIGN KEY` clause a `CREATE TABLE` collected, with its name already

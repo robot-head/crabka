@@ -1450,6 +1450,78 @@ async fn create_table_like_keeps_the_written_column_position() {
     );
 }
 
+#[tokio::test]
+async fn create_table_like_accepts_relation_and_composite_sources() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE source (a int4, b text)").await;
+    run_s(
+        &mut session,
+        "CREATE VIEW source_view AS SELECT * FROM source",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE MATERIALIZED VIEW source_matview AS SELECT * FROM source",
+    )
+    .await;
+    run_s(&mut session, "CREATE TYPE source_type AS (a int4, b text)").await;
+    for (target, definition, source) in [
+        ("from_view", "LIKE source_view INCLUDING ALL", "source_view"),
+        ("from_matview", "LIKE source_matview", "source_matview"),
+        ("from_type", "LIKE source_type", "source_type"),
+    ] {
+        run_s(
+            &mut session,
+            &format!("CREATE TABLE {target} ({definition})"),
+        )
+        .await;
+        run_s(
+            &mut session,
+            &format!("INSERT INTO {target} VALUES (1, 'copied')"),
+        )
+        .await;
+        assert!(
+            text_rows_of(&mut session, &format!("SELECT a, b FROM {target}")).await
+                == vec![text_row(&["1", "copied"])],
+            "{source}"
+        );
+    }
+
+    run_s(&mut session, "CREATE INDEX source_index ON source (a)").await;
+    run_s(&mut session, "CREATE SEQUENCE source_sequence").await;
+    for (source, detail) in [
+        ("source_index", "indexes"),
+        ("source_sequence", "sequences"),
+    ] {
+        let expected_detail = format!("This operation is not supported for {detail}.");
+        let error = session
+            .simple_query(&format!("CREATE TABLE wrong_source (LIKE {source})"))
+            .await
+            .expect_err("invalid LIKE source");
+        assert!(error.code == "42809");
+        assert!(error.message == format!("relation \"{source}\" is invalid in LIKE clause"));
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.detail.as_deref())
+                == Some(expected_detail.as_str())
+        );
+    }
+
+    for sql in [
+        "CREATE TABLE duplicate_local (a int4, LIKE source)",
+        "CREATE TABLE duplicate_like (LIKE source, LIKE source)",
+    ] {
+        let (code, message) = error_of(&mut session, sql).await;
+        assert!(code == "42701", "{sql}");
+        assert!(message == "column \"a\" specified more than once", "{sql}");
+    }
+}
+
 /// A row-security policy that reads a column depends on it. `PostgreSQL`
 /// refuses the drop and names the policy, and `CASCADE` takes the whole
 /// policy — never a policy left reading a column that is gone.
