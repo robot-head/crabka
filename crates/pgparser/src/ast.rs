@@ -1152,12 +1152,13 @@ pub enum Statement {
         /// accepted as the explicit spelling of it.
         cascade: bool,
     },
-    /// `IMPORT FOREIGN SCHEMA <remote_schema> [LIMIT TO | EXCEPT (<tables>)] FROM SERVER <server> [INTO <local_schema>]`
+    /// `IMPORT FOREIGN SCHEMA <remote_schema> [LIMIT TO | EXCEPT (<tables>)] FROM SERVER <server> [INTO <local_schema>] [OPTIONS (…)]`
     ImportForeignSchema {
         remote_schema: String,
         selector: ImportSelector,
         server: String,
         into_schema: String,
+        options: OptionList,
     },
     /// `LISTEN <channel>`: subscribe the session to an asynchronous notification
     /// channel. The channel is an identifier (unquoted spellings fold to

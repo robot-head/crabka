@@ -15508,7 +15508,7 @@ impl Parser {
         })
     }
 
-    /// `IMPORT FOREIGN SCHEMA <remote_schema> [LIMIT TO | EXCEPT (<tables>)] FROM SERVER <server> [INTO <schema>]`
+    /// `IMPORT FOREIGN SCHEMA <remote_schema> [LIMIT TO | EXCEPT (<tables>)] FROM SERVER <server> [INTO <schema>] [OPTIONS (…)]`
     fn import_foreign_schema(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::{ImportSelector, Statement};
         self.expect(&Token::Keyword(Keyword::Import))?;
@@ -15544,11 +15544,13 @@ impl Parser {
         } else {
             "public".into()
         };
+        let options = self.parse_options()?;
         Ok(Statement::ImportForeignSchema {
             remote_schema,
             selector,
             server,
             into_schema,
+            options,
         })
     }
 
@@ -24738,12 +24740,15 @@ mod tests {
 
     #[test]
     fn parses_import_foreign_schema_except() {
-        match one("IMPORT FOREIGN SCHEMA remote EXCEPT (foo, bar) FROM SERVER s INTO myschema") {
+        match one(
+            "IMPORT FOREIGN SCHEMA remote EXCEPT (foo, bar) FROM SERVER s INTO myschema OPTIONS (remote_estimate 'true')",
+        ) {
             Statement::ImportForeignSchema {
                 remote_schema,
                 selector,
                 server,
                 into_schema,
+                options,
             } => {
                 assert_eq!(remote_schema, "remote");
                 assert_eq!(server, "s");
@@ -24751,6 +24756,7 @@ mod tests {
                 assert!(
                     matches!(selector, crate::ast::ImportSelector::Except(ref v) if v == &["foo", "bar"])
                 );
+                assert_eq!(options, vec![("remote_estimate".into(), "true".into())]);
             }
             other => panic!("got {other:?}"),
         }
@@ -24764,6 +24770,7 @@ mod tests {
                 selector,
                 server,
                 into_schema,
+                ..
             } => {
                 assert_eq!(remote_schema, "kafka");
                 assert_eq!(server, "s");

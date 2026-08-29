@@ -1823,6 +1823,7 @@ pub(crate) fn execute_ddl(
             selector,
             server,
             into_schema,
+            options: _,
         } => {
             // Resolve the server (42704 if undefined) and the current user's
             // optional mapping (no mapping → no credentials).
