@@ -8583,6 +8583,33 @@ fn fdw_support_routines_must_have_postgresql_signatures() {
 }
 
 #[test]
+fn postgresql_fdw_validator_rejects_invalid_options() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER postgresql VALIDATOR postgresql_fdw_validator",
+        "CREATE SERVER good FOREIGN DATA WRAPPER postgresql OPTIONS (host 'localhost', dbname 'db')",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
+        let (_, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    for sql in [
+        "ALTER FOREIGN DATA WRAPPER postgresql OPTIONS (bad 'x')",
+        "CREATE SERVER bad FOREIGN DATA WRAPPER postgresql OPTIONS (bad 'x')",
+        "ALTER SERVER good OPTIONS (bad 'x')",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
+        let error = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+            .expect_err("invalid option");
+        assert!(
+            matches!(error, super::ExecError::Remote(ref error) if error.code == "HV00D" && error.message == "invalid option \"bad\"")
+        );
+    }
+}
+
+#[test]
 fn alter_fdw_rename_updates_servers_and_comments() {
     use crabka_pgcatalog::CommentObject;
     use crabka_pgkv::{Kv, MemKv};

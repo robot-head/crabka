@@ -1660,6 +1660,11 @@ pub(crate) fn execute_ddl(
             if let Some(validator) = validator {
                 validate_fdw_routine(kv, validator, &["text[]", "oid"], "void")?;
             }
+            validate_postgresql_fdw_options(
+                validator.as_deref(),
+                options.iter().map(|(name, _)| name),
+                true,
+            )?;
             let ops = ignore_duplicate(
                 crabka_pgcatalog::create_fdw_with_routines_owned_ops(
                     kv,
@@ -1702,6 +1707,24 @@ pub(crate) fn execute_ddl(
                 if let Some(Some(validator)) = validator {
                     validate_fdw_routine(kv, validator, &["text[]", "oid"], "void")?;
                 }
+                let current = crabka_pgcatalog::get_fdw(kv, name)?;
+                let effective_validator = validator
+                    .as_ref()
+                    .map_or(current.validator.as_deref(), |validator| {
+                        validator.as_deref()
+                    });
+                validate_postgresql_fdw_options(
+                    effective_validator,
+                    options
+                        .iter()
+                        .flat_map(|options| options.iter())
+                        .map(|option| match option {
+                            crabka_pgparser::ast::ForeignOptionAction::Add { name, .. }
+                            | crabka_pgparser::ast::ForeignOptionAction::Set { name, .. }
+                            | crabka_pgparser::ast::ForeignOptionAction::Drop { name } => name,
+                        }),
+                    true,
+                )?;
                 let option_mutations = options.as_deref().map(foreign_option_mutations);
                 crabka_pgcatalog::alter_fdw_ops(
                     kv,
@@ -1745,6 +1768,12 @@ pub(crate) fn execute_ddl(
                 crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
                 wrapper,
                 fctx,
+            )?;
+            let fdw = crabka_pgcatalog::get_fdw(kv, wrapper)?;
+            validate_postgresql_fdw_options(
+                fdw.validator.as_deref(),
+                options.iter().map(|(name, _)| name),
+                false,
             )?;
             let ops = ignore_duplicate(
                 crabka_pgcatalog::create_server_with_identity_owned_ops(
@@ -1939,6 +1968,20 @@ pub(crate) fn execute_ddl(
                 require_new_owner_role(kv, fctx, &owner)?;
                 crabka_pgcatalog::set_server_owner_ops(kv, name, &owner)?
             } else {
+                let server = crabka_pgcatalog::get_server(kv, name)?;
+                let fdw = crabka_pgcatalog::get_fdw(kv, &server.wrapper)?;
+                validate_postgresql_fdw_options(
+                    fdw.validator.as_deref(),
+                    options
+                        .iter()
+                        .flat_map(|options| options.iter())
+                        .map(|option| match option {
+                            crabka_pgparser::ast::ForeignOptionAction::Add { name, .. }
+                            | crabka_pgparser::ast::ForeignOptionAction::Set { name, .. }
+                            | crabka_pgparser::ast::ForeignOptionAction::Drop { name } => name,
+                        }),
+                    false,
+                )?;
                 let option_mutations = options.as_deref().map(foreign_option_mutations);
                 crabka_pgcatalog::alter_server_ops(
                     kv,
@@ -2075,6 +2118,26 @@ fn foreign_option_mutations(
             }
         })
         .collect()
+}
+
+fn validate_postgresql_fdw_options<'a>(
+    validator: Option<&str>,
+    mut names: impl Iterator<Item = &'a String>,
+    wrapper: bool,
+) -> Result<(), ExecError> {
+    if validator != Some("postgresql_fdw_validator") {
+        return Ok(());
+    }
+    let valid = ["host", "hostaddr", "port", "dbname", "connect_timeout"];
+    let Some(name) = names.find(|name| wrapper || !valid.contains(&name.as_str())) else {
+        return Ok(());
+    };
+    let error = crabka_pgwire::error::PgError::error("HV00D", format!("invalid option \"{name}\""));
+    Err(ExecError::Remote(if wrapper {
+        error.with_hint("There are no valid options in this context.")
+    } else {
+        error
+    }))
 }
 
 /// Validate an FDW support routine before storing its name in the catalog.
