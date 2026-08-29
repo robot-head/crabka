@@ -1612,12 +1612,13 @@ pub(crate) fn execute_ddl(
             options,
         } => {
             let ops = ignore_duplicate(
-                crabka_pgcatalog::create_fdw_with_routines_ops(
+                crabka_pgcatalog::create_fdw_with_routines_owned_ops(
                     kv,
                     name,
                     handler.as_deref(),
                     validator.as_deref(),
                     options.clone(),
+                    fctx.effective_role(),
                 ),
                 *if_not_exists,
             )?
@@ -1665,13 +1666,14 @@ pub(crate) fn execute_ddl(
             options,
         } => {
             let ops = ignore_duplicate(
-                crabka_pgcatalog::create_server_with_identity_ops(
+                crabka_pgcatalog::create_server_with_identity_owned_ops(
                     kv,
                     name,
                     wrapper,
                     server_type.as_deref(),
                     version.as_deref(),
                     options.clone(),
+                    fctx.effective_role(),
                 ),
                 *if_not_exists,
             )?

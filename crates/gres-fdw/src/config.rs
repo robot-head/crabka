@@ -301,6 +301,7 @@ mod tests {
     fn make_server(opts: &[(&str, &str)]) -> crabka_pgcatalog::ForeignServer {
         crabka_pgcatalog::ForeignServer {
             name: "s".into(),
+            owner: "postgres".into(),
             wrapper: "crabka_gres_fdw".into(),
             server_type: None,
             version: None,
@@ -334,6 +335,7 @@ mod tests {
     fn resolve_builds_scram_profile() {
         let server = crabka_pgcatalog::ForeignServer {
             name: "s".into(),
+            owner: "postgres".into(),
             wrapper: "crabka_gres_fdw".into(),
             server_type: None,
             version: None,

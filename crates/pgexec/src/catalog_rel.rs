@@ -1472,6 +1472,7 @@ fn foreign_option_array(options: &[(String, String)]) -> Datum {
 
 fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let wrappers = crabka_pgcatalog::list_fdws(kv)?;
+    let role_oids = role_oids(kv)?;
     let names = wrappers
         .iter()
         .map(|wrapper| wrapper.name.clone())
@@ -1489,7 +1490,7 @@ fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
             vec![
                 int(oids[&wrapper.name]),
                 text(&wrapper.name),
-                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                int(*role_oids.get(&wrapper.owner).unwrap_or(&0)),
                 foreign_routine_datum(wrapper.handler.as_deref(), &routine_oids),
                 foreign_routine_datum(wrapper.validator.as_deref(), &routine_oids),
                 Datum::Null,
@@ -1518,6 +1519,7 @@ fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             .collect::<Vec<_>>(),
     );
     let servers = crabka_pgcatalog::list_servers(kv)?;
+    let role_oids = role_oids(kv)?;
     let names = servers
         .iter()
         .map(|server| server.name.clone())
@@ -1529,7 +1531,7 @@ fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             vec![
                 int(oids[&server.name]),
                 text(&server.name),
-                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                int(*role_oids.get(&server.owner).unwrap_or(&0)),
                 int(*wrapper_oids.get(&server.wrapper).unwrap_or(&0)),
                 server.server_type.as_deref().map_or(Datum::Null, text),
                 server.version.as_deref().map_or(Datum::Null, text),
@@ -4334,7 +4336,7 @@ fn privilege_row(
 mod tests {
     use assert2::assert;
     use crabka_pgcatalog::{ForeignKey, IndexId, IndexMethod, IndexPlacement, NewIndex, TableId};
-    use crabka_pgkv::MemKv;
+    use crabka_pgkv::{Kv, MemKv};
     use crabka_pgtypes::ArrayValue;
 
     use super::*;
@@ -4367,6 +4369,47 @@ mod tests {
             };
             assert!(catalog_relation(&qualified) == Some(*name));
         }
+    }
+
+    #[test]
+    fn foreign_catalogs_project_the_stored_object_owner() {
+        let kv = MemKv::new();
+        crabka_pgcatalog::create_role(&kv, "alice", true).expect("owner role");
+        kv.write_batch(
+            &crabka_pgcatalog::create_fdw_with_routines_owned_ops(
+                &kv,
+                "w",
+                None,
+                None,
+                Vec::new(),
+                "alice",
+            )
+            .expect("fdw ops"),
+        )
+        .expect("create fdw");
+        kv.write_batch(
+            &crabka_pgcatalog::create_server_with_identity_owned_ops(
+                &kv,
+                "s",
+                "w",
+                None,
+                None,
+                Vec::new(),
+                "alice",
+            )
+            .expect("server ops"),
+        )
+        .expect("create server");
+
+        let alice_oid = role_oids(&kv).expect("role oids")["alice"];
+        assert_eq!(
+            pg_foreign_data_wrapper_rows(&kv).expect("fdw rows")[0][2],
+            int(alice_oid)
+        );
+        assert_eq!(
+            pg_foreign_server_rows(&kv).expect("server rows")[0][2],
+            int(alice_oid)
+        );
     }
 
     #[test]

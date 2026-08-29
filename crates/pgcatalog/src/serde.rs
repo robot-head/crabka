@@ -2094,16 +2094,18 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
 
 // ── Foreign-data wrapper ──────────────────────────────────────────────────────
 
-/// Format: `name | handler | validator | options`.
+/// Format: `name | owner | handler | validator | options`.
 #[must_use]
 pub fn serialize_fdw(
     name: &str,
+    owner: &str,
     handler: Option<&str>,
     validator: Option<&str>,
     options: &[(String, String)],
 ) -> Vec<u8> {
     let mut out = Vec::new();
     write_str(&mut out, name);
+    write_str(&mut out, owner);
     write_optional_string(&mut out, handler);
     write_optional_string(&mut out, validator);
     write_options(&mut out, options);
@@ -2118,11 +2120,13 @@ pub fn serialize_fdw(
 pub fn deserialize_fdw(bytes: &[u8]) -> Result<ForeignDataWrapper, KvError> {
     let mut cur = bytes;
     let name = read_string(&mut cur)?;
+    let owner = read_string(&mut cur)?;
     let handler = read_optional_string(&mut cur)?;
     let validator = read_optional_string(&mut cur)?;
     let options = read_options(&mut cur)?;
     Ok(ForeignDataWrapper {
         name,
+        owner,
         handler,
         validator,
         options,
@@ -2530,10 +2534,11 @@ fn read_count(cur: &mut &[u8]) -> Result<usize, KvError> {
 
 // ── Foreign server ────────────────────────────────────────────────────────────
 
-/// Format: `name | wrapper | type | version | options`.
+/// Format: `name | owner | wrapper | type | version | options`.
 #[must_use]
 pub fn serialize_server(
     name: &str,
+    owner: &str,
     wrapper: &str,
     server_type: Option<&str>,
     version: Option<&str>,
@@ -2541,6 +2546,7 @@ pub fn serialize_server(
 ) -> Vec<u8> {
     let mut out = Vec::new();
     write_str(&mut out, name);
+    write_str(&mut out, owner);
     write_str(&mut out, wrapper);
     write_optional_string(&mut out, server_type);
     write_optional_string(&mut out, version);
@@ -2556,12 +2562,14 @@ pub fn serialize_server(
 pub fn deserialize_server(bytes: &[u8]) -> Result<ForeignServer, KvError> {
     let mut cur = bytes;
     let name = read_string(&mut cur)?;
+    let owner = read_string(&mut cur)?;
     let wrapper = read_string(&mut cur)?;
     let server_type = read_optional_string(&mut cur)?;
     let version = read_optional_string(&mut cur)?;
     let options = read_options(&mut cur)?;
     Ok(ForeignServer {
         name,
+        owner,
         wrapper,
         server_type,
         version,
@@ -3444,12 +3452,14 @@ mod tests {
     fn roundtrip_fdw() {
         let bytes = serialize_fdw(
             "kafka_fdw",
+            "alice",
             Some("kafka_fdw_handler"),
             Some("kafka_fdw_validator"),
             &[("handler".into(), "kafka_fdw_handler".into())],
         );
         let fdw = deserialize_fdw(&bytes).expect("decode");
         assert_eq!(fdw.name, "kafka_fdw");
+        assert_eq!(fdw.owner, "alice");
         assert_eq!(fdw.handler.as_deref(), Some("kafka_fdw_handler"));
         assert_eq!(fdw.validator.as_deref(), Some("kafka_fdw_validator"));
         assert_eq!(fdw.options[0].0, "handler");
@@ -3459,6 +3469,7 @@ mod tests {
     fn roundtrip_server() {
         let bytes = serialize_server(
             "kafka_s",
+            "alice",
             "kafka_fdw",
             Some("kafka"),
             Some("1.0"),
@@ -3466,6 +3477,7 @@ mod tests {
         );
         let s = deserialize_server(&bytes).expect("decode");
         assert_eq!(s.name, "kafka_s");
+        assert_eq!(s.owner, "alice");
         assert_eq!(s.wrapper, "kafka_fdw");
         assert_eq!(s.server_type.as_deref(), Some("kafka"));
         assert_eq!(s.version.as_deref(), Some("1.0"));

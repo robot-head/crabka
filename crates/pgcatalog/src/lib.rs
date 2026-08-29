@@ -629,6 +629,8 @@ impl Sequence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignDataWrapper {
     pub name: String,
+    /// Role that created the wrapper.
+    pub owner: String,
     /// The optional handler routine named by `HANDLER`.
     pub handler: Option<String>,
     /// The optional validator routine named by `VALIDATOR`.
@@ -641,6 +643,8 @@ pub struct ForeignDataWrapper {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignServer {
     pub name: String,
+    /// Role that created the server.
+    pub owner: String,
     /// The FDW this server belongs to.
     pub wrapper: String,
     /// The optional server type named by `TYPE`.
@@ -7044,7 +7048,7 @@ pub fn create_fdw_ops(
     name: &str,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    create_fdw_with_routines_ops(kv, name, None, None, options)
+    create_fdw_with_routines_owned_ops(kv, name, None, None, options, BOOTSTRAP_ROLE)
 }
 
 /// Build the write batch for registering an FDW and its optional routines.
@@ -7059,13 +7063,25 @@ pub fn create_fdw_with_routines_ops(
     validator: Option<&str>,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    create_fdw_with_routines_owned_ops(kv, name, handler, validator, options, BOOTSTRAP_ROLE)
+}
+
+/// Build the write batch for an FDW and record the role that owns it.
+pub fn create_fdw_with_routines_owned_ops(
+    kv: &dyn Kv,
+    name: &str,
+    handler: Option<&str>,
+    validator: Option<&str>,
+    options: Vec<(String, String)>,
+    owner: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
     ensure_unique_options(&options)?;
     if kv.get(&key::fdw_key(name))?.is_some() {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
     Ok(vec![WriteOp::Put {
         key: key::fdw_key(name),
-        value: serialize_fdw(name, handler, validator, &options),
+        value: serialize_fdw(name, owner, handler, validator, &options),
     }])
 }
 
@@ -7112,6 +7128,7 @@ pub fn alter_fdw_ops(
         key: key::fdw_key(name),
         value: serialize_fdw(
             &wrapper.name,
+            &wrapper.owner,
             wrapper.handler.as_deref(),
             wrapper.validator.as_deref(),
             &wrapper.options,
@@ -7134,6 +7151,7 @@ pub fn rename_fdw_ops(
             key: key::fdw_key(new_name),
             value: serialize_fdw(
                 new_name,
+                &wrapper.owner,
                 wrapper.handler.as_deref(),
                 wrapper.validator.as_deref(),
                 &wrapper.options,
@@ -7161,6 +7179,7 @@ pub fn rename_fdw_ops(
                 key: key::server_key(&server.name),
                 value: serialize_server(
                     &server.name,
+                    &server.owner,
                     new_name,
                     server.server_type.as_deref(),
                     server.version.as_deref(),
@@ -7270,7 +7289,7 @@ pub fn create_server_ops(
     wrapper: &str,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    create_server_with_identity_ops(kv, name, wrapper, None, None, options)
+    create_server_with_identity_owned_ops(kv, name, wrapper, None, None, options, BOOTSTRAP_ROLE)
 }
 
 /// Build the write batch for registering a foreign server and its identity fields.
@@ -7286,6 +7305,27 @@ pub fn create_server_with_identity_ops(
     version: Option<&str>,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    create_server_with_identity_owned_ops(
+        kv,
+        name,
+        wrapper,
+        server_type,
+        version,
+        options,
+        BOOTSTRAP_ROLE,
+    )
+}
+
+/// Build the write batch for a foreign server and record the role that owns it.
+pub fn create_server_with_identity_owned_ops(
+    kv: &dyn Kv,
+    name: &str,
+    wrapper: &str,
+    server_type: Option<&str>,
+    version: Option<&str>,
+    options: Vec<(String, String)>,
+    owner: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
     ensure_unique_options(&options)?;
     let _ = get_fdw(kv, wrapper)?;
     if kv.get(&key::server_key(name))?.is_some() {
@@ -7293,7 +7333,7 @@ pub fn create_server_with_identity_ops(
     }
     Ok(vec![WriteOp::Put {
         key: key::server_key(name),
-        value: serialize_server(name, wrapper, server_type, version, &options),
+        value: serialize_server(name, owner, wrapper, server_type, version, &options),
     }])
 }
 
@@ -7336,6 +7376,7 @@ pub fn alter_server_ops(
         key: key::server_key(name),
         value: serialize_server(
             &server.name,
+            &server.owner,
             &server.wrapper,
             server.server_type.as_deref(),
             server.version.as_deref(),
@@ -7359,6 +7400,7 @@ pub fn rename_server_ops(
             key: key::server_key(new_name),
             value: serialize_server(
                 new_name,
+                &server.owner,
                 &server.wrapper,
                 server.server_type.as_deref(),
                 server.version.as_deref(),

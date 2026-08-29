@@ -7909,6 +7909,41 @@ fn create_fdw_objects_if_not_exists_skip_duplicates() {
 }
 
 #[test]
+fn fdw_and_server_are_owned_by_the_creating_role() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    crabka_pgcatalog::create_role(&kv, "alice", true).expect("create owner role");
+    let fctx = super::ForeignCtx {
+        current_user: "alice",
+        session_user: "alice",
+        ..super::ForeignCtx::none()
+    };
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) = super::execute_ddl(&kv, &stmt, fctx, true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert_eq!(
+        crabka_pgcatalog::get_fdw(&kv, "w").expect("fdw").owner,
+        "alice"
+    );
+    assert_eq!(
+        crabka_pgcatalog::get_server(&kv, "s")
+            .expect("server")
+            .owner,
+        "alice"
+    );
+}
+
+#[test]
 fn alter_foreign_options_update_catalog_records() {
     use crabka_pgkv::{Kv, MemKv};
 
@@ -7934,6 +7969,7 @@ fn alter_foreign_options_update_catalog_records() {
         crabka_pgcatalog::get_fdw(&kv, "w").expect("fdw"),
         crabka_pgcatalog::ForeignDataWrapper {
             name: "w".into(),
+            owner: "postgres".into(),
             handler: Some("new_handler".into()),
             validator: None,
             options: vec![
@@ -7946,6 +7982,7 @@ fn alter_foreign_options_update_catalog_records() {
         crabka_pgcatalog::get_server(&kv, "s").expect("server"),
         crabka_pgcatalog::ForeignServer {
             name: "s".into(),
+            owner: "postgres".into(),
             wrapper: "w".into(),
             server_type: None,
             version: Some("2".into()),
