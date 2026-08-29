@@ -7153,6 +7153,7 @@ pub fn create_server_with_identity_ops(
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     ensure_unique_options(&options)?;
+    let _ = get_fdw(kv, wrapper)?;
     if kv.get(&key::server_key(name))?.is_some() {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
@@ -9097,6 +9098,7 @@ mod tests {
     }
 
     fn check_fdw_crud(kv: &dyn Kv) {
+        create_fdw(kv, "kafka_fdw", vec![]).expect("create fdw");
         create_server(
             kv,
             "s",
@@ -9165,6 +9167,7 @@ mod tests {
         assert!(create_server(&kv, "s", "w", options()).is_err());
         assert!(create_user_mapping(&kv, "alice", "s", options()).is_err());
 
+        create_fdw(&kv, "w", vec![]).expect("create fdw");
         create_server(&kv, "valid", "w", vec![]).expect("create server");
         assert!(create_foreign_table(&kv, &rel("t"), vec![], "valid", options()).is_err());
     }
@@ -9180,9 +9183,17 @@ mod tests {
     #[test]
     fn drop_server_removes() {
         let kv = MemKv::new();
+        create_fdw(&kv, "fdw", vec![]).expect("create fdw");
         create_server(&kv, "s", "fdw", vec![]).expect("create");
         drop_server(&kv, "s").expect("drop");
         assert_eq!(get_server(&kv, "s").expect_err("gone").sqlstate(), "42704");
+    }
+
+    #[test]
+    fn server_requires_an_existing_fdw() {
+        let error = create_server(&MemKv::new(), "s", "missing", vec![])
+            .expect_err("server wrapper must exist");
+        assert_eq!(error.sqlstate(), "42704");
     }
 
     #[test]

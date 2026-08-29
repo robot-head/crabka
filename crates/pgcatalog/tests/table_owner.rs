@@ -335,6 +335,7 @@ fn replacing_a_schema_record_writes_the_owner_it_is_given() {
 #[test]
 fn a_foreign_table_reads_back_owned_by_the_role_it_was_created_under() {
     let kv = MemKv::new();
+    crabka_pgcatalog::create_fdw(&kv, "kafka_fdw", Vec::new()).expect("create fdw");
     create_server(&kv, "kafka_srv", "kafka_fdw", Vec::new()).expect("create server");
     let remote = RelationName::public("remote");
     let (_, ops) = crabka_pgcatalog::create_foreign_table_ops(
