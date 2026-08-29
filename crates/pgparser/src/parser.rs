@@ -15257,7 +15257,7 @@ impl Parser {
         })
     }
 
-    /// `CREATE FOREIGN TABLE <name> (<col> <type>, …) SERVER <server> OPTIONS (…)`
+    /// `CREATE FOREIGN TABLE <name> (<col> <type> | LIKE <source>, …) SERVER <server> OPTIONS (…)`
     fn create_foreign_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::{ColumnDef, Statement};
         self.expect(&Token::Keyword(Keyword::Create))?;
@@ -15266,27 +15266,35 @@ impl Parser {
         let name = self.relation_ref()?;
         self.expect(&Token::LParen)?;
         let mut columns = Vec::new();
-        loop {
-            let col_name = self.expect_col_id()?;
-            let ty = self.parse_type_name()?;
-            let collation =
-                if self.peek_ident_eq("collate") && matches!(self.peek2(), Token::Ident(_)) {
-                    self.bump();
-                    Some(self.expect_collation_name()?)
+        let mut like = Vec::new();
+        if *self.peek() != Token::RParen {
+            loop {
+                if self.eat_keyword(Keyword::Like) {
+                    like.push(self.like_clause(columns.len())?);
                 } else {
-                    None
-                };
-            columns.push(ColumnDef {
-                name: col_name,
-                ty,
-                serial: None,
-                collation,
-                constraints: Vec::new(),
-            });
-            if self.eat_comma() {
-                continue;
+                    let col_name = self.expect_col_id()?;
+                    let ty = self.parse_type_name()?;
+                    let collation = if self.peek_ident_eq("collate")
+                        && matches!(self.peek2(), Token::Ident(_))
+                    {
+                        self.bump();
+                        Some(self.expect_collation_name()?)
+                    } else {
+                        None
+                    };
+                    columns.push(ColumnDef {
+                        name: col_name,
+                        ty,
+                        serial: None,
+                        collation,
+                        constraints: Vec::new(),
+                    });
+                }
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
             }
-            break;
         }
         self.expect(&Token::RParen)?;
         self.expect(&Token::Keyword(Keyword::Server))?;
@@ -15295,6 +15303,7 @@ impl Parser {
         Ok(Statement::CreateForeignTable {
             name,
             columns,
+            like,
             server,
             options,
         })
@@ -24191,16 +24200,31 @@ mod tests {
             Statement::CreateForeignTable {
                 name,
                 columns,
+                like,
                 server,
                 options,
             } => {
                 assert2::assert!(name == crate::ast::RelationRef::bare("orders"));
                 assert_eq!(server, "s");
                 assert_eq!(columns.len(), 2);
+                assert!(like.is_empty());
                 assert_eq!(options[0], ("topic".into(), "orders".into()));
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_foreign_table_like_at_its_written_position() {
+        let Statement::CreateForeignTable { columns, like, .. } =
+            one("CREATE FOREIGN TABLE target (before int4, LIKE source, after text) SERVER s")
+        else {
+            panic!("expected CREATE FOREIGN TABLE");
+        };
+        assert!(columns.len() == 2);
+        assert!(like.len() == 1);
+        assert!(like[0].source == crate::ast::RelationRef::bare("source"));
+        assert!(like[0].position == 1);
     }
 
     #[test]
@@ -24429,12 +24453,14 @@ mod tests {
             Statement::CreateForeignTable {
                 name,
                 columns,
+                like,
                 server,
                 options,
             } => {
                 assert2::assert!(name == crate::ast::RelationRef::bare("t"));
                 assert_eq!(server, "s");
                 assert_eq!(columns.len(), 1);
+                assert!(like.is_empty());
                 assert!(options.is_empty());
             }
             other => panic!("got {other:?}"),

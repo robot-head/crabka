@@ -7258,6 +7258,7 @@ pub fn create_foreign_table(
         value_columns,
         server,
         options,
+        Vec::new(),
         TableCreation::bootstrap(),
     )?;
     kv.write_batch(&batch)?;
@@ -7276,6 +7277,7 @@ pub fn create_foreign_table_ops(
     value_columns: Vec<Column>,
     server: &str,
     options: Vec<(String, String)>,
+    checks: Vec<CheckConstraint>,
     creation: TableCreation<'_>,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     let _ = get_server(kv, server)?;
@@ -7306,7 +7308,7 @@ pub fn create_foreign_table_ops(
                 // materialized-view payload is not its to carry even when the
                 // caller left one in the creation record.
                 None,
-                &[],
+                &checks,
             ),
         },
         WriteOp::Put {

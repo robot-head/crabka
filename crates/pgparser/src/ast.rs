@@ -1116,10 +1116,11 @@ pub enum Statement {
         /// accepted as the explicit spelling of it.
         cascade: bool,
     },
-    /// `CREATE FOREIGN TABLE <name> (<col> <type>, …) SERVER <server> OPTIONS (…)`
+    /// `CREATE FOREIGN TABLE <name> (<col> <type> | LIKE <source>, …) SERVER <server> OPTIONS (…)`
     CreateForeignTable {
         name: RelationRef,
         columns: Vec<ColumnDef>,
+        like: Vec<LikeClause>,
         server: String,
         options: OptionList,
     },

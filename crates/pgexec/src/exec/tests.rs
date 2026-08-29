@@ -1522,6 +1522,61 @@ async fn create_table_like_accepts_relation_and_composite_sources() {
     }
 }
 
+#[tokio::test]
+async fn create_foreign_table_like_keeps_the_written_column_position() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(
+        &mut session,
+        "CREATE TABLE source (a int4 DEFAULT 7, b text CHECK (b <> 'bad'))",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE SERVER like_server FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'b:9092')",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE FOREIGN TABLE target (before int4, LIKE source INCLUDING ALL, after text) \
+         SERVER like_server OPTIONS (topic 'target')",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT attname FROM pg_attribute WHERE attrelid = 'target'::regclass \
+             AND attname IN ('before', 'a', 'b', 'after') ORDER BY attnum",
+        )
+        .await
+            == vec![
+                text_row(&["before"]),
+                text_row(&["a"]),
+                text_row(&["b"]),
+                text_row(&["after"]),
+            ]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef \
+             WHERE adrelid = 'target'::regclass",
+        )
+        .await
+            == vec![text_row(&["7"])]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT conname FROM pg_constraint WHERE conrelid = 'target'::regclass",
+        )
+        .await
+            == vec![text_row(&["source_b_check"])]
+    );
+}
+
 /// A row-security policy that reads a column depends on it. `PostgreSQL`
 /// refuses the drop and names the policy, and `CASCADE` takes the whole
 /// policy — never a policy left reading a column that is gone.

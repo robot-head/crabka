@@ -1677,22 +1677,28 @@ pub(crate) fn execute_ddl(
         Statement::CreateForeignTable {
             name,
             columns,
+            like,
             server,
             options,
         } => {
             let name = resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?;
             crate::usertype::ensure_relation_type_name_available(kv, &name)?;
-            crate::scope::reject_system_column_names(columns.iter().map(|c| c.name.as_str()))?;
-            let cols = columns
-                .iter()
-                .map(|c| Column::new(c.name.clone(), c.ty))
-                .collect();
+            let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
+            let (mut cols, checks, _, _, _) =
+                create_table_definition(kv, &name, columns, &[], like, &[], &ddl_ctx)?;
+            for column in &mut cols {
+                if column.identity.take().is_some() {
+                    column.default = None;
+                }
+            }
+            crate::scope::reject_system_column_names(cols.iter().map(|c| c.name.as_str()))?;
             let (_id, ops) = crabka_pgcatalog::create_foreign_table_ops(
                 kv,
                 &name,
                 cols,
                 server,
                 options.clone(),
+                checks,
                 fctx.table_creation(),
             )?;
             Ok((command("CREATE FOREIGN TABLE"), ops))
@@ -1791,6 +1797,7 @@ pub(crate) fn execute_ddl(
                     table.columns,
                     &srv.name,
                     table.options,
+                    Vec::new(),
                     crabka_pgcatalog::TableCreation {
                         owner: fctx.effective_role(),
                         id: crabka_pgcatalog::TableIdSource::Reserved(id),

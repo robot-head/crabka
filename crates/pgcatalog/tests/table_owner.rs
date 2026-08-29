@@ -343,6 +343,7 @@ fn a_foreign_table_reads_back_owned_by_the_role_it_was_created_under() {
         vec![Column::new("value", ColumnType::Text)],
         "kafka_srv",
         vec![("topic".into(), "remote".into())],
+        Vec::new(),
         TableCreation {
             owner: "regress_owner",
             id: crabka_pgcatalog::TableIdSource::Counter,

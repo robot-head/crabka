@@ -1,7 +1,7 @@
 use assert2::assert;
 use crabka_pgcatalog::{
     BOOTSTRAP_ROLE, CatalogError, Column, RelationName, Table, TableCreation, TableId,
-    TableIdSource, TableOptions, create_foreign_table_ops, create_schema_ops, create_server,
+    TableIdSource, TableOptions, create_foreign_table, create_schema_ops, create_server,
     create_table_ops, create_table_with_options_ops, drop_table_ops, get_table, read_next_table_id,
     relation_name_of, rename_table_ops, set_next_table_id_op, table_by_id,
 };
@@ -132,16 +132,14 @@ fn foreign_table_resolves_by_id() {
     let kv = MemKv::new();
     create_server(&kv, "kafka_srv", "kafka_fdw", Vec::new()).expect("create server");
     let ft = RelationName::public("ft");
-    let (id, ops) = create_foreign_table_ops(
+    let id = create_foreign_table(
         &kv,
         &ft,
         vec![Column::new("value", ColumnType::Text)],
         "kafka_srv",
         vec![("topic".into(), "ft".into())],
-        TableCreation::bootstrap(),
     )
-    .expect("create foreign table ops");
-    apply(&kv, &ops);
+    .expect("create foreign table");
 
     assert!(relation_name_of(&kv, id).expect("index lookup") == Some(ft.clone()));
     assert!(table_by_id(&kv, id).expect("table by id") == get_table(&kv, &ft).expect("by name"));
