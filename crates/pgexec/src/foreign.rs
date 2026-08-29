@@ -120,6 +120,22 @@ pub trait ForeignScanner: Send + Sync {
         mapping: Option<&UserMapping>,
         filter: &ImportFilter,
     ) -> Result<Vec<ImportedTable>, ExecError>;
+
+    /// Enumerate importable tables with SQL `IMPORT FOREIGN SCHEMA` options.
+    ///
+    /// Existing scanners that do not interpret import options retain their
+    /// `import_schema` implementation. An FDW that does can override this
+    /// method without making the executor depend on its option vocabulary.
+    fn import_schema_with_options(
+        &self,
+        server: &ForeignServer,
+        mapping: Option<&UserMapping>,
+        filter: &ImportFilter,
+        options: &[(String, String)],
+    ) -> Result<Vec<ImportedTable>, ExecError> {
+        let _ = options;
+        self.import_schema(server, mapping, filter)
+    }
 }
 
 /// One table `IMPORT FOREIGN SCHEMA` materializes. It carries the table's name,

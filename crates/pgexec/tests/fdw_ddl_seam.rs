@@ -68,6 +68,17 @@ impl foreign::ForeignScanner for ImportingScanner {
             .collect();
         Ok(tables)
     }
+
+    fn import_schema_with_options(
+        &self,
+        server: &ForeignServer,
+        mapping: Option<&UserMapping>,
+        filter: &foreign::ImportFilter,
+        options: &[(String, String)],
+    ) -> Result<Vec<foreign::ImportedTable>, crabka_pgexec::ExecError> {
+        assert!(options == [("fetch_size".into(), "1000".into())]);
+        self.import_schema(server, mapping, filter)
+    }
 }
 
 fn engine_with_recording_committer() -> (SqlEngine, Arc<RecordingCommitter>) {
@@ -226,7 +237,7 @@ async fn import_foreign_schema_routes_created_tables_through_committer() {
     .await;
     run(
         &mut session,
-        "IMPORT FOREIGN SCHEMA remote LIMIT TO (imported_one) FROM SERVER kafka_srv",
+        "IMPORT FOREIGN SCHEMA remote LIMIT TO (imported_one) FROM SERVER kafka_srv OPTIONS (fetch_size '1000')",
     )
     .await;
 

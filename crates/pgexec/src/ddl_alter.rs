@@ -1823,7 +1823,7 @@ pub(crate) fn execute_ddl(
             selector,
             server,
             into_schema,
-            options: _,
+            options,
         } => {
             // Resolve the server (42704 if undefined) and the current user's
             // optional mapping (no mapping → no credentials).
@@ -1834,7 +1834,8 @@ pub(crate) fn execute_ddl(
                 ExecError::Unsupported("foreign tables require the `kafka` feature".into())
             })?;
             let filter = crate::foreign::ImportFilter::from_selector(selector);
-            let tables = scanner.import_schema(&srv, mapping.as_ref(), &filter)?;
+            let tables =
+                scanner.import_schema_with_options(&srv, mapping.as_ref(), &filter, options)?;
             let mut ops = Vec::new();
             // Every table lands in one batch, so the counter cannot be read
             // again between them — an unapplied bump is invisible to the next
