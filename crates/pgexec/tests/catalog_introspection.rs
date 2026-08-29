@@ -231,6 +231,21 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
 }
 
 #[tokio::test]
+async fn pg_foreign_data_wrapper_absent_routines_render_as_dashes() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE FOREIGN DATA WRAPPER bare").await;
+
+    assert!(
+        grid(
+            &engine,
+            "SELECT fdwhandler::regproc, fdwvalidator::regproc FROM pg_foreign_data_wrapper",
+        )
+        .await
+            == vec![some(&["-", "-"])]
+    );
+}
+
+#[tokio::test]
 async fn pg_locks_renders_live_relation_and_advisory_holds() {
     let engine = SqlEngine::new();
     let mut session = engine.connect_with_pid(4242);

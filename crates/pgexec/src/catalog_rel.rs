@@ -1525,25 +1525,28 @@ fn foreign_routine_datum(
     routines: &[crabka_pgcatalog::routine::Routine],
     input_types: &[&str],
 ) -> Datum {
-    name.map_or(Datum::Null, |name| {
-        let bare = name.rsplit('.').next().unwrap_or(name);
-        let oid = if bare == "postgresql_fdw_validator" && input_types == ["text[]", "oid"] {
-            crate::routine::POSTGRESQL_FDW_VALIDATOR_OID
-        } else {
-            routines
-                .iter()
-                .find(|routine| {
-                    routine.name == bare
-                        && routine
-                            .input_params()
-                            .map(|parameter| parameter.ty.name.as_str())
-                            .eq(input_types.iter().copied())
-                })
-                .and_then(|routine| i32::try_from(routine.oid).ok())
-                .unwrap_or(0)
-        };
-        Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(oid, name))
-    })
+    name.map_or_else(
+        || Datum::Regclass(crabka_pgtypes::RegclassValue::unresolved(0)),
+        |name| {
+            let bare = name.rsplit('.').next().unwrap_or(name);
+            let oid = if bare == "postgresql_fdw_validator" && input_types == ["text[]", "oid"] {
+                crate::routine::POSTGRESQL_FDW_VALIDATOR_OID
+            } else {
+                routines
+                    .iter()
+                    .find(|routine| {
+                        routine.name == bare
+                            && routine
+                                .input_params()
+                                .map(|parameter| parameter.ty.name.as_str())
+                                .eq(input_types.iter().copied())
+                    })
+                    .and_then(|routine| i32::try_from(routine.oid).ok())
+                    .unwrap_or(0)
+            };
+            Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(oid, name))
+        },
+    )
 }
 
 fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
