@@ -1004,12 +1004,13 @@ pub enum Statement {
         schemas: Vec<String>,
         grantees: Vec<RoleSpec>,
     },
-    /// `GRANT ... ON FOREIGN DATA WRAPPER|SERVER ... TO ...`.
+    /// `GRANT ... ON FOREIGN DATA WRAPPER|SERVER ... TO ... [WITH GRANT OPTION]`.
     GrantForeignPrivileges {
         target: ForeignPrivilegeTarget,
         privileges: Vec<PrivilegeSpec>,
         names: Vec<String>,
         grantees: Vec<RoleSpec>,
+        grant_option: bool,
     },
     /// `GRANT … ON LARGE OBJECT oid [, …] TO role [, …] [WITH GRANT OPTION]`.
     GrantLargeObjectPrivileges {
@@ -1032,12 +1033,13 @@ pub enum Statement {
         schemas: Vec<String>,
         grantees: Vec<RoleSpec>,
     },
-    /// `REVOKE ... ON FOREIGN DATA WRAPPER|SERVER ... FROM ...`.
+    /// `REVOKE [GRANT OPTION FOR] ... ON FOREIGN DATA WRAPPER|SERVER ... FROM ...`.
     RevokeForeignPrivileges {
         target: ForeignPrivilegeTarget,
         privileges: Vec<PrivilegeSpec>,
         names: Vec<String>,
         grantees: Vec<RoleSpec>,
+        grant_option_only: bool,
     },
     /// `REVOKE [GRANT OPTION FOR] … ON LARGE OBJECT oid [, …] FROM role [, …]`.
     RevokeLargeObjectPrivileges {

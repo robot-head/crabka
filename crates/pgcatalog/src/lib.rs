@@ -5994,7 +5994,24 @@ pub fn grant_foreign_privileges_ops(
     grantees: &[String],
     privileges: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    foreign_privilege_ops(kv, target, names, grantees, privileges, true)
+    grant_foreign_privileges_with_option_ops(kv, target, names, grantees, privileges, false)
+}
+
+/// Build write operations for `GRANT ... WITH GRANT OPTION` on foreign objects.
+///
+/// # Errors
+///
+/// Returns undefined-object for a missing foreign object or grantee, invalid
+/// parameter value for an unsupported privilege, or catalog storage failures.
+pub fn grant_foreign_privileges_with_option_ops(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    names: &[String],
+    grantees: &[String],
+    privileges: &[String],
+    grant_option: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    foreign_privilege_ops(kv, target, names, grantees, privileges, true, grant_option)
 }
 
 /// Build write operations for `REVOKE ... ON FOREIGN DATA WRAPPER|SERVER`.
@@ -6010,7 +6027,32 @@ pub fn revoke_foreign_privileges_ops(
     grantees: &[String],
     privileges: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    foreign_privilege_ops(kv, target, names, grantees, privileges, false)
+    revoke_foreign_privileges_with_option_ops(kv, target, names, grantees, privileges, false)
+}
+
+/// Build write operations for `REVOKE [GRANT OPTION FOR]` on foreign objects.
+///
+/// # Errors
+///
+/// Returns undefined-object for a missing foreign object or grantee, invalid
+/// parameter value for an unsupported privilege, or catalog storage failures.
+pub fn revoke_foreign_privileges_with_option_ops(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    names: &[String],
+    grantees: &[String],
+    privileges: &[String],
+    grant_option_only: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    foreign_privilege_ops(
+        kv,
+        target,
+        names,
+        grantees,
+        privileges,
+        false,
+        grant_option_only,
+    )
 }
 
 /// Whether a direct grant is recorded for one foreign object.
@@ -6029,14 +6071,66 @@ pub fn foreign_privilege_is_granted(
     privilege: &str,
 ) -> Result<bool, CatalogError> {
     let privilege = privilege.to_ascii_uppercase();
-    Ok(kv
-        .get(&key::foreign_privilege_key(
-            target.key_name(),
-            name,
-            grantee,
-            &privilege,
-        ))?
-        .is_some())
+    kv.get(&key::foreign_privilege_key(
+        target.key_name(),
+        name,
+        grantee,
+        &privilege,
+    ))?
+    .map_or(Ok(false), |value| {
+        foreign_privilege_grant_option(&value).map(|_| true)
+    })
+}
+
+/// Whether a direct foreign-object grant also carries `GRANT OPTION`.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn foreign_privilege_has_grant_option(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    name: &str,
+    grantee: &str,
+    privilege: &str,
+) -> Result<bool, CatalogError> {
+    let privilege = privilege.to_ascii_uppercase();
+    kv.get(&key::foreign_privilege_key(
+        target.key_name(),
+        name,
+        grantee,
+        &privilege,
+    ))?
+    .map_or(Ok(false), |value| foreign_privilege_grant_option(&value))
+}
+
+/// The explicit ACL entries for one foreign object, sorted by grantee then
+/// privilege because the KV key uses that order.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_foreign_privileges(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    name: &str,
+) -> Result<Vec<(String, String, bool)>, CatalogError> {
+    let prefix = key::foreign_privilege_prefix(target.key_name(), name);
+    let mut privileges = kv
+        .scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(key, value)| {
+            let parts = key::key_parts(&key[prefix.len()..], 2)
+                .ok_or_else(|| KvError::CorruptRow("foreign privilege key is incomplete".into()))?;
+            Ok((
+                parts[0].to_owned(),
+                parts[1].to_owned(),
+                foreign_privilege_grant_option(&value)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, CatalogError>>()?;
+    privileges.sort();
+    Ok(privileges)
 }
 
 /// Delete every ACL row owned by one foreign object.
@@ -6089,6 +6183,7 @@ fn foreign_privilege_ops(
     grantees: &[String],
     privileges: &[String],
     grant: bool,
+    grant_option_only: bool,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     for name in names {
         match target {
@@ -6109,18 +6204,35 @@ fn foreign_privilege_ops(
         for name in names {
             for privilege in &privileges {
                 let key = key::foreign_privilege_key(target.key_name(), name, grantee, privilege);
-                ops.push(if grant {
+                let op = if grant {
+                    let retained_option = kv
+                        .get(&key)?
+                        .map_or(Ok(false), |value| foreign_privilege_grant_option(&value))?;
+                    WriteOp::Put {
+                        key,
+                        value: Vec::from([u8::from(grant_option_only || retained_option)]),
+                    }
+                } else if grant_option_only && kv.get(&key)?.is_some() {
                     WriteOp::Put {
                         key,
                         value: Vec::new(),
                     }
                 } else {
                     WriteOp::Delete { key }
-                });
+                };
+                ops.push(op);
             }
         }
     }
     Ok(ops)
+}
+
+fn foreign_privilege_grant_option(value: &[u8]) -> Result<bool, CatalogError> {
+    match value {
+        [] | [0] => Ok(false),
+        [1] => Ok(true),
+        _ => Err(KvError::CorruptRow("foreign privilege grant option is invalid".into()).into()),
+    }
 }
 
 fn expand_foreign_privileges(
@@ -9968,6 +10080,65 @@ mod tests {
                 .expect("renamed mapping")
                 .oid,
             mapping_oid
+        );
+    }
+
+    #[test]
+    fn foreign_privilege_grant_options_are_retained_and_revocable() {
+        let kv = MemKv::new();
+        create_role(&kv, "reader", true).expect("reader");
+        create_fdw(&kv, "w", vec![]).expect("fdw");
+        let target = ForeignPrivilegeTarget::DataWrapper;
+        let names = ["w".into()];
+        let grantees = ["reader".into()];
+        let privileges = ["USAGE".into()];
+        kv.write_batch(
+            &grant_foreign_privileges_with_option_ops(
+                &kv,
+                target,
+                &names,
+                &grantees,
+                &privileges,
+                true,
+            )
+            .expect("grant"),
+        )
+        .expect("apply grant");
+        assert!(foreign_privilege_is_granted(&kv, target, "w", "reader", "USAGE").expect("grant"));
+        assert!(
+            foreign_privilege_has_grant_option(&kv, target, "w", "reader", "USAGE")
+                .expect("grant option")
+        );
+        assert_eq!(
+            list_foreign_privileges(&kv, target, "w").expect("acl rows"),
+            vec![("reader".into(), "USAGE".into(), true)]
+        );
+        kv.write_batch(
+            &grant_foreign_privileges_ops(&kv, target, &names, &grantees, &privileges)
+                .expect("ordinary regrant"),
+        )
+        .expect("apply ordinary regrant");
+        assert!(
+            foreign_privilege_has_grant_option(&kv, target, "w", "reader", "USAGE")
+                .expect("ordinary regrant keeps grant option")
+        );
+
+        kv.write_batch(
+            &revoke_foreign_privileges_with_option_ops(
+                &kv,
+                target,
+                &names,
+                &grantees,
+                &privileges,
+                true,
+            )
+            .expect("revoke grant option"),
+        )
+        .expect("apply revoke");
+        assert!(foreign_privilege_is_granted(&kv, target, "w", "reader", "USAGE").expect("grant"));
+        assert!(
+            !foreign_privilege_has_grant_option(&kv, target, "w", "reader", "USAGE")
+                .expect("grant option removed")
         );
     }
 

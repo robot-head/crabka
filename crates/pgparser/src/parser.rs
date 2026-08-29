@@ -5123,12 +5123,13 @@ impl Parser {
             let names = self.object_name_list()?;
             self.expect(&Token::Keyword(Keyword::To))?;
             let grantees = self.grantee_list()?;
-            self.eat_with_grant_option()?;
+            let grant_option = self.eat_with_grant_option()?;
             return Ok(crate::ast::Statement::GrantForeignPrivileges {
                 target,
                 privileges,
                 names,
                 grantees,
+                grant_option,
             });
         }
         // PostgreSQL's `TABLE` object-type keyword is optional: `GRANT SELECT ON
@@ -5214,6 +5215,7 @@ impl Parser {
                 privileges,
                 names,
                 grantees,
+                grant_option_only,
             });
         }
         self.eat_keyword(Keyword::Table);
@@ -18481,18 +18483,20 @@ mod tests {
         use crate::ast::ForeignPrivilegeTarget;
 
         assert!(matches!(
-            one("GRANT USAGE ON FOREIGN DATA WRAPPER w TO reader"),
+            one("GRANT USAGE ON FOREIGN DATA WRAPPER w TO reader WITH GRANT OPTION"),
             Statement::GrantForeignPrivileges {
                 target: ForeignPrivilegeTarget::DataWrapper,
                 names,
+                grant_option: true,
                 ..
             } if names == ["w"]
         ));
         assert!(matches!(
-            one("REVOKE USAGE ON FOREIGN SERVER s FROM reader"),
+            one("REVOKE GRANT OPTION FOR USAGE ON FOREIGN SERVER s FROM reader"),
             Statement::RevokeForeignPrivileges {
                 target: ForeignPrivilegeTarget::Server,
                 names,
+                grant_option_only: true,
                 ..
             } if names == ["s"]
         ));

@@ -12,8 +12,8 @@
 //!    positional `SELECT *` and a named projection agree with the oracle. Types
 //!    are the nearest crabka [`ColumnType`]: `oid`/`xid` are integers, `name`,
 //!    `"char"`, `pg_node_tree`, `int2vector`, `oidvector` and `pg_lsn` are
-//!    `text`, and `aclitem[]` is a `text[]` that is always NULL. Crabka tracks
-//!    grants outside the ACL representation.
+//!    `text`, and `aclitem[]` is a `text[]`. Object kinds without stored ACLs
+//!    return NULL; foreign objects project their explicit `USAGE` grants.
 //!
 //! [`exec`](crate::exec) owns the relation seam. This module owns the extra
 //! names, their column lists and their rows.
@@ -1502,17 +1502,22 @@ fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
     Ok(wrappers
         .into_iter()
         .map(|wrapper| {
-            vec![
+            Ok(vec![
                 int(i32::try_from(wrapper.oid).expect("foreign wrapper oid fits i32")),
                 text(&wrapper.name),
                 int(*role_oids.get(&wrapper.owner).unwrap_or(&0)),
                 foreign_routine_datum(wrapper.handler.as_deref(), &routine_oids),
                 foreign_routine_datum(wrapper.validator.as_deref(), &routine_oids),
-                Datum::Null,
+                foreign_acl(
+                    kv,
+                    crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                    &wrapper.name,
+                    &wrapper.owner,
+                )?,
                 foreign_option_array(&wrapper.options),
-            ]
+            ])
         })
-        .collect())
+        .collect::<Result<Vec<_>, ExecError>>()?)
 }
 
 fn foreign_routine_datum(name: Option<&str>, oids: &BTreeMap<String, i32>) -> Datum {
@@ -1535,7 +1540,7 @@ fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(servers
         .into_iter()
         .map(|server| {
-            vec![
+            Ok(vec![
                 int(i32::try_from(server.oid).expect("foreign server oid fits i32")),
                 text(&server.name),
                 int(*role_oids.get(&server.owner).unwrap_or(&0)),
@@ -1545,11 +1550,45 @@ fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 ),
                 server.server_type.as_deref().map_or(Datum::Null, text),
                 server.version.as_deref().map_or(Datum::Null, text),
-                Datum::Null,
+                foreign_acl(
+                    kv,
+                    crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                    &server.name,
+                    &server.owner,
+                )?,
                 foreign_option_array(&server.options),
-            ]
+            ])
         })
-        .collect())
+        .collect::<Result<Vec<_>, ExecError>>()?)
+}
+
+fn foreign_acl(
+    kv: &dyn Kv,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    name: &str,
+    owner: &str,
+) -> Result<Datum, ExecError> {
+    let grants = crabka_pgcatalog::list_foreign_privileges(kv, target, name)?;
+    if grants.is_empty() {
+        return Ok(Datum::Null);
+    }
+    let mut items = vec![format!("{owner}=U/{owner}")];
+    items.extend(
+        grants
+            .into_iter()
+            .map(|(grantee, _privilege, grant_option)| {
+                let grantee = if grantee == crabka_pgcatalog::PUBLIC_ROLE {
+                    String::new()
+                } else {
+                    grantee
+                };
+                format!("{grantee}=U{}/{owner}", if grant_option { "*" } else { "" })
+            }),
+    );
+    Ok(Datum::Array(crabka_pgtypes::ArrayValue::new(
+        ElemType::Text,
+        items.into_iter().map(Datum::Text).collect(),
+    )))
 }
 
 fn pg_user_mapping_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {

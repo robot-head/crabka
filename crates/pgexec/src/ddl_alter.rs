@@ -1548,17 +1548,19 @@ pub(crate) fn execute_ddl(
             privileges,
             names,
             grantees,
+            grant_option,
         } => {
             let target = foreign_privilege_target(*target);
-            require_foreign_ownership(kv, target, names, fctx)?;
+            require_foreign_grant_authority(kv, target, names, fctx)?;
             let grantees = resolve_grantees(kv, fctx, grantees)?;
             let privileges = foreign_privilege_names(privileges)?;
-            let ops = crabka_pgcatalog::grant_foreign_privileges_ops(
+            let ops = crabka_pgcatalog::grant_foreign_privileges_with_option_ops(
                 kv,
                 target,
                 names,
                 &grantees,
                 &privileges,
+                *grant_option,
             )?;
             Ok((command("GRANT"), ops))
         }
@@ -1596,17 +1598,19 @@ pub(crate) fn execute_ddl(
             privileges,
             names,
             grantees,
+            grant_option_only,
         } => {
             let target = foreign_privilege_target(*target);
             require_foreign_ownership(kv, target, names, fctx)?;
             let grantees = resolve_grantees(kv, fctx, grantees)?;
             let privileges = foreign_privilege_names(privileges)?;
-            let ops = crabka_pgcatalog::revoke_foreign_privileges_ops(
+            let ops = crabka_pgcatalog::revoke_foreign_privileges_with_option_ops(
                 kv,
                 target,
                 names,
                 &grantees,
                 &privileges,
+                *grant_option_only,
             )?;
             Ok((command("REVOKE"), ops))
         }
@@ -3649,6 +3653,33 @@ fn require_foreign_ownership(
                 format!("must be owner of {kind} {name}"),
             )));
         }
+    }
+    Ok(())
+}
+
+fn require_foreign_grant_authority(
+    kv: &dyn Kv,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    names: &[String],
+    fctx: ForeignCtx<'_>,
+) -> Result<(), ExecError> {
+    for name in names {
+        if crate::catalog_fn::foreign_usage_grant_option_is_held(
+            kv,
+            target,
+            name,
+            fctx.effective_role(),
+        )? {
+            continue;
+        }
+        let kind = match target {
+            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => "foreign-data wrapper",
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server => "foreign server",
+        };
+        return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "42501",
+            format!("permission denied for {kind} {name}"),
+        )));
     }
     Ok(())
 }

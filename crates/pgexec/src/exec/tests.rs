@@ -1581,25 +1581,61 @@ async fn create_foreign_table_like_keeps_the_written_column_position() {
 async fn foreign_object_privilege_functions_accept_catalog_oids() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
+    run_s(&mut session, "CREATE ROLE privilege_reader").await;
     run_s(&mut session, "CREATE FOREIGN DATA WRAPPER privilege_fdw").await;
     run_s(
         &mut session,
         "CREATE SERVER privilege_server FOREIGN DATA WRAPPER privilege_fdw",
     )
     .await;
+    for sql in [
+        "GRANT USAGE ON FOREIGN DATA WRAPPER privilege_fdw TO privilege_reader WITH GRANT OPTION",
+        "GRANT USAGE ON FOREIGN SERVER privilege_server TO privilege_reader WITH GRANT OPTION",
+    ] {
+        run_s(&mut session, sql).await;
+    }
     assert_eq!(
         text_rows_of(
             &mut session,
             "SELECT has_foreign_data_wrapper_privilege(fdw.oid, 'USAGE'), \
                     has_server_privilege(srv.oid, 'USAGE'), \
-                    has_server_privilege(999999::oid, 'USAGE') IS NULL \
+                    has_server_privilege('privilege_reader', srv.oid, 'USAGE WITH GRANT OPTION'), \
+                    has_server_privilege(999999::oid, 'USAGE') IS NULL, \
+                    fdw.fdwacl::text, srv.srvacl::text \
              FROM pg_foreign_data_wrapper fdw \
              CROSS JOIN pg_foreign_server srv \
              WHERE fdw.fdwname = 'privilege_fdw' \
                AND srv.srvname = 'privilege_server'",
         )
         .await,
-        vec![text_row(&["t", "t", "t"])]
+        vec![text_row(&[
+            "t",
+            "t",
+            "t",
+            "t",
+            "{postgres=U/postgres,privilege_reader=U*/postgres}",
+            "{postgres=U/postgres,privilege_reader=U*/postgres}",
+        ])]
+    );
+    run_s(
+        &mut session,
+        "REVOKE GRANT OPTION FOR USAGE ON FOREIGN SERVER privilege_server FROM privilege_reader",
+    )
+    .await;
+    assert_eq!(
+        text_rows_of(
+            &mut session,
+            "SELECT has_server_privilege('privilege_reader', srv.oid, 'USAGE'), \
+                    has_server_privilege('privilege_reader', srv.oid, 'USAGE WITH GRANT OPTION'), \
+                    srv.srvacl::text \
+             FROM pg_foreign_server srv WHERE srv.srvname = 'privilege_server'",
+        )
+        .await,
+        vec![text_row(&[
+            "t",
+            "f",
+            "{postgres=U/postgres,privilege_reader=U/postgres}",
+        ])]
     );
 }
 
@@ -8021,7 +8057,7 @@ fn foreign_usage_is_required_to_create_servers_and_foreign_tables() {
     use crabka_pgkv::{Kv, MemKv};
 
     let kv = MemKv::new();
-    for role in ["owner", "reader"] {
+    for role in ["owner", "reader", "delegate"] {
         crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
     }
     let owner = super::ForeignCtx {
@@ -8062,12 +8098,13 @@ fn foreign_usage_is_required_to_create_servers_and_foreign_tables() {
         (crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper, "w"),
         (crabka_pgcatalog::ForeignPrivilegeTarget::Server, "s"),
     ] {
-        let ops = crabka_pgcatalog::grant_foreign_privileges_ops(
+        let ops = crabka_pgcatalog::grant_foreign_privileges_with_option_ops(
             &kv,
             target,
             &[name.into()],
             &["reader".into()],
             &["USAGE".into()],
+            true,
         )
         .expect("grant usage");
         kv.write_batch(&ops).expect("apply usage grant");
@@ -8083,6 +8120,27 @@ fn foreign_usage_is_required_to_create_servers_and_foreign_tables() {
             .expect("one statement");
         let (_, ops) = super::execute_ddl(&kv, &stmt, reader, true).expect(sql);
         kv.write_batch(&ops).expect("apply reader DDL");
+    }
+    for sql in [
+        "GRANT USAGE ON FOREIGN DATA WRAPPER w TO delegate",
+        "GRANT USAGE ON FOREIGN SERVER s TO delegate",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_, ops) = super::execute_ddl(&kv, &stmt, reader, true).expect(sql);
+        kv.write_batch(&ops).expect("delegate usage grant");
+    }
+    for (target, name) in [
+        (crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper, "w"),
+        (crabka_pgcatalog::ForeignPrivilegeTarget::Server, "s"),
+    ] {
+        assert!(
+            crabka_pgcatalog::foreign_privilege_is_granted(&kv, target, name, "delegate", "USAGE")
+                .expect("delegate grant")
+        );
     }
 }
 

@@ -2313,7 +2313,7 @@ fn has_foreign_privilege(
         return Ok(Datum::Bool(true));
     }
     if grant_option {
-        return Ok(Datum::Bool(false));
+        return foreign_usage_grant_option_is_held(kv, target, &object, &role).map(Datum::Bool);
     }
     foreign_usage_is_held(kv, target, &object, &role).map(Datum::Bool)
 }
@@ -2351,6 +2351,26 @@ pub(crate) fn foreign_usage_is_held(
     object: &str,
     role: &str,
 ) -> Result<bool, ExecError> {
+    foreign_usage_access_is_held(kv, target, object, role, false)
+}
+
+/// Whether `role` can grant `USAGE` on one foreign object.
+pub(crate) fn foreign_usage_grant_option_is_held(
+    kv: &dyn Kv,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    object: &str,
+    role: &str,
+) -> Result<bool, ExecError> {
+    foreign_usage_access_is_held(kv, target, object, role, true)
+}
+
+fn foreign_usage_access_is_held(
+    kv: &dyn Kv,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    object: &str,
+    role: &str,
+    grant_option: bool,
+) -> Result<bool, ExecError> {
     let owner = match target {
         crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => {
             crabka_pgcatalog::get_fdw(kv, object)?.owner
@@ -2365,25 +2385,46 @@ pub(crate) fn foreign_usage_is_held(
         return Ok(true);
     }
     for grantee in crabka_pgcatalog::list_roles(kv)? {
-        if crabka_pgcatalog::role_has_privs_of(kv, role, &grantee.name)?
-            && crabka_pgcatalog::foreign_privilege_is_granted(
+        let has_usage = if grant_option {
+            crabka_pgcatalog::foreign_privilege_has_grant_option(
                 kv,
                 target,
                 object,
                 &grantee.name,
                 "USAGE",
             )?
-        {
+        } else {
+            crabka_pgcatalog::foreign_privilege_is_granted(
+                kv,
+                target,
+                object,
+                &grantee.name,
+                "USAGE",
+            )?
+        };
+        if crabka_pgcatalog::role_has_privs_of(kv, role, &grantee.name)? && has_usage {
             return Ok(true);
         }
     }
-    Ok(crabka_pgcatalog::foreign_privilege_is_granted(
-        kv,
-        target,
-        object,
-        crabka_pgcatalog::PUBLIC_ROLE,
-        "USAGE",
-    )?)
+    if grant_option {
+        crabka_pgcatalog::foreign_privilege_has_grant_option(
+            kv,
+            target,
+            object,
+            crabka_pgcatalog::PUBLIC_ROLE,
+            "USAGE",
+        )
+        .map_err(Into::into)
+    } else {
+        crabka_pgcatalog::foreign_privilege_is_granted(
+            kv,
+            target,
+            object,
+            crabka_pgcatalog::PUBLIC_ROLE,
+            "USAGE",
+        )
+        .map_err(Into::into)
+    }
 }
 
 fn role_argument_name_required(ctx: &EvalCtx, argument: &Datum) -> Result<String, ExecError> {
@@ -4033,6 +4074,18 @@ mod tests {
                 )
                 .expect("privilege answer")
                     == Datum::Bool(true)
+            );
+            assert!(
+                has_privilege(
+                    function,
+                    &[
+                        Datum::Text(object.into()),
+                        Datum::Text("USAGE WITH GRANT OPTION".into()),
+                    ],
+                    &ctx,
+                )
+                .expect("grant option answer")
+                    == Datum::Bool(false)
             );
             assert!(
                 has_privilege(
