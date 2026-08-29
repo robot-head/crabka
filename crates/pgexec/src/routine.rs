@@ -1758,11 +1758,46 @@ pub(crate) fn drop_routines(
                         cast.method == 'f' && cast.function.parse::<u32>() == Ok(routine.oid)
                     })
                     .collect::<Vec<_>>();
+                let fdws = crabka_pgcatalog::list_fdws(kv)?
+                    .into_iter()
+                    .filter(|fdw| {
+                        [fdw.handler.as_deref(), fdw.validator.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .any(|name| {
+                                name.strip_prefix("public.").unwrap_or(name) == routine.name
+                            })
+                    })
+                    .collect::<Vec<_>>();
                 if !cascade && (!ordinary.is_empty() || !event.is_empty() || !casts.is_empty()) {
                     return Err(ExecError::DependentObjectsStillExist(format!(
                         "cannot drop function {} because other objects depend on it",
                         routine.identity()
                     )));
+                }
+                if !cascade && !fdws.is_empty() {
+                    let detail = fdws
+                        .iter()
+                        .map(|fdw| {
+                            format!(
+                                "foreign-data wrapper {} depends on function {}",
+                                fdw.name,
+                                routine.identity()
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Err(ExecError::Remote(
+                        crabka_pgwire::error::PgError::error(
+                            "2BP01",
+                            format!(
+                                "cannot drop function {} because other objects depend on it",
+                                routine.identity()
+                            ),
+                        )
+                        .with_detail(detail)
+                        .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+                    ));
                 }
                 if cascade {
                     for trigger in ordinary {
@@ -1781,6 +1816,11 @@ pub(crate) fn drop_routines(
                             cast.source,
                             cast.target,
                         ));
+                    }
+                    for fdw in fdws {
+                        ops.extend(crabka_pgcatalog::drop_fdw_with_dependents_ops(
+                            kv, &fdw.name, true,
+                        )?);
                     }
                 }
                 ops.extend(drop_routine_ops(&routine.identity()));

@@ -8583,6 +8583,44 @@ fn fdw_support_routines_must_have_postgresql_signatures() {
 }
 
 #[test]
+fn fdw_support_routines_block_drops_and_cascade_with_their_servers() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FUNCTION handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'",
+        "CREATE FOREIGN DATA WRAPPER w HANDLER handler",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
+        let (_, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+
+    let drop_handler = crabka_pgparser::parser::parse("DROP FUNCTION handler()")
+        .expect("parse drop")
+        .remove(0);
+    let error = super::execute_ddl(&kv, &drop_handler, super::ForeignCtx::none(), true)
+        .expect_err("FDW must depend on its handler");
+    assert!(matches!(error, super::ExecError::Remote(ref error)
+        if error.code == "2BP01"
+            && error.message == "cannot drop function handler() because other objects depend on it"
+            && error.diagnostics.as_ref().and_then(|diagnostics| diagnostics.detail.as_deref())
+                == Some("foreign-data wrapper w depends on function handler()")
+            && error.diagnostics.as_ref().and_then(|diagnostics| diagnostics.hint.as_deref())
+                == Some("Use DROP ... CASCADE to drop the dependent objects too.")));
+
+    let cascade = crabka_pgparser::parser::parse("DROP FUNCTION handler() CASCADE")
+        .expect("parse cascade")
+        .remove(0);
+    let (_, ops) =
+        super::execute_ddl(&kv, &cascade, super::ForeignCtx::none(), true).expect("cascade drop");
+    kv.write_batch(&ops).expect("apply cascade drop");
+    assert!(crabka_pgcatalog::get_fdw(&kv, "w").is_err());
+    assert!(crabka_pgcatalog::get_server(&kv, "s").is_err());
+}
+
+#[test]
 fn postgresql_fdw_validator_rejects_invalid_options() {
     use crabka_pgkv::{Kv, MemKv};
 
