@@ -7336,6 +7336,7 @@ pub fn create_user_mapping_ops(
     server: &str,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    let _ = get_server(kv, server)?;
     ensure_unique_options(&options)?;
     if kv.get(&key::user_mapping_key(user, server))?.is_some() {
         return Err(CatalogError::DuplicateObject(format!("{user}@{server}")));
@@ -9396,6 +9397,8 @@ mod tests {
     #[test]
     fn create_user_mapping_persists() {
         let kv = MemKv::new();
+        create_fdw(&kv, "w", vec![]).expect("fdw");
+        create_server(&kv, "s", "w", vec![]).expect("server");
         create_user_mapping(&kv, "alice", "s", vec![("k".into(), "v".into())]).expect("create");
         let m = get_user_mapping(&kv, "alice", "s").expect("must be persisted");
         assert_eq!(m.user, "alice");
@@ -9405,6 +9408,8 @@ mod tests {
     #[test]
     fn user_mapping_lookup_falls_back_to_public() {
         let kv = MemKv::new();
+        create_fdw(&kv, "w", vec![]).expect("fdw");
+        create_server(&kv, "s", "w", vec![]).expect("server");
         create_user_mapping(
             &kv,
             PUBLIC_ROLE,
@@ -9432,6 +9437,8 @@ mod tests {
     #[test]
     fn drop_user_mapping_removes() {
         let kv = MemKv::new();
+        create_fdw(&kv, "w", vec![]).expect("fdw");
+        create_server(&kv, "s2", "w", vec![]).expect("server");
         create_user_mapping(&kv, "bob", "s2", vec![]).expect("create");
         drop_user_mapping(&kv, "bob", "s2").expect("drop");
         assert_eq!(
@@ -9440,6 +9447,13 @@ mod tests {
                 .sqlstate(),
             "42704"
         );
+    }
+
+    #[test]
+    fn user_mapping_requires_an_existing_server() {
+        let error = create_user_mapping(&MemKv::new(), "alice", "missing", vec![])
+            .expect_err("mapping server must exist");
+        assert_eq!(error.sqlstate(), "42704");
     }
 
     #[test]
