@@ -295,6 +295,7 @@ fn create_base_type(
     let mut output = None;
     let mut typmod_in = None;
     let mut typmod_out = None;
+    let mut element = None;
     let mut like = None;
     let mut category = None;
     let mut preferred = false;
@@ -308,6 +309,7 @@ fn create_base_type(
             "output" => output = Some(option_name(option)?),
             "typmod_in" => typmod_in = Some(option_name(option)?),
             "typmod_out" => typmod_out = Some(option_name(option)?),
+            "element" => element = Some(option_type(option)?),
             "like" => like = Some(option_type(option)?),
             "category" => category = Some(option_char(option)?),
             "preferred" => preferred = option_bool(option)?,
@@ -325,15 +327,11 @@ fn create_base_type(
                 layout.alignment = option_alignment(option)?;
                 layout_written = true;
             }
-            // Every remaining option names a companion routine, an element type
-            // or a storage strategy that gres has nowhere to put. Refusing is
-            // the whole difference between "not supported" and a type that
-            // exists but misbehaves.
             other => {
                 return Err(ExecError::Unsupported(format!(
                     "type attribute \"{other}\" is not supported: gres builds a base type only \
                      from LIKE, INTERNALLENGTH, PASSEDBYVALUE, ALIGNMENT, INPUT, OUTPUT, \
-                     CATEGORY, PREFERRED and DELIMITER"
+                     TYPMOD_IN, TYPMOD_OUT, ELEMENT, CATEGORY, PREFERRED, DELIMITER and STORAGE"
                 )));
             }
         }
@@ -385,6 +383,7 @@ fn create_base_type(
     });
     let body = UserTypeBody::Base(BaseBody {
         representation,
+        element,
         input,
         output,
         typmod_in,

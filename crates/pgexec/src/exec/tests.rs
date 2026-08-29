@@ -2294,7 +2294,8 @@ async fn a_base_type_takes_its_layout_written_out() {
     run_s(
         &mut session,
         "CREATE TYPE vt (internallength = variable, input = vt_in, output = vt_out, \
-             typmod_in = vt_mod_in, typmod_out = vt_mod_out, alignment = int4, storage = main)",
+             typmod_in = vt_mod_in, typmod_out = vt_mod_out, element = int4, alignment = int4, \
+             storage = main)",
     )
     .await;
     // A varlena pair needs no reinterpretation, so the cast is recorded and
@@ -2326,13 +2327,13 @@ async fn a_base_type_takes_its_layout_written_out() {
     assert!(
         text_rows_of(
             &mut session,
-            "SELECT typname, typlen, typtype, typstorage FROM pg_type \
+            "SELECT typname, typlen, typtype, typstorage, typelem FROM pg_type \
                  WHERE typname IN ('vt', 'ft') ORDER BY typname"
         )
         .await
             == vec![
-                text_row(&["ft", "4", "b", "p"]),
-                text_row(&["vt", "-1", "b", "m"]),
+                text_row(&["ft", "4", "b", "p", "0"]),
+                text_row(&["vt", "-1", "b", "m", "23"]),
             ]
     );
     assert!(

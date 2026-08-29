@@ -238,6 +238,8 @@ pub struct BaseBody {
     /// `Datum`, so the two are the same bytes — which is the whole content of
     /// binary coercibility between them.
     pub representation: ColumnType,
+    /// `pg_type.typelem`, when this base type has an element type.
+    pub element: Option<ColumnType>,
     /// `pg_type.typinput`: the routine that parses the external text form.
     pub input: String,
     /// `pg_type.typoutput`.

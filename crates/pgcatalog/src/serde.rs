@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 19;
+pub const SCHEMA_VERSION: u8 = 20;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -1073,6 +1073,16 @@ fn write_optional_string(out: &mut Vec<u8>, value: Option<&str>) {
     }
 }
 
+fn write_optional_type(out: &mut Vec<u8>, value: Option<ColumnType>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            write_type(out, value);
+        }
+        None => out.push(0),
+    }
+}
+
 /// Append a length-prefixed byte string, the framing `read_str` expects.
 fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(
@@ -1114,6 +1124,19 @@ fn read_optional_string(cur: &mut &[u8]) -> Result<Option<String>, KvError> {
         tag => Err(KvError::CorruptRow(format!(
             "unknown optional string tag {tag}"
         ))),
+    }
+}
+
+fn read_optional_type(
+    cur: &mut &[u8],
+    resolve_user_type: &dyn Fn(u32) -> Option<ColumnType>,
+) -> Result<Option<ColumnType>, UserTypeDecodeError> {
+    match take_u8(cur)? {
+        0 => Ok(None),
+        1 => read_type_with(cur, resolve_user_type).map(Some),
+        tag => Err(UserTypeDecodeError::Corrupt(KvError::CorruptRow(format!(
+            "unknown optional type tag {tag}"
+        )))),
     }
 }
 
@@ -2163,6 +2186,7 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
         UserTypeBody::Base(base) => {
             out.push(USER_TYPE_BASE);
             write_type(&mut out, base.representation);
+            write_optional_type(&mut out, base.element);
             write_str(&mut out, &base.input);
             write_str(&mut out, &base.output);
             write_optional_string(&mut out, base.typmod_in.as_deref());
@@ -2311,6 +2335,7 @@ pub(crate) fn deserialize_user_type_with(
         USER_TYPE_SHELL => UserTypeBody::Shell,
         USER_TYPE_BASE => {
             let representation = read_type_with(&mut cur, resolve_user_type)?;
+            let element = read_optional_type(&mut cur, resolve_user_type)?;
             let input = read_string(&mut cur)?;
             let output = read_string(&mut cur)?;
             let typmod_in = read_optional_string(&mut cur)?;
@@ -2321,6 +2346,7 @@ pub(crate) fn deserialize_user_type_with(
             let storage = char::from(take_u8(&mut cur)?);
             UserTypeBody::Base(BaseBody {
                 representation,
+                element,
                 input,
                 output,
                 typmod_in,
@@ -3014,6 +3040,7 @@ mod tests {
                 body: crabka_pgtypes::usertype::UserTypeBody::Base(
                     crabka_pgtypes::usertype::BaseBody {
                         representation: ColumnType::Int4,
+                        element: None,
                         input: "int4in".into(),
                         output: "int4out".into(),
                         typmod_in: None,
@@ -3409,6 +3436,7 @@ mod tests {
             name: "stored_text".into(),
             body: UserTypeBody::Base(BaseBody {
                 representation: ColumnType::Text,
+                element: Some(ColumnType::Int4),
                 input: "stored_text_in".into(),
                 output: "stored_text_out".into(),
                 typmod_in: Some("stored_text_typmodin".into()),

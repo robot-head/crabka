@@ -2326,25 +2326,33 @@ pub(crate) fn user_type_rows(
     let mut rows = Vec::new();
     for ty in crabka_pgcatalog::list_user_types(catalog_kv)? {
         let column_type = ty.column_type();
-        let (typrelid, typbasetype, category) = match &ty.body {
+        let (typrelid, typelem, typbasetype, category) = match &ty.body {
             usertype::UserTypeBody::Composite(_) => (
                 i32::try_from(usertype::composite_relation_oid(ty.oid)).unwrap_or(0),
+                0,
                 0,
                 "C",
             ),
             usertype::UserTypeBody::Enum(_) | usertype::UserTypeBody::EnumOrdered { .. } => {
-                (0, 0, "E")
+                (0, 0, 0, "E")
             }
-            usertype::UserTypeBody::Range(_) => (0, 0, "R"),
+            usertype::UserTypeBody::Range(_) => (0, 0, 0, "R"),
             usertype::UserTypeBody::Domain(domain) => (
+                0,
                 0,
                 i32::try_from(domain.base.oid()).unwrap_or(0),
                 builtin_type_category(domain.base),
             ),
             // `TypeShellMake` writes the pseudo-type class and a four-byte
             // `typlen` — not 0, which `type_sanity` reads as a corrupt row.
-            usertype::UserTypeBody::Shell => (0, 0, "P"),
-            usertype::UserTypeBody::Base(base) => (0, 0, base.category.as_str()),
+            usertype::UserTypeBody::Shell => (0, 0, 0, "P"),
+            usertype::UserTypeBody::Base(base) => (
+                0,
+                base.element
+                    .map_or(0, |element| i32::try_from(element.oid()).unwrap_or(0)),
+                0,
+                base.category.as_str(),
+            ),
         };
         // A shell is the one user type with no `ColumnType`, and `TypeShellMake`
         // gives it `sizeof(int32)` regardless.
@@ -2358,7 +2366,7 @@ pub(crate) fn user_type_rows(
                 category,
                 typtype: ty.typtype(),
                 typrelid,
-                typelem: 0,
+                typelem,
                 typarray: i32::try_from(ty.array_oid).unwrap_or(0),
                 typbasetype,
                 typcollation: column_type.map_or(0, text_collation_oid),
