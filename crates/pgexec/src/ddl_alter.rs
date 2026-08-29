@@ -1604,8 +1604,19 @@ pub(crate) fn execute_ddl(
             )?;
             Ok((command("ALTER DEFAULT PRIVILEGES"), ops))
         }
-        Statement::CreateFdw { name, options } => {
-            let ops = crabka_pgcatalog::create_fdw_ops(kv, name, options.clone())?;
+        Statement::CreateFdw {
+            name,
+            handler,
+            validator,
+            options,
+        } => {
+            let ops = crabka_pgcatalog::create_fdw_with_routines_ops(
+                kv,
+                name,
+                handler.as_deref(),
+                validator.as_deref(),
+                options.clone(),
+            )?;
             Ok((command("CREATE FOREIGN DATA WRAPPER"), ops))
         }
         Statement::DropFdw {

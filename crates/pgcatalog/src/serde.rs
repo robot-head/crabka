@@ -2073,11 +2073,18 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
 
 // ── Foreign-data wrapper ──────────────────────────────────────────────────────
 
-/// Format: `name len (u32) | name | options`.
+/// Format: `name | handler | validator | options`.
 #[must_use]
-pub fn serialize_fdw(name: &str, options: &[(String, String)]) -> Vec<u8> {
+pub fn serialize_fdw(
+    name: &str,
+    handler: Option<&str>,
+    validator: Option<&str>,
+    options: &[(String, String)],
+) -> Vec<u8> {
     let mut out = Vec::new();
     write_str(&mut out, name);
+    write_optional_string(&mut out, handler);
+    write_optional_string(&mut out, validator);
     write_options(&mut out, options);
     out
 }
@@ -2090,8 +2097,15 @@ pub fn serialize_fdw(name: &str, options: &[(String, String)]) -> Vec<u8> {
 pub fn deserialize_fdw(bytes: &[u8]) -> Result<ForeignDataWrapper, KvError> {
     let mut cur = bytes;
     let name = read_string(&mut cur)?;
+    let handler = read_optional_string(&mut cur)?;
+    let validator = read_optional_string(&mut cur)?;
     let options = read_options(&mut cur)?;
-    Ok(ForeignDataWrapper { name, options })
+    Ok(ForeignDataWrapper {
+        name,
+        handler,
+        validator,
+        options,
+    })
 }
 
 // ── User-defined types ────────────────────────────────────────────────────────
@@ -3396,10 +3410,14 @@ mod tests {
     fn roundtrip_fdw() {
         let bytes = serialize_fdw(
             "kafka_fdw",
+            Some("kafka_fdw_handler"),
+            Some("kafka_fdw_validator"),
             &[("handler".into(), "kafka_fdw_handler".into())],
         );
         let fdw = deserialize_fdw(&bytes).expect("decode");
         assert_eq!(fdw.name, "kafka_fdw");
+        assert_eq!(fdw.handler.as_deref(), Some("kafka_fdw_handler"));
+        assert_eq!(fdw.validator.as_deref(), Some("kafka_fdw_validator"));
         assert_eq!(fdw.options[0].0, "handler");
     }
 

@@ -15130,7 +15130,7 @@ impl Parser {
 
     // SP40: FDW DDL parse functions
 
-    /// `CREATE FOREIGN DATA WRAPPER <name> OPTIONS (…)`
+    /// `CREATE FOREIGN DATA WRAPPER <name> [HANDLER name] [VALIDATOR name] [OPTIONS (…)]`
     fn create_fdw(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Create))?;
@@ -15138,8 +15138,33 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Data))?;
         self.expect(&Token::Keyword(Keyword::Wrapper))?;
         let name = self.expect_col_id()?;
-        let options = self.parse_options()?;
-        Ok(Statement::CreateFdw { name, options })
+        let mut handler = None;
+        let mut validator = None;
+        let options = loop {
+            if self.eat_ident_eq("handler") {
+                if handler.replace(self.expect_col_id()?).is_some() {
+                    return Err(ParseError::new(
+                        "conflicting or redundant options",
+                        self.peek_pos(),
+                    ));
+                }
+            } else if self.eat_ident_eq("validator") {
+                if validator.replace(self.expect_col_id()?).is_some() {
+                    return Err(ParseError::new(
+                        "conflicting or redundant options",
+                        self.peek_pos(),
+                    ));
+                }
+            } else {
+                break self.parse_options()?;
+            }
+        };
+        Ok(Statement::CreateFdw {
+            name,
+            handler,
+            validator,
+            options,
+        })
     }
 
     /// `DROP FOREIGN DATA WRAPPER [IF EXISTS] <name>`
@@ -24264,9 +24289,13 @@ mod tests {
     #[test]
     fn parses_create_fdw() {
         assert_eq!(
-            one("CREATE FOREIGN DATA WRAPPER kafka_fdw OPTIONS (protocol 'kafka')"),
+            one(
+                "CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_handler VALIDATOR kafka_validator OPTIONS (protocol 'kafka')",
+            ),
             Statement::CreateFdw {
                 name: "kafka_fdw".into(),
+                handler: Some("kafka_handler".into()),
+                validator: Some("kafka_validator".into()),
                 options: vec![("protocol".into(), "kafka".into())],
             }
         );

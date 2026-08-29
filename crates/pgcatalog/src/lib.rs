@@ -627,6 +627,10 @@ impl Sequence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignDataWrapper {
     pub name: String,
+    /// The optional handler routine named by `HANDLER`.
+    pub handler: Option<String>,
+    /// The optional validator routine named by `VALIDATOR`.
+    pub validator: Option<String>,
     /// OPTIONS, for example the handler and the validator.
     pub options: Vec<(String, String)>,
 }
@@ -7016,12 +7020,27 @@ pub fn create_fdw_ops(
     name: &str,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    create_fdw_with_routines_ops(kv, name, None, None, options)
+}
+
+/// Build the write batch for registering an FDW and its optional routines.
+///
+/// # Errors
+///
+/// Returns duplicate-object or storage/corruption errors from the catalog KV seam.
+pub fn create_fdw_with_routines_ops(
+    kv: &dyn Kv,
+    name: &str,
+    handler: Option<&str>,
+    validator: Option<&str>,
+    options: Vec<(String, String)>,
+) -> Result<Vec<WriteOp>, CatalogError> {
     if kv.get(&key::fdw_key(name))?.is_some() {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
     Ok(vec![WriteOp::Put {
         key: key::fdw_key(name),
-        value: serialize_fdw(name, &options),
+        value: serialize_fdw(name, handler, validator, &options),
     }])
 }
 

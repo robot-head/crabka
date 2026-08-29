@@ -1063,6 +1063,8 @@ pub enum Statement {
     /// `CREATE FOREIGN DATA WRAPPER <name> OPTIONS (…)`
     CreateFdw {
         name: String,
+        handler: Option<String>,
+        validator: Option<String>,
         options: OptionList,
     },
     /// `DROP FOREIGN DATA WRAPPER [IF EXISTS] <name>`

@@ -1477,6 +1477,12 @@ fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
         .map(|wrapper| wrapper.name.clone())
         .collect::<Vec<_>>();
     let oids = banded_oids(FDW_OID_BASE, &names);
+    let routine_names = wrappers
+        .iter()
+        .flat_map(|wrapper| [wrapper.handler.clone(), wrapper.validator.clone()])
+        .flatten()
+        .collect::<Vec<_>>();
+    let routine_oids = banded_oids(USER_MAPPING_OID_BASE + OID_BAND_WIDTH, &routine_names);
     Ok(wrappers
         .into_iter()
         .map(|wrapper| {
@@ -1484,13 +1490,22 @@ fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
                 int(oids[&wrapper.name]),
                 text(&wrapper.name),
                 int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
-                Datum::Null,
-                Datum::Null,
+                foreign_routine_datum(wrapper.handler.as_deref(), &routine_oids),
+                foreign_routine_datum(wrapper.validator.as_deref(), &routine_oids),
                 Datum::Null,
                 foreign_option_array(&wrapper.options),
             ]
         })
         .collect())
+}
+
+fn foreign_routine_datum(name: Option<&str>, oids: &BTreeMap<String, i32>) -> Datum {
+    name.map_or(Datum::Null, |name| {
+        Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(
+            *oids.get(name).unwrap_or(&0),
+            name,
+        ))
+    })
 }
 
 fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {

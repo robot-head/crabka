@@ -144,7 +144,7 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     let engine = SqlEngine::new();
     run(
         &engine,
-        "CREATE FOREIGN DATA WRAPPER fdw OPTIONS (kind 'test')",
+        "CREATE FOREIGN DATA WRAPPER fdw HANDLER fdw_handler VALIDATOR fdw_validator OPTIONS (kind 'test')",
     )
     .await;
     run(
@@ -166,10 +166,10 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     assert!(
         grid(
             &engine,
-            "SELECT fdwname, fdwoptions FROM pg_foreign_data_wrapper",
+            "SELECT fdwname, fdwhandler::text, fdwvalidator::text, fdwoptions FROM pg_foreign_data_wrapper",
         )
         .await
-            == vec![some(&["fdw", "{kind=test}"])]
+            == vec![some(&["fdw", "fdw_handler", "fdw_validator", "{kind=test}"])]
     );
     assert!(
         grid(&engine, "SELECT srvname, srvoptions FROM pg_foreign_server",).await
