@@ -91,6 +91,7 @@ pub(crate) fn add_column_merge_notices(
         let Action::AddColumn {
             if_not_exists,
             column,
+            ..
         } = action
         else {
             continue;

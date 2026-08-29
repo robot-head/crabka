@@ -3281,6 +3281,7 @@ pub(crate) fn skipped_by_existence_check(
         Action::AddColumn {
             if_not_exists: true,
             column,
+            ..
         } => columns_before.contains(&column.name),
         Action::DropColumn {
             column,
@@ -4230,6 +4231,7 @@ pub(crate) fn alter_table_action_ops(
         Action::AddColumn {
             if_not_exists,
             column,
+            options,
         } => {
             // Before `IF NOT EXISTS`, which is where `PostgreSQL` puts it:
             // `check_for_column_name_collision` finds a system column by its
@@ -4245,6 +4247,11 @@ pub(crate) fn alter_table_action_ops(
                     column: column.name.clone(),
                     table: table_name.to_string(),
                 });
+            }
+            if !options.is_empty() && state.table.foreign.is_none() {
+                return Err(ExecError::WrongObjectType(format!(
+                    "relation \"{table_name}\" is not a foreign table"
+                )));
             }
             let mut sequences = Vec::new();
             let declares_primary_key = column.constraints.iter().any(|c| {
@@ -4276,6 +4283,15 @@ pub(crate) fn alter_table_action_ops(
                 row.push(fill.clone());
             }
             state.table.columns.push(catalog_column);
+            if !options.is_empty() {
+                state
+                    .table
+                    .foreign
+                    .as_mut()
+                    .expect("foreign column options require a foreign table")
+                    .column_options
+                    .push((column.name.clone(), options.clone()));
+            }
             // A generation expression added here gets exactly the DDL-time
             // analysis it gets inside CREATE TABLE, and PostgreSQL's table
             // rewrite then computes it for every row that already exists — an

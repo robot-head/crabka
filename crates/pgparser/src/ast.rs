@@ -2507,6 +2507,8 @@ pub enum AlterTableAction {
     AddColumn {
         if_not_exists: bool,
         column: ColumnDef,
+        /// Per-column `OPTIONS (...)` on an added foreign-table column.
+        options: OptionList,
     },
     DropColumn {
         column: String,

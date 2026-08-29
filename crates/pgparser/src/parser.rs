@@ -4313,7 +4313,7 @@ impl Parser {
     fn alter_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("alter")?;
         self.expect(&Token::Keyword(Keyword::Table))?;
-        self.alter_table_body()
+        self.alter_table_body(false)
     }
 
     /// `ALTER FOREIGN TABLE` takes the `ALTER TABLE` action grammar.
@@ -4321,7 +4321,7 @@ impl Parser {
         self.expect_ident_eq("alter")?;
         self.expect(&Token::Keyword(Keyword::Foreign))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
-        self.alter_table_body()
+        self.alter_table_body(true)
     }
 
     /// `ALTER MATERIALIZED VIEW …`, which `PostgreSQL` defines with the same
@@ -4338,12 +4338,15 @@ impl Parser {
         self.expect_ident_eq("alter")?;
         self.expect_ident_eq("materialized")?;
         self.expect(&Token::Keyword(Keyword::View))?;
-        self.alter_table_body()
+        self.alter_table_body(false)
     }
 
     /// The shared tail of `ALTER TABLE`/`ALTER MATERIALIZED VIEW`, positioned
     /// after the object keyword.
-    fn alter_table_body(&mut self) -> Result<crate::ast::Statement, ParseError> {
+    fn alter_table_body(
+        &mut self,
+        foreign_table: bool,
+    ) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
 
         let if_exists = self.eat_if_exists();
@@ -4373,7 +4376,7 @@ impl Parser {
         }
         let table = self.relation_ref()?;
         self.eat_inheritance_star();
-        let action = self.alter_table_action()?;
+        let action = self.alter_table_action(foreign_table)?;
         if matches!(action, crate::ast::AlterTableAction::SetSchema(_)) {
             return Ok(Statement::AlterTable {
                 table,
@@ -4386,7 +4389,7 @@ impl Parser {
         // Only the ALTER-subcommand form takes a comma list; RENAME and the
         // ownership/schema movers are standalone in PostgreSQL's grammar too.
         while self.eat_comma() {
-            actions.push(self.alter_table_action()?);
+            actions.push(self.alter_table_action(foreign_table)?);
         }
         Ok(Statement::AlterTable {
             table,
@@ -4449,7 +4452,10 @@ impl Parser {
         })
     }
 
-    fn alter_table_action(&mut self) -> Result<crate::ast::AlterTableAction, ParseError> {
+    fn alter_table_action(
+        &mut self,
+        foreign_table: bool,
+    ) -> Result<crate::ast::AlterTableAction, ParseError> {
         use crate::ast::{AlterTableAction, ColumnDef};
 
         // Must precede the ENABLE/DISABLE TRIGGER production and the
@@ -4500,7 +4506,11 @@ impl Parser {
             let _ = explicit_column;
             let name = self.expect_col_id()?;
             let (ty, serial) = self.parse_column_type(&name)?;
-            let qualifiers = self.column_qualifiers()?;
+            let (qualifiers, options) = if foreign_table {
+                self.foreign_column_qualifiers()?
+            } else {
+                (self.column_qualifiers()?, Vec::new())
+            };
             return Ok(AlterTableAction::AddColumn {
                 if_not_exists,
                 column: ColumnDef {
@@ -4510,6 +4520,7 @@ impl Parser {
                     collation: qualifiers.collation,
                     constraints: qualifiers.constraints,
                 },
+                options,
             });
         }
         if self.eat_keyword(Keyword::Drop) {
@@ -22932,9 +22943,26 @@ mod tests {
                     vec![AlterTableAction::AddColumn {
                         if_not_exists: false,
                         column: collated("b", Some("C"), vec![not_null()]),
+                        options: Vec::new(),
                     }],
                 )
         );
+
+        let Statement::AlterTable { actions, .. } =
+            one("ALTER FOREIGN TABLE t ADD COLUMN b text OPTIONS (remote_name 'remote_b')")
+        else {
+            panic!("expected ALTER TABLE");
+        };
+        let [
+            AlterTableAction::AddColumn {
+                column, options, ..
+            },
+        ] = actions.as_slice()
+        else {
+            panic!("expected ADD COLUMN");
+        };
+        assert!(column.name == "b");
+        assert!(options == &vec![("remote_name".into(), "remote_b".into())]);
 
         // A retype names the collation the column keeps afterwards.
         assert!(
