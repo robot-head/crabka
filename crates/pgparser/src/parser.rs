@@ -15323,15 +15323,31 @@ impl Parser {
         })
     }
 
-    /// `ALTER SERVER <name> OPTIONS (ADD/SET/DROP …)`.
+    /// `ALTER SERVER <name> [VERSION '…'] [OPTIONS (ADD/SET/DROP …)]`.
     fn alter_server(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         // ALTER is not a keyword yet; matched as ident
         self.bump(); // ALTER
         self.expect(&Token::Keyword(Keyword::Server))?;
         let name = self.expect_col_id()?;
-        let options = self.parse_alter_options()?;
-        Ok(Statement::AlterServer { name, options })
+        let version = self
+            .eat_ident_eq("version")
+            .then(|| self.expect_string_lit())
+            .transpose()?;
+        let options = matches!(self.peek(), Token::Keyword(Keyword::Options))
+            .then(|| self.parse_alter_options())
+            .transpose()?;
+        if version.is_none() && options.is_none() {
+            return Err(ParseError::new(
+                "expected VERSION or OPTIONS",
+                self.peek_pos(),
+            ));
+        }
+        Ok(Statement::AlterServer {
+            name,
+            version,
+            options,
+        })
     }
 
     /// `DROP SERVER [IF EXISTS] <name>`
@@ -24552,7 +24568,8 @@ mod tests {
             one("ALTER SERVER s OPTIONS (ADD bootstrap 'b:9092', SET port '9092', DROP stale)"),
             Statement::AlterServer {
                 name: "s".into(),
-                options: vec![
+                version: None,
+                options: Some(vec![
                     ForeignOptionAction::Add {
                         name: "bootstrap".into(),
                         value: "b:9092".into()
@@ -24564,9 +24581,21 @@ mod tests {
                     ForeignOptionAction::Drop {
                         name: "stale".into()
                     },
-                ],
+                ]),
             }
         );
+    }
+
+    #[test]
+    fn parses_alter_server_version() {
+        assert!(matches!(
+            one("ALTER SERVER s VERSION '2' OPTIONS (host 'localhost')"),
+            Statement::AlterServer {
+                name,
+                version: Some(version),
+                options: Some(_),
+            } if name == "s" && version == "2"
+        ));
     }
 
     #[test]

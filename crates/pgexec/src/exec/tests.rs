@@ -7916,8 +7916,8 @@ fn alter_foreign_options_update_catalog_records() {
     for sql in [
         "CREATE FOREIGN DATA WRAPPER w HANDLER old_handler VALIDATOR old_validator OPTIONS (host 'old', stale 'x')",
         "ALTER FOREIGN DATA WRAPPER w HANDLER new_handler NO VALIDATOR OPTIONS (SET host 'new', DROP stale, port '5432')",
-        "CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (host 'old', stale 'x')",
-        "ALTER SERVER s OPTIONS (SET host 'new', DROP stale, ADD port '5432')",
+        "CREATE SERVER s VERSION '1' FOREIGN DATA WRAPPER w OPTIONS (host 'old', stale 'x')",
+        "ALTER SERVER s VERSION '2' OPTIONS (SET host 'new', DROP stale, ADD port '5432')",
         "CREATE USER MAPPING FOR PUBLIC SERVER s OPTIONS (username 'old')",
         "ALTER USER MAPPING FOR PUBLIC SERVER s OPTIONS (SET username 'new', ADD password 'secret')",
     ] {
@@ -7943,13 +7943,17 @@ fn alter_foreign_options_update_catalog_records() {
         }
     );
     assert_eq!(
-        crabka_pgcatalog::get_server(&kv, "s")
-            .expect("server")
-            .options,
-        vec![
-            ("host".into(), "new".into()),
-            ("port".into(), "5432".into())
-        ]
+        crabka_pgcatalog::get_server(&kv, "s").expect("server"),
+        crabka_pgcatalog::ForeignServer {
+            name: "s".into(),
+            wrapper: "w".into(),
+            server_type: None,
+            version: Some("2".into()),
+            options: vec![
+                ("host".into(), "new".into()),
+                ("port".into(), "5432".into())
+            ],
+        }
     );
     assert_eq!(
         crabka_pgcatalog::get_user_mapping(&kv, "public", "s")

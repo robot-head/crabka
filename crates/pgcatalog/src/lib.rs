@@ -7230,8 +7230,23 @@ pub fn alter_server_options_ops(
     name: &str,
     changes: &[ForeignOptionMutation],
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    alter_server_ops(kv, name, None, Some(changes))
+}
+
+/// Apply version and option changes to a server and return the catalog write batch.
+pub fn alter_server_ops(
+    kv: &dyn Kv,
+    name: &str,
+    version: Option<&str>,
+    changes: Option<&[ForeignOptionMutation]>,
+) -> Result<Vec<WriteOp>, CatalogError> {
     let mut server = get_server(kv, name)?;
-    server.options = apply_foreign_option_mutations(&server.options, changes)?;
+    if let Some(version) = version {
+        server.version = Some(version.to_owned());
+    }
+    if let Some(changes) = changes {
+        server.options = apply_foreign_option_mutations(&server.options, changes)?;
+    }
     Ok(vec![WriteOp::Put {
         key: key::server_key(name),
         value: serialize_server(

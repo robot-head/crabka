@@ -1779,11 +1779,17 @@ pub(crate) fn execute_ddl(
             };
             Ok((command("DROP FOREIGN TABLE"), ops))
         }
-        Statement::AlterServer { name, options } => {
-            let ops = crabka_pgcatalog::alter_server_options_ops(
+        Statement::AlterServer {
+            name,
+            version,
+            options,
+        } => {
+            let option_mutations = options.as_deref().map(foreign_option_mutations);
+            let ops = crabka_pgcatalog::alter_server_ops(
                 kv,
                 name,
-                &foreign_option_mutations(options),
+                version.as_deref(),
+                option_mutations.as_deref(),
             )?;
             Ok((command("ALTER SERVER"), ops))
         }

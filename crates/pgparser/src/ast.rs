@@ -1096,10 +1096,11 @@ pub enum Statement {
         version: Option<String>,
         options: OptionList,
     },
-    /// `ALTER SERVER <name> OPTIONS (…)`
+    /// `ALTER SERVER <name> [VERSION '…'] [OPTIONS (…)]`
     AlterServer {
         name: String,
-        options: Vec<ForeignOptionAction>,
+        version: Option<String>,
+        options: Option<Vec<ForeignOptionAction>>,
     },
     /// `DROP SERVER [IF EXISTS] <name>`
     DropServer {
