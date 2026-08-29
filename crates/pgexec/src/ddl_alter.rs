@@ -4497,6 +4497,7 @@ pub(crate) fn alter_table_action_ops(
             Ok(())
         }
         Action::AlterForeignColumnOptions { column, options } => {
+            crate::scope::reject_system_column_names([column.as_str()])?;
             state.column_index(column)?;
             let foreign = state.table.foreign.as_mut().ok_or_else(|| {
                 ExecError::WrongObjectType(format!(
