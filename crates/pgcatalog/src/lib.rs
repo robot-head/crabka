@@ -7147,9 +7147,12 @@ pub fn drop_fdw(kv: &dyn Kv, name: &str) -> Result<(), CatalogError> {
 /// Returns undefined-object or storage/corruption errors from the catalog KV seam.
 pub fn drop_fdw_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
     let _ = get_fdw(kv, name)?;
-    Ok(vec![WriteOp::Delete {
-        key: key::fdw_key(name),
-    }])
+    Ok(vec![
+        WriteOp::Delete {
+            key: key::fdw_key(name),
+        },
+        set_comment_op("foreign data wrapper", CommentObject::Named(name), None),
+    ])
 }
 
 // ── Foreign server ────────────────────────────────────────────────────────────
@@ -7292,9 +7295,12 @@ pub fn drop_server(kv: &dyn Kv, name: &str) -> Result<(), CatalogError> {
 /// Returns undefined-object or storage/corruption errors from the catalog KV seam.
 pub fn drop_server_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
     let _ = get_server(kv, name)?;
-    Ok(vec![WriteOp::Delete {
-        key: key::server_key(name),
-    }])
+    Ok(vec![
+        WriteOp::Delete {
+            key: key::server_key(name),
+        },
+        set_comment_op("server", CommentObject::Named(name), None),
+    ])
 }
 
 // ── User mapping ──────────────────────────────────────────────────────────────

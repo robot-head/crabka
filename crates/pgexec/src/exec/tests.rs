@@ -7966,6 +7966,59 @@ fn alter_foreign_options_update_catalog_records() {
     );
 }
 
+#[test]
+fn comments_on_foreign_objects_are_persisted() {
+    use crabka_pgcatalog::CommentObject;
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "COMMENT ON FOREIGN DATA WRAPPER w IS 'a wrapper'",
+        "COMMENT ON SERVER s IS 'a server'",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert_eq!(
+        crabka_pgcatalog::get_comment(&kv, "foreign data wrapper", CommentObject::Named("w"))
+            .expect("fdw comment"),
+        Some("a wrapper".into())
+    );
+    assert_eq!(
+        crabka_pgcatalog::get_comment(&kv, "server", CommentObject::Named("s"))
+            .expect("server comment"),
+        Some("a server".into())
+    );
+    for sql in ["DROP SERVER s", "DROP FOREIGN DATA WRAPPER w"] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert_eq!(
+        crabka_pgcatalog::get_comment(&kv, "foreign data wrapper", CommentObject::Named("w"))
+            .expect("fdw comment"),
+        None
+    );
+    assert_eq!(
+        crabka_pgcatalog::get_comment(&kv, "server", CommentObject::Named("s"))
+            .expect("server comment"),
+        None
+    );
+}
+
 fn command_tag(r: &QueryResult) -> &str {
     match r {
         QueryResult::Command { tag } | QueryResult::Rows { tag, .. } => tag,

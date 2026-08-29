@@ -9423,6 +9423,7 @@ impl Parser {
             Token::Keyword(Keyword::View) => "view".to_string(),
             Token::Keyword(Keyword::Index) => "index".to_string(),
             Token::Keyword(Keyword::Cast) => "cast".to_string(),
+            Token::Keyword(Keyword::Foreign) => "foreign".to_string(),
             Token::Keyword(Keyword::Schema) => "schema".to_string(),
             Token::Keyword(Keyword::Server) => "server".to_string(),
             other => {
@@ -24540,6 +24541,22 @@ mod tests {
                 }]),
             }
         );
+    }
+
+    #[test]
+    fn parses_comment_on_foreign_data_wrapper() {
+        let Statement::Comment {
+            object_kind,
+            object_name,
+            comment,
+            ..
+        } = one("COMMENT ON FOREIGN DATA WRAPPER w IS 'a wrapper'")
+        else {
+            panic!("expected COMMENT")
+        };
+        assert_eq!(object_kind, "foreign data wrapper");
+        assert_eq!(object_name, "w");
+        assert_eq!(comment.as_deref(), Some("a wrapper"));
     }
 
     #[test]

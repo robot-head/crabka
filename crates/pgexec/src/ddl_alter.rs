@@ -7338,6 +7338,30 @@ pub(crate) fn comment_ops(
         ));
     }
 
+    if object_kind == "foreign data wrapper" {
+        let _ = crabka_pgcatalog::get_fdw(kv, object_name)?;
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(object_name),
+                comment,
+            )],
+        ));
+    }
+
+    if object_kind == "server" {
+        let _ = crabka_pgcatalog::get_server(kv, object_name)?;
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(object_name),
+                comment,
+            )],
+        ));
+    }
+
     if object_kind == "aggregate" {
         let signature = aggregate.expect("parser records every aggregate comment signature");
         let Some(routine) = crate::useragg::resolve_signature(kv, signature)? else {
