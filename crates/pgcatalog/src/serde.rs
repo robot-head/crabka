@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 17;
+pub const SCHEMA_VERSION: u8 = 18;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -2148,6 +2148,7 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
             write_str(&mut out, &base.category);
             out.push(u8::from(base.preferred));
             write_str(&mut out, &base.delimiter);
+            out.push(base.storage as u8);
         }
     }
     out.push(USER_TYPE_IDENTITY_V2);
@@ -2293,6 +2294,7 @@ pub(crate) fn deserialize_user_type_with(
             let category = read_string(&mut cur)?;
             let preferred = take_u8(&mut cur)? != 0;
             let delimiter = read_string(&mut cur)?;
+            let storage = char::from(take_u8(&mut cur)?);
             UserTypeBody::Base(BaseBody {
                 representation,
                 input,
@@ -2300,6 +2302,7 @@ pub(crate) fn deserialize_user_type_with(
                 category,
                 preferred,
                 delimiter,
+                storage,
             })
         }
         other => {
@@ -2990,6 +2993,7 @@ mod tests {
                         category: "N".into(),
                         preferred: false,
                         delimiter: ",".into(),
+                        storage: 'x',
                     },
                 ),
             },
@@ -3363,6 +3367,26 @@ mod tests {
                 collation: Some("C".into()),
                 multirange_schema: Some("multirange_schema".into()),
                 multirange_name: Some("multirange_of_text".into()),
+            }),
+        };
+        assert_eq!(deserialize_user_type(&serialize_user_type(&ty)), Ok(ty));
+    }
+
+    #[test]
+    fn base_type_storage_roundtrips() {
+        let ty = UserType {
+            oid: 300_002,
+            array_oid: crabka_pgtypes::usertype::user_array_oid(300_002),
+            schema: "catalog_types".into(),
+            name: "stored_text".into(),
+            body: UserTypeBody::Base(BaseBody {
+                representation: ColumnType::Text,
+                input: "stored_text_in".into(),
+                output: "stored_text_out".into(),
+                category: "U".into(),
+                preferred: false,
+                delimiter: ",".into(),
+                storage: 'm',
             }),
         };
         assert_eq!(deserialize_user_type(&serialize_user_type(&ty)), Ok(ty));

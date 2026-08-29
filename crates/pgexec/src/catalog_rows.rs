@@ -2040,6 +2040,15 @@ fn pg_type_row_with_defined(
     proc_oids: &BTreeMap<String, i32>,
     defined: bool,
 ) -> Vec<Datum> {
+    pg_type_row_with_storage(row, proc_oids, defined, None)
+}
+
+fn pg_type_row_with_storage(
+    row: PgTypeRow<'_>,
+    proc_oids: &BTreeMap<String, i32>,
+    defined: bool,
+    storage: Option<char>,
+) -> Vec<Datum> {
     let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
     let typalign = match row.name {
         "cstring" => "c",
@@ -2053,11 +2062,22 @@ fn pg_type_row_with_defined(
             _ => "i",
         }),
     };
-    let typstorage = if row.name == "cstring" || row.len >= 0 {
-        "p"
-    } else {
-        "x"
-    };
+    let typstorage = storage.map_or_else(
+        || {
+            if row.name == "cstring" || row.len >= 0 {
+                "p"
+            } else {
+                "x"
+            }
+        },
+        |storage| match storage {
+            'p' => "p",
+            'e' => "e",
+            'm' => "m",
+            'x' => "x",
+            _ => unreachable!("user type storage is validated at creation"),
+        },
+    );
     let routines = pg_type_routines(&row, proc_oids);
     vec![
         oid(row.oid),
@@ -2300,7 +2320,7 @@ pub(crate) fn user_type_rows(
         // A shell is the one user type with no `ColumnType`, and `TypeShellMake`
         // gives it `sizeof(int32)` regardless.
         let shell_typlen = 4;
-        rows.push(pg_type_row_with_defined(
+        rows.push(pg_type_row_with_storage(
             PgTypeRow {
                 oid: i32::try_from(ty.oid).unwrap_or(0),
                 name: &ty.name,
@@ -2324,6 +2344,10 @@ pub(crate) fn user_type_rows(
             },
             proc_oids,
             !ty.is_shell(),
+            match &ty.body {
+                usertype::UserTypeBody::Base(base) => Some(base.storage),
+                _ => None,
+            },
         ));
         if column_type.is_some() {
             let array_name = format!("_{}", ty.name);
@@ -4789,6 +4813,42 @@ mod tests {
             &BTreeMap::new(),
         );
         assert!(row[23] == Datum::InternalChar(b'p'));
+    }
+
+    #[test]
+    fn pg_type_storage_keeps_explicit_and_default_classes_distinct() {
+        let row = |name, len| PgTypeRow {
+            oid: 1,
+            name,
+            namespace: PG_CATALOG_NAMESPACE_OID,
+            len,
+            category: "P",
+            typtype: "p",
+            typrelid: 0,
+            typelem: 0,
+            typarray: 0,
+            typbasetype: 0,
+            typcollation: 0,
+            domain_base: None,
+            range_align: None,
+        };
+        for (storage, expected) in [('p', b'p'), ('e', b'e'), ('m', b'm'), ('x', b'x')] {
+            let result = pg_type_row_with_storage(
+                row("explicit", -1),
+                &BTreeMap::new(),
+                true,
+                Some(storage),
+            );
+            assert!(result[23] == Datum::InternalChar(expected));
+        }
+        for (name, len, expected) in [
+            ("fixed", 0, b'p'),
+            ("varlena", -1, b'x'),
+            ("cstring", -1, b'p'),
+        ] {
+            let result = pg_type_row_with_storage(row(name, len), &BTreeMap::new(), true, None);
+            assert!(result[23] == Datum::InternalChar(expected));
+        }
     }
 
     #[test]

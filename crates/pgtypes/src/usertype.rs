@@ -249,6 +249,8 @@ pub struct BaseBody {
     pub preferred: bool,
     /// `pg_type.typdelim`, the array element separator.
     pub delimiter: String,
+    /// `pg_type.typstorage`: `p`, `e`, `m`, or `x`.
+    pub storage: char,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

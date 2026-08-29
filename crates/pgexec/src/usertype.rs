@@ -297,6 +297,7 @@ fn create_base_type(
     let mut category = None;
     let mut preferred = false;
     let mut delimiter = ",".to_string();
+    let mut storage = None;
     let mut layout = Layout::default();
     let mut layout_written = false;
     for option in options {
@@ -307,6 +308,7 @@ fn create_base_type(
             "category" => category = Some(option_char(option)?),
             "preferred" => preferred = option_bool(option)?,
             "delimiter" => delimiter = option_string(option)?,
+            "storage" => storage = Some(option_storage(option)?),
             "internallength" => {
                 layout.length = option_type_length(option)?;
                 layout_written = true;
@@ -367,6 +369,10 @@ fn create_base_type(
     // `DefineType` starts every base type at `TYPCATEGORY_USER` and only the
     // `CATEGORY` option moves it. `LIKE` copies the layout, never the category.
     let category = category.unwrap_or_else(|| "U".to_string());
+    let storage = storage.unwrap_or(match representation.type_size() {
+        -1 => 'x',
+        _ => 'p',
+    });
     let body = UserTypeBody::Base(BaseBody {
         representation,
         input,
@@ -374,6 +380,7 @@ fn create_base_type(
         category,
         preferred,
         delimiter,
+        storage,
     });
     // A shell of this name is the two-phase definition closing: keep the oid,
     // because the I/O functions created in between already name it.
@@ -474,6 +481,20 @@ fn option_alignment(option: &BaseTypeOption) -> Result<char, ExecError> {
         "char" | "bpchar" | "character" => Ok('c'),
         _ => Err(ExecError::InvalidParameterValueMessage(format!(
             "alignment \"{written}\" not recognized"
+        ))),
+    }
+}
+
+/// `STORAGE = plain | external | extended | main`, stored as PostgreSQL's
+/// one-byte `pg_type.typstorage` code.
+fn option_storage(option: &BaseTypeOption) -> Result<char, ExecError> {
+    match option_string(option)?.to_ascii_lowercase().as_str() {
+        "plain" => Ok('p'),
+        "external" => Ok('e'),
+        "extended" => Ok('x'),
+        "main" => Ok('m'),
+        storage => Err(ExecError::InvalidParameterValueMessage(format!(
+            "storage \"{storage}\" not recognized"
         ))),
     }
 }

@@ -2254,10 +2254,10 @@ async fn a_base_type_needs_its_io_pair_and_a_representation() {
     assert!(
         text_rows_of(
             &mut session,
-            "SELECT typlen, typtype FROM pg_type WHERE typname = 't'"
+            "SELECT typlen, typtype, typstorage FROM pg_type WHERE typname = 't'"
         )
         .await
-            == vec![text_row(&["-1", "b"])]
+            == vec![text_row(&["-1", "b", "x"])]
     );
 }
 
@@ -2284,7 +2284,7 @@ async fn a_base_type_takes_its_layout_written_out() {
     run_s(
         &mut session,
         "CREATE TYPE vt (internallength = variable, input = vt_in, output = vt_out, \
-             alignment = int4)",
+             alignment = int4, storage = main)",
     )
     .await;
     // A varlena pair needs no reinterpretation, so the cast is recorded and
@@ -2316,11 +2316,14 @@ async fn a_base_type_takes_its_layout_written_out() {
     assert!(
         text_rows_of(
             &mut session,
-            "SELECT typname, typlen, typtype FROM pg_type \
+            "SELECT typname, typlen, typtype, typstorage FROM pg_type \
                  WHERE typname IN ('vt', 'ft') ORDER BY typname"
         )
         .await
-            == vec![text_row(&["ft", "4", "b"]), text_row(&["vt", "-1", "b"])]
+            == vec![
+                text_row(&["ft", "4", "b", "p"]),
+                text_row(&["vt", "-1", "b", "m"]),
+            ]
     );
 }
 

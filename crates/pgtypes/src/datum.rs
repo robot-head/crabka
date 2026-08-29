@@ -3331,8 +3331,10 @@ mod tests {
 
     #[test]
     fn builtin_array_descriptors_have_distinct_identities_and_postgres_names() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
 
         use assert2::assert;
 
@@ -3460,6 +3462,7 @@ mod tests {
                     category: "N".to_string(),
                     preferred: false,
                     delimiter: ",".to_string(),
+                    storage: 'x',
                 }),
             },
         ] {
