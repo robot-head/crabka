@@ -8128,6 +8128,91 @@ fn creating_an_fdw_requires_a_superuser() {
 }
 
 #[test]
+fn foreign_owner_changes_enforce_fdw_and_server_rules() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    let mut superuser = crabka_pgcatalog::RoleAttributes::default();
+    superuser.set(crabka_pgcatalog::RoleAttribute::Superuser, true);
+    for role in ["owner", "other_super"] {
+        kv.write_batch(
+            &crabka_pgcatalog::create_role_ops(&kv, role, true, superuser)
+                .expect("create superuser role"),
+        )
+        .expect("store superuser role");
+    }
+    crabka_pgcatalog::create_role(&kv, "alice", true).expect("create role");
+    let owner = super::ForeignCtx {
+        current_user: "owner",
+        session_user: "owner",
+        ..super::ForeignCtx::none()
+    };
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_, ops) = super::execute_ddl(&kv, &stmt, owner, true).expect(sql);
+        kv.write_batch(&ops).expect("apply setup DDL");
+    }
+
+    let alter = |sql| {
+        crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement")
+    };
+    let error = super::execute_ddl(
+        &kv,
+        &alter("ALTER FOREIGN DATA WRAPPER w OWNER TO alice"),
+        owner,
+        true,
+    )
+    .expect_err("FDW owners must be superusers");
+    assert!(matches!(error, super::ExecError::Remote(ref error)
+            if error.code == "42501"
+                && error.message == "permission denied to change owner of foreign-data wrapper \"w\""));
+
+    let (_, ops) = super::execute_ddl(
+        &kv,
+        &alter("ALTER FOREIGN DATA WRAPPER w OWNER TO other_super"),
+        owner,
+        true,
+    )
+    .expect("superuser FDW owner is valid");
+    kv.write_batch(&ops).expect("apply FDW owner change");
+    assert_eq!(
+        crabka_pgcatalog::get_fdw(&kv, "w").expect("FDW").owner,
+        "other_super"
+    );
+
+    let (_, ops) = super::execute_ddl(&kv, &alter("ALTER SERVER s OWNER TO alice"), owner, true)
+        .expect("superuser can transfer server ownership");
+    kv.write_batch(&ops).expect("apply server owner change");
+    assert_eq!(
+        crabka_pgcatalog::get_server(&kv, "s")
+            .expect("server")
+            .owner,
+        "alice"
+    );
+
+    let alice = super::ForeignCtx {
+        current_user: "alice",
+        session_user: "alice",
+        ..super::ForeignCtx::none()
+    };
+    let error = super::execute_ddl(&kv, &alter("ALTER SERVER s OWNER TO owner"), alice, true)
+        .expect_err("new owner must be assumable");
+    assert!(matches!(error, super::ExecError::Remote(ref error)
+        if error.code == "42501" && error.message == "must be able to SET ROLE \"owner\""));
+}
+
+#[test]
 fn foreign_usage_is_required_to_create_servers_and_foreign_tables() {
     use crabka_pgkv::{Kv, MemKv};
 

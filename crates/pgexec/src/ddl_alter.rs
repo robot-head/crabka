@@ -1677,6 +1677,7 @@ pub(crate) fn execute_ddl(
         Statement::AlterFdw {
             name,
             rename_to,
+            owner_to,
             handler,
             validator,
             options,
@@ -1689,6 +1690,10 @@ pub(crate) fn execute_ddl(
             )?;
             let ops = if let Some(rename_to) = rename_to {
                 crabka_pgcatalog::rename_fdw_ops(kv, name, rename_to)?
+            } else if let Some(owner) = owner_to {
+                let owner = resolve_new_owner(kv, fctx, owner)?;
+                require_fdw_owner_superuser(kv, name, &owner)?;
+                crabka_pgcatalog::set_fdw_owner_ops(kv, name, &owner)?
             } else {
                 if let Some(Some(handler)) = handler {
                     validate_fdw_routine(kv, handler, &[], "fdw_handler")?;
@@ -1916,6 +1921,7 @@ pub(crate) fn execute_ddl(
         Statement::AlterServer {
             name,
             rename_to,
+            owner_to,
             version,
             options,
         } => {
@@ -1927,6 +1933,10 @@ pub(crate) fn execute_ddl(
             )?;
             let ops = if let Some(rename_to) = rename_to {
                 crabka_pgcatalog::rename_server_ops(kv, name, rename_to)?
+            } else if let Some(owner) = owner_to {
+                let owner = resolve_new_owner(kv, fctx, owner)?;
+                require_new_owner_role(kv, fctx, &owner)?;
+                crabka_pgcatalog::set_server_owner_ops(kv, name, &owner)?
             } else {
                 let option_mutations = options.as_deref().map(foreign_option_mutations);
                 crabka_pgcatalog::alter_server_ops(
@@ -3734,6 +3744,28 @@ fn require_fdw_create_superuser(
     Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
         "42501",
         format!("permission denied to create foreign-data wrapper \"{name}\""),
+    )))
+}
+
+fn require_fdw_owner_superuser(kv: &dyn Kv, name: &str, owner: &str) -> Result<(), ExecError> {
+    if crate::rls::role_is_superuser(kv, owner)? {
+        return Ok(());
+    }
+    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42501",
+        format!("permission denied to change owner of foreign-data wrapper \"{name}\""),
+    )))
+}
+
+fn require_new_owner_role(kv: &dyn Kv, fctx: ForeignCtx<'_>, owner: &str) -> Result<(), ExecError> {
+    if crate::rls::role_is_superuser(kv, fctx.effective_role())?
+        || crabka_pgcatalog::role_can_set(kv, fctx.effective_role(), owner)?
+    {
+        return Ok(());
+    }
+    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42501",
+        format!("must be able to SET ROLE \"{owner}\""),
     )))
 }
 

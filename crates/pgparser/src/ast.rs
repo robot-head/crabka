@@ -1096,6 +1096,8 @@ pub enum Statement {
         name: String,
         /// The `RENAME TO` target; exclusive with the definition clauses.
         rename_to: Option<String>,
+        /// The `OWNER TO` target; exclusive with the definition clauses.
+        owner_to: Option<RoleSpec>,
         /// `Some(None)` means `NO HANDLER`; outer `None` leaves it unchanged.
         handler: Option<Option<String>>,
         /// `Some(None)` means `NO VALIDATOR`; outer `None` leaves it unchanged.
@@ -1126,6 +1128,8 @@ pub enum Statement {
         name: String,
         /// The `RENAME TO` target; exclusive with version and option clauses.
         rename_to: Option<String>,
+        /// The `OWNER TO` target; exclusive with version and option clauses.
+        owner_to: Option<RoleSpec>,
         version: Option<String>,
         options: Option<Vec<ForeignOptionAction>>,
     },

@@ -15290,6 +15290,18 @@ impl Parser {
             return Ok(Statement::AlterFdw {
                 name,
                 rename_to: Some(self.expect_col_id()?),
+                owner_to: None,
+                handler: None,
+                validator: None,
+                options: None,
+            });
+        }
+        if self.eat_ident_eq("owner") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            return Ok(Statement::AlterFdw {
+                name,
+                rename_to: None,
+                owner_to: Some(self.role_spec()?),
                 handler: None,
                 validator: None,
                 options: None,
@@ -15357,6 +15369,7 @@ impl Parser {
         Ok(Statement::AlterFdw {
             name,
             rename_to: None,
+            owner_to: None,
             handler,
             validator,
             options,
@@ -15405,6 +15418,17 @@ impl Parser {
             return Ok(Statement::AlterServer {
                 name,
                 rename_to: Some(self.expect_col_id()?),
+                owner_to: None,
+                version: None,
+                options: None,
+            });
+        }
+        if self.eat_ident_eq("owner") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            return Ok(Statement::AlterServer {
+                name,
+                rename_to: None,
+                owner_to: Some(self.role_spec()?),
                 version: None,
                 options: None,
             });
@@ -15425,6 +15449,7 @@ impl Parser {
         Ok(Statement::AlterServer {
             name,
             rename_to: None,
+            owner_to: None,
             version,
             options,
         })
@@ -24690,6 +24715,7 @@ mod tests {
             Statement::AlterFdw {
                 name: "w".into(),
                 rename_to: None,
+                owner_to: None,
                 handler: None,
                 validator: None,
                 options: Some(vec![
@@ -24716,6 +24742,7 @@ mod tests {
             Statement::AlterFdw {
                 name: "w".into(),
                 rename_to: None,
+                owner_to: None,
                 handler: Some(Some("public.h".into())),
                 validator: Some(None),
                 options: Some(vec![ForeignOptionAction::Add {
@@ -24733,10 +24760,26 @@ mod tests {
             Statement::AlterFdw {
                 name,
                 rename_to: Some(rename_to),
+                owner_to: None,
                 handler: None,
                 validator: None,
                 options: None,
             } if name == "w" && rename_to == "renamed"
+        ));
+    }
+
+    #[test]
+    fn parses_alter_fdw_owner() {
+        assert!(matches!(
+            one("ALTER FOREIGN DATA WRAPPER w OWNER TO CURRENT_USER"),
+            Statement::AlterFdw {
+                name,
+                rename_to: None,
+                owner_to: Some(RoleSpec::CurrentUser),
+                handler: None,
+                validator: None,
+                options: None,
+            } if name == "w"
         ));
     }
 
@@ -24783,6 +24826,7 @@ mod tests {
             Statement::AlterServer {
                 name: "s".into(),
                 rename_to: None,
+                owner_to: None,
                 version: None,
                 options: Some(vec![
                     ForeignOptionAction::Add {
@@ -24808,6 +24852,7 @@ mod tests {
             Statement::AlterServer {
                 name,
                 rename_to: None,
+                owner_to: None,
                 version: Some(version),
                 options: Some(_),
             } if name == "s" && version == "2"
@@ -24821,9 +24866,24 @@ mod tests {
             Statement::AlterServer {
                 name,
                 rename_to: Some(rename_to),
+                owner_to: None,
                 version: None,
                 options: None,
             } if name == "s" && rename_to == "renamed"
+        ));
+    }
+
+    #[test]
+    fn parses_alter_server_owner() {
+        assert!(matches!(
+            one("ALTER SERVER s OWNER TO alice"),
+            Statement::AlterServer {
+                name,
+                rename_to: None,
+                owner_to: Some(RoleSpec::Name(owner)),
+                version: None,
+                options: None,
+            } if name == "s" && owner == "alice"
         ));
     }
 

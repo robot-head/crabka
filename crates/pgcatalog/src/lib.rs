@@ -7477,6 +7477,27 @@ pub fn alter_fdw_ops(
     }])
 }
 
+/// Build the write batch for `ALTER FOREIGN DATA WRAPPER ... OWNER TO`.
+pub fn set_fdw_owner_ops(
+    kv: &dyn Kv,
+    name: &str,
+    owner: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut wrapper = get_fdw(kv, name)?;
+    wrapper.owner = owner.to_owned();
+    Ok(vec![WriteOp::Put {
+        key: key::fdw_key(name),
+        value: serialize_fdw(
+            wrapper.oid,
+            &wrapper.name,
+            &wrapper.owner,
+            wrapper.handler.as_deref(),
+            wrapper.validator.as_deref(),
+            &wrapper.options,
+        ),
+    }])
+}
+
 /// Rename an FDW and update every server that names it.
 pub fn rename_fdw_ops(
     kv: &dyn Kv,
@@ -7737,6 +7758,27 @@ pub fn alter_server_ops(
             server.oid,
             &server.name,
             &server.owner,
+            &server.wrapper,
+            server.server_type.as_deref(),
+            server.version.as_deref(),
+            &server.options,
+        ),
+    }])
+}
+
+/// Change a foreign server's owner and return the catalog write batch.
+pub fn set_server_owner_ops(
+    kv: &dyn Kv,
+    name: &str,
+    owner: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let server = get_server(kv, name)?;
+    Ok(vec![WriteOp::Put {
+        key: key::server_key(name),
+        value: serialize_server(
+            server.oid,
+            &server.name,
+            owner,
             &server.wrapper,
             server.server_type.as_deref(),
             server.version.as_deref(),
