@@ -5821,6 +5821,56 @@ async fn foreign_object_owners_and_grantees_block_dropping_a_role() {
 }
 
 #[tokio::test]
+async fn user_mapping_errors_validate_roles_and_name_the_mapping() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER mapping_fdw",
+        "CREATE SERVER mapping_server FOREIGN DATA WRAPPER mapping_fdw",
+        "CREATE USER MAPPING FOR PUBLIC SERVER mapping_server",
+    ] {
+        run_s(&mut session, sql).await;
+    }
+    assert!(
+        error_of(
+            &mut session,
+            "CREATE USER MAPPING FOR missing_mapping_role SERVER no_server",
+        )
+        .await
+            == (
+                "42704".into(),
+                "role \"missing_mapping_role\" does not exist".into(),
+            )
+    );
+    assert!(
+        error_of(
+            &mut session,
+            "CREATE USER MAPPING FOR PUBLIC SERVER mapping_server",
+        )
+        .await
+            == (
+                "42710".into(),
+                "user mapping for \"public\" already exists for server \"mapping_server\"".into(),
+            )
+    );
+    for sql in [
+        "ALTER USER MAPPING FOR current_user SERVER mapping_server OPTIONS (SET missing 'x')",
+        "DROP USER MAPPING FOR current_user SERVER mapping_server",
+    ] {
+        assert!(
+            error_of(&mut session, sql).await
+                == (
+                    "42704".into(),
+                    "user mapping for \"postgres\" does not exist for server \"mapping_server\""
+                        .into(),
+                )
+        );
+    }
+}
+
+#[tokio::test]
 async fn drop_user_after_rule_and_owner_cleanup_terminates() {
     use assert2::assert;
 

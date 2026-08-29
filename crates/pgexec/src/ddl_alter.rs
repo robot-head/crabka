@@ -1828,17 +1828,23 @@ pub(crate) fn execute_ddl(
             options,
         } => {
             let resolved_user = role_spec_name(user, fctx);
+            require_mapping_role(kv, resolved_user)?;
             require_user_mapping_authority(kv, resolved_user, server, fctx)?;
-            let ops = ignore_duplicate(
-                crabka_pgcatalog::create_user_mapping_ops(
-                    kv,
-                    resolved_user,
-                    server,
-                    options.clone(),
-                ),
-                *if_not_exists,
-            )?
-            .unwrap_or_default();
+            let ops = match crabka_pgcatalog::create_user_mapping_ops(
+                kv,
+                resolved_user,
+                server,
+                options.clone(),
+            ) {
+                Ok(ops) => ops,
+                Err(crabka_pgcatalog::CatalogError::DuplicateObject(_)) if *if_not_exists => {
+                    Vec::new()
+                }
+                Err(crabka_pgcatalog::CatalogError::DuplicateObject(_)) => {
+                    return Err(user_mapping_exists(resolved_user, server));
+                }
+                Err(error) => return Err(error.into()),
+            };
             Ok((command("CREATE USER MAPPING"), ops))
         }
         Statement::DropUserMapping {
@@ -1851,11 +1857,16 @@ pub(crate) fn execute_ddl(
             // RESTRICT are indistinguishable; both are accepted.
 
             let resolved_user = role_spec_name(user, fctx);
+            require_mapping_role(kv, resolved_user)?;
             require_user_mapping_authority(kv, resolved_user, server, fctx)?;
-            let ops = ignore_missing_ops(
-                crabka_pgcatalog::drop_user_mapping_ops(kv, resolved_user, server),
-                *if_exists,
-            )?;
+            let ops = match crabka_pgcatalog::drop_user_mapping_ops(kv, resolved_user, server) {
+                Ok(ops) => ops,
+                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => Vec::new(),
+                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+                    return Err(user_mapping_missing(resolved_user, server));
+                }
+                Err(error) => return Err(error.into()),
+            };
             Ok((command("DROP USER MAPPING"), ops))
         }
         Statement::CreateForeignTable {
@@ -2010,13 +2021,20 @@ pub(crate) fn execute_ddl(
             options,
         } => {
             let user = role_spec_name(user, fctx);
+            require_mapping_role(kv, user)?;
             require_user_mapping_authority(kv, user, server, fctx)?;
-            let ops = crabka_pgcatalog::alter_user_mapping_options_ops(
+            let ops = match crabka_pgcatalog::alter_user_mapping_options_ops(
                 kv,
                 user,
                 server,
                 &foreign_option_mutations(options),
-            )?;
+            ) {
+                Ok(ops) => ops,
+                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+                    return Err(user_mapping_missing(user, server));
+                }
+                Err(error) => return Err(error.into()),
+            };
             Ok((command("ALTER USER MAPPING"), ops))
         }
         // SP40: IMPORT FOREIGN SCHEMA discovers the server's tables through the
@@ -2251,6 +2269,28 @@ fn foreign_dependents_error(message: String, dependents: Vec<String>) -> ExecErr
             .with_detail(dependents.join("\n"))
             .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
     )
+}
+
+fn require_mapping_role(kv: &dyn Kv, role: &str) -> Result<(), ExecError> {
+    if role == crabka_pgcatalog::PUBLIC_ROLE || crabka_pgcatalog::role_is_nameable(kv, role)? {
+        Ok(())
+    } else {
+        Err(undefined_role(role))
+    }
+}
+
+fn user_mapping_exists(user: &str, server: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42710",
+        format!("user mapping for \"{user}\" already exists for server \"{server}\""),
+    ))
+}
+
+fn user_mapping_missing(user: &str, server: &str) -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42704",
+        format!("user mapping for \"{user}\" does not exist for server \"{server}\""),
+    ))
 }
 
 fn validate_postgresql_fdw_options<'a>(
