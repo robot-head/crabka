@@ -4458,6 +4458,12 @@ impl Parser {
     ) -> Result<crate::ast::AlterTableAction, ParseError> {
         use crate::ast::{AlterTableAction, ColumnDef};
 
+        if foreign_table && matches!(self.peek(), Token::Keyword(Keyword::Options)) {
+            return Ok(AlterTableAction::AlterForeignTableOptions {
+                options: self.parse_alter_options()?,
+            });
+        }
+
         // Must precede the ENABLE/DISABLE TRIGGER production and the
         // `consume_unsupported_subcommand` catch-all at the end: both would
         // otherwise swallow these, and the catch-all turns a security-relevant

@@ -3564,6 +3564,7 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         Action::AddConstraint(_)
         | Action::SetDefault { .. }
         | Action::AlterForeignColumnOptions { .. }
+        | Action::AlterForeignTableOptions { .. }
         | Action::SetExpression { .. } => 5,
         Action::SetSchema(_) => unreachable!("SET SCHEMA is handled before ALTER TABLE passes"),
         Action::OfType(_) | Action::NotOfType => {
@@ -3609,6 +3610,7 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::SetDefault { .. } => "ALTER COLUMN ... SET DEFAULT",
         Action::DropDefault(_) => "ALTER COLUMN ... DROP DEFAULT",
         Action::AlterForeignColumnOptions { .. } => "ALTER COLUMN ... OPTIONS",
+        Action::AlterForeignTableOptions { .. } => "OPTIONS",
         Action::SetExpression { .. } => "ALTER COLUMN ... SET EXPRESSION",
         Action::DropExpression { .. } => "ALTER COLUMN ... DROP EXPRESSION",
         Action::AddConstraint(_) => "ADD CONSTRAINT",
@@ -3691,7 +3693,9 @@ pub(crate) fn alter_action_allows(
     use crabka_pgparser::ast::AlterTableAction as Action;
 
     match action {
-        Action::AlterForeignColumnOptions { .. } => kind == "foreign table",
+        Action::AlterForeignColumnOptions { .. } | Action::AlterForeignTableOptions { .. } => {
+            kind == "foreign table"
+        }
         // Every kind can be handed to another role.
         Action::OwnerTo(_) => true,
         // A view's columns take defaults, which is what an INSTEAD OF trigger
@@ -4485,6 +4489,18 @@ pub(crate) fn alter_table_action_ops(
                     foreign.column_options.push((column.clone(), updated));
                 }
             }
+            Ok(())
+        }
+        Action::AlterForeignTableOptions { options } => {
+            let foreign = state.table.foreign.as_mut().ok_or_else(|| {
+                ExecError::WrongObjectType(format!(
+                    "relation \"{table_name}\" is not a foreign table"
+                ))
+            })?;
+            foreign.options = crabka_pgcatalog::apply_foreign_option_mutations(
+                &foreign.options,
+                &foreign_option_mutations(options),
+            )?;
             Ok(())
         }
         Action::SetExpression { column, predicate } => {

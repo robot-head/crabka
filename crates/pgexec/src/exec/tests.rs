@@ -8940,6 +8940,16 @@ fn foreign_table_columns_keep_normal_qualifiers() {
     let (_result, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
         .expect("add foreign column options");
     kv.write_batch(&ops).expect("apply added column");
+    let stmt = crabka_pgparser::parser::parse(
+        "ALTER FOREIGN TABLE t OPTIONS (ADD remote_topic 'orders', ADD format 'json')",
+    )
+    .expect("alter foreign table options")
+    .into_iter()
+    .next()
+    .expect("one statement");
+    let (_result, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+        .expect("alter foreign table options");
+    kv.write_batch(&ops).expect("apply foreign table options");
     let table = crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("t"))
         .expect("foreign table");
     assert!(
@@ -8950,7 +8960,11 @@ fn foreign_table_columns_keep_normal_qualifiers() {
     );
     assert_eq!(table.checks.len(), 1);
     assert_eq!(
-        table.foreign.expect("foreign metadata").column_options,
+        table
+            .foreign
+            .as_ref()
+            .expect("foreign metadata")
+            .column_options,
         vec![
             (
                 "id".into(),
@@ -8963,6 +8977,13 @@ fn foreign_table_columns_keep_normal_qualifiers() {
                 "remote".into(),
                 vec![("remote_name".into(), "remote_id".into())],
             ),
+        ]
+    );
+    assert_eq!(
+        table.foreign.expect("foreign metadata").options,
+        vec![
+            ("remote_topic".into(), "orders".into()),
+            ("format".into(), "json".into()),
         ]
     );
     let stmt = crabka_pgparser::parser::parse(
