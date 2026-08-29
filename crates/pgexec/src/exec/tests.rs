@@ -5785,6 +5785,42 @@ async fn drop_role_if_exists_skips_only_a_missing_role() {
 }
 
 #[tokio::test]
+async fn foreign_object_owners_and_grantees_block_dropping_a_role() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for sql in [
+        "CREATE ROLE foreign_dependency",
+        "CREATE FOREIGN DATA WRAPPER foreign_dependency_fdw",
+        "CREATE SERVER foreign_dependency_server FOREIGN DATA WRAPPER foreign_dependency_fdw",
+        "ALTER SERVER foreign_dependency_server OWNER TO foreign_dependency",
+        "GRANT USAGE ON FOREIGN DATA WRAPPER foreign_dependency_fdw TO foreign_dependency",
+    ] {
+        run_s(&mut session, sql).await;
+    }
+    let error = session
+        .simple_query("DROP ROLE foreign_dependency")
+        .await
+        .expect_err("foreign dependencies must block the drop");
+    assert!(error.code == "2BP01");
+    assert!(
+        error.message
+            == "role \"foreign_dependency\" cannot be dropped because some objects depend on it"
+    );
+    assert!(
+        error
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.detail.as_deref())
+            == Some(
+                "privileges for foreign-data wrapper foreign_dependency_fdw\nowner of server \
+                 foreign_dependency_server"
+            )
+    );
+}
+
+#[tokio::test]
 async fn drop_user_after_rule_and_owner_cleanup_terminates() {
     use assert2::assert;
 

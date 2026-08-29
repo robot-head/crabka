@@ -1473,7 +1473,10 @@ pub(crate) fn execute_ddl(
             let mut ops = Vec::new();
             for name in names {
                 match crabka_pgcatalog::drop_role_ops(kv, name) {
-                    Ok(role_ops) => ops.extend(role_ops),
+                    Ok(role_ops) => {
+                        reject_foreign_role_dependencies(kv, name)?;
+                        ops.extend(role_ops);
+                    }
                     Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => {}
                     Err(error) => return Err(error.into()),
                 }
@@ -2121,6 +2124,58 @@ fn foreign_option_mutations(
             }
         })
         .collect()
+}
+
+fn reject_foreign_role_dependencies(kv: &dyn Kv, role: &str) -> Result<(), ExecError> {
+    let mut dependents = Vec::new();
+    for fdw in crabka_pgcatalog::list_fdws(kv)? {
+        if fdw.owner == role {
+            dependents.push(format!("owner of foreign-data wrapper {}", fdw.name));
+        }
+        if crabka_pgcatalog::list_foreign_privileges(
+            kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+            &fdw.name,
+        )?
+        .iter()
+        .any(|(grantee, _, _)| grantee == role)
+        {
+            dependents.push(format!("privileges for foreign-data wrapper {}", fdw.name));
+        }
+    }
+    for server in crabka_pgcatalog::list_servers(kv)? {
+        if server.owner == role {
+            dependents.push(format!("owner of server {}", server.name));
+        }
+        if crabka_pgcatalog::list_foreign_privileges(
+            kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+            &server.name,
+        )?
+        .iter()
+        .any(|(grantee, _, _)| grantee == role)
+        {
+            dependents.push(format!("privileges for server {}", server.name));
+        }
+    }
+    for mapping in crabka_pgcatalog::list_user_mappings(kv)? {
+        if mapping.user == role {
+            dependents.push(format!(
+                "user mapping for {role} on server {}",
+                mapping.server
+            ));
+        }
+    }
+    if dependents.is_empty() {
+        return Ok(());
+    }
+    Err(ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "2BP01",
+            format!("role \"{role}\" cannot be dropped because some objects depend on it"),
+        )
+        .with_detail(dependents.join("\n")),
+    ))
 }
 
 fn validate_postgresql_fdw_options<'a>(
