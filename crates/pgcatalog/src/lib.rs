@@ -188,6 +188,8 @@ pub struct Column {
     /// changes what `pg_attribute.attcollation` (and so `\d`) reports; it never
     /// changes how two values compare.
     pub collation: Option<String>,
+    /// `pg_attribute.attstattarget`; `-1` selects PostgreSQL's default.
+    pub statistics_target: i16,
 }
 
 impl Column {
@@ -201,6 +203,7 @@ impl Column {
             generated: None,
             identity: None,
             collation: None,
+            statistics_target: -1,
         }
     }
 

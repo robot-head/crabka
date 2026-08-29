@@ -2522,6 +2522,11 @@ pub enum AlterTableAction {
         expr: Expr,
     },
     DropDefault(String),
+    /// `ALTER [COLUMN] name SET STATISTICS target`.
+    SetStatistics {
+        column: String,
+        target: i32,
+    },
     /// `ALTER [COLUMN] c OPTIONS (ADD | SET | DROP …)` on a foreign table.
     AlterForeignColumnOptions {
         column: String,

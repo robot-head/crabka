@@ -3563,6 +3563,7 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         // expression in the same breath.
         Action::AddConstraint(_)
         | Action::SetDefault { .. }
+        | Action::SetStatistics { .. }
         | Action::AlterForeignColumnOptions { .. }
         | Action::AlterForeignTableOptions { .. }
         | Action::SetExpression { .. } => 5,
@@ -3608,6 +3609,7 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::SetNotNull(_) => "ALTER COLUMN ... SET NOT NULL",
         Action::DropNotNull(_) => "ALTER COLUMN ... DROP NOT NULL",
         Action::SetDefault { .. } => "ALTER COLUMN ... SET DEFAULT",
+        Action::SetStatistics { .. } => "ALTER COLUMN ... SET STATISTICS",
         Action::DropDefault(_) => "ALTER COLUMN ... DROP DEFAULT",
         Action::AlterForeignColumnOptions { .. } => "ALTER COLUMN ... OPTIONS",
         Action::AlterForeignTableOptions { .. } => "OPTIONS",
@@ -4454,6 +4456,21 @@ pub(crate) fn alter_table_action_ops(
             let index = state.column_index(column)?;
             let ty = state.table.columns[index].ty;
             state.table.columns[index].default = Some(default_from_expr(expr, ty, &ddl_ctx)?);
+            Ok(())
+        }
+        Action::SetStatistics { column, target } => {
+            let target = i16::try_from(*target).map_err(|_| {
+                ExecError::InvalidParameterValueMessage(
+                    "statistics target must be between -1 and 10000".into(),
+                )
+            })?;
+            if !(-1..=10_000).contains(&target) {
+                return Err(ExecError::InvalidParameterValueMessage(
+                    "statistics target must be between -1 and 10000".into(),
+                ));
+            }
+            let index = state.column_index(column)?;
+            state.table.columns[index].statistics_target = target;
             Ok(())
         }
         Action::DropDefault(column) => {

@@ -1546,7 +1546,7 @@ pub(crate) fn attribute_rows_for_table(
                 Datum::Bool(true),
                 Datum::Int2(0),
                 int(column_collation_oid(column)),
-                Datum::Int2(-1),
+                Datum::Int2(column.statistics_target),
                 acl.of(&table.name, &column.name),
                 Datum::Null,
                 table

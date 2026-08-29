@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 24;
+pub const SCHEMA_VERSION: u8 = 25;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -1195,6 +1195,7 @@ pub fn serialize_schema(
         write_generated(&mut out, c.generated.as_ref());
         out.push(identity_flag(c.identity));
         write_collation(&mut out, c.collation.as_deref());
+        out.extend_from_slice(&c.statistics_target.to_be_bytes());
     }
     out.push(table_option_flags(options));
     write_str(&mut out, owner);
@@ -2021,6 +2022,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
         let generated = read_generated(&mut cur)?;
         let identity = read_identity(&mut cur)?;
         let collation = read_collation(&mut cur)?;
+        let statistics_target = i16::from_be_bytes(take_n(&mut cur, 2)?.try_into().expect("2"));
         columns.push(Column {
             name,
             ty,
@@ -2029,6 +2031,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
             generated,
             identity,
             collation,
+            statistics_target,
         });
     }
     let options = read_table_options(take_u8(&mut cur)?)?;
@@ -2692,6 +2695,7 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
             // view column derives from its body is not persisted, so `\d` on a
             // view reports the type's own.
             collation: None,
+            statistics_target: -1,
         });
     }
     let options = ViewOptions {

@@ -4758,6 +4758,17 @@ impl Parser {
             });
         }
         if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
+            if self.eat_ident_eq("statistics") {
+                let negative = *self.peek() == Token::Minus;
+                if negative {
+                    self.bump();
+                }
+                let target = self.expect_i32("statistics target")?;
+                return Ok(AlterTableAction::SetStatistics {
+                    column,
+                    target: if negative { -target } else { target },
+                });
+            }
             if self.eat_keyword(Keyword::Not) {
                 self.expect(&Token::Keyword(Keyword::Null))?;
                 return Ok(AlterTableAction::SetNotNull(column));
