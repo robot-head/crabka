@@ -2663,6 +2663,14 @@ pub fn set_typed_table_type_op(relation: &RelationName, oid: u32) -> WriteOp {
     }
 }
 
+/// Clear a relation's `OF composite_type` association.
+#[must_use]
+pub fn clear_typed_table_type_op(relation: &RelationName) -> WriteOp {
+    WriteOp::Delete {
+        key: typed_table_key(relation),
+    }
+}
+
 /// The composite type a typed table was declared `OF`, if any.
 ///
 /// # Errors
@@ -7663,6 +7671,22 @@ mod tests {
 
     fn apply(kv: &MemKv, ops: &[WriteOp]) {
         kv.write_batch(ops).expect("write");
+    }
+
+    #[test]
+    fn typed_table_type_can_be_cleared() {
+        use assert2::assert;
+
+        let kv = MemKv::new();
+        let relation = RelationName::new("public", "items");
+        apply(&kv, &[set_typed_table_type_op(&relation, 30_001)]);
+        assert!(typed_table_type(&kv, &relation).expect("typed row") == Some(30_001));
+        apply(&kv, &[clear_typed_table_type_op(&relation)]);
+        assert!(
+            typed_table_type(&kv, &relation)
+                .expect("cleared row")
+                .is_none()
+        );
     }
 
     /// A catalog nobody has written to still reports three schemas, each with

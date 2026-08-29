@@ -2356,6 +2356,69 @@ pub(crate) fn alter_table_ops(
         return Ok((command("ALTER TABLE"), ops));
     }
 
+    if let [action @ (Action::OfType(_) | Action::NotOfType)] = actions {
+        let table = match crabka_pgcatalog::get_table(kv, table_name) {
+            Ok(table) => table,
+            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if if_exists => {
+                return Ok((command("ALTER TABLE"), Vec::new()));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        crate::privilege::require_ownership(
+            kv,
+            table_name,
+            &table.owner,
+            crate::privilege::RelationKind::Table,
+            fctx.effective_role(),
+        )?;
+        if !crate::inheritance::parents_of(kv, table_name)?.is_empty() {
+            return Err(ExecError::WrongObjectType(
+                "typed tables cannot inherit".into(),
+            ));
+        }
+        let op = match action {
+            Action::OfType(reference) => {
+                let type_name = resolve_user_type(kv, resolution, reference)?;
+                let ty = crabka_pgcatalog::get_user_type(kv, &type_name)?.ok_or_else(|| {
+                    ExecError::UndefinedObject(format!("type \"{type_name}\" does not exist"))
+                })?;
+                let fields = ty.fields().ok_or_else(|| {
+                    ExecError::WrongObjectType(format!("type {type_name} is not a composite type"))
+                })?;
+                for (index, field) in fields.iter().enumerate() {
+                    let Some(column) = table.columns.get(index) else {
+                        return Err(ExecError::InvalidTableDefinition(format!(
+                            "table is missing column \"{}\"",
+                            field.name
+                        )));
+                    };
+                    if column.name != field.name {
+                        return Err(ExecError::InvalidTableDefinition(format!(
+                            "table has column \"{}\" where type requires \"{}\"",
+                            column.name, field.name
+                        )));
+                    }
+                    if column.ty != field.ty {
+                        return Err(ExecError::InvalidTableDefinition(format!(
+                            "table \"{}\" has different type for column \"{}\"",
+                            table_name.name, field.name
+                        )));
+                    }
+                }
+                if let Some(column) = table.columns.get(fields.len()) {
+                    return Err(ExecError::InvalidTableDefinition(format!(
+                        "table has extra column \"{}\"",
+                        column.name
+                    )));
+                }
+                crabka_pgcatalog::set_typed_table_type_op(table_name, ty.oid)
+            }
+            Action::NotOfType => crabka_pgcatalog::clear_typed_table_type_op(table_name),
+            _ => unreachable!("only OF and NOT OF reach the typed-table path"),
+        };
+        return Ok((command("ALTER TABLE"), vec![op]));
+    }
+
     if let [Action::RenameColumn { column, new_name }] = actions
         && let Ok(mut view) = crabka_pgcatalog::get_view(kv, table_name)
     {
@@ -2856,6 +2919,9 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         // expression in the same breath.
         Action::AddConstraint(_) | Action::SetDefault { .. } | Action::SetExpression { .. } => 5,
         Action::SetSchema(_) => unreachable!("SET SCHEMA is handled before ALTER TABLE passes"),
+        Action::OfType(_) | Action::NotOfType => {
+            unreachable!("OF and NOT OF are handled before ALTER TABLE passes")
+        }
         Action::RenameTable { .. }
         | Action::RenameColumn { .. }
         | Action::RenameConstraint { .. }
@@ -2908,6 +2974,9 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::ResetStorageParameters(_) => "RESET",
         Action::SetTablespace(_) => "SET TABLESPACE",
         Action::SetSchema(_) => unreachable!("SET SCHEMA is handled before ALTER TABLE passes"),
+        Action::OfType(_) | Action::NotOfType => {
+            unreachable!("OF and NOT OF are handled before ALTER TABLE passes")
+        }
         Action::SetAccessMethod(_) => "SET ACCESS METHOD",
         Action::OwnerTo(_) => "OWNER TO",
         // `PostgreSQL` spells the exact form back, so the selector and the mode
@@ -4102,6 +4171,9 @@ pub(crate) fn alter_table_action_ops(
         }
         Action::SetWithoutOids => Ok(()),
         Action::SetSchema(_) => unreachable!("SET SCHEMA is handled before ALTER TABLE passes"),
+        Action::OfType(_) | Action::NotOfType => {
+            unreachable!("OF and NOT OF are handled before ALTER TABLE passes")
+        }
         Action::SetReplicaIdentity(identity) => {
             let identity = replica_identity_for_action(kv, state, identity)?;
             state.ops.extend(crabka_pgcatalog::set_replica_identity_ops(

@@ -2522,6 +2522,10 @@ pub enum AlterTableAction {
     SetTablespace(String),
     /// `SET SCHEMA <name>` — move the relation without changing its local name.
     SetSchema(String),
+    /// `OF composite_type` — associate an existing matching table with a row type.
+    OfType(RelationRef),
+    /// `NOT OF` — remove a table's row-type association.
+    NotOfType,
     /// `SET ACCESS METHOD <name|DEFAULT>`.
     SetAccessMethod(Option<String>),
     OwnerTo(RoleSpec),

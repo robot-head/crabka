@@ -1219,6 +1219,82 @@ async fn a_table_of_a_composite_type_copies_its_fields() {
     assert!(sqlstate_of(&mut session, "SELECT * FROM persons").await == "42P01");
 }
 
+#[tokio::test]
+async fn alter_table_can_associate_and_disassociate_a_matching_row_type() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TYPE pair AS (id int4, label text)").await;
+    run_s(&mut session, "CREATE TABLE items (id int4, label text)").await;
+    run_s(&mut session, "ALTER TABLE IF EXISTS absent OF pair").await;
+    assert!(sqlstate_of(&mut session, "ALTER TABLE absent OF pair").await == "42P01");
+    run_s(&mut session, "CREATE TABLE too_short (id int4)").await;
+    assert!(
+        error_of(&mut session, "ALTER TABLE too_short OF pair").await
+            == ("42P16".into(), "table is missing column \"label\"".into())
+    );
+    run_s(
+        &mut session,
+        "CREATE TABLE wrong_type (id text, label text)",
+    )
+    .await;
+    assert!(
+        error_of(&mut session, "ALTER TABLE wrong_type OF pair").await
+            == (
+                "42P16".into(),
+                "table \"wrong_type\" has different type for column \"id\"".into(),
+            )
+    );
+    run_s(
+        &mut session,
+        "CREATE TABLE wrong_order (label text, id int4)",
+    )
+    .await;
+    assert!(
+        error_of(&mut session, "ALTER TABLE wrong_order OF pair").await
+            == (
+                "42P16".into(),
+                "table has column \"label\" where type requires \"id\"".into(),
+            )
+    );
+    run_s(
+        &mut session,
+        "CREATE TABLE too_wide (id int4, label text, extra int4)",
+    )
+    .await;
+    assert!(
+        error_of(&mut session, "ALTER TABLE too_wide OF pair").await
+            == ("42P16".into(), "table has extra column \"extra\"".into())
+    );
+    run_s(&mut session, "CREATE TABLE parent (id int4, label text)").await;
+    run_s(&mut session, "CREATE TABLE inherited () INHERITS (parent)").await;
+    assert!(
+        error_of(&mut session, "ALTER TABLE inherited OF pair").await
+            == ("42809".into(), "typed tables cannot inherit".into())
+    );
+
+    run_s(&mut session, "ALTER TABLE items OF pair").await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT c.reloftype = t.oid FROM pg_class c JOIN pg_type t \
+             ON t.typname = 'pair' WHERE c.relname = 'items'",
+        )
+        .await
+            == vec![text_row(&["t"])]
+    );
+    run_s(&mut session, "ALTER TABLE items NOT OF").await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT reloftype FROM pg_class WHERE relname = 'items'",
+        )
+        .await
+            == vec![text_row(&["0"])]
+    );
+}
+
 /// A row-security policy that reads a column depends on it. `PostgreSQL`
 /// refuses the drop and names the policy, and `CASCADE` takes the whole
 /// policy — never a policy left reading a column that is gone.

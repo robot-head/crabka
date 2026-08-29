@@ -4557,6 +4557,13 @@ impl Parser {
             self.expect_keyword_or_ident(Keyword::To, "to")?;
             return Ok(AlterTableAction::OwnerTo(self.role_spec()?));
         }
+        if self.eat_ident_eq("of") {
+            return Ok(AlterTableAction::OfType(self.relation_ref()?));
+        }
+        if self.eat_keyword(Keyword::Not) || self.eat_ident_eq("not") {
+            self.expect_ident_eq("of")?;
+            return Ok(AlterTableAction::NotOfType);
+        }
         if self.peek_ident_eq("attach")
             && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("partition"))
         {
@@ -24726,6 +24733,25 @@ mod tests {
             panic!("expected ALTER TABLE");
         };
         assert!(actions == vec![AlterTableAction::SetSchema("other".into())]);
+    }
+
+    #[test]
+    fn alter_table_records_typed_table_association_actions() {
+        use assert2::assert;
+
+        let Statement::AlterTable { actions, .. } = one("ALTER TABLE t OF pair") else {
+            panic!("expected ALTER TABLE");
+        };
+        assert!(
+            actions
+                == vec![AlterTableAction::OfType(crate::ast::RelationRef::bare(
+                    "pair"
+                ))]
+        );
+        let Statement::AlterTable { actions, .. } = one("ALTER TABLE t NOT OF") else {
+            panic!("expected ALTER TABLE");
+        };
+        assert!(actions == vec![AlterTableAction::NotOfType]);
     }
 
     #[test]
