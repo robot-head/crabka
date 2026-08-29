@@ -7946,6 +7946,27 @@ fn create_user_mapping_for_current_user_stored_under_current_role() {
     use crabka_pgkv::{Kv, MemKv};
 
     let kv = MemKv::new();
+    for role in ["owner", "alice"] {
+        crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
+    }
+    let owner = super::ForeignCtx {
+        current_user: "owner",
+        session_user: "owner",
+        ..super::ForeignCtx::none()
+    };
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "GRANT USAGE ON FOREIGN SERVER s TO alice",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_, ops) = super::execute_ddl(&kv, &stmt, owner, true).expect(sql);
+        kv.write_batch(&ops).expect("apply setup DDL");
+    }
     let stmt = crabka_pgparser::parser::parse(
         "CREATE USER MAPPING FOR CURRENT_USER SERVER s OPTIONS (username 'u', password 'p')",
     )
@@ -7957,7 +7978,7 @@ fn create_user_mapping_for_current_user_stored_under_current_role() {
     // execute_ddl must resolve the keyword through the current session role.
     let fctx = super::ForeignCtx {
         current_user: "alice",
-        session_user: "owner",
+        session_user: "alice",
         ..super::ForeignCtx::none()
     };
     let (result, ops) = super::execute_ddl(&kv, &stmt, fctx, true).expect("execute_ddl ok");
@@ -7973,6 +7994,60 @@ fn create_user_mapping_for_current_user_stored_under_current_role() {
         mapping.options.iter().any(|(k, _)| k == "username"),
         "options preserved"
     );
+}
+
+#[test]
+fn user_mapping_requires_server_ownership_or_usage_for_the_mapped_role() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for role in ["owner", "reader", "other"] {
+        crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
+    }
+    let owner = super::ForeignCtx {
+        current_user: "owner",
+        session_user: "owner",
+        ..super::ForeignCtx::none()
+    };
+    let reader = super::ForeignCtx {
+        current_user: "reader",
+        session_user: "reader",
+        ..super::ForeignCtx::none()
+    };
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "GRANT USAGE ON FOREIGN SERVER s TO reader",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_, ops) = super::execute_ddl(&kv, &stmt, owner, true).expect(sql);
+        kv.write_batch(&ops).expect("apply setup DDL");
+    }
+    let own = crabka_pgparser::parser::parse("CREATE USER MAPPING FOR reader SERVER s")
+        .expect("parse own mapping")
+        .into_iter()
+        .next()
+        .expect("one statement");
+    let (_, ops) = super::execute_ddl(&kv, &own, reader, true).expect("own mapping");
+    kv.write_batch(&ops).expect("apply own mapping");
+    for sql in [
+        "CREATE USER MAPPING FOR other SERVER s",
+        "CREATE USER MAPPING FOR PUBLIC SERVER s",
+        "ALTER USER MAPPING FOR other SERVER s OPTIONS (SET username 'other')",
+        "DROP USER MAPPING FOR other SERVER s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let error = super::execute_ddl(&kv, &stmt, reader, true).expect_err("owner required");
+        assert!(matches!(error, super::ExecError::Remote(ref error) if error.code == "42501"));
+    }
 }
 
 #[test]

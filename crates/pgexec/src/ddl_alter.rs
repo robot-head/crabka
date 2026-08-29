@@ -1768,6 +1768,7 @@ pub(crate) fn execute_ddl(
             options,
         } => {
             let resolved_user = role_spec_name(user, fctx);
+            require_user_mapping_authority(kv, resolved_user, server, fctx)?;
             let ops = ignore_duplicate(
                 crabka_pgcatalog::create_user_mapping_ops(
                     kv,
@@ -1790,6 +1791,7 @@ pub(crate) fn execute_ddl(
             // RESTRICT are indistinguishable; both are accepted.
 
             let resolved_user = role_spec_name(user, fctx);
+            require_user_mapping_authority(kv, resolved_user, server, fctx)?;
             let ops = ignore_missing_ops(
                 crabka_pgcatalog::drop_user_mapping_ops(kv, resolved_user, server),
                 *if_exists,
@@ -1929,6 +1931,7 @@ pub(crate) fn execute_ddl(
             options,
         } => {
             let user = role_spec_name(user, fctx);
+            require_user_mapping_authority(kv, user, server, fctx)?;
             let ops = crabka_pgcatalog::alter_user_mapping_options_ops(
                 kv,
                 user,
@@ -1954,6 +1957,12 @@ pub(crate) fn execute_ddl(
             into_schema,
             options,
         } => {
+            require_foreign_usage(
+                kv,
+                crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                server,
+                fctx,
+            )?;
             // Resolve the server (42704 if undefined) and the current user's
             // optional mapping (falling back to PUBLIC, then no credentials).
             let srv = crabka_pgcatalog::get_server(kv, server)?;
@@ -3682,6 +3691,33 @@ fn require_foreign_grant_authority(
         )));
     }
     Ok(())
+}
+
+fn require_user_mapping_authority(
+    kv: &dyn Kv,
+    mapped_user: &str,
+    server: &str,
+    fctx: ForeignCtx<'_>,
+) -> Result<(), ExecError> {
+    let owner = crabka_pgcatalog::get_server(kv, server)?.owner;
+    let role = fctx.effective_role();
+    if crate::rls::role_is_superuser(kv, role)?
+        || crabka_pgcatalog::role_has_privs_of(kv, role, &owner)?
+    {
+        return Ok(());
+    }
+    if mapped_user == role {
+        return require_foreign_usage(
+            kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+            server,
+            fctx,
+        );
+    }
+    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42501",
+        format!("must be owner of foreign server {server}"),
+    )))
 }
 
 fn require_foreign_usage(
