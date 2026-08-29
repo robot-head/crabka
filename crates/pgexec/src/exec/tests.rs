@@ -8045,6 +8045,49 @@ fn alter_server_rename_updates_mappings_tables_and_comments() {
 }
 
 #[test]
+fn drop_foreign_objects_restrict_or_cascade_dependents() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE USER MAPPING FOR PUBLIC SERVER s",
+        "CREATE FOREIGN TABLE t (id int4) SERVER s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    let stmt = crabka_pgparser::parser::parse("DROP SERVER s")
+        .expect("parse")
+        .into_iter()
+        .next()
+        .expect("one statement");
+    assert!(super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).is_err());
+
+    let stmt = crabka_pgparser::parser::parse("DROP FOREIGN DATA WRAPPER w CASCADE")
+        .expect("parse")
+        .into_iter()
+        .next()
+        .expect("one statement");
+    let (_result, ops) =
+        super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect("cascade");
+    kv.write_batch(&ops).expect("apply cascade ops");
+    assert!(crabka_pgcatalog::get_fdw(&kv, "w").is_err());
+    assert!(crabka_pgcatalog::get_server(&kv, "s").is_err());
+    assert!(crabka_pgcatalog::get_user_mapping(&kv, "public", "s").is_err());
+    assert!(
+        crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("t")).is_err()
+    );
+}
+
+#[test]
 fn comments_on_foreign_objects_are_persisted() {
     use crabka_pgcatalog::CommentObject;
     use crabka_pgkv::{Kv, MemKv};

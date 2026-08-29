@@ -1648,12 +1648,12 @@ pub(crate) fn execute_ddl(
         Statement::DropFdw {
             name,
             if_exists,
-            cascade: _,
+            cascade,
         } => {
-            // No object can depend on this one in this engine, so CASCADE and
-            // RESTRICT are indistinguishable; both are accepted.
-
-            let ops = ignore_missing_ops(crabka_pgcatalog::drop_fdw_ops(kv, name), *if_exists)?;
+            let ops = ignore_missing_ops(
+                crabka_pgcatalog::drop_fdw_with_dependents_ops(kv, name, *cascade),
+                *if_exists,
+            )?;
             Ok((command("DROP FOREIGN DATA WRAPPER"), ops))
         }
         Statement::CreateServer {
@@ -1681,12 +1681,12 @@ pub(crate) fn execute_ddl(
         Statement::DropServer {
             name,
             if_exists,
-            cascade: _,
+            cascade,
         } => {
-            // No object can depend on this one in this engine, so CASCADE and
-            // RESTRICT are indistinguishable; both are accepted.
-
-            let ops = ignore_missing_ops(crabka_pgcatalog::drop_server_ops(kv, name), *if_exists)?;
+            let ops = ignore_missing_ops(
+                crabka_pgcatalog::drop_server_with_dependents_ops(kv, name, *cascade),
+                *if_exists,
+            )?;
             Ok((command("DROP SERVER"), ops))
         }
         Statement::CreateUserMapping {

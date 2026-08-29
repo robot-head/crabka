@@ -928,6 +928,8 @@ pub enum CatalogError {
     UndefinedIndex(String),
     #[error("cannot drop index \"{0}\" because it is required by a table constraint")]
     DependentObjectsStillExist(String),
+    #[error("cannot drop {kind} \"{name}\" because other objects depend on it")]
+    ForeignObjectHasDependents { kind: &'static str, name: String },
     #[error("tablespace \"{0}\" is not empty")]
     TablespaceNotEmpty(String),
     #[error("cannot drop operator family \"{0}\" because other objects depend on it")]
@@ -1051,6 +1053,7 @@ impl CatalogError {
             | CatalogError::UndefinedConstraint(_)
             | CatalogError::UndefinedPolicy { .. } => "42704",
             CatalogError::DependentObjectsStillExist(_)
+            | CatalogError::ForeignObjectHasDependents { .. }
             | CatalogError::TablespaceNotEmpty(_)
             | CatalogError::OperatorFamilyNotEmpty(_)
             | CatalogError::SystemSchemaDrop(_)
@@ -7208,6 +7211,30 @@ pub fn drop_fdw_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogErro
     ])
 }
 
+/// Drop an FDW, optionally cascading to its servers and their dependents.
+pub fn drop_fdw_with_dependents_ops(
+    kv: &dyn Kv,
+    name: &str,
+    cascade: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let servers = list_servers(kv)?
+        .into_iter()
+        .filter(|server| server.wrapper == name)
+        .collect::<Vec<_>>();
+    if !cascade && !servers.is_empty() {
+        return Err(CatalogError::ForeignObjectHasDependents {
+            kind: "foreign-data wrapper",
+            name: name.to_string(),
+        });
+    }
+    let mut ops = Vec::new();
+    for server in servers {
+        ops.extend(drop_server_with_dependents_ops(kv, &server.name, true)?);
+    }
+    ops.extend(drop_fdw_ops(kv, name)?);
+    Ok(ops)
+}
+
 // ── Foreign server ────────────────────────────────────────────────────────────
 
 /// Register a foreign server.
@@ -7430,6 +7457,42 @@ pub fn drop_server_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogE
         },
         set_comment_op("server", CommentObject::Named(name), None),
     ])
+}
+
+/// Drop a server, optionally cascading to its user mappings and foreign tables.
+pub fn drop_server_with_dependents_ops(
+    kv: &dyn Kv,
+    name: &str,
+    cascade: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mappings = list_user_mappings(kv)?
+        .into_iter()
+        .filter(|mapping| mapping.server == name)
+        .collect::<Vec<_>>();
+    let tables = list_tables(kv)?
+        .into_iter()
+        .filter(|table| {
+            table
+                .foreign
+                .as_ref()
+                .is_some_and(|foreign| foreign.server == name)
+        })
+        .collect::<Vec<_>>();
+    if !cascade && (!mappings.is_empty() || !tables.is_empty()) {
+        return Err(CatalogError::ForeignObjectHasDependents {
+            kind: "server",
+            name: name.to_string(),
+        });
+    }
+    let mut ops = Vec::new();
+    for mapping in mappings {
+        ops.extend(drop_user_mapping_ops(kv, &mapping.user, name)?);
+    }
+    for table in tables {
+        ops.extend(drop_table_ops(kv, &table.name)?);
+    }
+    ops.extend(drop_server_ops(kv, name)?);
+    Ok(ops)
 }
 
 // ── User mapping ──────────────────────────────────────────────────────────────
