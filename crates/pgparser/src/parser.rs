@@ -15172,6 +15172,37 @@ impl Parser {
         Ok(opts)
     }
 
+    /// Parse the qualifiers of a foreign-table column, whose `OPTIONS` clause
+    /// may sit among ordinary column constraints.
+    fn foreign_column_qualifiers(
+        &mut self,
+    ) -> Result<(ColumnQualifiers, crate::ast::OptionList), ParseError> {
+        let mut qualifiers = ColumnQualifiers {
+            constraints: Vec::new(),
+            collation: None,
+        };
+        let mut options = Vec::new();
+        loop {
+            let next = self.column_qualifiers()?;
+            if let Some(collation) = next.collation {
+                if qualifiers.collation.is_some() {
+                    return Err(ParseError::new_sqlstate(
+                        "42601",
+                        "multiple COLLATE clauses not allowed",
+                        self.peek_pos(),
+                    ));
+                }
+                qualifiers.collation = Some(collation);
+            }
+            qualifiers.constraints.extend(next.constraints);
+            if !matches!(self.peek(), Token::Keyword(Keyword::Options)) {
+                break;
+            }
+            options.extend(self.parse_options()?);
+        }
+        Ok((qualifiers, options))
+    }
+
     fn parse_alter_options(&mut self) -> Result<Vec<crate::ast::ForeignOptionAction>, ParseError> {
         use crate::ast::ForeignOptionAction;
 
@@ -15583,8 +15614,7 @@ impl Parser {
                     } else {
                         let col_name = self.expect_col_id()?;
                         let (ty, serial) = self.parse_column_type(&col_name)?;
-                        let qualifiers = self.column_qualifiers()?;
-                        let options = self.parse_options()?;
+                        let (qualifiers, options) = self.foreign_column_qualifiers()?;
                         if !options.is_empty() {
                             column_options.push((col_name.clone(), options));
                         }
@@ -24570,6 +24600,20 @@ mod tests {
             }
             other => panic!("got {other:?}"),
         }
+    }
+
+    #[test]
+    fn foreign_table_options_can_precede_column_constraints() {
+        let Statement::CreateForeignTable {
+            columns,
+            column_options,
+            ..
+        } = one("CREATE FOREIGN TABLE t (id int4 OPTIONS (remote_name 'id') NOT NULL) SERVER s")
+        else {
+            panic!("expected CREATE FOREIGN TABLE");
+        };
+        assert!(columns[0].constraints.len() == 1);
+        assert!(column_options == vec![("id".into(), vec![("remote_name".into(), "id".into())])]);
     }
 
     #[test]

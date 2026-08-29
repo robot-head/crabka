@@ -1893,6 +1893,7 @@ pub(crate) fn execute_ddl(
                 server,
                 fctx,
             )?;
+            reject_foreign_table_index_constraints(columns, constraints)?;
             crate::usertype::ensure_relation_type_name_available(kv, &name)?;
             let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
             let inheritance_parents = inherits
@@ -2305,6 +2306,38 @@ fn user_mapping_missing(user: &str, server: &str) -> ExecError {
         "42704",
         format!("user mapping for \"{user}\" does not exist for server \"{server}\""),
     ))
+}
+
+fn reject_foreign_table_index_constraints(
+    columns: &[crabka_pgparser::ast::ColumnDef],
+    constraints: &[crabka_pgparser::ast::TableConstraint],
+) -> Result<(), ExecError> {
+    use crabka_pgparser::ast::{ColumnConstraintKind, TableConstraintKind};
+
+    let column_kind = columns
+        .iter()
+        .flat_map(|column| &column.constraints)
+        .find_map(|constraint| match constraint.kind {
+            ColumnConstraintKind::PrimaryKey => Some("primary key"),
+            ColumnConstraintKind::Unique { .. } => Some("unique"),
+            ColumnConstraintKind::References(_) => Some("foreign key"),
+            _ => None,
+        });
+    let table_kind = constraints
+        .iter()
+        .find_map(|constraint| match constraint.kind {
+            TableConstraintKind::PrimaryKey { .. } => Some("primary key"),
+            TableConstraintKind::Unique { .. } => Some("unique"),
+            TableConstraintKind::ForeignKey { .. } => Some("foreign key"),
+            TableConstraintKind::Exclude { .. } => Some("exclusion"),
+            TableConstraintKind::NotNull { .. } | TableConstraintKind::Check(_) => None,
+        });
+    let Some(kind) = column_kind.or(table_kind) else {
+        return Ok(());
+    };
+    Err(ExecError::Unsupported(format!(
+        "{kind} constraints are not supported on foreign tables"
+    )))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -8909,7 +8909,7 @@ fn foreign_table_columns_keep_normal_qualifiers() {
     for sql in [
         "CREATE FOREIGN DATA WRAPPER w",
         "CREATE SERVER s FOREIGN DATA WRAPPER w",
-        "CREATE FOREIGN TABLE t (id int4 NOT NULL OPTIONS (remote_name 'remote_id'), value int4, CONSTRAINT valid_value CHECK (value > 0)) SERVER s",
+        "CREATE FOREIGN TABLE t (id int4 OPTIONS (remote_name 'remote_id') NOT NULL, value int4, CONSTRAINT valid_value CHECK (value > 0)) SERVER s",
     ] {
         let stmt = crabka_pgparser::parser::parse(sql)
             .expect(sql)
@@ -8967,6 +8967,42 @@ fn foreign_table_columns_keep_normal_qualifiers() {
             .column_options
             .is_empty()
     );
+}
+
+#[test]
+fn foreign_tables_reject_index_backed_constraints() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
+        let (_, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    for (sql, kind) in [
+        (
+            "CREATE FOREIGN TABLE pk (id int4 PRIMARY KEY) SERVER s",
+            "primary key",
+        ),
+        (
+            "CREATE FOREIGN TABLE uq (id int4, UNIQUE (id)) SERVER s",
+            "unique",
+        ),
+        (
+            "CREATE FOREIGN TABLE fk (id int4 REFERENCES parent (id)) SERVER s",
+            "foreign key",
+        ),
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
+        assert!(
+            matches!(super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true),
+                Err(super::ExecError::Unsupported(message))
+                    if message == format!("{kind} constraints are not supported on foreign tables"))
+        );
+    }
 }
 
 #[test]
