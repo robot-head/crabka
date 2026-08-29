@@ -1728,6 +1728,7 @@ pub(crate) fn execute_ddl(
             if_not_exists,
             name,
             columns,
+            constraints,
             column_options,
             like,
             server,
@@ -1737,7 +1738,7 @@ pub(crate) fn execute_ddl(
             crate::usertype::ensure_relation_type_name_available(kv, &name)?;
             let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
             let (mut cols, checks, _, _, _) =
-                create_table_definition(kv, &name, columns, &[], like, &[], &ddl_ctx)?;
+                create_table_definition(kv, &name, columns, constraints, like, &[], &ddl_ctx)?;
             for column in &mut cols {
                 if column.identity.take().is_some() {
                     column.default = None;

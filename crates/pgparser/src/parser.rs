@@ -15472,12 +15472,15 @@ impl Parser {
         let name = self.relation_ref()?;
         self.expect(&Token::LParen)?;
         let mut columns = Vec::new();
+        let mut constraints = Vec::new();
         let mut column_options = Vec::new();
         let mut like = Vec::new();
         if *self.peek() != Token::RParen {
             loop {
                 if self.eat_keyword(Keyword::Like) {
                     like.push(self.like_clause(columns.len())?);
+                } else if self.starts_table_constraint() {
+                    constraints.push(self.table_constraint()?);
                 } else {
                     let col_name = self.expect_col_id()?;
                     let (ty, serial) = self.parse_column_type(&col_name)?;
@@ -15508,6 +15511,7 @@ impl Parser {
             if_not_exists,
             name,
             columns,
+            constraints,
             column_options,
             like,
             server,

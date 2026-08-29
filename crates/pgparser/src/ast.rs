@@ -1143,6 +1143,7 @@ pub enum Statement {
         if_not_exists: bool,
         name: RelationRef,
         columns: Vec<ColumnDef>,
+        constraints: Vec<TableConstraint>,
         /// Per-column `OPTIONS (...)`, keyed by the declared column name.
         column_options: Vec<(String, OptionList)>,
         like: Vec<LikeClause>,
