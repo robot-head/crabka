@@ -1068,6 +1068,11 @@ pub enum Statement {
         validator: Option<String>,
         options: OptionList,
     },
+    /// `ALTER FOREIGN DATA WRAPPER <name> OPTIONS (…)`
+    AlterFdw {
+        name: String,
+        options: Vec<ForeignOptionAction>,
+    },
     /// `DROP FOREIGN DATA WRAPPER [IF EXISTS] <name>`
     DropFdw {
         name: String,

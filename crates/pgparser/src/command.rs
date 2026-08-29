@@ -21,6 +21,7 @@ command_identities!(
     (AlterDomain, "ALTER DOMAIN"),
     (AlterEventTrigger, "ALTER EVENT TRIGGER"),
     (AlterExtension, "ALTER EXTENSION"),
+    (AlterForeignDataWrapper, "ALTER FOREIGN DATA WRAPPER"),
     (AlterFunction, "ALTER FUNCTION"),
     (AlterIndex, "ALTER INDEX"),
     (AlterLanguage, "ALTER LANGUAGE"),

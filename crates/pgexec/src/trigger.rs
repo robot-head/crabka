@@ -1105,6 +1105,7 @@ pub(crate) fn event_command_tag(stmt: &parsed::Statement) -> &'static str {
         Statement::DropDomain { .. } => "DROP DOMAIN",
         Statement::Comment { .. } => "COMMENT",
         Statement::CreateFdw { .. } => "CREATE FOREIGN DATA WRAPPER",
+        Statement::AlterFdw { .. } => "ALTER FOREIGN DATA WRAPPER",
         Statement::DropFdw { .. } => "DROP FOREIGN DATA WRAPPER",
         Statement::CreateServer { .. } => "CREATE SERVER",
         Statement::AlterServer { .. } => "ALTER SERVER",

@@ -7076,6 +7076,25 @@ pub fn get_fdw(kv: &dyn Kv, name: &str) -> Result<ForeignDataWrapper, CatalogErr
     Ok(deserialize_fdw(&bytes)?)
 }
 
+/// Apply option changes to an FDW and return the catalog write batch.
+pub fn alter_fdw_options_ops(
+    kv: &dyn Kv,
+    name: &str,
+    changes: &[ForeignOptionMutation],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut wrapper = get_fdw(kv, name)?;
+    wrapper.options = apply_foreign_option_mutations(&wrapper.options, changes)?;
+    Ok(vec![WriteOp::Put {
+        key: key::fdw_key(name),
+        value: serialize_fdw(
+            &wrapper.name,
+            wrapper.handler.as_deref(),
+            wrapper.validator.as_deref(),
+            &wrapper.options,
+        ),
+    }])
+}
+
 /// List foreign-data wrappers by name.
 ///
 /// # Errors

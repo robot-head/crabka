@@ -4096,7 +4096,7 @@ impl Parser {
                 I::PrepareTransaction,
                 self.prepared_transaction_refusal(crate::ast::RefusalCommand::PrepareTransaction),
             ),
-            // SP40: ALTER SERVER / ALTER USER MAPPING; bounded ALTER TABLE rename.
+            // SP40: foreign-object ALTER and bounded ALTER TABLE rename.
             Token::Ident(s) if s == "alter" => match self.peek2() {
                 Token::Ident(s) if s == "default" => {
                     emitted(I::AlterDefaultPrivileges, self.alter_default_privileges())
@@ -4151,6 +4151,12 @@ impl Parser {
                 }
                 Token::Keyword(Keyword::Index) => emitted(I::AlterIndex, self.alter_index()),
                 Token::Keyword(Keyword::Schema) => emitted(I::AlterSchema, self.alter_schema()),
+                Token::Keyword(Keyword::Foreign)
+                    if matches!(self.peek3(), Token::Keyword(Keyword::Data))
+                        && matches!(self.peek_n(3), Token::Keyword(Keyword::Wrapper)) =>
+                {
+                    emitted(I::AlterForeignDataWrapper, self.alter_fdw())
+                }
                 Token::Keyword(Keyword::Server) => emitted(I::AlterServer, self.alter_server()),
                 // `ALTER USER MAPPING …` and `ALTER USER name …` share a
                 // prefix; only the former is followed by MAPPING.
@@ -15212,6 +15218,18 @@ impl Parser {
         })
     }
 
+    /// `ALTER FOREIGN DATA WRAPPER <name> OPTIONS (ADD/SET/DROP …)`.
+    fn alter_fdw(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+        self.bump(); // ALTER
+        self.expect(&Token::Keyword(Keyword::Foreign))?;
+        self.expect(&Token::Keyword(Keyword::Data))?;
+        self.expect(&Token::Keyword(Keyword::Wrapper))?;
+        let name = self.expect_col_id()?;
+        let options = self.parse_alter_options()?;
+        Ok(Statement::AlterFdw { name, options })
+    }
+
     /// `CREATE SERVER <name> [TYPE 'type'] [VERSION 'version'] FOREIGN DATA WRAPPER <wrapper> OPTIONS (…)`
     fn create_server(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
@@ -24398,6 +24416,31 @@ mod tests {
                 name: "kafka_fdw".into(),
                 if_exists: true,
                 cascade: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_alter_fdw() {
+        assert_eq!(
+            one(
+                "ALTER FOREIGN DATA WRAPPER w OPTIONS (ADD host 'new', SET port '5432', DROP stale)"
+            ),
+            Statement::AlterFdw {
+                name: "w".into(),
+                options: vec![
+                    ForeignOptionAction::Add {
+                        name: "host".into(),
+                        value: "new".into()
+                    },
+                    ForeignOptionAction::Set {
+                        name: "port".into(),
+                        value: "5432".into()
+                    },
+                    ForeignOptionAction::Drop {
+                        name: "stale".into()
+                    },
+                ],
             }
         );
     }

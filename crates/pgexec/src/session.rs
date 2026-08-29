@@ -2641,6 +2641,7 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::AlterSchema { .. }
         | Statement::DropSchema { .. }
         | Statement::CreateFdw { .. }
+        | Statement::AlterFdw { .. }
         | Statement::DropFdw { .. }
         | Statement::CreateServer { .. }
         | Statement::AlterServer { .. }
@@ -8152,9 +8153,9 @@ impl SqlSession {
             | Statement::AlterSchema { .. }
             | Statement::DropSchema { .. }
             // SP40: FDW DDL funnels through the same catalog-lock + execute_ddl + commit
-            // path as ordinary DDL. ALTER/IMPORT variants resolve to a clear 0A000 inside
-            // execute_ddl (not yet supported / deferred to a later task).
+            // path as ordinary DDL.
             | Statement::CreateFdw { .. }
+            | Statement::AlterFdw { .. }
             | Statement::DropFdw { .. }
             | Statement::CreateServer { .. }
             | Statement::AlterServer { .. }

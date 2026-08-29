@@ -192,6 +192,7 @@ pub fn statement_operation(stmt: &Statement) -> &'static str {
         Statement::AlterDefaultTablePrivileges { .. } => "ALTER DEFAULT PRIVILEGES",
         Statement::SetRole { .. } => "SET ROLE",
         Statement::CreateFdw { .. } => "CREATE FOREIGN DATA WRAPPER",
+        Statement::AlterFdw { .. } => "ALTER FOREIGN DATA WRAPPER",
         Statement::DropFdw { .. } => "DROP FOREIGN DATA WRAPPER",
         Statement::CreateServer { .. } => "CREATE SERVER",
         Statement::AlterServer { .. } => "ALTER SERVER",
