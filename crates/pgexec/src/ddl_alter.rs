@@ -1669,7 +1669,7 @@ pub(crate) fn execute_ddl(
             validate_postgresql_fdw_options(
                 validator.as_deref(),
                 options.iter().map(|(name, _)| name),
-                true,
+                PostgresqlFdwOptionContext::Wrapper,
             )?;
             let ops = ignore_duplicate(
                 crabka_pgcatalog::create_fdw_with_routines_owned_ops(
@@ -1729,7 +1729,7 @@ pub(crate) fn execute_ddl(
                             | crabka_pgparser::ast::ForeignOptionAction::Set { name, .. }
                             | crabka_pgparser::ast::ForeignOptionAction::Drop { name } => name,
                         }),
-                    true,
+                    PostgresqlFdwOptionContext::Wrapper,
                 )?;
                 let option_mutations = options.as_deref().map(foreign_option_mutations);
                 crabka_pgcatalog::alter_fdw_ops(
@@ -1782,7 +1782,7 @@ pub(crate) fn execute_ddl(
             validate_postgresql_fdw_options(
                 fdw.validator.as_deref(),
                 options.iter().map(|(name, _)| name),
-                false,
+                PostgresqlFdwOptionContext::Server,
             )?;
             let ops = ignore_duplicate(
                 crabka_pgcatalog::create_server_with_identity_owned_ops(
@@ -1830,6 +1830,11 @@ pub(crate) fn execute_ddl(
             let resolved_user = role_spec_name(user, fctx);
             require_mapping_role(kv, resolved_user)?;
             require_user_mapping_authority(kv, resolved_user, server, fctx)?;
+            validate_postgresql_user_mapping_options(
+                kv,
+                server,
+                options.iter().map(|(name, _)| name),
+            )?;
             let ops = match crabka_pgcatalog::create_user_mapping_ops(
                 kv,
                 resolved_user,
@@ -2003,7 +2008,7 @@ pub(crate) fn execute_ddl(
                             | crabka_pgparser::ast::ForeignOptionAction::Set { name, .. }
                             | crabka_pgparser::ast::ForeignOptionAction::Drop { name } => name,
                         }),
-                    false,
+                    PostgresqlFdwOptionContext::Server,
                 )?;
                 let option_mutations = options.as_deref().map(foreign_option_mutations);
                 crabka_pgcatalog::alter_server_ops(
@@ -2023,6 +2028,15 @@ pub(crate) fn execute_ddl(
             let user = role_spec_name(user, fctx);
             require_mapping_role(kv, user)?;
             require_user_mapping_authority(kv, user, server, fctx)?;
+            validate_postgresql_user_mapping_options(
+                kv,
+                server,
+                options.iter().map(|option| match option {
+                    crabka_pgparser::ast::ForeignOptionAction::Add { name, .. }
+                    | crabka_pgparser::ast::ForeignOptionAction::Set { name, .. }
+                    | crabka_pgparser::ast::ForeignOptionAction::Drop { name } => name,
+                }),
+            )?;
             let ops = match crabka_pgcatalog::alter_user_mapping_options_ops(
                 kv,
                 user,
@@ -2293,24 +2307,56 @@ fn user_mapping_missing(user: &str, server: &str) -> ExecError {
     ))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PostgresqlFdwOptionContext {
+    Wrapper,
+    Server,
+    UserMapping,
+}
+
 fn validate_postgresql_fdw_options<'a>(
     validator: Option<&str>,
     mut names: impl Iterator<Item = &'a String>,
-    wrapper: bool,
+    context: PostgresqlFdwOptionContext,
 ) -> Result<(), ExecError> {
     if validator != Some("postgresql_fdw_validator") {
         return Ok(());
     }
-    let valid = ["host", "hostaddr", "port", "dbname", "connect_timeout"];
-    let Some(name) = names.find(|name| wrapper || !valid.contains(&name.as_str())) else {
+    let valid = match context {
+        PostgresqlFdwOptionContext::Wrapper => &[][..],
+        PostgresqlFdwOptionContext::Server => {
+            &["host", "hostaddr", "port", "dbname", "connect_timeout"]
+        }
+        PostgresqlFdwOptionContext::UserMapping => &["user", "password"],
+    };
+    let Some(name) = names.find(|name| !valid.contains(&name.as_str())) else {
         return Ok(());
     };
     let error = crabka_pgwire::error::PgError::error("HV00D", format!("invalid option \"{name}\""));
-    Err(ExecError::Remote(if wrapper {
-        error.with_hint("There are no valid options in this context.")
-    } else {
-        error
-    }))
+    let error = match context {
+        PostgresqlFdwOptionContext::Wrapper => {
+            error.with_hint("There are no valid options in this context.")
+        }
+        PostgresqlFdwOptionContext::UserMapping if name == "username" => {
+            error.with_hint("Perhaps you meant the option \"user\".")
+        }
+        PostgresqlFdwOptionContext::Server | PostgresqlFdwOptionContext::UserMapping => error,
+    };
+    Err(ExecError::Remote(error))
+}
+
+fn validate_postgresql_user_mapping_options<'a>(
+    kv: &dyn Kv,
+    server: &str,
+    names: impl Iterator<Item = &'a String>,
+) -> Result<(), ExecError> {
+    let server = crabka_pgcatalog::get_server(kv, server)?;
+    let fdw = crabka_pgcatalog::get_fdw(kv, &server.wrapper)?;
+    validate_postgresql_fdw_options(
+        fdw.validator.as_deref(),
+        names,
+        PostgresqlFdwOptionContext::UserMapping,
+    )
 }
 
 /// Validate an FDW support routine before storing its name in the catalog.

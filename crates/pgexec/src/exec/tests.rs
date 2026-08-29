@@ -8725,6 +8725,7 @@ fn postgresql_fdw_validator_rejects_invalid_options() {
     for sql in [
         "CREATE FOREIGN DATA WRAPPER postgresql VALIDATOR postgresql_fdw_validator",
         "CREATE SERVER good FOREIGN DATA WRAPPER postgresql OPTIONS (host 'localhost', dbname 'db')",
+        "CREATE USER MAPPING FOR PUBLIC SERVER good OPTIONS (user 'reader')",
     ] {
         let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
         let (_, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
@@ -8741,6 +8742,19 @@ fn postgresql_fdw_validator_rejects_invalid_options() {
         assert!(
             matches!(error, super::ExecError::Remote(ref error) if error.code == "HV00D" && error.message == "invalid option \"bad\"")
         );
+    }
+    for sql in [
+        "CREATE USER MAPPING FOR current_user SERVER good OPTIONS (username 'reader')",
+        "ALTER USER MAPPING FOR PUBLIC SERVER good OPTIONS (SET username 'reader')",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
+        let error = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+            .expect_err("invalid user mapping option");
+        assert!(matches!(error, super::ExecError::Remote(ref error)
+                if error.code == "HV00D"
+                    && error.message == "invalid option \"username\""
+                    && error.diagnostics.as_ref().and_then(|d| d.hint.as_deref())
+                        == Some("Perhaps you meant the option \"user\".")));
     }
 }
 
