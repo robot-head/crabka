@@ -1319,6 +1319,51 @@ async fn alter_table_can_associate_and_disassociate_a_matching_row_type() {
     );
 }
 
+#[tokio::test]
+async fn create_table_like_copies_generated_columns_only_when_requested() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(
+        &mut session,
+        "CREATE TABLE source (base int4, doubled int4 GENERATED ALWAYS AS (base * 2) STORED)",
+    )
+    .await;
+    run_s(&mut session, "CREATE TABLE copied_default (LIKE source)").await;
+    run_s(&mut session, "INSERT INTO copied_default VALUES (4, 91)").await;
+    assert!(
+        text_rows_of(&mut session, "SELECT * FROM copied_default").await
+            == vec![text_row(&["4", "91"])]
+    );
+
+    run_s(
+        &mut session,
+        "CREATE TABLE copied_generated (LIKE source INCLUDING GENERATED)",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "INSERT INTO copied_generated (base) VALUES (4)",
+    )
+    .await;
+    assert!(
+        text_rows_of(&mut session, "SELECT * FROM copied_generated").await
+            == vec![text_row(&["4", "8"])]
+    );
+
+    run_s(
+        &mut session,
+        "CREATE TABLE copied_all (LIKE source INCLUDING ALL)",
+    )
+    .await;
+    run_s(&mut session, "INSERT INTO copied_all (base) VALUES (5)").await;
+    assert!(
+        text_rows_of(&mut session, "SELECT * FROM copied_all").await
+            == vec![text_row(&["5", "10"])]
+    );
+}
+
 /// A row-security policy that reads a column depends on it. `PostgreSQL`
 /// refuses the drop and names the policy, and `CASCADE` takes the whole
 /// policy — never a policy left reading a column that is gone.

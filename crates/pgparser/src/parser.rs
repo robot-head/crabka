@@ -8525,10 +8525,11 @@ impl Parser {
                 "constraints" => clause.set(LikeOption::Constraints, including),
                 "indexes" => clause.set(LikeOption::Indexes, including),
                 "identity" => clause.set(LikeOption::Identity, including),
-                // The remaining PostgreSQL options (COMMENTS, GENERATED,
-                // STATISTICS, STORAGE, COMPRESSION) name properties Crabka does
-                // not carry on a column, so honoring them is a no-op either way.
-                "comments" | "generated" | "statistics" | "storage" | "compression" => {}
+                "generated" => clause.set(LikeOption::Generated, including),
+                // The remaining PostgreSQL options (COMMENTS, STATISTICS,
+                // STORAGE, COMPRESSION) name properties Crabka does not carry
+                // on a column, so honoring them is a no-op either way.
+                "comments" | "statistics" | "storage" | "compression" => {}
                 other => {
                     return Err(ParseError::new(
                         format!("unrecognized LIKE option \"{other}\""),
@@ -19442,6 +19443,27 @@ mod tests {
         };
         assert!(name == crate::ast::RelationRef::bare("persons"));
         assert!(of_type == Some(crate::ast::RelationRef::bare("person_type")));
+    }
+
+    #[test]
+    fn create_table_like_records_generated_copy_options() {
+        use assert2::assert;
+
+        let Statement::CreateTable { like, .. } =
+            one("CREATE TABLE copied (LIKE source INCLUDING GENERATED)")
+        else {
+            panic!("expected create table");
+        };
+        assert!(like.len() == 1);
+        assert!(like[0].includes(crate::ast::LikeOption::Generated));
+
+        let Statement::CreateTable { like, .. } =
+            one("CREATE TABLE copied_all (LIKE source INCLUDING ALL EXCLUDING GENERATED)")
+        else {
+            panic!("expected create table");
+        };
+        assert!(!like[0].includes(crate::ast::LikeOption::Generated));
+        assert!(like[0].includes(crate::ast::LikeOption::Defaults));
     }
 
     #[test]

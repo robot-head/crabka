@@ -570,6 +570,9 @@ pub(crate) fn create_table_definition(
                 copied.identity = None;
                 copied.default = None;
             }
+            if !clause.includes(crabka_pgparser::ast::LikeOption::Generated) {
+                copied.generated = None;
+            }
             cols.push(copied);
         }
         if clause.includes(crabka_pgparser::ast::LikeOption::Constraints) {

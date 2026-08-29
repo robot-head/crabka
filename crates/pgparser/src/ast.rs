@@ -2677,6 +2677,7 @@ pub enum LikeOption {
     Constraints,
     Indexes,
     Identity,
+    Generated,
 }
 
 impl LikeOption {
@@ -2686,6 +2687,7 @@ impl LikeOption {
         Self::Constraints,
         Self::Indexes,
         Self::Identity,
+        Self::Generated,
     ];
 }
 
