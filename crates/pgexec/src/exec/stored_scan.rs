@@ -136,6 +136,17 @@ pub(super) fn scan_stored_relation(
         let scanner = read_ctx.fctx.scanner.ok_or_else(|| {
             ExecError::Unsupported("foreign tables require the `kafka` feature".into())
         })?;
+        if !crate::catalog_fn::foreign_usage_is_held(
+            catalog_kv,
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+            &meta.server,
+            read_ctx.fctx.effective_role(),
+        )? {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42501",
+                format!("permission denied for foreign server {}", meta.server),
+            )));
+        }
         let server = crabka_pgcatalog::get_server(catalog_kv, &meta.server)?;
         // A per-user mapping is optional; PostgreSQL falls back to PUBLIC when
         // the current role has no mapping on this server.

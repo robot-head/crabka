@@ -1717,6 +1717,12 @@ pub(crate) fn execute_ddl(
             version,
             options,
         } => {
+            require_foreign_usage(
+                kv,
+                crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                wrapper,
+                fctx,
+            )?;
             let ops = ignore_duplicate(
                 crabka_pgcatalog::create_server_with_identity_owned_ops(
                     kv,
@@ -1799,6 +1805,12 @@ pub(crate) fn execute_ddl(
             options,
         } => {
             let name = resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?;
+            require_foreign_usage(
+                kv,
+                crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                server,
+                fctx,
+            )?;
             crate::usertype::ensure_relation_type_name_available(kv, &name)?;
             let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
             let inheritance_parents = inherits
@@ -3639,6 +3651,25 @@ fn require_foreign_ownership(
         }
     }
     Ok(())
+}
+
+fn require_foreign_usage(
+    kv: &dyn Kv,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    name: &str,
+    fctx: ForeignCtx<'_>,
+) -> Result<(), ExecError> {
+    if crate::catalog_fn::foreign_usage_is_held(kv, target, name, fctx.effective_role())? {
+        return Ok(());
+    }
+    let kind = match target {
+        crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => "foreign-data wrapper",
+        crabka_pgcatalog::ForeignPrivilegeTarget::Server => "foreign server",
+    };
+    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42501",
+        format!("permission denied for {kind} {name}"),
+    )))
 }
 
 /// The role an `OWNER TO` or `CREATE SCHEMA AUTHORIZATION` clause names,

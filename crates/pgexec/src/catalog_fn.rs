@@ -2297,6 +2297,7 @@ fn has_foreign_privilege(
     let Some(kv) = ctx.catalog() else {
         return Ok(Datum::Bool(true));
     };
+    let role = effective_privilege_role(&role);
     let owner = match target {
         crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => {
             crabka_pgcatalog::get_fdw(kv, object)?.owner
@@ -2305,7 +2306,6 @@ fn has_foreign_privilege(
             crabka_pgcatalog::get_server(kv, object)?.owner
         }
     };
-    let role = effective_privilege_role(&role);
     if crate::rls::role_is_superuser(kv, &role)?
         || crabka_pgcatalog::role_has_privs_of(kv, &role, &owner)?
     {
@@ -2314,8 +2314,32 @@ fn has_foreign_privilege(
     if grant_option {
         return Ok(Datum::Bool(false));
     }
+    foreign_usage_is_held(kv, target, object, &role).map(Datum::Bool)
+}
+
+/// Whether `role` can use one foreign object through ownership, membership, or
+/// an explicit/public `USAGE` grant.
+pub(crate) fn foreign_usage_is_held(
+    kv: &dyn Kv,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    object: &str,
+    role: &str,
+) -> Result<bool, ExecError> {
+    let owner = match target {
+        crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => {
+            crabka_pgcatalog::get_fdw(kv, object)?.owner
+        }
+        crabka_pgcatalog::ForeignPrivilegeTarget::Server => {
+            crabka_pgcatalog::get_server(kv, object)?.owner
+        }
+    };
+    if crate::rls::role_is_superuser(kv, role)?
+        || crabka_pgcatalog::role_has_privs_of(kv, role, &owner)?
+    {
+        return Ok(true);
+    }
     for grantee in crabka_pgcatalog::list_roles(kv)? {
-        if crabka_pgcatalog::role_has_privs_of(kv, &role, &grantee.name)?
+        if crabka_pgcatalog::role_has_privs_of(kv, role, &grantee.name)?
             && crabka_pgcatalog::foreign_privilege_is_granted(
                 kv,
                 target,
@@ -2324,16 +2348,16 @@ fn has_foreign_privilege(
                 "USAGE",
             )?
         {
-            return Ok(Datum::Bool(true));
+            return Ok(true);
         }
     }
-    Ok(Datum::Bool(crabka_pgcatalog::foreign_privilege_is_granted(
+    Ok(crabka_pgcatalog::foreign_privilege_is_granted(
         kv,
         target,
         object,
         crabka_pgcatalog::PUBLIC_ROLE,
         "USAGE",
-    )?))
+    )?)
 }
 
 fn role_argument_name_required(ctx: &EvalCtx, argument: &Datum) -> Result<String, ExecError> {
@@ -3670,10 +3694,10 @@ mod tests {
 
     use super::{
         catalog_func, char_to_encoding, coerce_rule_unknown_literals, coerce_rule_values_literals,
-        constraint_def, encoding_to_char, foreign_key_definition, has_privilege, indexes_size,
-        is_catalog_func, is_simple_rule_action, quote_identifier, relation_size,
-        relation_size_with_fork, size_bytes, size_pretty, table_size, total_relation_size,
-        view_def,
+        constraint_def, encoding_to_char, foreign_key_definition, foreign_privilege_target,
+        foreign_usage_is_held, has_privilege, indexes_size, is_catalog_func, is_simple_rule_action,
+        quote_identifier, relation_size, relation_size_with_fork, size_bytes, size_pretty,
+        table_size, total_relation_size, view_def,
     };
     use crate::error::ExecError;
 
@@ -3931,6 +3955,15 @@ mod tests {
                 .expect("privilege answer")
                     == Datum::Bool(false)
             );
+            assert!(
+                !foreign_usage_is_held(
+                    kv.as_ref(),
+                    foreign_privilege_target(function).expect("foreign target"),
+                    object,
+                    "reader",
+                )
+                .expect("usage answer")
+            );
         }
 
         for (target, name) in [
@@ -3959,6 +3992,15 @@ mod tests {
                 )
                 .expect("privilege answer")
                     == Datum::Bool(true)
+            );
+            assert!(
+                foreign_usage_is_held(
+                    kv.as_ref(),
+                    foreign_privilege_target(function).expect("foreign target"),
+                    object,
+                    "reader",
+                )
+                .expect("usage answer")
             );
         }
     }

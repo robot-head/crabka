@@ -7991,6 +7991,76 @@ fn fdw_and_server_are_owned_by_the_creating_role() {
 }
 
 #[test]
+fn foreign_usage_is_required_to_create_servers_and_foreign_tables() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for role in ["owner", "reader"] {
+        crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
+    }
+    let owner = super::ForeignCtx {
+        current_user: "owner",
+        session_user: "owner",
+        ..super::ForeignCtx::none()
+    };
+    let reader = super::ForeignCtx {
+        current_user: "reader",
+        session_user: "reader",
+        ..super::ForeignCtx::none()
+    };
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_, ops) = super::execute_ddl(&kv, &stmt, owner, true).expect(sql);
+        kv.write_batch(&ops).expect("apply owner DDL");
+    }
+    for sql in [
+        "CREATE SERVER reader_s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE reader_t (id int4) SERVER s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let error = super::execute_ddl(&kv, &stmt, reader, true).expect_err("USAGE required");
+        assert!(matches!(error, super::ExecError::Remote(ref error) if error.code == "42501"));
+    }
+    for (target, name) in [
+        (crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper, "w"),
+        (crabka_pgcatalog::ForeignPrivilegeTarget::Server, "s"),
+    ] {
+        let ops = crabka_pgcatalog::grant_foreign_privileges_ops(
+            &kv,
+            target,
+            &[name.into()],
+            &["reader".into()],
+            &["USAGE".into()],
+        )
+        .expect("grant usage");
+        kv.write_batch(&ops).expect("apply usage grant");
+    }
+    for sql in [
+        "CREATE SERVER reader_s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE reader_t (id int4) SERVER s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_, ops) = super::execute_ddl(&kv, &stmt, reader, true).expect(sql);
+        kv.write_batch(&ops).expect("apply reader DDL");
+    }
+}
+
+#[test]
 fn foreign_object_usage_grants_follow_rename_and_require_the_owner() {
     use crabka_pgkv::{Kv, MemKv};
 
