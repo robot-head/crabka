@@ -7362,6 +7362,29 @@ pub fn get_user_mapping(
     Ok(deserialize_user_mapping(&bytes)?)
 }
 
+/// Resolve a mapping for `user`, falling back to the server's `PUBLIC` mapping.
+///
+/// A user-specific mapping wins. Missing mappings are normal for a foreign
+/// scan, while storage errors still reach the caller.
+pub fn get_user_mapping_or_public(
+    kv: &dyn Kv,
+    user: &str,
+    server: &str,
+) -> Result<Option<UserMapping>, CatalogError> {
+    match get_user_mapping(kv, user, server) {
+        Ok(mapping) => Ok(Some(mapping)),
+        Err(CatalogError::UndefinedObject(_)) if user != PUBLIC_ROLE => {
+            match get_user_mapping(kv, PUBLIC_ROLE, server) {
+                Ok(mapping) => Ok(Some(mapping)),
+                Err(CatalogError::UndefinedObject(_)) => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+        Err(CatalogError::UndefinedObject(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Apply option changes to a user mapping and return the catalog write batch.
 pub fn alter_user_mapping_options_ops(
     kv: &dyn Kv,
@@ -9377,6 +9400,33 @@ mod tests {
         let m = get_user_mapping(&kv, "alice", "s").expect("must be persisted");
         assert_eq!(m.user, "alice");
         assert_eq!(m.server, "s");
+    }
+
+    #[test]
+    fn user_mapping_lookup_falls_back_to_public() {
+        let kv = MemKv::new();
+        create_user_mapping(
+            &kv,
+            PUBLIC_ROLE,
+            "s",
+            vec![("user".into(), "shared".into())],
+        )
+        .expect("public mapping");
+        assert_eq!(
+            get_user_mapping_or_public(&kv, "alice", "s")
+                .expect("lookup")
+                .expect("public fallback")
+                .user,
+            PUBLIC_ROLE
+        );
+        create_user_mapping(&kv, "alice", "s", vec![]).expect("specific mapping");
+        assert_eq!(
+            get_user_mapping_or_public(&kv, "alice", "s")
+                .expect("lookup")
+                .expect("specific mapping")
+                .user,
+            "alice"
+        );
     }
 
     #[test]

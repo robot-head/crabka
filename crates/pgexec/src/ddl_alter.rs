@@ -1826,9 +1826,10 @@ pub(crate) fn execute_ddl(
             options,
         } => {
             // Resolve the server (42704 if undefined) and the current user's
-            // optional mapping (no mapping → no credentials).
+            // optional mapping (falling back to PUBLIC, then no credentials).
             let srv = crabka_pgcatalog::get_server(kv, server)?;
-            let mapping = crabka_pgcatalog::get_user_mapping(kv, fctx.current_user, server).ok();
+            let mapping =
+                crabka_pgcatalog::get_user_mapping_or_public(kv, fctx.current_user, server)?;
             // A scanner must be registered (the `kafka` feature is built in).
             let scanner = fctx.scanner.ok_or_else(|| {
                 ExecError::Unsupported("foreign tables require the `kafka` feature".into())

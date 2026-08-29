@@ -137,14 +137,13 @@ pub(super) fn scan_stored_relation(
             ExecError::Unsupported("foreign tables require the `kafka` feature".into())
         })?;
         let server = crabka_pgcatalog::get_server(catalog_kv, &meta.server)?;
-        // A per-user mapping is optional: fall back to no credentials when the
-        // current user has none registered for this server.
-        let mapping = crabka_pgcatalog::get_user_mapping(
+        // A per-user mapping is optional; PostgreSQL falls back to PUBLIC when
+        // the current role has no mapping on this server.
+        let mapping = crabka_pgcatalog::get_user_mapping_or_public(
             catalog_kv,
             read_ctx.fctx.current_user,
             &meta.server,
-        )
-        .ok();
+        )?;
         // SP40 Task 14: pass the pushed-down slice when present (single foreign
         // table). The residual WHERE still re-filters locally, so results are
         // identical whether or not the scan honors `bounds`.
