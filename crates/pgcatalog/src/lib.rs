@@ -969,6 +969,9 @@ pub enum CatalogError {
     /// Generic "object already exists" (42710), for FDW, server, user-mapping.
     #[error("object \"{0}\" already exists")]
     DuplicateObject(String),
+    /// An FDW option list names one setting more than once.
+    #[error("option \"{0}\" provided more than once")]
+    DuplicateOption(String),
     /// Generic "undefined object" (42704), for FDW, server, user-mapping.
     #[error("object \"{0}\" does not exist")]
     UndefinedObject(String),
@@ -1048,6 +1051,7 @@ impl CatalogError {
             | CatalogError::UnmovableSchemaObject { .. }
             | CatalogError::InvalidSharding(_) => "0A000",
             CatalogError::DuplicateObject(_)
+            | CatalogError::DuplicateOption(_)
             | CatalogError::DuplicateConstraint { .. }
             | CatalogError::DuplicatePolicy { .. } => "42710",
             CatalogError::DuplicateSchema(_) => "42P06",
@@ -7039,6 +7043,7 @@ pub fn create_fdw_with_routines_ops(
     validator: Option<&str>,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    ensure_unique_options(&options)?;
     if kv.get(&key::fdw_key(name))?.is_some() {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
@@ -7147,6 +7152,7 @@ pub fn create_server_with_identity_ops(
     version: Option<&str>,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    ensure_unique_options(&options)?;
     if kv.get(&key::server_key(name))?.is_some() {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
@@ -7239,6 +7245,7 @@ pub fn create_user_mapping_ops(
     server: &str,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    ensure_unique_options(&options)?;
     if kv.get(&key::user_mapping_key(user, server))?.is_some() {
         return Err(CatalogError::DuplicateObject(format!("{user}@{server}")));
     }
@@ -7365,6 +7372,7 @@ pub fn create_foreign_table_ops(
     creation: TableCreation<'_>,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     let _ = get_server(kv, server)?;
+    ensure_unique_options(&options)?;
 
     if relation_exists(kv, name)? {
         return Err(CatalogError::DuplicateTable(name.to_string()));
@@ -7403,6 +7411,16 @@ pub fn create_foreign_table_ops(
     ];
     batch.extend(bump);
     Ok((next, batch))
+}
+
+fn ensure_unique_options(options: &[(String, String)]) -> Result<(), CatalogError> {
+    let mut names = HashSet::with_capacity(options.len());
+    for (name, _) in options {
+        if !names.insert(name) {
+            return Err(CatalogError::DuplicateOption(name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Read the next `TableId`. This is 1 when the meta key is absent.
@@ -9127,6 +9145,28 @@ mod tests {
         create_fdw(&kv, "w", vec![]).expect("create");
         let fdw = get_fdw(&kv, "w").expect("must be persisted");
         assert_eq!(fdw.name, "w");
+    }
+
+    #[test]
+    fn foreign_options_must_be_unique() {
+        let kv = MemKv::new();
+        let options = || {
+            vec![
+                ("testing".into(), "1".into()),
+                ("testing".into(), "2".into()),
+            ]
+        };
+        let error = create_fdw(&kv, "w", options()).expect_err("fdw options must be unique");
+        assert_eq!(
+            error.to_string(),
+            "option \"testing\" provided more than once"
+        );
+        assert_eq!(error.sqlstate(), "42710");
+        assert!(create_server(&kv, "s", "w", options()).is_err());
+        assert!(create_user_mapping(&kv, "alice", "s", options()).is_err());
+
+        create_server(&kv, "valid", "w", vec![]).expect("create server");
+        assert!(create_foreign_table(&kv, &rel("t"), vec![], "valid", options()).is_err());
     }
 
     #[test]
