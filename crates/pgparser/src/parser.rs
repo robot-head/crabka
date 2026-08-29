@@ -8074,7 +8074,7 @@ impl Parser {
             if *self.peek() != Token::RParen {
                 loop {
                     if self.eat_keyword(Keyword::Like) {
-                        like.push(self.like_clause()?);
+                        like.push(self.like_clause(columns.len())?);
                     } else if self.starts_table_constraint() {
                         constraints.push(self.table_constraint()?);
                     } else {
@@ -8497,11 +8497,12 @@ impl Parser {
 
     /// `(LIKE source [ {INCLUDING | EXCLUDING} <option> …])`. The `LIKE` itself
     /// is already consumed.
-    fn like_clause(&mut self) -> Result<crate::ast::LikeClause, ParseError> {
+    fn like_clause(&mut self, position: usize) -> Result<crate::ast::LikeClause, ParseError> {
         use crate::ast::LikeOption;
         let source = self.relation_ref()?;
         let mut clause = crate::ast::LikeClause {
             source,
+            position,
             including: Vec::new(),
         };
         loop {
@@ -19464,6 +19465,20 @@ mod tests {
         };
         assert!(!like[0].includes(crate::ast::LikeOption::Generated));
         assert!(like[0].includes(crate::ast::LikeOption::Defaults));
+    }
+
+    #[test]
+    fn create_table_like_records_its_written_column_position() {
+        use assert2::assert;
+
+        let Statement::CreateTable { columns, like, .. } =
+            one("CREATE TABLE copied (before int4, LIKE source, after text)")
+        else {
+            panic!("expected create table");
+        };
+        assert!(columns.len() == 2);
+        assert!(like.len() == 1);
+        assert!(like[0].position == 1);
     }
 
     #[test]

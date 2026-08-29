@@ -2695,6 +2695,8 @@ impl LikeOption {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LikeClause {
     pub source: RelationRef,
+    /// Number of local columns written before this clause.
+    pub position: usize,
     /// The properties an `INCLUDING` clause turned on, in no particular order.
     /// `EXCLUDING` removes an option, so the last mention of a property wins
     /// exactly as it does in `PostgreSQL`.

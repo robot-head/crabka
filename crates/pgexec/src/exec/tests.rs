@@ -1421,6 +1421,35 @@ async fn create_table_like_including_indexes_copies_ordinary_indexes() {
     );
 }
 
+#[tokio::test]
+async fn create_table_like_keeps_the_written_column_position() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE source (copied int4)").await;
+    run_s(
+        &mut session,
+        "CREATE TABLE target (before int4, LIKE source, after text)",
+    )
+    .await;
+    run_s(&mut session, "INSERT INTO target VALUES (1, 2, 'tail')").await;
+    assert!(
+        text_rows_of(&mut session, "SELECT before, copied, after FROM target").await
+            == vec![text_row(&["1", "2", "tail"])]
+    );
+    run_s(
+        &mut session,
+        "CREATE TABLE target_at_end (before int4, LIKE source)",
+    )
+    .await;
+    run_s(&mut session, "INSERT INTO target_at_end VALUES (3, 4)").await;
+    assert!(
+        text_rows_of(&mut session, "SELECT before, copied FROM target_at_end").await
+            == vec![text_row(&["3", "4"])]
+    );
+}
+
 /// A row-security policy that reads a column depends on it. `PostgreSQL`
 /// refuses the drop and names the policy, and `CASCADE` takes the whole
 /// policy — never a policy left reading a column that is gone.

@@ -547,6 +547,7 @@ pub(crate) fn create_table_definition(
 ) -> Result<TableDefinition, ExecError> {
     let resolution = ctx.resolution();
     let mut cols: Vec<Column> = Vec::new();
+    let mut copied_columns = Vec::new();
     let mut checks: Vec<crabka_pgcatalog::CheckConstraint> = Vec::new();
     let mut sequences: Vec<(crabka_pgcatalog::RelationName, Sequence)> = Vec::new();
     let mut indexes: Vec<crabka_pgcatalog::NewIndex> = Vec::new();
@@ -590,7 +591,7 @@ pub(crate) fn create_table_definition(
             if !clause.includes(crabka_pgparser::ast::LikeOption::Generated) {
                 copied.generated = None;
             }
-            cols.push(copied);
+            copied_columns.push((clause.position, copied));
         }
         if clause.includes(crabka_pgparser::ast::LikeOption::Constraints) {
             for check in &source.checks {
@@ -616,7 +617,11 @@ pub(crate) fn create_table_definition(
     }
 
     let primary_key_columns = create_table_primary_key_columns(columns, constraints);
-    for column in columns {
+    let mut copied = copied_columns.into_iter().peekable();
+    for (position, column) in columns.iter().enumerate() {
+        while copied.peek().is_some_and(|(at, _)| *at == position) {
+            cols.push(copied.next().expect("peeked copied column").1);
+        }
         cols.push(column_from_ast(
             name,
             column,
@@ -625,6 +630,7 @@ pub(crate) fn create_table_definition(
             &primary_key_columns,
         )?);
     }
+    cols.extend(copied.map(|(_, column)| column));
     // A `CHECK`'s generated name is `<table>_<column>_check` when the predicate
     // references exactly one of the relation's columns, so the name depends on
     // the columns the relation *has* — inherited ones included.
