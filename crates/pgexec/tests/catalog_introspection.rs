@@ -144,7 +144,12 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     let engine = SqlEngine::new();
     run(
         &engine,
-        "CREATE FOREIGN DATA WRAPPER fdw HANDLER fdw_handler VALIDATOR fdw_validator OPTIONS (kind 'test')",
+        "CREATE FUNCTION fdw_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE FOREIGN DATA WRAPPER fdw HANDLER fdw_handler VALIDATOR postgresql_fdw_validator OPTIONS (kind 'test')",
     )
     .await;
     run(
@@ -169,7 +174,12 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
             "SELECT fdwname, fdwhandler::text, fdwvalidator::text, fdwoptions FROM pg_foreign_data_wrapper",
         )
         .await
-            == vec![some(&["fdw", "fdw_handler", "fdw_validator", "{kind=test}"])]
+            == vec![some(&[
+                "fdw",
+                "fdw_handler",
+                "postgresql_fdw_validator",
+                "{kind=test}"
+            ])]
     );
     assert!(
         grid(
@@ -185,7 +195,7 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
             "SELECT umuser = 0, umserver > 0 FROM pg_user_mapping",
         )
         .await
-            == vec![some(&["t", "t"])]
+            == vec![some(&["f", "t"])]
     );
     assert!(
         grid(
@@ -472,6 +482,12 @@ async fn system_catalog_oid_indexes_keep_pg18_catalog_identity_and_links() {
                 some(&["pg_enum", "3502", "pg_enum_oid_index"]),
                 some(&["pg_event_trigger", "3468", "pg_event_trigger_oid_index"]),
                 some(&["pg_extension", "3080", "pg_extension_oid_index"]),
+                some(&[
+                    "pg_foreign_data_wrapper",
+                    "112",
+                    "pg_foreign_data_wrapper_oid_index"
+                ]),
+                some(&["pg_foreign_server", "113", "pg_foreign_server_oid_index"]),
                 some(&["pg_language", "2682", "pg_language_oid_index"]),
                 some(&[
                     "pg_largeobject_metadata",
@@ -498,6 +514,7 @@ async fn system_catalog_oid_indexes_keep_pg18_catalog_identity_and_links() {
                 some(&["pg_ts_config", "3712", "pg_ts_config_oid_index"]),
                 some(&["pg_ts_dict", "3605", "pg_ts_dict_oid_index"]),
                 some(&["pg_type", "2703", "pg_type_oid_index"]),
+                some(&["pg_user_mapping", "174", "pg_user_mapping_oid_index"]),
             ]
     );
 }

@@ -2704,6 +2704,16 @@ pub(crate) const BUILTIN_CATALOG_OID_INDEXES: &[BuiltinCatalogOidIndex] = &[
         oid: 3080,
     },
     BuiltinCatalogOidIndex {
+        table: "pg_foreign_data_wrapper",
+        name: "pg_foreign_data_wrapper_oid_index",
+        oid: 112,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_foreign_server",
+        name: "pg_foreign_server_oid_index",
+        oid: 113,
+    },
+    BuiltinCatalogOidIndex {
         table: "pg_language",
         name: "pg_language_oid_index",
         oid: 2682,
@@ -2772,6 +2782,11 @@ pub(crate) const BUILTIN_CATALOG_OID_INDEXES: &[BuiltinCatalogOidIndex] = &[
         table: "pg_trigger",
         name: "pg_trigger_oid_index",
         oid: 2702,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_user_mapping",
+        name: "pg_user_mapping_oid_index",
+        oid: 174,
     },
 ];
 
