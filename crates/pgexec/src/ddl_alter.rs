@@ -1682,6 +1682,7 @@ pub(crate) fn execute_ddl(
             validator,
             options,
         } => {
+            require_fdw_alter_superuser(kv, name, fctx)?;
             require_foreign_ownership(
                 kv,
                 crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
@@ -3741,20 +3742,43 @@ fn require_fdw_create_superuser(
     if crate::rls::role_is_superuser(kv, fctx.effective_role())? {
         return Ok(());
     }
-    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
-        "42501",
-        format!("permission denied to create foreign-data wrapper \"{name}\""),
-    )))
+    Err(ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "42501",
+            format!("permission denied to create foreign-data wrapper \"{name}\""),
+        )
+        .with_hint("Must be superuser to create a foreign-data wrapper."),
+    ))
 }
 
 fn require_fdw_owner_superuser(kv: &dyn Kv, name: &str, owner: &str) -> Result<(), ExecError> {
     if crate::rls::role_is_superuser(kv, owner)? {
         return Ok(());
     }
-    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
-        "42501",
-        format!("permission denied to change owner of foreign-data wrapper \"{name}\""),
-    )))
+    Err(ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "42501",
+            format!("permission denied to change owner of foreign-data wrapper \"{name}\""),
+        )
+        .with_hint("The owner of a foreign-data wrapper must be a superuser."),
+    ))
+}
+
+fn require_fdw_alter_superuser(
+    kv: &dyn Kv,
+    name: &str,
+    fctx: ForeignCtx<'_>,
+) -> Result<(), ExecError> {
+    if crate::rls::role_is_superuser(kv, fctx.effective_role())? {
+        return Ok(());
+    }
+    Err(ExecError::Remote(
+        crabka_pgwire::error::PgError::error(
+            "42501",
+            format!("permission denied to alter foreign-data wrapper \"{name}\""),
+        )
+        .with_hint("Must be superuser to alter a foreign-data wrapper."),
+    ))
 }
 
 fn require_new_owner_role(kv: &dyn Kv, fctx: ForeignCtx<'_>, owner: &str) -> Result<(), ExecError> {

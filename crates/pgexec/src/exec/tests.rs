@@ -8213,6 +8213,19 @@ fn foreign_owner_changes_enforce_fdw_and_server_rules() {
         .expect_err("new owner must be assumable");
     assert!(matches!(error, super::ExecError::Remote(ref error)
         if error.code == "42501" && error.message == "must be able to SET ROLE \"owner\""));
+
+    let error = super::execute_ddl(
+        &kv,
+        &alter("ALTER FOREIGN DATA WRAPPER w OPTIONS (ADD option 'value')"),
+        alice,
+        true,
+    )
+    .expect_err("only superusers may alter FDWs");
+    assert!(matches!(error, super::ExecError::Remote(ref error)
+        if error.code == "42501"
+            && error.message == "permission denied to alter foreign-data wrapper \"w\""
+            && error.diagnostics.as_ref().and_then(|diagnostics| diagnostics.hint.as_deref())
+                == Some("Must be superuser to alter a foreign-data wrapper.")));
 }
 
 #[test]
