@@ -1657,7 +1657,7 @@ fn pg_user_mappings_rows(kv: &dyn Kv, current_user: &str) -> Result<Vec<Vec<Datu
                     mapping.server.clone(),
                 ))
             })?;
-            let visible = user_mapping_visible(kv, &mapping, owner, current_user)?;
+            let visible = user_mapping_option_visible(kv, &mapping, owner, current_user)?;
             Ok(vec![
                 int(i32::try_from(mapping.oid).expect("user mapping oid fits i32")),
                 text(&mapping.server),
@@ -4190,20 +4190,24 @@ fn user_mapping_option_rows(
     database: &str,
     current_user: &str,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
-    Ok(visible_user_mappings(kv, current_user)?
-        .into_iter()
-        .flat_map(|mapping| {
-            mapping.options.into_iter().map(move |(name, value)| {
-                vec![
-                    text(user_mapping_authorization_identifier(&mapping.user)),
-                    text(database),
-                    text(&mapping.server),
-                    text(&name),
-                    text(&value),
-                ]
-            })
-        })
-        .collect())
+    let mut rows = Vec::new();
+    for (mapping, owner) in visible_user_mappings(kv, current_user)? {
+        let show_value = user_mapping_option_visible(kv, &mapping, &owner, current_user)?;
+        for (name, value) in mapping.options {
+            rows.push(vec![
+                text(user_mapping_authorization_identifier(&mapping.user)),
+                text(database),
+                text(&mapping.server),
+                text(&name),
+                if show_value {
+                    text(&value)
+                } else {
+                    Datum::Null
+                },
+            ]);
+        }
+    }
+    Ok(rows)
 }
 
 fn user_mapping_rows(
@@ -4213,7 +4217,7 @@ fn user_mapping_rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(visible_user_mappings(kv, current_user)?
         .into_iter()
-        .map(|mapping| {
+        .map(|(mapping, _)| {
             vec![
                 text(user_mapping_authorization_identifier(&mapping.user)),
                 text(database),
@@ -4226,7 +4230,7 @@ fn user_mapping_rows(
 fn visible_user_mappings(
     kv: &dyn Kv,
     current_user: &str,
-) -> Result<Vec<crabka_pgcatalog::UserMapping>, ExecError> {
+) -> Result<Vec<(crabka_pgcatalog::UserMapping, String)>, ExecError> {
     let server_owners = foreign_server_owners(kv)?;
     let mut mappings = Vec::new();
     for mapping in crabka_pgcatalog::list_user_mappings(kv)? {
@@ -4235,8 +4239,8 @@ fn visible_user_mappings(
                 mapping.server.clone(),
             ))
         })?;
-        if user_mapping_visible(kv, &mapping, owner, current_user)? {
-            mappings.push(mapping);
+        if foreign_server_visible(kv, &mapping.server, current_user)? {
+            mappings.push((mapping, owner.clone()));
         }
     }
     Ok(mappings)
@@ -4249,7 +4253,20 @@ fn foreign_server_owners(kv: &dyn Kv) -> Result<BTreeMap<String, String>, ExecEr
         .collect())
 }
 
-fn user_mapping_visible(
+fn foreign_server_visible(
+    kv: &dyn Kv,
+    server: &str,
+    current_user: &str,
+) -> Result<bool, ExecError> {
+    crate::catalog_fn::foreign_usage_is_held(
+        kv,
+        crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+        server,
+        current_user,
+    )
+}
+
+fn user_mapping_option_visible(
     kv: &dyn Kv,
     mapping: &crabka_pgcatalog::UserMapping,
     server_owner: &str,
@@ -4953,6 +4970,51 @@ mod tests {
         assert!(options("owner", "reader") == Datum::Null);
         assert!(options("owner", crabka_pgcatalog::PUBLIC_ROLE) == secret("public"));
         assert!(options(crabka_pgcatalog::BOOTSTRAP_ROLE, "other") == secret("other"));
+
+        let reader_session = SessionIdent {
+            current_user: "reader",
+            ..test_session()
+        };
+        assert_eq!(
+            rows(&kv, "information_schema.user_mappings", reader_session)
+                .expect("information schema mappings"),
+            vec![
+                vec![text("other"), text("postgres"), text("s")],
+                vec![text("PUBLIC"), text("postgres"), text("s")],
+                vec![text("reader"), text("postgres"), text("s")],
+            ]
+        );
+        assert_eq!(
+            rows(
+                &kv,
+                "information_schema.user_mapping_options",
+                reader_session,
+            )
+            .expect("information schema mapping options"),
+            vec![
+                vec![
+                    text("other"),
+                    text("postgres"),
+                    text("s"),
+                    text("user"),
+                    Datum::Null,
+                ],
+                vec![
+                    text("PUBLIC"),
+                    text("postgres"),
+                    text("s"),
+                    text("user"),
+                    Datum::Null,
+                ],
+                vec![
+                    text("reader"),
+                    text("postgres"),
+                    text("s"),
+                    text("user"),
+                    text("reader-secret"),
+                ],
+            ]
+        );
     }
 
     #[test]
