@@ -3290,6 +3290,32 @@ fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             ]);
         }
     }
+    for wrapper in crabka_pgcatalog::list_fdws(kv)? {
+        if let Some(comment) = crabka_pgcatalog::get_comment(
+            kv,
+            "foreign data wrapper",
+            CommentObject::Named(&wrapper.name),
+        )? {
+            rows.push(vec![
+                int(i32::try_from(wrapper.oid).expect("FDW oid fits int4")),
+                int(relation_oid("pg_foreign_data_wrapper")),
+                int(0),
+                text(&comment),
+            ]);
+        }
+    }
+    for server in crabka_pgcatalog::list_servers(kv)? {
+        if let Some(comment) =
+            crabka_pgcatalog::get_comment(kv, "server", CommentObject::Named(&server.name))?
+        {
+            rows.push(vec![
+                int(i32::try_from(server.oid).expect("server oid fits int4")),
+                int(relation_oid("pg_foreign_server")),
+                int(0),
+                text(&comment),
+            ]);
+        }
+    }
     Ok(rows)
 }
 

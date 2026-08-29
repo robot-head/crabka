@@ -149,7 +149,7 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     .await;
     run(
         &engine,
-        "CREATE FOREIGN DATA WRAPPER fdw HANDLER fdw_handler VALIDATOR postgresql_fdw_validator OPTIONS (kind 'test')",
+        "CREATE FOREIGN DATA WRAPPER fdw HANDLER fdw_handler VALIDATOR postgresql_fdw_validator",
     )
     .await;
     run(
@@ -164,6 +164,12 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     .await;
     run(
         &engine,
+        "COMMENT ON FOREIGN DATA WRAPPER fdw IS 'wrapper comment'",
+    )
+    .await;
+    run(&engine, "COMMENT ON SERVER server IS 'server comment'").await;
+    run(
+        &engine,
         "CREATE FOREIGN TABLE remote (value text) SERVER server OPTIONS (topic 'events')",
     )
     .await;
@@ -171,14 +177,14 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     assert!(
         grid(
             &engine,
-            "SELECT fdwname, fdwhandler::text, fdwvalidator::text, fdwoptions FROM pg_foreign_data_wrapper",
+            "SELECT fdwname, fdwhandler::text, fdwvalidator::text, coalesce(fdwoptions::text, '') FROM pg_foreign_data_wrapper",
         )
         .await
             == vec![some(&[
                 "fdw",
                 "fdw_handler",
                 "postgresql_fdw_validator",
-                "{kind=test}"
+                ""
             ])]
     );
     assert!(
@@ -192,21 +198,18 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     assert!(
         grid(
             &engine,
-            "SELECT array_to_string(ARRAY(SELECT option_name FROM pg_options_to_table(fdwoptions)), ',') \
-             FROM pg_catalog.pg_foreign_data_wrapper fdw \
-             LEFT JOIN pg_catalog.pg_description d \
-               ON d.classoid = fdw.tableoid AND d.objoid = fdw.oid AND d.objsubid = 0",
-        )
-        .await
-            == vec![some(&["kind"])]
-    );
-    assert!(
-        grid(
-            &engine,
             "SELECT srvname, srvtype, srvversion, srvoptions FROM pg_foreign_server",
         )
         .await
             == vec![some(&["server", "test", "1", "{host=local}"])]
+    );
+    assert!(
+        grid(
+            &engine,
+            "SELECT description FROM pg_description WHERE description IN ('wrapper comment', 'server comment') ORDER BY 1",
+        )
+        .await
+            == vec![some(&["server comment"]), some(&["wrapper comment"])]
     );
     assert!(
         grid(
