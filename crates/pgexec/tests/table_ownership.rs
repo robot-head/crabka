@@ -136,12 +136,18 @@ async fn a_temporary_relation_belongs_to_the_session_that_created_it() {
 async fn a_foreign_table_belongs_to_the_role_that_created_it() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
+    run(&mut session, "CREATE FOREIGN DATA WRAPPER kafka_fdw").await;
     run(
         &mut session,
         "CREATE SERVER srv FOREIGN DATA WRAPPER kafka_fdw",
     )
     .await;
     run(&mut session, "CREATE ROLE importer LOGIN").await;
+    run(
+        &mut session,
+        "GRANT USAGE ON FOREIGN SERVER srv TO importer",
+    )
+    .await;
     run(&mut session, "SET SESSION AUTHORIZATION importer").await;
     run(
         &mut session,

@@ -1860,6 +1860,10 @@ async fn spawn_with_scanner(scanner: Arc<dyn ForeignScanner>) -> u16 {
 async fn create_drop_foreign_objects_roundtrip() {
     let client = connect(spawn().await).await;
     client
+        .batch_execute("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+        .await
+        .expect("create FDW");
+    client
         .batch_execute(
             "CREATE SERVER s FOREIGN DATA WRAPPER kafka_fdw \
              OPTIONS (bootstrap 'h:9092', registry_url 'http://r')",
@@ -1921,6 +1925,10 @@ async fn foreign_select_reads_scanner_rows_with_projection_and_where() {
     });
     let client = connect(spawn_with_scanner(scanner).await).await;
     client
+        .batch_execute("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+        .await
+        .expect("create FDW");
+    client
         .batch_execute(
             "CREATE SERVER s FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'h:9092')",
         )
@@ -1963,6 +1971,10 @@ async fn foreign_select_reads_scanner_rows_with_projection_and_where() {
 #[tokio::test]
 async fn foreign_select_without_scanner_is_unsupported() {
     let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+        .await
+        .expect("create FDW");
     client
         .batch_execute(
             "CREATE SERVER s FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'h:9092')",
@@ -2010,6 +2022,10 @@ async fn import_foreign_schema_materializes_foreign_tables() {
         ],
     });
     let client = connect(spawn_with_scanner(scanner).await).await;
+    client
+        .batch_execute("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+        .await
+        .expect("create FDW");
     client
         .batch_execute(
             "CREATE SERVER s FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'h:9092')",

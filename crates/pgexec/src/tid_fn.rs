@@ -38,11 +38,12 @@
 //! [`EvalCtx`](crate::clock::EvalCtx) — and inventing one to guess with would
 //! trade a visible refusal for a wrong `tid`.
 
+use std::collections::BTreeSet;
+
 use crabka_pgcatalog::{RelationName, Table};
 use crabka_pgkv::Kv;
 use crabka_pgparser::ast::{Expr, FuncCall, QueryBody, SelectItem, SetExpr, Statement, TableExpr};
 use crabka_pgtypes::{ColumnType, Datum, Tid};
-use std::collections::BTreeSet;
 
 use crate::{
     clock::EvalCtx,
@@ -529,6 +530,7 @@ mod tests {
         run(&engine, "INSERT INTO t VALUES (1)").await;
         run(&engine, "CREATE INDEX t_a ON t (a)").await;
         run(&engine, "CREATE TABLE p (a int) PARTITION BY RANGE (a)").await;
+        run(&engine, "CREATE FOREIGN DATA WRAPPER kafka_fdw").await;
         run(
             &engine,
             "CREATE SERVER k FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'b:9092')",

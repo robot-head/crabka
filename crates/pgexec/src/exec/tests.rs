@@ -7856,6 +7856,9 @@ mod pushdown {
         }));
         {
             let mut s = engine.connect();
+            s.simple_query("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+                .await
+                .expect("create FDW");
             s.simple_query(
                 "CREATE SERVER k FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'b:9092')",
             )

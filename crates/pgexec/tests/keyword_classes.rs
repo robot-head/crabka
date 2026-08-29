@@ -946,6 +946,7 @@ async fn a_keyword_that_begins_a_statement_keeps_its_own_syntax() {
     let mut setup = Client::new(&engine);
     setup.run("CREATE TABLE kw_base (n int4)").await;
     setup.run("CREATE TABLE kw_dropme (n int4)").await;
+    setup.run("CREATE FOREIGN DATA WRAPPER kw_fdw").await;
     setup
         .run("CREATE SERVER kw_srv FOREIGN DATA WRAPPER kw_fdw")
         .await;
