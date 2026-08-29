@@ -4157,6 +4157,11 @@ impl Parser {
                 {
                     emitted(I::AlterForeignDataWrapper, self.alter_fdw())
                 }
+                Token::Keyword(Keyword::Foreign)
+                    if matches!(self.peek3(), Token::Keyword(Keyword::Table)) =>
+                {
+                    emitted(I::AlterTable, self.alter_foreign_table())
+                }
                 Token::Keyword(Keyword::Server) => emitted(I::AlterServer, self.alter_server()),
                 // `ALTER USER MAPPING …` and `ALTER USER name …` share a
                 // prefix; only the former is followed by MAPPING.
@@ -4307,6 +4312,14 @@ impl Parser {
 
     fn alter_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("alter")?;
+        self.expect(&Token::Keyword(Keyword::Table))?;
+        self.alter_table_body()
+    }
+
+    /// `ALTER FOREIGN TABLE` takes the `ALTER TABLE` action grammar.
+    fn alter_foreign_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("alter")?;
+        self.expect(&Token::Keyword(Keyword::Foreign))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
         self.alter_table_body()
     }
@@ -25076,6 +25089,15 @@ mod tests {
             ),
             (
                 "ALTER TABLE t RENAME TO u",
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::RenameTable {
+                        new_name: "u".into(),
+                    }],
+                ),
+            ),
+            (
+                "ALTER FOREIGN TABLE t RENAME TO u",
                 alter_table_stmt(
                     "t",
                     vec![AlterTableAction::RenameTable {

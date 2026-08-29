@@ -8019,6 +8019,29 @@ fn comments_on_foreign_objects_are_persisted() {
     );
 }
 
+#[test]
+fn alter_foreign_table_uses_the_alter_table_path() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE t (id int4) SERVER s",
+        "ALTER FOREIGN TABLE t RENAME TO u",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert!(crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("u")).is_ok());
+}
+
 fn command_tag(r: &QueryResult) -> &str {
     match r {
         QueryResult::Command { tag } | QueryResult::Rows { tag, .. } => tag,
