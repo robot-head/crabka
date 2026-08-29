@@ -100,6 +100,9 @@ enum Srf {
     Record(RecordCall),
     PgInputErrorInfo,
     PgListeningChannels,
+    /// `pg_options_to_table(text[])` parses catalog option strings into their
+    /// name/value rows.
+    PgOptionsToTable,
     PgShowAllSettings,
     /// `pg_snapshot_xip(pg_snapshot)` → `xid8`, and `txid_snapshot_xip`, which
     /// is the same expansion reported as `bigint`. One row per running
@@ -329,6 +332,7 @@ fn classify(name: &str) -> Option<Srf> {
         "jsonb_to_recordset" => Srf::Record(RECORD_JSONB_TO.into_set()),
         "pg_input_error_info" => Srf::PgInputErrorInfo,
         "pg_listening_channels" => Srf::PgListeningChannels,
+        "pg_options_to_table" => Srf::PgOptionsToTable,
         "pg_show_all_settings" => Srf::PgShowAllSettings,
         "pg_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Modern),
         "txid_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Legacy),
@@ -554,6 +558,16 @@ pub(crate) fn plan(
         Srf::PgListeningChannels => {
             require_arity(name, &given, (0, 0))?;
             vec![column(&bare, ColumnType::Text)]
+        }
+        Srf::PgOptionsToTable => {
+            require_arity(name, &given, (1, 1))?;
+            if require_array(name, &given, 0)? != ElemType::Text {
+                return Err(undefined_function(name, &given));
+            }
+            vec![
+                column("option_name", ColumnType::Text),
+                column("option_value", ColumnType::Text),
+            ]
         }
         Srf::PgShowAllSettings => {
             require_arity(name, &given, (0, 0))?;
@@ -784,6 +798,7 @@ pub(crate) fn rows_with_memory(
         Srf::Record(call) => record_rows(call, plan, vals, ctx)?,
         Srf::PgInputErrorInfo => input_error_info_rows(vals, ctx)?,
         Srf::PgListeningChannels => pg_listening_channel_rows(ctx),
+        Srf::PgOptionsToTable => pg_options_to_table_rows(vals)?,
         Srf::PgShowAllSettings => crate::exec::catalog_rows::pg_show_all_settings_rows()?,
         Srf::SnapshotXip(family) => snapshot_xip_rows(family, &plan.name, &vals[0], ctx)?,
         Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
@@ -839,6 +854,7 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
         }
         Srf::PgInputErrorInfo => vec![text, text],
         Srf::PgListeningChannels => Vec::new(),
+        Srf::PgOptionsToTable => vec![Some(ColumnType::Array(ElemType::Text))],
         Srf::PgShowAllSettings => Vec::new(),
         Srf::SnapshotXip(family) => vec![Some(family.snapshot_type())],
         // `regclass`, but resolving a *name* to a relation needs the catalog and
@@ -1002,6 +1018,35 @@ fn pg_listening_channel_rows(ctx: &EvalCtx) -> Vec<Vec<Datum>> {
             .map(|channel| vec![Datum::Text(channel)])
             .collect()
     })
+}
+
+/// `pg_options_to_table(text[])` splits each catalog option at its first `=`.
+/// An option without `=` has no value; an empty suffix is an empty text value.
+fn pg_options_to_table_rows(vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let Datum::Array(options) = &vals[0] else {
+        return Err(type_error("pg_options_to_table", &vals[0]));
+    };
+    options
+        .elems
+        .iter()
+        .map(|option| {
+            let Datum::Text(option) = option else {
+                if option.is_null() {
+                    return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                        "22004",
+                        "null array element not allowed in this context",
+                    )));
+                }
+                return Err(type_error("pg_options_to_table", option));
+            };
+            let (name, value) = option
+                .split_once('=')
+                .map_or((option.as_str(), Datum::Null), |(name, value)| {
+                    (name, Datum::Text(value.to_string()))
+                });
+            Ok(vec![Datum::Text(name.to_string()), value])
+        })
+        .collect()
 }
 
 /// `pg_snapshot_xip` / `txid_snapshot_xip`: one row per running transaction the
@@ -3139,6 +3184,7 @@ mod tests {
             "jsonb_path_query",
             "pg_input_error_info",
             "pg_listening_channels",
+            "pg_options_to_table",
             "pg_show_all_settings",
             "pg_snapshot_xip",
             "txid_snapshot_xip",
@@ -3161,6 +3207,32 @@ mod tests {
                 "{name} should not be a set-returning function"
             );
         }
+    }
+
+    #[test]
+    fn pg_options_to_table_splits_once_and_keeps_empty_values() {
+        assert_eq!(
+            call(
+                "pg_options_to_table",
+                &[array(
+                    ElemType::Text,
+                    texts(&["host=broker", "flag", "password=a=b", "empty="]),
+                )],
+            )
+            .expect("options"),
+            vec![
+                vec![Datum::Text("host".into()), Datum::Text("broker".into())],
+                vec![Datum::Text("flag".into()), Datum::Null],
+                vec![Datum::Text("password".into()), Datum::Text("a=b".into())],
+                vec![Datum::Text("empty".into()), Datum::Text(String::new())],
+            ]
+        );
+        let error = call(
+            "pg_options_to_table",
+            &[array(ElemType::Text, vec![Datum::Null])],
+        )
+        .expect_err("NULL array element");
+        assert!(error.into_pg().code == "22004");
     }
 
     #[test]
