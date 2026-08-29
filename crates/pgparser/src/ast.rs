@@ -2488,6 +2488,11 @@ pub enum AlterTableAction {
         expr: Expr,
     },
     DropDefault(String),
+    /// `ALTER [COLUMN] c OPTIONS (ADD | SET | DROP …)` on a foreign table.
+    AlterForeignColumnOptions {
+        column: String,
+        options: Vec<ForeignOptionAction>,
+    },
     /// `ALTER [COLUMN] c SET EXPRESSION AS (<expr>)` — replace a generated
     /// column's generation expression.
     SetExpression {

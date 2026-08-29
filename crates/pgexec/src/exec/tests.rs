@@ -8106,6 +8106,16 @@ fn foreign_table_columns_keep_normal_qualifiers() {
             super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
         kv.write_batch(&ops).expect("apply DDL ops");
     }
+    let stmt = crabka_pgparser::parser::parse(
+        "ALTER FOREIGN TABLE t ALTER COLUMN id OPTIONS (SET remote_name 'id', ADD remote_type 'integer')",
+    )
+    .expect("alter foreign table")
+    .into_iter()
+    .next()
+    .expect("one statement");
+    let (_result, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+        .expect("alter foreign table");
+    kv.write_batch(&ops).expect("apply alter ops");
     let table = crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("t"))
         .expect("foreign table");
     assert!(
@@ -8119,8 +8129,29 @@ fn foreign_table_columns_keep_normal_qualifiers() {
         table.foreign.expect("foreign metadata").column_options,
         vec![(
             "id".into(),
-            vec![("remote_name".into(), "remote_id".into())]
+            vec![
+                ("remote_name".into(), "id".into()),
+                ("remote_type".into(), "integer".into()),
+            ]
         )]
+    );
+    let stmt = crabka_pgparser::parser::parse(
+        "ALTER FOREIGN TABLE t ALTER COLUMN id OPTIONS (DROP remote_type, DROP remote_name)",
+    )
+    .expect("drop foreign options")
+    .into_iter()
+    .next()
+    .expect("one statement");
+    let (_result, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+        .expect("drop foreign options");
+    kv.write_batch(&ops).expect("apply option drops");
+    assert!(
+        crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("t"))
+            .expect("foreign table")
+            .foreign
+            .expect("foreign metadata")
+            .column_options
+            .is_empty()
     );
 }
 

@@ -4734,6 +4734,12 @@ impl Parser {
 
         self.eat_ident_eq("column");
         let column = self.expect_col_id()?;
+        if *self.peek() == Token::Keyword(Keyword::Options) {
+            return Ok(AlterTableAction::AlterForeignColumnOptions {
+                column,
+                options: self.parse_alter_options()?,
+            });
+        }
         if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
             if self.eat_keyword(Keyword::Not) {
                 self.expect(&Token::Keyword(Keyword::Null))?;

@@ -3053,7 +3053,10 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         // `SET EXPRESSION` lands with the other column-attribute writes, after
         // `ADD COLUMN`: one statement may add a generated column and reword its
         // expression in the same breath.
-        Action::AddConstraint(_) | Action::SetDefault { .. } | Action::SetExpression { .. } => 5,
+        Action::AddConstraint(_)
+        | Action::SetDefault { .. }
+        | Action::AlterForeignColumnOptions { .. }
+        | Action::SetExpression { .. } => 5,
         Action::SetSchema(_) => unreachable!("SET SCHEMA is handled before ALTER TABLE passes"),
         Action::OfType(_) | Action::NotOfType => {
             unreachable!("OF and NOT OF are handled before ALTER TABLE passes")
@@ -3097,6 +3100,7 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::DropNotNull(_) => "ALTER COLUMN ... DROP NOT NULL",
         Action::SetDefault { .. } => "ALTER COLUMN ... SET DEFAULT",
         Action::DropDefault(_) => "ALTER COLUMN ... DROP DEFAULT",
+        Action::AlterForeignColumnOptions { .. } => "ALTER COLUMN ... OPTIONS",
         Action::SetExpression { .. } => "ALTER COLUMN ... SET EXPRESSION",
         Action::DropExpression { .. } => "ALTER COLUMN ... DROP EXPRESSION",
         Action::AddConstraint(_) => "ADD CONSTRAINT",
@@ -3179,6 +3183,7 @@ pub(crate) fn alter_action_allows(
     use crabka_pgparser::ast::AlterTableAction as Action;
 
     match action {
+        Action::AlterForeignColumnOptions { .. } => kind == "foreign table",
         // Every kind can be handed to another role.
         Action::OwnerTo(_) => true,
         // A view's columns take defaults, which is what an INSTEAD OF trigger
@@ -3739,6 +3744,36 @@ pub(crate) fn alter_table_action_ops(
         Action::DropDefault(column) => {
             let index = state.column_index(column)?;
             state.table.columns[index].default = None;
+            Ok(())
+        }
+        Action::AlterForeignColumnOptions { column, options } => {
+            state.column_index(column)?;
+            let foreign = state.table.foreign.as_mut().ok_or_else(|| {
+                ExecError::WrongObjectType(format!(
+                    "relation \"{table_name}\" is not a foreign table"
+                ))
+            })?;
+            let changes = foreign_option_mutations(options);
+            if let Some(index) = foreign
+                .column_options
+                .iter()
+                .position(|(name, _)| name == column)
+            {
+                let updated = crabka_pgcatalog::apply_foreign_option_mutations(
+                    &foreign.column_options[index].1,
+                    &changes,
+                )?;
+                if updated.is_empty() {
+                    foreign.column_options.remove(index);
+                } else {
+                    foreign.column_options[index].1 = updated;
+                }
+            } else {
+                let updated = crabka_pgcatalog::apply_foreign_option_mutations(&[], &changes)?;
+                if !updated.is_empty() {
+                    foreign.column_options.push((column.clone(), updated));
+                }
+            }
             Ok(())
         }
         Action::SetExpression { column, predicate } => {

@@ -3770,7 +3770,7 @@ pub fn replace_table_schema_ops(
     let bytes = kv
         .get(&catalog_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
-    let (id, _, options, _, foreign, _, _) = deserialize_schema(&bytes)?;
+    let (id, _, options, _, _, _, _) = deserialize_schema(&bytes)?;
     Ok(vec![WriteOp::Put {
         key: catalog_key(name),
         value: serialize_schema(
@@ -3788,7 +3788,7 @@ pub fn replace_table_schema_ops(
                 ..options
             },
             &table.owner,
-            foreign.as_ref(),
+            table.foreign.as_ref(),
             // Like the row-security flags, the materialized-view metadata comes
             // from the working relation: `REFRESH MATERIALIZED VIEW` folds into
             // the same `Table` an `ALTER` subcommand edits, so re-reading it
