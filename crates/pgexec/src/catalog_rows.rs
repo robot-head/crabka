@@ -143,6 +143,7 @@ pub(crate) fn virtual_catalog_rows(
                 name,
                 crate::catalog_rel::SessionIdent {
                     database: ctx.database(),
+                    current_user: &ctx.current_user,
                     backend_pid: ctx.backend_pid,
                     compute_query_id: ctx.compute_query_id,
                     track_activities: ctx.track_activities,
@@ -155,6 +156,7 @@ pub(crate) fn virtual_catalog_rows(
             name,
             crate::catalog_rel::SessionIdent {
                 database: ctx.database(),
+                current_user: &ctx.current_user,
                 backend_pid: ctx.backend_pid,
                 compute_query_id: ctx.compute_query_id,
                 track_activities: ctx.track_activities,

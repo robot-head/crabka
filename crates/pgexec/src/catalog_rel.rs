@@ -175,6 +175,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_tablespace",
     "pg_trigger",
     "pg_user_mapping",
+    "pg_user_mappings",
     "pg_views",
 ];
 
@@ -251,6 +252,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_tablespace",
     "pg_trigger",
     "pg_user_mapping",
+    "pg_user_mappings",
     "pg_views",
     "information_schema.applicable_roles",
     "information_schema.column_privileges",
@@ -363,6 +365,7 @@ fn system_view_oid(name: &str) -> i32 {
         "information_schema.table_privileges" => 120_020,
         "information_schema.user_mapping_options" => 120_029,
         "information_schema.user_mappings" => 120_030,
+        "pg_user_mappings" => 120_031,
         "information_schema.views" => 120_021,
         _ => 0,
     }
@@ -1043,6 +1046,8 @@ pub(crate) fn columns(name: &str) -> Vec<Column> {
 pub(crate) struct SessionIdent<'a> {
     /// The database the session connected to, as its startup packet spelled it.
     pub database: &'a str,
+    /// The current role, used by system views that redact sensitive fields.
+    pub current_user: &'a str,
     /// The querying session's backend id, which `pg_stat_activity` reports as
     /// its one row's `pid`.
     pub backend_pid: i32,
@@ -1069,6 +1074,7 @@ pub(crate) fn rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     let SessionIdent {
         database,
+        current_user,
         backend_pid,
         compute_query_id,
         track_activities,
@@ -1120,6 +1126,7 @@ pub(crate) fn rows(
         "pg_tablespace" => pg_tablespace_rows(kv),
         "pg_trigger" => pg_trigger_rows(kv),
         "pg_user_mapping" => pg_user_mapping_rows(kv),
+        "pg_user_mappings" => pg_user_mappings_rows(kv, current_user),
         "pg_views" => pg_views_rows(kv, style),
         _ => information_schema_rows(kv, database, name, style),
     }
@@ -1619,6 +1626,49 @@ fn pg_user_mapping_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect())
 }
 
+/// `pg_user_mappings` exposes every mapping, but redacts credentials unless
+/// PostgreSQL would let the querying role use that server or own its public map.
+fn pg_user_mappings_rows(kv: &dyn Kv, current_user: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let server_owners = crabka_pgcatalog::list_servers(kv)?
+        .into_iter()
+        .map(|server| (server.name, server.owner))
+        .collect::<BTreeMap<_, _>>();
+    crabka_pgcatalog::list_user_mappings(kv)?
+        .into_iter()
+        .map(|mapping| {
+            let owner = server_owners.get(&mapping.server).ok_or_else(|| {
+                ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedObject(
+                    mapping.server.clone(),
+                ))
+            })?;
+            let visible = if crate::rls::role_is_superuser(kv, current_user)? {
+                true
+            } else if mapping.user == crabka_pgcatalog::PUBLIC_ROLE {
+                crabka_pgcatalog::role_has_privs_of(kv, current_user, owner)?
+            } else if mapping.user == current_user {
+                crate::catalog_fn::foreign_usage_is_held(
+                    kv,
+                    crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                    &mapping.server,
+                    current_user,
+                )?
+            } else {
+                false
+            };
+            Ok(vec![
+                int(i32::try_from(mapping.oid).expect("user mapping oid fits i32")),
+                text(&mapping.server),
+                text(&mapping.user),
+                if visible {
+                    foreign_option_array(&mapping.options)
+                } else {
+                    Datum::Null
+                },
+            ])
+        })
+        .collect()
+}
+
 fn pg_foreign_table_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let servers = crabka_pgcatalog::list_servers(kv)?;
     let server_oids = servers
@@ -1939,6 +1989,12 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("oid", Int4),
             ("umuser", Int4),
             ("umserver", Int4),
+            ("umoptions", ColumnType::Array(ElemType::Text)),
+        ]),
+        "pg_user_mappings" => cols(&[
+            ("umid", Int4),
+            ("srvname", Text),
+            ("umuser", Text),
             ("umoptions", ColumnType::Array(ElemType::Text)),
         ]),
         "pg_event_trigger" => cols(&[
@@ -4573,6 +4629,7 @@ mod tests {
             std::sync::LazyLock::new(|| jiff::tz::TimeZone::UTC);
         SessionIdent {
             database: crate::exec::DEFAULT_DATABASE,
+            current_user: crabka_pgcatalog::BOOTSTRAP_ROLE,
             backend_pid: 0,
             compute_query_id: false,
             track_activities: false,
@@ -4635,6 +4692,81 @@ mod tests {
             pg_foreign_server_rows(&kv).expect("server rows")[0][2],
             int(alice_oid)
         );
+    }
+
+    #[test]
+    fn user_mapping_view_redacts_other_roles_credentials() {
+        let kv = MemKv::new();
+        for role in ["owner", "reader", "other"] {
+            crabka_pgcatalog::create_role(&kv, role, true).expect("role");
+        }
+        kv.write_batch(
+            &crabka_pgcatalog::create_fdw_with_routines_owned_ops(
+                &kv,
+                "w",
+                None,
+                None,
+                Vec::new(),
+                "owner",
+            )
+            .expect("fdw ops"),
+        )
+        .expect("create fdw");
+        kv.write_batch(
+            &crabka_pgcatalog::create_server_with_identity_owned_ops(
+                &kv,
+                "s",
+                "w",
+                None,
+                None,
+                Vec::new(),
+                "owner",
+            )
+            .expect("server ops"),
+        )
+        .expect("create server");
+        for user in ["reader", "other", crabka_pgcatalog::PUBLIC_ROLE] {
+            crabka_pgcatalog::create_user_mapping(
+                &kv,
+                user,
+                "s",
+                vec![("user".into(), format!("{user}-secret"))],
+            )
+            .expect("mapping");
+        }
+        kv.write_batch(
+            &crabka_pgcatalog::grant_foreign_privileges_ops(
+                &kv,
+                crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                &["s".into()],
+                &["reader".into()],
+                &["USAGE".into()],
+            )
+            .expect("usage grant"),
+        )
+        .expect("grant usage");
+
+        let options = |role: &str, user: &str| {
+            let session = SessionIdent {
+                current_user: role,
+                ..test_session()
+            };
+            rows(&kv, "pg_user_mappings", session)
+                .expect("mapping rows")
+                .into_iter()
+                .find(|row| row[2] == text(user))
+                .expect("mapping row")[3]
+                .clone()
+        };
+        let secret =
+            |user: &str| foreign_option_array(&[("user".into(), format!("{user}-secret"))]);
+
+        assert!(options("reader", "reader") == secret("reader"));
+        assert!(options("reader", "other") == Datum::Null);
+        assert!(options("reader", crabka_pgcatalog::PUBLIC_ROLE) == Datum::Null);
+        assert!(options("owner", "reader") == Datum::Null);
+        assert!(options("owner", crabka_pgcatalog::PUBLIC_ROLE) == secret("public"));
+        assert!(options(crabka_pgcatalog::BOOTSTRAP_ROLE, "other") == secret("other"));
     }
 
     #[test]
