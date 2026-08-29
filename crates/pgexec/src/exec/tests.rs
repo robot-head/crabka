@@ -8051,6 +8051,21 @@ fn foreign_object_usage_grants_follow_rename_and_require_the_owner() {
         session_user: "reader",
         ..super::ForeignCtx::none()
     };
+    for sql in [
+        "ALTER FOREIGN DATA WRAPPER renamed_w OPTIONS (ADD x '1')",
+        "DROP FOREIGN DATA WRAPPER renamed_w",
+        "ALTER SERVER renamed_s OPTIONS (ADD x '1')",
+        "DROP SERVER renamed_s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let error = super::execute_ddl(&kv, &stmt, reader, true).expect_err("reader is not owner");
+        assert!(matches!(error, super::ExecError::Remote(ref error) if error.code == "42501"));
+    }
+
     let error = super::execute_ddl(&kv, &stmt, reader, true).expect_err("reader is not owner");
     assert!(matches!(error, super::ExecError::Remote(ref error) if error.code == "42501"));
 

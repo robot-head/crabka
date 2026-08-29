@@ -1670,6 +1670,12 @@ pub(crate) fn execute_ddl(
             validator,
             options,
         } => {
+            require_foreign_ownership(
+                kv,
+                crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                std::slice::from_ref(name),
+                fctx,
+            )?;
             let ops = if let Some(rename_to) = rename_to {
                 crabka_pgcatalog::rename_fdw_ops(kv, name, rename_to)?
             } else {
@@ -1689,6 +1695,14 @@ pub(crate) fn execute_ddl(
             if_exists,
             cascade,
         } => {
+            if crabka_pgcatalog::get_fdw(kv, name).is_ok() {
+                require_foreign_ownership(
+                    kv,
+                    crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                    std::slice::from_ref(name),
+                    fctx,
+                )?;
+            }
             let ops = ignore_missing_ops(
                 crabka_pgcatalog::drop_fdw_with_dependents_ops(kv, name, *cascade),
                 *if_exists,
@@ -1723,6 +1737,14 @@ pub(crate) fn execute_ddl(
             if_exists,
             cascade,
         } => {
+            if crabka_pgcatalog::get_server(kv, name).is_ok() {
+                require_foreign_ownership(
+                    kv,
+                    crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                    std::slice::from_ref(name),
+                    fctx,
+                )?;
+            }
             let ops = ignore_missing_ops(
                 crabka_pgcatalog::drop_server_with_dependents_ops(kv, name, *cascade),
                 *if_exists,
@@ -1866,6 +1888,12 @@ pub(crate) fn execute_ddl(
             version,
             options,
         } => {
+            require_foreign_ownership(
+                kv,
+                crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                std::slice::from_ref(name),
+                fctx,
+            )?;
             let ops = if let Some(rename_to) = rename_to {
                 crabka_pgcatalog::rename_server_ops(kv, name, rename_to)?
             } else {
