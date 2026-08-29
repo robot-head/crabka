@@ -2280,13 +2280,6 @@ fn has_foreign_privilege(
     privilege: &str,
     grant_option: bool,
 ) -> Result<Datum, ExecError> {
-    let (role, object) = match vals {
-        [Datum::Text(object), _] => (ctx.current_user.clone(), object.as_str()),
-        [role, Datum::Text(object), _] => {
-            (role_argument_name_required(ctx, role)?, object.as_str())
-        }
-        _ => return Ok(Datum::Null),
-    };
     let wanted = privilege.to_ascii_uppercase();
     if !matches!(wanted.as_str(), "USAGE" | "ALL" | "ALL PRIVILEGES") {
         return Err(ExecError::FunctionError {
@@ -2297,13 +2290,21 @@ fn has_foreign_privilege(
     let Some(kv) = ctx.catalog() else {
         return Ok(Datum::Bool(true));
     };
+    let (role, object) = match vals {
+        [object, _] => (ctx.current_user.clone(), object),
+        [role, object, _] => (role_argument_name_required(ctx, role)?, object),
+        _ => return Ok(Datum::Null),
+    };
+    let Some(object) = foreign_privilege_object_name(kv, target, object)? else {
+        return Ok(Datum::Null);
+    };
     let role = effective_privilege_role(&role);
     let owner = match target {
         crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => {
-            crabka_pgcatalog::get_fdw(kv, object)?.owner
+            crabka_pgcatalog::get_fdw(kv, &object)?.owner
         }
         crabka_pgcatalog::ForeignPrivilegeTarget::Server => {
-            crabka_pgcatalog::get_server(kv, object)?.owner
+            crabka_pgcatalog::get_server(kv, &object)?.owner
         }
     };
     if crate::rls::role_is_superuser(kv, &role)?
@@ -2314,7 +2315,32 @@ fn has_foreign_privilege(
     if grant_option {
         return Ok(Datum::Bool(false));
     }
-    foreign_usage_is_held(kv, target, object, &role).map(Datum::Bool)
+    foreign_usage_is_held(kv, target, &object, &role).map(Datum::Bool)
+}
+
+fn foreign_privilege_object_name(
+    kv: &dyn Kv,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    object: &Datum,
+) -> Result<Option<String>, ExecError> {
+    if let Datum::Text(name) = object {
+        return Ok(Some(name.clone()));
+    }
+    let oid = match object {
+        Datum::Oid(oid) => *oid,
+        other => u32::try_from(int_arg(other)?)
+            .map_err(|_| ExecError::Unsupported("foreign object oid is out of range".into()))?,
+    };
+    Ok(match target {
+        crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => crabka_pgcatalog::list_fdws(kv)?
+            .into_iter()
+            .find(|wrapper| wrapper.oid == oid)
+            .map(|wrapper| wrapper.name),
+        crabka_pgcatalog::ForeignPrivilegeTarget::Server => crabka_pgcatalog::list_servers(kv)?
+            .into_iter()
+            .find(|server| server.oid == oid)
+            .map(|server| server.name),
+    })
 }
 
 /// Whether `role` can use one foreign object through ownership, membership, or
@@ -3935,6 +3961,12 @@ mod tests {
         crabka_pgcatalog::create_role(kv.as_ref(), "reader", true).expect("reader role");
         crabka_pgcatalog::create_fdw(kv.as_ref(), "w", Vec::new()).expect("fdw");
         crabka_pgcatalog::create_server(kv.as_ref(), "s", "w", Vec::new()).expect("server");
+        let wrapper_oid = crabka_pgcatalog::get_fdw(kv.as_ref(), "w")
+            .expect("fdw")
+            .oid;
+        let server_oid = crabka_pgcatalog::get_server(kv.as_ref(), "s")
+            .expect("server")
+            .oid;
         let catalog: Arc<dyn Kv> = kv.clone();
         let mut ctx = crate::clock::EvalCtx::for_ddl(
             &crate::relname::ResolutionScope::default(),
@@ -3942,9 +3974,9 @@ mod tests {
         );
         ctx.current_user = "reader".into();
 
-        for (function, object) in [
-            ("has_foreign_data_wrapper_privilege", "w"),
-            ("has_server_privilege", "s"),
+        for (function, object, oid) in [
+            ("has_foreign_data_wrapper_privilege", "w", wrapper_oid),
+            ("has_server_privilege", "s", server_oid),
         ] {
             assert!(
                 has_privilege(
@@ -3953,6 +3985,15 @@ mod tests {
                     &ctx,
                 )
                 .expect("privilege answer")
+                    == Datum::Bool(false)
+            );
+            assert!(
+                has_privilege(
+                    function,
+                    &[Datum::Oid(oid), Datum::Text("USAGE".into())],
+                    &ctx,
+                )
+                .expect("oid privilege answer")
                     == Datum::Bool(false)
             );
             assert!(
@@ -3980,9 +4021,9 @@ mod tests {
             .expect("grant ops");
             kv.write_batch(&ops).expect("apply grant");
         }
-        for (function, object) in [
-            ("has_foreign_data_wrapper_privilege", "w"),
-            ("has_server_privilege", "s"),
+        for (function, object, oid) in [
+            ("has_foreign_data_wrapper_privilege", "w", wrapper_oid),
+            ("has_server_privilege", "s", server_oid),
         ] {
             assert!(
                 has_privilege(
@@ -3991,6 +4032,19 @@ mod tests {
                     &ctx,
                 )
                 .expect("privilege answer")
+                    == Datum::Bool(true)
+            );
+            assert!(
+                has_privilege(
+                    function,
+                    &[
+                        Datum::Text("reader".into()),
+                        Datum::Oid(oid),
+                        Datum::Text("USAGE".into()),
+                    ],
+                    &ctx,
+                )
+                .expect("role and oid privilege answer")
                     == Datum::Bool(true)
             );
             assert!(
@@ -4003,6 +4057,15 @@ mod tests {
                 .expect("usage answer")
             );
         }
+        assert_eq!(
+            has_privilege(
+                "has_server_privilege",
+                &[Datum::Oid(999_999), Datum::Text("USAGE".into())],
+                &ctx,
+            )
+            .expect("missing oid answer"),
+            Datum::Null
+        );
     }
 
     #[test]

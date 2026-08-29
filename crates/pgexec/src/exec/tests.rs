@@ -1578,6 +1578,32 @@ async fn create_foreign_table_like_keeps_the_written_column_position() {
 }
 
 #[tokio::test]
+async fn foreign_object_privilege_functions_accept_catalog_oids() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE FOREIGN DATA WRAPPER privilege_fdw").await;
+    run_s(
+        &mut session,
+        "CREATE SERVER privilege_server FOREIGN DATA WRAPPER privilege_fdw",
+    )
+    .await;
+    assert_eq!(
+        text_rows_of(
+            &mut session,
+            "SELECT has_foreign_data_wrapper_privilege(fdw.oid, 'USAGE'), \
+                    has_server_privilege(srv.oid, 'USAGE'), \
+                    has_server_privilege(999999::oid, 'USAGE') IS NULL \
+             FROM pg_foreign_data_wrapper fdw \
+             CROSS JOIN pg_foreign_server srv \
+             WHERE fdw.fdwname = 'privilege_fdw' \
+               AND srv.srvname = 'privilege_server'",
+        )
+        .await,
+        vec![text_row(&["t", "t", "t"])]
+    );
+}
+
+#[tokio::test]
 async fn foreign_tables_record_inheritance_and_partition_parents() {
     use assert2::assert;
 
