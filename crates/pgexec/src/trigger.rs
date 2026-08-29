@@ -1200,8 +1200,10 @@ pub(crate) fn event_trigger_context(
         parsed::Statement::CreateView { name, .. } | parsed::Statement::DropView { name, .. } => {
             vec![(name, "view")]
         }
-        parsed::Statement::CreateForeignTable { name, .. }
-        | parsed::Statement::DropForeignTable { name, .. } => vec![(name, "foreign table")],
+        parsed::Statement::CreateForeignTable { name, .. } => vec![(name, "foreign table")],
+        parsed::Statement::DropForeignTable { names, .. } => {
+            names.iter().map(|name| (name, "foreign table")).collect()
+        }
         _ => Vec::new(),
     };
     let mut objects = Vec::new();

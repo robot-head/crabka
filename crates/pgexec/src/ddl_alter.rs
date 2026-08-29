@@ -1754,29 +1754,30 @@ pub(crate) fn execute_ddl(
             Ok((command("CREATE FOREIGN TABLE"), ops))
         }
         Statement::DropForeignTable {
-            name,
+            names,
             if_exists,
             cascade: _,
         } => {
             // No object can depend on this one in this engine, so CASCADE and
             // RESTRICT are indistinguishable; both are accepted.
 
-            // A foreign table shares the ordinary table catalog key, so `drop_table`
-            // removes it (catalog entry + sequence + any rows).
-            let name = &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?;
-            // Sharing that key is exactly why the kind has to be checked here:
-            // without it `DROP FOREIGN TABLE t` dropped an ordinary table, and
-            // `DROP FOREIGN TABLE mv` a materialized view, where `PostgreSQL`
-            // reports the kind and points at the command that would have
-            // worked. `IF EXISTS` does not waive it — the relation exists.
-            if let Some(error) = drop_kind_mismatch(kv, name, "foreign table") {
-                return Err(error);
+            let mut ops = Vec::new();
+            for reference in names {
+                // A foreign table shares the ordinary table catalog key, so
+                // `drop_table` removes it (catalog entry + sequence + rows).
+                let name =
+                    &resolve_relation(kv, resolution, reference, SchemaDisposition::Utility)?;
+                // Sharing that key is exactly why the kind has to be checked:
+                // `DROP FOREIGN TABLE t` must not drop an ordinary table.
+                if let Some(error) = drop_kind_mismatch(kv, name, "foreign table") {
+                    return Err(error);
+                }
+                match crabka_pgcatalog::drop_table_ops(kv, name) {
+                    Ok(drop_ops) => ops.extend(drop_ops),
+                    Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => {}
+                    Err(e) => return Err(e.into()),
+                }
             }
-            let ops = match crabka_pgcatalog::drop_table_ops(kv, name) {
-                Ok(ops) => ops,
-                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => Vec::new(),
-                Err(e) => return Err(e.into()),
-            };
             Ok((command("DROP FOREIGN TABLE"), ops))
         }
         Statement::AlterServer {

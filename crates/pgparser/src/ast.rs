@@ -1143,9 +1143,9 @@ pub enum Statement {
         server: String,
         options: OptionList,
     },
-    /// `DROP FOREIGN TABLE [IF EXISTS] <name>`
+    /// `DROP FOREIGN TABLE [IF EXISTS] <name> [, …]`
     DropForeignTable {
-        name: RelationRef,
+        names: Vec<RelationRef>,
         if_exists: bool,
         /// `CASCADE` was written: dependent objects are dropped too rather than
         /// the drop being refused with 2BP01. `RESTRICT` is the default and is

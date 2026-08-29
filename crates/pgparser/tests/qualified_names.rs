@@ -30,8 +30,8 @@ fn named_relation(sql: &str) -> RelationRef {
         | Statement::DropIndex { name, .. }
         | Statement::CreateType { name, .. }
         | Statement::CreateDomain { name, .. }
-        | Statement::CreateForeignTable { name, .. }
-        | Statement::DropForeignTable { name, .. } => name,
+        | Statement::CreateForeignTable { name, .. } => name,
+        Statement::DropForeignTable { mut names, .. } => names.remove(0),
         Statement::Insert { table, .. }
         | Statement::Update { table, .. }
         | Statement::Delete { table, .. }

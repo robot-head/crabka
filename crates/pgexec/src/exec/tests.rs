@@ -8042,6 +8042,35 @@ fn alter_foreign_table_uses_the_alter_table_path() {
     assert!(crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("u")).is_ok());
 }
 
+#[test]
+fn drop_foreign_table_accepts_a_comma_list() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE t1 (id int4) SERVER s",
+        "CREATE FOREIGN TABLE t2 (id int4) SERVER s",
+        "DROP FOREIGN TABLE t1, t2",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    for table in ["t1", "t2"] {
+        assert!(
+            crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public(table))
+                .is_err()
+        );
+    }
+}
+
 fn command_tag(r: &QueryResult) -> &str {
     match r {
         QueryResult::Command { tag } | QueryResult::Rows { tag, .. } => tag,

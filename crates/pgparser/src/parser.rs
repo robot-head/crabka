@@ -15489,17 +15489,20 @@ impl Parser {
         })
     }
 
-    /// `DROP FOREIGN TABLE [IF EXISTS] <name>`
+    /// `DROP FOREIGN TABLE [IF EXISTS] <name> [, …]`
     fn drop_foreign_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect(&Token::Keyword(Keyword::Foreign))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_exists = self.eat_if_exists();
-        let name = self.relation_ref()?;
+        let mut names = vec![self.relation_ref()?];
+        while self.eat_comma() {
+            names.push(self.relation_ref()?);
+        }
         let cascade = self.eat_drop_behavior();
         Ok(Statement::DropForeignTable {
-            name,
+            names,
             if_exists,
             cascade,
         })
@@ -24718,7 +24721,7 @@ mod tests {
         assert_eq!(
             one("DROP FOREIGN TABLE orders"),
             Statement::DropForeignTable {
-                name: "orders".into(),
+                names: vec!["orders".into()],
                 if_exists: false,
                 cascade: false,
             }
@@ -24726,7 +24729,7 @@ mod tests {
         assert_eq!(
             one("DROP FOREIGN TABLE IF EXISTS orders"),
             Statement::DropForeignTable {
-                name: "orders".into(),
+                names: vec!["orders".into()],
                 if_exists: true,
                 cascade: false,
             }
@@ -24852,7 +24855,7 @@ mod tests {
         assert_eq!(
             one("DROP FOREIGN TABLE IF EXISTS mytable"),
             Statement::DropForeignTable {
-                name: "mytable".into(),
+                names: vec!["mytable".into()],
                 if_exists: true,
                 cascade: false,
             }
@@ -24861,7 +24864,7 @@ mod tests {
         assert_eq!(
             one("DROP FOREIGN TABLE mytable"),
             Statement::DropForeignTable {
-                name: "mytable".into(),
+                names: vec!["mytable".into()],
                 if_exists: false,
                 cascade: false,
             }
