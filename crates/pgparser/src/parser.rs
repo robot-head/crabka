@@ -15466,6 +15466,7 @@ impl Parser {
         let name = self.relation_ref()?;
         self.expect(&Token::LParen)?;
         let mut columns = Vec::new();
+        let mut column_options = Vec::new();
         let mut like = Vec::new();
         if *self.peek() != Token::RParen {
             loop {
@@ -15475,6 +15476,10 @@ impl Parser {
                     let col_name = self.expect_col_id()?;
                     let (ty, serial) = self.parse_column_type(&col_name)?;
                     let qualifiers = self.column_qualifiers()?;
+                    let options = self.parse_options()?;
+                    if !options.is_empty() {
+                        column_options.push((col_name.clone(), options));
+                    }
                     columns.push(ColumnDef {
                         name: col_name,
                         ty,
@@ -15497,6 +15502,7 @@ impl Parser {
             if_not_exists,
             name,
             columns,
+            column_options,
             like,
             server,
             options,

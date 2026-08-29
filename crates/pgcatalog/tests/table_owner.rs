@@ -68,6 +68,7 @@ fn a_schema_record_round_trips_its_owner() {
     let foreign = ForeignTableMeta {
         server: "kafka_srv".into(),
         options: vec![("topic".into(), "orders".into())],
+        column_options: Vec::new(),
     };
     let cases = [
         (
@@ -344,6 +345,7 @@ fn a_foreign_table_reads_back_owned_by_the_role_it_was_created_under() {
         vec![Column::new("value", ColumnType::Text)],
         "kafka_srv",
         vec![("topic".into(), "remote".into())],
+        Vec::new(),
         Vec::new(),
         TableCreation {
             owner: "regress_owner",

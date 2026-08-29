@@ -191,6 +191,7 @@ mod tests {
             foreign: Some(ForeignTableMeta {
                 server: "s".into(),
                 options: vec![("topic".into(), "events".into())],
+                column_options: Vec::new(),
             }),
             materialized: None,
             checks: Vec::new(),

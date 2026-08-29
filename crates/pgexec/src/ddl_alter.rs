@@ -1728,6 +1728,7 @@ pub(crate) fn execute_ddl(
             if_not_exists,
             name,
             columns,
+            column_options,
             like,
             server,
             options,
@@ -1750,6 +1751,7 @@ pub(crate) fn execute_ddl(
                     cols,
                     server,
                     options.clone(),
+                    column_options.clone(),
                     checks,
                     fctx.table_creation(),
                 ),
@@ -1881,6 +1883,7 @@ pub(crate) fn execute_ddl(
                     table.columns,
                     &srv.name,
                     table.options,
+                    Vec::new(),
                     Vec::new(),
                     crabka_pgcatalog::TableCreation {
                         owner: fctx.effective_role(),

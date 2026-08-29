@@ -276,6 +276,8 @@ pub struct ForeignTableMeta {
     pub server: String,
     /// Table-level OPTIONS, for example `topic = 'orders'`.
     pub options: Vec<(String, String)>,
+    /// Per-column `OPTIONS`, keyed by the local column name.
+    pub column_options: Vec<(String, Vec<(String, String)>)>,
 }
 
 /// Ordinary-table creation options stored in the catalog schema record.
@@ -7672,6 +7674,7 @@ pub fn create_foreign_table(
         server,
         options,
         Vec::new(),
+        Vec::new(),
         TableCreation::bootstrap(),
     )?;
     kv.write_batch(&batch)?;
@@ -7690,11 +7693,13 @@ pub fn create_foreign_table_ops(
     value_columns: Vec<Column>,
     server: &str,
     options: Vec<(String, String)>,
+    column_options: Vec<(String, Vec<(String, String)>)>,
     checks: Vec<CheckConstraint>,
     creation: TableCreation<'_>,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     let _ = get_server(kv, server)?;
     ensure_unique_options(&options)?;
+    ensure_foreign_column_options(&value_columns, &column_options)?;
 
     if relation_exists(kv, name)? {
         return Err(CatalogError::DuplicateTable(name.to_string()));
@@ -7707,6 +7712,7 @@ pub fn create_foreign_table_ops(
     let meta = ForeignTableMeta {
         server: server.to_string(),
         options,
+        column_options,
     };
 
     let mut batch = vec![
@@ -7741,6 +7747,23 @@ fn ensure_unique_options(options: &[(String, String)]) -> Result<(), CatalogErro
         if !names.insert(name) {
             return Err(CatalogError::DuplicateOption(name.clone()));
         }
+    }
+    Ok(())
+}
+
+fn ensure_foreign_column_options(
+    columns: &[Column],
+    column_options: &[(String, Vec<(String, String)>)],
+) -> Result<(), CatalogError> {
+    let mut names = HashSet::with_capacity(column_options.len());
+    for (column, options) in column_options {
+        if !columns.iter().any(|candidate| candidate.name == *column) {
+            return Err(CatalogError::UndefinedColumn(column.clone()));
+        }
+        if !names.insert(column) {
+            return Err(CatalogError::DuplicateOption(column.clone()));
+        }
+        ensure_unique_options(options)?;
     }
     Ok(())
 }

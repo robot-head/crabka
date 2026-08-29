@@ -8095,7 +8095,7 @@ fn foreign_table_columns_keep_normal_qualifiers() {
     for sql in [
         "CREATE FOREIGN DATA WRAPPER w",
         "CREATE SERVER s FOREIGN DATA WRAPPER w",
-        "CREATE FOREIGN TABLE t (id int4 NOT NULL, value int4 CHECK (value > 0)) SERVER s",
+        "CREATE FOREIGN TABLE t (id int4 NOT NULL OPTIONS (remote_name 'remote_id'), value int4 CHECK (value > 0)) SERVER s",
     ] {
         let stmt = crabka_pgparser::parser::parse(sql)
             .expect(sql)
@@ -8115,6 +8115,13 @@ fn foreign_table_columns_keep_normal_qualifiers() {
             .any(|column| column.name == "id" && column.not_null)
     );
     assert_eq!(table.checks.len(), 1);
+    assert_eq!(
+        table.foreign.expect("foreign metadata").column_options,
+        vec![(
+            "id".into(),
+            vec![("remote_name".into(), "remote_id".into())]
+        )]
+    );
 }
 
 #[test]

@@ -4,8 +4,8 @@
 //! type tag; table option flags (u8: sharded, row security, forced row
 //! security); the owning role (u32 length + name bytes);
 //! followed by a `foreign` flag byte: `0` = ordinary table (no further payload),
-//! `1` = foreign table (server name len u32, server name bytes, option count
-//! u32, then per option: key len u32, key bytes, value len u32, value bytes);
+//! `1` = foreign table (server name len u32, server name bytes, table option
+//! list, then column-option entries, each with a column name and option list);
 //! the `CHECK` constraint list; and a `materialized` flag byte: `0` = not a
 //! materialized view (no further payload), `1` = materialized view (definition
 //! len u32, definition bytes, `relispopulated` byte).
@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 22;
+pub const SCHEMA_VERSION: u8 = 23;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -1204,6 +1204,15 @@ pub fn serialize_schema(
             out.push(1);
             write_str(&mut out, &m.server);
             write_options(&mut out, &m.options);
+            out.extend_from_slice(
+                &u32::try_from(m.column_options.len())
+                    .expect("foreign column-option count must fit in u32")
+                    .to_be_bytes(),
+            );
+            for (column, options) in &m.column_options {
+                write_str(&mut out, column);
+                write_options(&mut out, options);
+            }
         }
     }
     write_checks(&mut out, checks);
@@ -2029,7 +2038,19 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
         1 => {
             let server = read_string(&mut cur)?;
             let options = read_options(&mut cur)?;
-            Some(ForeignTableMeta { server, options })
+            let count = usize::try_from(u32::from_be_bytes(
+                take_n(&mut cur, 4)?.try_into().expect("4"),
+            ))
+            .expect("u32 fits in usize on supported targets");
+            let mut column_options = Vec::with_capacity(count.min(1024));
+            for _ in 0..count {
+                column_options.push((read_string(&mut cur)?, read_options(&mut cur)?));
+            }
+            Some(ForeignTableMeta {
+                server,
+                options,
+                column_options,
+            })
         }
         flag => {
             return Err(KvError::CorruptRow(format!("unknown foreign flag {flag}")));
@@ -3399,6 +3420,7 @@ mod tests {
         let meta = ForeignTableMeta {
             server: "kafka_srv".into(),
             options: vec![("topic".into(), "events".into())],
+            column_options: Vec::new(),
         };
         let bytes = serialize_schema(
             table_id,
@@ -4012,6 +4034,7 @@ mod tests {
             Some(&ForeignTableMeta {
                 server: String::new(),
                 options: Vec::new(),
+                column_options: Vec::new(),
             }),
             None,
             &[],
@@ -4137,6 +4160,7 @@ mod tests {
         let meta = ForeignTableMeta {
             server: "kafka_srv".into(),
             options: vec![("topic".into(), "orders".into())],
+            column_options: Vec::new(),
         };
         let matview = MaterializedView {
             definition: "SELECT x FROM orders".into(),

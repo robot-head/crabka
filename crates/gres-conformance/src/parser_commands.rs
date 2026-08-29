@@ -482,6 +482,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "ALTER FOREIGN DATA WRAPPER",
+        sql: "ALTER FOREIGN DATA WRAPPER parser_commands_wrapper OPTIONS (host 'localhost')",
+        expected_statement: "AlterFdw",
+        refusal: None,
+    },
+    CommandProbe {
         command: "DROP FOREIGN DATA WRAPPER",
         sql: "DROP FOREIGN DATA WRAPPER parser_commands_wrapper",
         expected_statement: "DropFdw",
@@ -1274,6 +1280,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::AlterDefaultTablePrivileges { .. } => "AlterDefaultTablePrivileges",
         Statement::SetRole { .. } => "SetRole",
         Statement::CreateFdw { .. } => "CreateFdw",
+        Statement::AlterFdw { .. } => "AlterFdw",
         Statement::DropFdw { .. } => "DropFdw",
         Statement::CreateServer { .. } => "CreateServer",
         Statement::AlterServer { .. } => "AlterServer",
@@ -1317,7 +1324,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 173,
+            report.commands.len() == 174,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1375,7 +1382,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(173));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(174));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

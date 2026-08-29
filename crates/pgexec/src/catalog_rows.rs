@@ -966,6 +966,20 @@ pub(crate) fn information_schema_schemata_rows(
         .collect())
 }
 
+fn foreign_option_array(options: &[(String, String)]) -> Datum {
+    if options.is_empty() {
+        Datum::Null
+    } else {
+        Datum::Array(crabka_pgtypes::ArrayValue::new(
+            crabka_pgtypes::ElemType::Text,
+            options
+                .iter()
+                .map(|(name, value)| Datum::Text(format!("{name}={value}")))
+                .collect(),
+        ))
+    }
+}
+
 /// The role name behind [`schema_owner_oid`], so the two schema projections
 /// cannot disagree about who owns a schema.
 pub(crate) fn schema_owner_name(owner: &str) -> &'static str {
@@ -1533,7 +1547,16 @@ pub(crate) fn attribute_rows_for_table(
                 Datum::Int2(-1),
                 acl.of(&table.name, &column.name),
                 Datum::Null,
-                Datum::Null,
+                table
+                    .foreign
+                    .as_ref()
+                    .and_then(|foreign| {
+                        foreign
+                            .column_options
+                            .iter()
+                            .find(|(name, _)| name == &column.name)
+                    })
+                    .map_or(Datum::Null, |(_, options)| foreign_option_array(options)),
                 Datum::Null,
             ])
         })
@@ -4851,11 +4874,45 @@ pub(crate) fn text(value: &str) -> Datum {
 
 #[cfg(test)]
 mod tests {
-    use crabka_pgcatalog::RelationName;
+    use crabka_pgcatalog::{ForeignTableMeta, RelationName, Table};
     use crabka_pgkv::{Kv, MemKv};
     use crabka_pgtypes::usertype::{CompositeField, RangeBody, UserTypeBody};
 
     use super::*;
+
+    #[test]
+    fn foreign_column_options_are_exposed_by_pg_attribute() {
+        let table = Table {
+            id: 1,
+            owner: "postgres".into(),
+            name: RelationName::public("t"),
+            columns: vec![Column::new("id", ColumnType::Int4)],
+            sharded: false,
+            row_security: false,
+            force_row_security: false,
+            sharding: None,
+            foreign: Some(ForeignTableMeta {
+                server: "s".into(),
+                options: Vec::new(),
+                column_options: vec![(
+                    "id".into(),
+                    vec![("remote_name".into(), "remote_id".into())],
+                )],
+            }),
+            materialized: None,
+            checks: Vec::new(),
+        };
+
+        let rows = attribute_rows_for_table(1, &table, &ColumnAcl(BTreeMap::new()))
+            .expect("attribute rows");
+        assert_eq!(
+            rows[0][23],
+            Datum::Array(crabka_pgtypes::ArrayValue::new(
+                crabka_pgtypes::ElemType::Text,
+                vec![Datum::Text("remote_name=remote_id".into())],
+            ))
+        );
+    }
 
     #[test]
     fn largeobject_metadata_has_its_upstream_primary_index() {
