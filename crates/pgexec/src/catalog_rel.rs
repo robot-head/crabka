@@ -187,6 +187,12 @@ const INFORMATION_SCHEMA_RELATIONS: &[&str] = &[
     "information_schema.column_privileges",
     "information_schema.constraint_column_usage",
     "information_schema.enabled_roles",
+    "information_schema.foreign_data_wrapper_options",
+    "information_schema.foreign_data_wrappers",
+    "information_schema.foreign_server_options",
+    "information_schema.foreign_servers",
+    "information_schema.foreign_table_options",
+    "information_schema.foreign_tables",
     "information_schema.key_column_usage",
     "information_schema.parameters",
     "information_schema.referential_constraints",
@@ -194,6 +200,8 @@ const INFORMATION_SCHEMA_RELATIONS: &[&str] = &[
     "information_schema.sequences",
     "information_schema.table_constraints",
     "information_schema.table_privileges",
+    "information_schema.user_mapping_options",
+    "information_schema.user_mappings",
     "information_schema.views",
 ];
 
@@ -252,6 +260,12 @@ static RELATION_NAMES: &[&str] = &[
     "information_schema.column_privileges",
     "information_schema.constraint_column_usage",
     "information_schema.enabled_roles",
+    "information_schema.foreign_data_wrapper_options",
+    "information_schema.foreign_data_wrappers",
+    "information_schema.foreign_server_options",
+    "information_schema.foreign_servers",
+    "information_schema.foreign_table_options",
+    "information_schema.foreign_tables",
     "information_schema.key_column_usage",
     "information_schema.parameters",
     "information_schema.referential_constraints",
@@ -259,6 +273,8 @@ static RELATION_NAMES: &[&str] = &[
     "information_schema.sequences",
     "information_schema.table_constraints",
     "information_schema.table_privileges",
+    "information_schema.user_mapping_options",
+    "information_schema.user_mappings",
     "information_schema.views",
 ];
 
@@ -336,6 +352,12 @@ fn system_view_oid(name: &str) -> i32 {
         "information_schema.column_privileges" => 120_011,
         "information_schema.constraint_column_usage" => 120_012,
         "information_schema.enabled_roles" => 120_013,
+        "information_schema.foreign_data_wrapper_options" => 120_023,
+        "information_schema.foreign_data_wrappers" => 120_024,
+        "information_schema.foreign_server_options" => 120_025,
+        "information_schema.foreign_servers" => 120_026,
+        "information_schema.foreign_table_options" => 120_027,
+        "information_schema.foreign_tables" => 120_028,
         "information_schema.key_column_usage" => 120_014,
         "information_schema.parameters" => 120_015,
         "information_schema.referential_constraints" => 120_016,
@@ -343,6 +365,8 @@ fn system_view_oid(name: &str) -> i32 {
         "information_schema.sequences" => 120_018,
         "information_schema.table_constraints" => 120_019,
         "information_schema.table_privileges" => 120_020,
+        "information_schema.user_mapping_options" => 120_029,
+        "information_schema.user_mappings" => 120_030,
         "information_schema.views" => 120_021,
         _ => 0,
     }
@@ -3769,6 +3793,46 @@ fn information_schema_columns(name: &str) -> Vec<Column> {
             ("role_name", Text),
             ("is_grantable", Text),
         ]),
+        "information_schema.foreign_data_wrapper_options" => cols(&[
+            ("foreign_data_wrapper_catalog", Text),
+            ("foreign_data_wrapper_name", Text),
+            ("option_name", Text),
+            ("option_value", Text),
+        ]),
+        "information_schema.foreign_data_wrappers" => cols(&[
+            ("foreign_data_wrapper_catalog", Text),
+            ("foreign_data_wrapper_name", Text),
+            ("foreign_data_wrapper_language", Text),
+        ]),
+        "information_schema.foreign_server_options" => cols(&[
+            ("foreign_server_catalog", Text),
+            ("foreign_server_name", Text),
+            ("option_name", Text),
+            ("option_value", Text),
+        ]),
+        "information_schema.foreign_servers" => cols(&[
+            ("foreign_server_catalog", Text),
+            ("foreign_server_name", Text),
+            ("foreign_data_wrapper_catalog", Text),
+            ("foreign_data_wrapper_name", Text),
+            ("foreign_server_type", Text),
+            ("foreign_server_version", Text),
+            ("authorization_identifier", Text),
+        ]),
+        "information_schema.foreign_table_options" => cols(&[
+            ("foreign_table_catalog", Text),
+            ("foreign_table_schema", Text),
+            ("foreign_table_name", Text),
+            ("option_name", Text),
+            ("option_value", Text),
+        ]),
+        "information_schema.foreign_tables" => cols(&[
+            ("foreign_table_catalog", Text),
+            ("foreign_table_schema", Text),
+            ("foreign_table_name", Text),
+            ("foreign_server_catalog", Text),
+            ("foreign_server_name", Text),
+        ]),
         _ => information_schema_columns_rest(name),
     }
 }
@@ -3844,6 +3908,18 @@ fn information_schema_columns_rest(name: &str) -> Vec<Column> {
             ("privilege_type", Text),
             ("is_grantable", Text),
         ]),
+        "information_schema.user_mapping_options" => cols(&[
+            ("authorization_identifier", Text),
+            ("foreign_server_catalog", Text),
+            ("foreign_server_name", Text),
+            ("option_name", Text),
+            ("option_value", Text),
+        ]),
+        "information_schema.user_mappings" => cols(&[
+            ("authorization_identifier", Text),
+            ("foreign_server_catalog", Text),
+            ("foreign_server_name", Text),
+        ]),
         _ => Vec::new(),
     }
 }
@@ -3863,14 +3939,144 @@ fn information_schema_rows(
         "information_schema.views" => information_schema_view_rows(kv, database, style),
         "information_schema.enabled_roles" => enabled_role_rows(kv),
         "information_schema.applicable_roles" => Ok(Vec::new()),
+        "information_schema.foreign_data_wrapper_options" => {
+            foreign_data_wrapper_option_rows(kv, database)
+        }
+        "information_schema.foreign_data_wrappers" => foreign_data_wrapper_rows(kv, database),
+        "information_schema.foreign_server_options" => foreign_server_option_rows(kv, database),
+        "information_schema.foreign_servers" => foreign_server_rows(kv, database),
+        "information_schema.foreign_table_options" => foreign_table_option_rows(kv, database),
+        "information_schema.foreign_tables" => foreign_table_rows(kv, database),
         "information_schema.sequences" => sequence_view_rows(kv, database),
         "information_schema.table_privileges" => table_privilege_rows(kv, database),
         "information_schema.column_privileges" => column_privilege_rows(kv, database),
+        "information_schema.user_mapping_options" => user_mapping_option_rows(kv, database),
+        "information_schema.user_mappings" => user_mapping_rows(kv, database),
         // `routines`/`parameters` need user-defined routines, which crabka has
         // no object kind for yet, so both are correctly empty rather than
         // absent.
         _ => Ok(Vec::new()),
     }
+}
+
+fn foreign_data_wrapper_option_rows(
+    kv: &dyn Kv,
+    database: &str,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_fdws(kv)?
+        .into_iter()
+        .flat_map(|wrapper| {
+            wrapper.options.into_iter().map(move |(name, value)| {
+                vec![
+                    text(database),
+                    text(&wrapper.name),
+                    text(&name),
+                    text(&value),
+                ]
+            })
+        })
+        .collect())
+}
+
+fn foreign_data_wrapper_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_fdws(kv)?
+        .into_iter()
+        .map(|wrapper| vec![text(database), text(&wrapper.name), Datum::Null])
+        .collect())
+}
+
+fn foreign_server_option_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_servers(kv)?
+        .into_iter()
+        .flat_map(|server| {
+            server.options.into_iter().map(move |(name, value)| {
+                vec![
+                    text(database),
+                    text(&server.name),
+                    text(&name),
+                    text(&value),
+                ]
+            })
+        })
+        .collect())
+}
+
+fn foreign_server_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_servers(kv)?
+        .into_iter()
+        .map(|server| {
+            vec![
+                text(database),
+                text(&server.name),
+                text(database),
+                text(&server.wrapper),
+                server.server_type.as_deref().map_or(Datum::Null, text),
+                server.version.as_deref().map_or(Datum::Null, text),
+                text(&server.owner),
+            ]
+        })
+        .collect())
+}
+
+fn foreign_table_option_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_tables(kv)?
+        .into_iter()
+        .filter_map(|table| {
+            table.foreign.map(|foreign| {
+                foreign.options.into_iter().map(move |(name, value)| {
+                    vec![
+                        text(database),
+                        text(&table.name.schema),
+                        text(&table.name.name),
+                        text(&name),
+                        text(&value),
+                    ]
+                })
+            })
+        })
+        .flatten()
+        .collect())
+}
+
+fn foreign_table_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_tables(kv)?
+        .into_iter()
+        .filter_map(|table| {
+            table.foreign.map(|foreign| {
+                vec![
+                    text(database),
+                    text(&table.name.schema),
+                    text(&table.name.name),
+                    text(database),
+                    text(&foreign.server),
+                ]
+            })
+        })
+        .collect())
+}
+
+fn user_mapping_option_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_user_mappings(kv)?
+        .into_iter()
+        .flat_map(|mapping| {
+            mapping.options.into_iter().map(move |(name, value)| {
+                vec![
+                    text(&mapping.user),
+                    text(database),
+                    text(&mapping.server),
+                    text(&name),
+                    text(&value),
+                ]
+            })
+        })
+        .collect())
+}
+
+fn user_mapping_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_user_mappings(kv)?
+        .into_iter()
+        .map(|mapping| vec![text(&mapping.user), text(database), text(&mapping.server)])
+        .collect())
 }
 
 fn catalog_name(database: &str) -> Datum {
@@ -4409,6 +4615,121 @@ mod tests {
         assert_eq!(
             pg_foreign_server_rows(&kv).expect("server rows")[0][2],
             int(alice_oid)
+        );
+    }
+
+    #[test]
+    fn information_schema_foreign_views_project_foreign_catalog_options() {
+        let kv = MemKv::new();
+        crabka_pgcatalog::create_fdw(&kv, "w", vec![("host".into(), "broker".into())])
+            .expect("fdw");
+        crabka_pgcatalog::create_server(&kv, "s", "w", vec![("port".into(), "5432".into())])
+            .expect("server");
+        crabka_pgcatalog::create_user_mapping(
+            &kv,
+            crabka_pgcatalog::PUBLIC_ROLE,
+            "s",
+            vec![("user".into(), "guest".into())],
+        )
+        .expect("mapping");
+        crabka_pgcatalog::create_foreign_table(
+            &kv,
+            &RelationName::public("t"),
+            vec![Column::new("id", ColumnType::Int4)],
+            "s",
+            vec![("topic".into(), "events".into())],
+        )
+        .expect("foreign table");
+
+        let database = crate::exec::DEFAULT_DATABASE;
+        assert!(
+            rows(
+                &kv,
+                "information_schema.foreign_data_wrappers",
+                test_session()
+            )
+            .expect("wrapper rows")
+                == vec![vec![text(database), text("w"), Datum::Null]]
+        );
+        assert!(
+            rows(
+                &kv,
+                "information_schema.foreign_data_wrapper_options",
+                test_session()
+            )
+            .expect("wrapper options")
+                == vec![vec![
+                    text(database),
+                    text("w"),
+                    text("host"),
+                    text("broker")
+                ]]
+        );
+        assert!(
+            rows(&kv, "information_schema.foreign_servers", test_session()).expect("server rows")
+                == vec![vec![
+                    text(database),
+                    text("s"),
+                    text(database),
+                    text("w"),
+                    Datum::Null,
+                    Datum::Null,
+                    text("postgres"),
+                ]]
+        );
+        assert!(
+            rows(
+                &kv,
+                "information_schema.foreign_server_options",
+                test_session()
+            )
+            .expect("server options")
+                == vec![vec![text(database), text("s"), text("port"), text("5432")]]
+        );
+        assert!(
+            rows(&kv, "information_schema.foreign_tables", test_session())
+                .expect("foreign table rows")
+                == vec![vec![
+                    text(database),
+                    text("public"),
+                    text("t"),
+                    text(database),
+                    text("s"),
+                ]]
+        );
+        assert!(
+            rows(
+                &kv,
+                "information_schema.foreign_table_options",
+                test_session()
+            )
+            .expect("foreign table options")
+                == vec![vec![
+                    text(database),
+                    text("public"),
+                    text("t"),
+                    text("topic"),
+                    text("events"),
+                ]]
+        );
+        assert!(
+            rows(&kv, "information_schema.user_mappings", test_session()).expect("mapping rows")
+                == vec![vec![text("public"), text(database), text("s")]]
+        );
+        assert!(
+            rows(
+                &kv,
+                "information_schema.user_mapping_options",
+                test_session()
+            )
+            .expect("mapping options")
+                == vec![vec![
+                    text("public"),
+                    text(database),
+                    text("s"),
+                    text("user"),
+                    text("guest"),
+                ]]
         );
     }
 
