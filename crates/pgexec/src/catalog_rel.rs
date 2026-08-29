@@ -1994,7 +1994,7 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
         "pg_user_mappings" => cols(&[
             ("umid", Int4),
             ("srvname", Text),
-            ("umuser", Text),
+            ("usename", Text),
             ("umoptions", ColumnType::Array(ElemType::Text)),
         ]),
         "pg_event_trigger" => cols(&[

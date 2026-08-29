@@ -209,6 +209,10 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
             == vec![some(&["f", "t"])]
     );
     assert!(
+        grid(&engine, "SELECT srvname, usename FROM pg_user_mappings").await
+            == vec![some(&["server", "postgres"])]
+    );
+    assert!(
         grid(
             &engine,
             "SELECT ftserver > 0, ftoptions FROM pg_foreign_table",
