@@ -1071,7 +1071,12 @@ pub enum Statement {
     /// `ALTER FOREIGN DATA WRAPPER <name> OPTIONS (…)`
     AlterFdw {
         name: String,
-        options: Vec<ForeignOptionAction>,
+        /// `Some(None)` means `NO HANDLER`; outer `None` leaves it unchanged.
+        handler: Option<Option<String>>,
+        /// `Some(None)` means `NO VALIDATOR`; outer `None` leaves it unchanged.
+        validator: Option<Option<String>>,
+        /// Absent unless this statement contains an `OPTIONS` clause.
+        options: Option<Vec<ForeignOptionAction>>,
     },
     /// `DROP FOREIGN DATA WRAPPER [IF EXISTS] <name>`
     DropFdw {

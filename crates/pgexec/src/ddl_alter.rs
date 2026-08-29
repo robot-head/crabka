@@ -1624,11 +1624,19 @@ pub(crate) fn execute_ddl(
             .unwrap_or_default();
             Ok((command("CREATE FOREIGN DATA WRAPPER"), ops))
         }
-        Statement::AlterFdw { name, options } => {
-            let ops = crabka_pgcatalog::alter_fdw_options_ops(
+        Statement::AlterFdw {
+            name,
+            handler,
+            validator,
+            options,
+        } => {
+            let option_mutations = options.as_deref().map(foreign_option_mutations);
+            let ops = crabka_pgcatalog::alter_fdw_ops(
                 kv,
                 name,
-                &foreign_option_mutations(options),
+                handler.as_ref().map(Option::as_deref),
+                validator.as_ref().map(Option::as_deref),
+                option_mutations.as_deref(),
             )?;
             Ok((command("ALTER FOREIGN DATA WRAPPER"), ops))
         }

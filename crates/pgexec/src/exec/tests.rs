@@ -7914,8 +7914,8 @@ fn alter_foreign_options_update_catalog_records() {
 
     let kv = MemKv::new();
     for sql in [
-        "CREATE FOREIGN DATA WRAPPER w OPTIONS (host 'old', stale 'x')",
-        "ALTER FOREIGN DATA WRAPPER w OPTIONS (SET host 'new', DROP stale, ADD port '5432')",
+        "CREATE FOREIGN DATA WRAPPER w HANDLER old_handler VALIDATOR old_validator OPTIONS (host 'old', stale 'x')",
+        "ALTER FOREIGN DATA WRAPPER w HANDLER new_handler NO VALIDATOR OPTIONS (SET host 'new', DROP stale, port '5432')",
         "CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (host 'old', stale 'x')",
         "ALTER SERVER s OPTIONS (SET host 'new', DROP stale, ADD port '5432')",
         "CREATE USER MAPPING FOR PUBLIC SERVER s OPTIONS (username 'old')",
@@ -7931,11 +7931,16 @@ fn alter_foreign_options_update_catalog_records() {
         kv.write_batch(&ops).expect("apply DDL ops");
     }
     assert_eq!(
-        crabka_pgcatalog::get_fdw(&kv, "w").expect("fdw").options,
-        vec![
-            ("host".into(), "new".into()),
-            ("port".into(), "5432".into())
-        ]
+        crabka_pgcatalog::get_fdw(&kv, "w").expect("fdw"),
+        crabka_pgcatalog::ForeignDataWrapper {
+            name: "w".into(),
+            handler: Some("new_handler".into()),
+            validator: None,
+            options: vec![
+                ("host".into(), "new".into()),
+                ("port".into(), "5432".into())
+            ],
+        }
     );
     assert_eq!(
         crabka_pgcatalog::get_server(&kv, "s")

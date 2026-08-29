@@ -7082,8 +7082,27 @@ pub fn alter_fdw_options_ops(
     name: &str,
     changes: &[ForeignOptionMutation],
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    alter_fdw_ops(kv, name, None, None, Some(changes))
+}
+
+/// Apply support-function and option changes to an FDW and return the write batch.
+pub fn alter_fdw_ops(
+    kv: &dyn Kv,
+    name: &str,
+    handler: Option<Option<&str>>,
+    validator: Option<Option<&str>>,
+    changes: Option<&[ForeignOptionMutation]>,
+) -> Result<Vec<WriteOp>, CatalogError> {
     let mut wrapper = get_fdw(kv, name)?;
-    wrapper.options = apply_foreign_option_mutations(&wrapper.options, changes)?;
+    if let Some(handler) = handler {
+        wrapper.handler = handler.map(str::to_owned);
+    }
+    if let Some(validator) = validator {
+        wrapper.validator = validator.map(str::to_owned);
+    }
+    if let Some(changes) = changes {
+        wrapper.options = apply_foreign_option_mutations(&wrapper.options, changes)?;
+    }
     Ok(vec![WriteOp::Put {
         key: key::fdw_key(name),
         value: serialize_fdw(

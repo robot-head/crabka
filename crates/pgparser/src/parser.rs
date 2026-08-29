@@ -15100,7 +15100,7 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let mut opts = Vec::new();
         loop {
-            let k = self.expect_ident()?;
+            let k = self.expect_col_id()?;
             let v = self.expect_string_lit()?;
             opts.push((k, v));
             if self.eat_comma() {
@@ -15134,10 +15134,10 @@ impl Parser {
                     name: self.expect_col_id()?,
                 }
             } else {
-                return Err(ParseError::new(
-                    "expected ADD, SET, or DROP in OPTIONS",
-                    self.peek_pos(),
-                ));
+                ForeignOptionAction::Add {
+                    name: self.expect_col_id()?,
+                    value: self.expect_string_lit()?,
+                }
             };
             actions.push(action);
             if !self.eat_comma() {
@@ -15226,8 +15226,71 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Data))?;
         self.expect(&Token::Keyword(Keyword::Wrapper))?;
         let name = self.expect_col_id()?;
-        let options = self.parse_alter_options()?;
-        Ok(Statement::AlterFdw { name, options })
+        let mut handler = None;
+        let mut validator = None;
+        let mut options = None;
+        loop {
+            if self.eat_ident_eq("handler") {
+                if handler.replace(Some(self.qualified_name_text()?)).is_some() {
+                    return Err(ParseError::new(
+                        "conflicting or redundant options",
+                        self.peek_pos(),
+                    ));
+                }
+            } else if self.eat_ident_eq("validator") {
+                if validator
+                    .replace(Some(self.qualified_name_text()?))
+                    .is_some()
+                {
+                    return Err(ParseError::new(
+                        "conflicting or redundant options",
+                        self.peek_pos(),
+                    ));
+                }
+            } else if self.eat_ident_eq("no") {
+                if self.eat_ident_eq("handler") {
+                    if handler.replace(None).is_some() {
+                        return Err(ParseError::new(
+                            "conflicting or redundant options",
+                            self.peek_pos(),
+                        ));
+                    }
+                } else if self.eat_ident_eq("validator") {
+                    if validator.replace(None).is_some() {
+                        return Err(ParseError::new(
+                            "conflicting or redundant options",
+                            self.peek_pos(),
+                        ));
+                    }
+                } else {
+                    return Err(ParseError::new(
+                        "expected HANDLER or VALIDATOR after NO",
+                        self.peek_pos(),
+                    ));
+                }
+            } else if matches!(self.peek(), Token::Keyword(Keyword::Options)) {
+                if options.replace(self.parse_alter_options()?).is_some() {
+                    return Err(ParseError::new(
+                        "conflicting or redundant options",
+                        self.peek_pos(),
+                    ));
+                }
+            } else {
+                break;
+            }
+        }
+        if handler.is_none() && validator.is_none() && options.is_none() {
+            return Err(ParseError::new(
+                "expected HANDLER, VALIDATOR, or OPTIONS",
+                self.peek_pos(),
+            ));
+        }
+        Ok(Statement::AlterFdw {
+            name,
+            handler,
+            validator,
+            options,
+        })
     }
 
     /// `CREATE SERVER <name> [TYPE 'type'] [VERSION 'version'] FOREIGN DATA WRAPPER <wrapper> OPTIONS (…)`
@@ -24428,7 +24491,9 @@ mod tests {
             ),
             Statement::AlterFdw {
                 name: "w".into(),
-                options: vec![
+                handler: None,
+                validator: None,
+                options: Some(vec![
                     ForeignOptionAction::Add {
                         name: "host".into(),
                         value: "new".into()
@@ -24440,7 +24505,23 @@ mod tests {
                     ForeignOptionAction::Drop {
                         name: "stale".into()
                     },
-                ],
+                ]),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_alter_fdw_routines() {
+        assert_eq!(
+            one("ALTER FOREIGN DATA WRAPPER w HANDLER public.h NO VALIDATOR OPTIONS (host 'new')"),
+            Statement::AlterFdw {
+                name: "w".into(),
+                handler: Some(Some("public.h".into())),
+                validator: Some(None),
+                options: Some(vec![ForeignOptionAction::Add {
+                    name: "host".into(),
+                    value: "new".into(),
+                }]),
             }
         );
     }
