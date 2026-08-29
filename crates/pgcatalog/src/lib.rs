@@ -7315,6 +7315,82 @@ pub fn alter_server_ops(
     }])
 }
 
+/// Rename a server and every catalog record that names it.
+pub fn rename_server_ops(
+    kv: &dyn Kv,
+    name: &str,
+    new_name: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let server = get_server(kv, name)?;
+    if kv.get(&key::server_key(new_name))?.is_some() {
+        return Err(CatalogError::DuplicateObject(new_name.to_string()));
+    }
+    let mut ops = vec![
+        WriteOp::Put {
+            key: key::server_key(new_name),
+            value: serialize_server(
+                new_name,
+                &server.wrapper,
+                server.server_type.as_deref(),
+                server.version.as_deref(),
+                &server.options,
+            ),
+        },
+        WriteOp::Delete {
+            key: key::server_key(name),
+        },
+    ];
+    if let Some(comment) = get_comment(kv, "server", CommentObject::Named(name))? {
+        ops.push(set_comment_op("server", CommentObject::Named(name), None));
+        ops.push(set_comment_op(
+            "server",
+            CommentObject::Named(new_name),
+            Some(&comment),
+        ));
+    }
+    for mapping in list_user_mappings(kv)? {
+        if mapping.server == name {
+            ops.push(WriteOp::Delete {
+                key: key::user_mapping_key(&mapping.user, name),
+            });
+            ops.push(WriteOp::Put {
+                key: key::user_mapping_key(&mapping.user, new_name),
+                value: serialize_user_mapping(&mapping.user, new_name, &mapping.options),
+            });
+        }
+    }
+    for table in list_tables(kv)? {
+        if table
+            .foreign
+            .as_ref()
+            .is_some_and(|foreign| foreign.server == name)
+        {
+            let bytes = kv
+                .get(&catalog_key(&table.name))?
+                .ok_or_else(|| CatalogError::UndefinedTable(table.name.to_string()))?;
+            let (id, columns, options, owner, mut foreign, checks, materialized) =
+                deserialize_schema(&bytes)?;
+            foreign
+                .as_mut()
+                .expect("foreign table list entry retains its foreign metadata")
+                .server = new_name.to_string();
+            ops.push(WriteOp::Put {
+                key: catalog_key(&table.name),
+                value: serialize_schema(
+                    id,
+                    &columns,
+                    options,
+                    &owner,
+                    foreign.as_ref(),
+                    materialized.as_ref(),
+                    &checks,
+                ),
+            });
+        }
+    }
+    Ok(ops)
+}
+
 /// List foreign servers by name.
 ///
 /// # Errors

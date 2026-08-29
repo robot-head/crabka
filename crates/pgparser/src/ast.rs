@@ -1101,6 +1101,8 @@ pub enum Statement {
     /// `ALTER SERVER <name> [VERSION '…'] [OPTIONS (…)]`
     AlterServer {
         name: String,
+        /// The `RENAME TO` target; exclusive with version and option clauses.
+        rename_to: Option<String>,
         version: Option<String>,
         options: Option<Vec<ForeignOptionAction>>,
     },

@@ -15355,6 +15355,15 @@ impl Parser {
         self.bump(); // ALTER
         self.expect(&Token::Keyword(Keyword::Server))?;
         let name = self.expect_col_id()?;
+        if self.eat_ident_eq("rename") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            return Ok(Statement::AlterServer {
+                name,
+                rename_to: Some(self.expect_col_id()?),
+                version: None,
+                options: None,
+            });
+        }
         let version = self
             .eat_ident_eq("version")
             .then(|| self.expect_string_lit())
@@ -15370,6 +15379,7 @@ impl Parser {
         }
         Ok(Statement::AlterServer {
             name,
+            rename_to: None,
             version,
             options,
         })
@@ -24630,6 +24640,7 @@ mod tests {
             one("ALTER SERVER s OPTIONS (ADD bootstrap 'b:9092', SET port '9092', DROP stale)"),
             Statement::AlterServer {
                 name: "s".into(),
+                rename_to: None,
                 version: None,
                 options: Some(vec![
                     ForeignOptionAction::Add {
@@ -24654,9 +24665,23 @@ mod tests {
             one("ALTER SERVER s VERSION '2' OPTIONS (host 'localhost')"),
             Statement::AlterServer {
                 name,
+                rename_to: None,
                 version: Some(version),
                 options: Some(_),
             } if name == "s" && version == "2"
+        ));
+    }
+
+    #[test]
+    fn parses_alter_server_rename() {
+        assert!(matches!(
+            one("ALTER SERVER s RENAME TO renamed"),
+            Statement::AlterServer {
+                name,
+                rename_to: Some(rename_to),
+                version: None,
+                options: None,
+            } if name == "s" && rename_to == "renamed"
         ));
     }
 

@@ -8003,6 +8003,48 @@ fn alter_fdw_rename_updates_servers_and_comments() {
 }
 
 #[test]
+fn alter_server_rename_updates_mappings_tables_and_comments() {
+    use crabka_pgcatalog::CommentObject;
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE USER MAPPING FOR PUBLIC SERVER s",
+        "CREATE FOREIGN TABLE t (id int4) SERVER s",
+        "COMMENT ON SERVER s IS 'a server'",
+        "ALTER SERVER s RENAME TO renamed",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert!(crabka_pgcatalog::get_server(&kv, "s").is_err());
+    assert!(crabka_pgcatalog::get_server(&kv, "renamed").is_ok());
+    assert!(crabka_pgcatalog::get_user_mapping(&kv, "public", "s").is_err());
+    assert!(crabka_pgcatalog::get_user_mapping(&kv, "public", "renamed").is_ok());
+    assert_eq!(
+        crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("t"))
+            .expect("foreign table")
+            .foreign
+            .expect("foreign metadata")
+            .server,
+        "renamed"
+    );
+    assert_eq!(
+        crabka_pgcatalog::get_comment(&kv, "server", CommentObject::Named("renamed"))
+            .expect("comment"),
+        Some("a server".into())
+    );
+}
+
+#[test]
 fn comments_on_foreign_objects_are_persisted() {
     use crabka_pgcatalog::CommentObject;
     use crabka_pgkv::{Kv, MemKv};
