@@ -85,6 +85,13 @@ pub(super) fn column_from_ast(
             | crabka_pgparser::ast::ColumnConstraintKind::References(_) => {}
         }
     }
+    if catalog_column.default.is_none()
+        && catalog_column.generated.is_none()
+        && let Some((source, representation)) = base_type_default(column.ty)
+    {
+        let expr = crabka_pgparser::parser::parse_expression(&source)?;
+        catalog_column.default = Some(default_from_expr(&expr, representation, ctx)?);
+    }
     if catalog_column.generated.is_some() {
         if catalog_column.identity.is_some() {
             return Err(ExecError::Syntax(format!(
@@ -102,4 +109,17 @@ pub(super) fn column_from_ast(
         }
     }
     Ok(catalog_column)
+}
+
+fn base_type_default(ty: ColumnType) -> Option<(String, ColumnType)> {
+    let ColumnType::Base(base) = ty else {
+        return None;
+    };
+    let user_type = crabka_pgtypes::usertype::lookup_oid(base.oid)?;
+    let crabka_pgtypes::usertype::UserTypeBody::Base(body) = &user_type.body else {
+        return None;
+    };
+    body.default
+        .as_ref()
+        .map(|default| (default.clone(), *base.representation))
 }

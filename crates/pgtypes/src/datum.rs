@@ -3458,6 +3458,7 @@ mod tests {
                 body: crate::usertype::UserTypeBody::Base(crate::usertype::BaseBody {
                     representation: ColumnType::Int4,
                     element: None,
+                    default: None,
                     input: "int4in".to_string(),
                     output: "int4out".to_string(),
                     typmod_in: None,

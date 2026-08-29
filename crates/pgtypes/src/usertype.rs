@@ -240,6 +240,8 @@ pub struct BaseBody {
     pub representation: ColumnType,
     /// `pg_type.typelem`, when this base type has an element type.
     pub element: Option<ColumnType>,
+    /// `pg_type.typdefault`, applied to columns that write no default.
+    pub default: Option<String>,
     /// `pg_type.typinput`: the routine that parses the external text form.
     pub input: String,
     /// `pg_type.typoutput`.

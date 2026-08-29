@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 20;
+pub const SCHEMA_VERSION: u8 = 21;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -2187,6 +2187,7 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
             out.push(USER_TYPE_BASE);
             write_type(&mut out, base.representation);
             write_optional_type(&mut out, base.element);
+            write_optional_string(&mut out, base.default.as_deref());
             write_str(&mut out, &base.input);
             write_str(&mut out, &base.output);
             write_optional_string(&mut out, base.typmod_in.as_deref());
@@ -2336,6 +2337,7 @@ pub(crate) fn deserialize_user_type_with(
         USER_TYPE_BASE => {
             let representation = read_type_with(&mut cur, resolve_user_type)?;
             let element = read_optional_type(&mut cur, resolve_user_type)?;
+            let default = read_optional_string(&mut cur)?;
             let input = read_string(&mut cur)?;
             let output = read_string(&mut cur)?;
             let typmod_in = read_optional_string(&mut cur)?;
@@ -2347,6 +2349,7 @@ pub(crate) fn deserialize_user_type_with(
             UserTypeBody::Base(BaseBody {
                 representation,
                 element,
+                default,
                 input,
                 output,
                 typmod_in,
@@ -3041,6 +3044,7 @@ mod tests {
                     crabka_pgtypes::usertype::BaseBody {
                         representation: ColumnType::Int4,
                         element: None,
+                        default: None,
                         input: "int4in".into(),
                         output: "int4out".into(),
                         typmod_in: None,
@@ -3437,6 +3441,7 @@ mod tests {
             body: UserTypeBody::Base(BaseBody {
                 representation: ColumnType::Text,
                 element: Some(ColumnType::Int4),
+                default: Some("'stored default'".into()),
                 input: "stored_text_in".into(),
                 output: "stored_text_out".into(),
                 typmod_in: Some("stored_text_typmodin".into()),

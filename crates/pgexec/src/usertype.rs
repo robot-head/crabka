@@ -296,6 +296,7 @@ fn create_base_type(
     let mut typmod_in = None;
     let mut typmod_out = None;
     let mut element = None;
+    let mut default = None;
     let mut like = None;
     let mut category = None;
     let mut preferred = false;
@@ -310,6 +311,7 @@ fn create_base_type(
             "typmod_in" => typmod_in = Some(option_name(option)?),
             "typmod_out" => typmod_out = Some(option_name(option)?),
             "element" => element = Some(option_type(option)?),
+            "default" => default = Some(option_default(option)?),
             "like" => like = Some(option_type(option)?),
             "category" => category = Some(option_char(option)?),
             "preferred" => preferred = option_bool(option)?,
@@ -331,7 +333,7 @@ fn create_base_type(
                 return Err(ExecError::Unsupported(format!(
                     "type attribute \"{other}\" is not supported: gres builds a base type only \
                      from LIKE, INTERNALLENGTH, PASSEDBYVALUE, ALIGNMENT, INPUT, OUTPUT, \
-                     TYPMOD_IN, TYPMOD_OUT, ELEMENT, CATEGORY, PREFERRED, DELIMITER and STORAGE"
+                     TYPMOD_IN, TYPMOD_OUT, ELEMENT, DEFAULT, CATEGORY, PREFERRED, DELIMITER and STORAGE"
                 )));
             }
         }
@@ -384,6 +386,7 @@ fn create_base_type(
     let body = UserTypeBody::Base(BaseBody {
         representation,
         element,
+        default,
         input,
         output,
         typmod_in,
@@ -441,6 +444,17 @@ fn option_string(option: &BaseTypeOption) -> Result<String, ExecError> {
         BaseTypeOptionValue::Str(text) => Ok(text.clone()),
         BaseTypeOptionValue::Name(name) => Ok(name.clone()),
         _ => Err(malformed_option(option, "a string")),
+    }
+}
+
+fn option_default(option: &BaseTypeOption) -> Result<String, ExecError> {
+    match &option.value {
+        BaseTypeOptionValue::Name(name) => Ok(name.clone()),
+        BaseTypeOptionValue::Str(value) => Ok(format!("'{}'", value.replace('\'', "''"))),
+        BaseTypeOptionValue::Int(value) => Ok(value.to_string()),
+        BaseTypeOptionValue::Bool(value) => Ok(value.to_string()),
+        BaseTypeOptionValue::None => Ok("NULL".into()),
+        BaseTypeOptionValue::Omitted => Err(malformed_option(option, "a default value")),
     }
 }
 

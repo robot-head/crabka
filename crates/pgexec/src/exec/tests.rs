@@ -2295,7 +2295,7 @@ async fn a_base_type_takes_its_layout_written_out() {
         &mut session,
         "CREATE TYPE vt (internallength = variable, input = vt_in, output = vt_out, \
              typmod_in = vt_mod_in, typmod_out = vt_mod_out, element = int4, alignment = int4, \
-             storage = main)",
+             default = 'zippo', storage = main)",
     )
     .await;
     // A varlena pair needs no reinterpretation, so the cast is recorded and
@@ -2317,7 +2317,7 @@ async fn a_base_type_takes_its_layout_written_out() {
     run_s(
         &mut session,
         "CREATE TYPE ft (internallength = 4, input = ft_in, output = ft_out, \
-             alignment = int4, passedbyvalue)",
+             alignment = int4, default = 42, passedbyvalue)",
     )
     .await;
     run_s(&mut session, "CREATE CAST (int4 AS ft) WITHOUT FUNCTION").await;
@@ -2343,6 +2343,12 @@ async fn a_base_type_takes_its_layout_written_out() {
         )
         .await
             == vec![text_row(&["vt_in", "vt_out", "vt_mod_in", "vt_mod_out"])]
+    );
+    run_s(&mut session, "CREATE TABLE base_defaults (v vt, f ft)").await;
+    run_s(&mut session, "INSERT INTO base_defaults DEFAULT VALUES").await;
+    assert!(
+        text_rows_of(&mut session, "SELECT v, f FROM base_defaults").await
+            == vec![text_row(&["zippo", "42"])]
     );
 }
 
