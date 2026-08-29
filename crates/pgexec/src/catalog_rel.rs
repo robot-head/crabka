@@ -3916,6 +3916,8 @@ fn information_schema_columns(name: &str) -> Vec<Column> {
         "information_schema.foreign_data_wrappers" => cols(&[
             ("foreign_data_wrapper_catalog", Text),
             ("foreign_data_wrapper_name", Text),
+            ("authorization_identifier", Text),
+            ("library_name", Text),
             ("foreign_data_wrapper_language", Text),
         ]),
         "information_schema.foreign_server_options" => cols(&[
@@ -4095,7 +4097,15 @@ fn foreign_data_wrapper_option_rows(
 fn foreign_data_wrapper_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(crabka_pgcatalog::list_fdws(kv)?
         .into_iter()
-        .map(|wrapper| vec![text(database), text(&wrapper.name), Datum::Null])
+        .map(|wrapper| {
+            vec![
+                text(database),
+                text(&wrapper.name),
+                text(&wrapper.owner),
+                Datum::Null,
+                text("c"),
+            ]
+        })
         .collect())
 }
 
@@ -4839,7 +4849,13 @@ mod tests {
                 test_session()
             )
             .expect("wrapper rows")
-                == vec![vec![text(database), text("w"), Datum::Null]]
+                == vec![vec![
+                    text(database),
+                    text("w"),
+                    text(crabka_pgcatalog::BOOTSTRAP_ROLE),
+                    Datum::Null,
+                    text("c"),
+                ]]
         );
         assert!(
             rows(
