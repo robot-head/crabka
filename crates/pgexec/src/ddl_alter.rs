@@ -3107,6 +3107,19 @@ pub(crate) fn alter_table_ops(
     {
         return Err(error);
     }
+    if kind == Some("foreign table")
+        && actions
+            .iter()
+            .any(|action| matches!(action, Action::AlterConstraint { .. }))
+    {
+        return Err(relkind_not_supported(
+            format!(
+                "ALTER action ALTER CONSTRAINT cannot be performed on relation \"{}\"",
+                table_name.name
+            ),
+            "foreign table",
+        ));
+    }
     let table = match fetched {
         Ok(table) => table,
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if if_exists => {
