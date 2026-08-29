@@ -15152,7 +15152,7 @@ impl Parser {
         }
     }
 
-    /// Parse `OPTIONS ( ident 'string' [, …] )`. Returns an empty list if OPTIONS is absent.
+    /// Parse `OPTIONS ( label 'string' [, …] )`. Returns an empty list if OPTIONS is absent.
     fn parse_options(&mut self) -> Result<crate::ast::OptionList, ParseError> {
         if !self.eat_keyword(Keyword::Options) {
             return Ok(vec![]);
@@ -15160,7 +15160,7 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let mut opts = Vec::new();
         loop {
-            let k = self.expect_col_id()?;
+            let k = self.expect_col_label()?;
             let v = self.expect_string_lit()?;
             opts.push((k, v));
             if self.eat_comma() {
@@ -15181,21 +15181,21 @@ impl Parser {
         loop {
             let action = if self.eat_ident_eq("add") {
                 ForeignOptionAction::Add {
-                    name: self.expect_col_id()?,
+                    name: self.expect_col_label()?,
                     value: self.expect_string_lit()?,
                 }
             } else if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
                 ForeignOptionAction::Set {
-                    name: self.expect_col_id()?,
+                    name: self.expect_col_label()?,
                     value: self.expect_string_lit()?,
                 }
             } else if self.eat_keyword(Keyword::Drop) || self.eat_ident_eq("drop") {
                 ForeignOptionAction::Drop {
-                    name: self.expect_col_id()?,
+                    name: self.expect_col_label()?,
                 }
             } else {
                 ForeignOptionAction::Add {
-                    name: self.expect_col_id()?,
+                    name: self.expect_col_label()?,
                     value: self.expect_string_lit()?,
                 }
             };
@@ -24890,7 +24890,7 @@ mod tests {
 
     #[test]
     fn parses_create_user_mapping_for_current_user() {
-        match one("CREATE USER MAPPING FOR CURRENT_USER SERVER s OPTIONS (username 'u')") {
+        match one("CREATE USER MAPPING FOR CURRENT_USER SERVER s OPTIONS (user 'u')") {
             Statement::CreateUserMapping {
                 user,
                 server,
@@ -24899,7 +24899,7 @@ mod tests {
             } => {
                 assert_eq!(user, RoleSpec::CurrentUser);
                 assert_eq!(server, "s");
-                assert_eq!(options[0], ("username".into(), "u".into()));
+                assert_eq!(options[0], ("user".into(), "u".into()));
             }
             other => panic!("got {other:?}"),
         }
@@ -24931,7 +24931,7 @@ mod tests {
 
     #[test]
     fn parses_alter_user_mapping() {
-        match one("ALTER USER MAPPING FOR PUBLIC SERVER s OPTIONS (SET username 'newu')") {
+        match one("ALTER USER MAPPING FOR PUBLIC SERVER s OPTIONS (SET user 'newu')") {
             Statement::AlterUserMapping {
                 user,
                 server,
@@ -24942,7 +24942,7 @@ mod tests {
                 assert_eq!(
                     options,
                     vec![ForeignOptionAction::Set {
-                        name: "username".into(),
+                        name: "user".into(),
                         value: "newu".into()
                     }]
                 );
