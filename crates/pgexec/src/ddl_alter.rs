@@ -1468,13 +1468,16 @@ pub(crate) fn execute_ddl(
             let ops = crabka_pgcatalog::alter_role_ops(kv, name, login, attributes)?;
             Ok((command("ALTER ROLE"), ops))
         }
-        Statement::DropRole { name, if_exists } => {
+        Statement::DropRole { names, if_exists } => {
             crate::privilege::require_role_drop(kv, fctx.effective_role())?;
-            let ops = match crabka_pgcatalog::drop_role_ops(kv, name) {
-                Ok(ops) => ops,
-                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => Vec::new(),
-                Err(error) => return Err(error.into()),
-            };
+            let mut ops = Vec::new();
+            for name in names {
+                match crabka_pgcatalog::drop_role_ops(kv, name) {
+                    Ok(role_ops) => ops.extend(role_ops),
+                    Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
             Ok((command("DROP ROLE"), ops))
         }
         Statement::GrantTablePrivileges {

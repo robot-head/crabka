@@ -987,7 +987,7 @@ pub enum Statement {
         owner: RoleSpec,
     },
     /* SQL parity matrix row: DROP ROLE / DROP USER. */ DropRole {
-        name: String,
+        names: Vec<String>,
         if_exists: bool,
     },
     /* SQL parity matrix row: GRANT. */ GrantTablePrivileges {

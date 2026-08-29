@@ -5771,6 +5771,17 @@ async fn drop_role_if_exists_skips_only_a_missing_role() {
     assert!(
         !crabka_pgcatalog::role_exists(engine.catalog_kv(), "existing_role").expect("role lookup")
     );
+
+    run(&engine, "CREATE ROLE first_role; CREATE ROLE second_role").await;
+    let results = run(
+        &engine,
+        "DROP ROLE IF EXISTS missing_role, first_role, second_role",
+    )
+    .await;
+    assert!(tag_of(&results[0]) == "DROP ROLE");
+    for name in ["first_role", "second_role"] {
+        assert!(!crabka_pgcatalog::role_exists(engine.catalog_kv(), name).expect("role lookup"));
+    }
 }
 
 #[tokio::test]

@@ -5027,10 +5027,11 @@ impl Parser {
             self.expect_ident_eq("role")?;
         }
         let if_exists = self.eat_if_exists();
-        Ok(crate::ast::Statement::DropRole {
-            name: self.expect_object_name()?,
-            if_exists,
-        })
+        let mut names = vec![self.expect_object_name()?];
+        while self.eat_comma() {
+            names.push(self.expect_object_name()?);
+        }
+        Ok(crate::ast::Statement::DropRole { names, if_exists })
     }
 
     fn security_label(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -25739,19 +25740,20 @@ fn every_non_goal_has_a_bounded_typed_refusal_probe() {
 }
 
 #[test]
-fn drop_role_and_user_retain_if_exists() {
+fn drop_role_and_user_retain_if_exists_and_all_names() {
     use crate::ast::Statement;
 
-    for (sql, name, if_exists) in [
-        ("DROP ROLE r", "r", false),
-        ("DROP ROLE IF EXISTS r", "r", true),
-        ("DROP USER u", "u", false),
-        ("DROP USER IF EXISTS u", "u", true),
+    for (sql, names, if_exists) in [
+        ("DROP ROLE r", vec!["r"], false),
+        ("DROP ROLE IF EXISTS r", vec!["r"], true),
+        ("DROP USER u", vec!["u"], false),
+        ("DROP USER IF EXISTS u", vec!["u"], true),
+        ("DROP ROLE IF EXISTS r, s", vec!["r", "s"], true),
     ] {
         assert_eq!(
             parse(sql),
             Ok(vec![Statement::DropRole {
-                name: name.into(),
+                names: names.into_iter().map(str::to_owned).collect(),
                 if_exists,
             }]),
             "{sql}",
