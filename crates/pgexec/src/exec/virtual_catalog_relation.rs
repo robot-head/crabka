@@ -13,17 +13,19 @@ pub(crate) fn virtual_catalog_relation(
     let described = virtual_catalog_table(table);
     let (scope, system) = virtual_catalog_scope(catalog_kv, &described, name, alias, refs)?;
     let rows = catalog_rows::virtual_catalog_rows(catalog_kv, table, ctx)?;
-    let mut rows = if system.ctid {
-        rows.into_iter()
-            .zip(1u64..)
-            .map(|(mut row, ordinal)| {
+    let mut rows = rows
+        .into_iter()
+        .zip(1u64..)
+        .map(|(mut row, ordinal)| {
+            if system.tableoid {
+                row.push(Datum::Int4(virtual_relation_oid(table)));
+            }
+            if system.ctid {
                 row.push(crate::scope::row_ctid(ordinal));
-                row
-            })
-            .collect()
-    } else {
-        rows
-    };
+            }
+            row
+        })
+        .collect::<Vec<_>>();
     catalog_rows::resolve_regclass_at(
         catalog_kv,
         ctx.resolution(),
@@ -105,7 +107,7 @@ fn virtual_catalog_scope(
     let qualifier = alias.unwrap_or(&name.name);
     let mut scope = relation_scope(catalog_kv, described, qualifier)?;
     let system = crate::scope::SystemColumns {
-        tableoid: false,
+        tableoid: crate::scope::wants_tableoid(refs),
         cmax: false,
         xmax: false,
         cmin: false,

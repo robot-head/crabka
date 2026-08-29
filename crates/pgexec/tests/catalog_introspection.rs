@@ -184,6 +184,17 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     assert!(
         grid(
             &engine,
+            "SELECT array_to_string(ARRAY(SELECT option_name FROM pg_options_to_table(fdwoptions)), ',') \
+             FROM pg_catalog.pg_foreign_data_wrapper fdw \
+             LEFT JOIN pg_catalog.pg_description d \
+               ON d.classoid = fdw.tableoid AND d.objoid = fdw.oid AND d.objsubid = 0",
+        )
+        .await
+            == vec![some(&["kind"])]
+    );
+    assert!(
+        grid(
+            &engine,
             "SELECT srvname, srvtype, srvversion, srvoptions FROM pg_foreign_server",
         )
         .await
