@@ -1524,7 +1524,11 @@ pub(crate) fn attribute_rows_for_table(
                 Datum::Int2(i16::from(matches!(column.ty, ColumnType::Array(_)))),
                 Datum::Bool(typbyval),
                 Datum::InternalChar(typalign),
-                Datum::InternalChar(attribute_storage(column.ty).as_bytes()[0]),
+                Datum::InternalChar(
+                    column
+                        .storage
+                        .unwrap_or_else(|| attribute_storage(column.ty).as_bytes()[0]),
+                ),
                 Datum::InternalChar(b'\0'),
                 Datum::Bool(column.not_null),
                 // `atthasdef` means "this column has a `pg_attrdef` row", and a

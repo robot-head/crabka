@@ -3564,6 +3564,7 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         Action::AddConstraint(_)
         | Action::SetDefault { .. }
         | Action::SetStatistics { .. }
+        | Action::SetStorage { .. }
         | Action::AlterForeignColumnOptions { .. }
         | Action::AlterForeignTableOptions { .. }
         | Action::SetExpression { .. } => 5,
@@ -3610,6 +3611,7 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::DropNotNull(_) => "ALTER COLUMN ... DROP NOT NULL",
         Action::SetDefault { .. } => "ALTER COLUMN ... SET DEFAULT",
         Action::SetStatistics { .. } => "ALTER COLUMN ... SET STATISTICS",
+        Action::SetStorage { .. } => "ALTER COLUMN ... SET STORAGE",
         Action::DropDefault(_) => "ALTER COLUMN ... DROP DEFAULT",
         Action::AlterForeignColumnOptions { .. } => "ALTER COLUMN ... OPTIONS",
         Action::AlterForeignTableOptions { .. } => "OPTIONS",
@@ -4471,6 +4473,22 @@ pub(crate) fn alter_table_action_ops(
             }
             let index = state.column_index(column)?;
             state.table.columns[index].statistics_target = target;
+            Ok(())
+        }
+        Action::SetStorage { column, storage } => {
+            let storage = match storage.to_ascii_lowercase().as_str() {
+                "plain" => b'p',
+                "external" => b'e',
+                "extended" => b'x',
+                "main" => b'm',
+                _ => {
+                    return Err(ExecError::InvalidParameterValueMessage(format!(
+                        "invalid storage type \"{storage}\""
+                    )));
+                }
+            };
+            let index = state.column_index(column)?;
+            state.table.columns[index].storage = Some(storage);
             Ok(())
         }
         Action::DropDefault(column) => {

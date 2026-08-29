@@ -4769,6 +4769,12 @@ impl Parser {
                     target: if negative { -target } else { target },
                 });
             }
+            if self.eat_ident_eq("storage") {
+                return Ok(AlterTableAction::SetStorage {
+                    column,
+                    storage: self.expect_col_id()?,
+                });
+            }
             if self.eat_keyword(Keyword::Not) {
                 self.expect(&Token::Keyword(Keyword::Null))?;
                 return Ok(AlterTableAction::SetNotNull(column));

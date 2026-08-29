@@ -2527,6 +2527,11 @@ pub enum AlterTableAction {
         column: String,
         target: i32,
     },
+    /// `ALTER [COLUMN] name SET STORAGE {PLAIN|EXTERNAL|EXTENDED|MAIN}`.
+    SetStorage {
+        column: String,
+        storage: String,
+    },
     /// `ALTER [COLUMN] c OPTIONS (ADD | SET | DROP …)` on a foreign table.
     AlterForeignColumnOptions {
         column: String,

@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 25;
+pub const SCHEMA_VERSION: u8 = 26;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -1196,6 +1196,13 @@ pub fn serialize_schema(
         out.push(identity_flag(c.identity));
         write_collation(&mut out, c.collation.as_deref());
         out.extend_from_slice(&c.statistics_target.to_be_bytes());
+        match c.storage {
+            None => out.push(0),
+            Some(storage) => {
+                out.push(1);
+                out.push(storage);
+            }
+        }
     }
     out.push(table_option_flags(options));
     write_str(&mut out, owner);
@@ -2023,6 +2030,15 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
         let identity = read_identity(&mut cur)?;
         let collation = read_collation(&mut cur)?;
         let statistics_target = i16::from_be_bytes(take_n(&mut cur, 2)?.try_into().expect("2"));
+        let storage = match take_u8(&mut cur)? {
+            0 => None,
+            1 => Some(take_u8(&mut cur)?),
+            flag => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown column-storage flag {flag}"
+                )));
+            }
+        };
         columns.push(Column {
             name,
             ty,
@@ -2032,6 +2048,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
             identity,
             collation,
             statistics_target,
+            storage,
         });
     }
     let options = read_table_options(take_u8(&mut cur)?)?;
@@ -2696,6 +2713,7 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
             // view reports the type's own.
             collation: None,
             statistics_target: -1,
+            storage: None,
         });
     }
     let options = ViewOptions {

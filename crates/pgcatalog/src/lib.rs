@@ -190,6 +190,8 @@ pub struct Column {
     pub collation: Option<String>,
     /// `pg_attribute.attstattarget`; `-1` selects PostgreSQL's default.
     pub statistics_target: i16,
+    /// Explicit `ALTER COLUMN ... SET STORAGE` setting, if any.
+    pub storage: Option<u8>,
 }
 
 impl Column {
@@ -204,6 +206,7 @@ impl Column {
             identity: None,
             collation: None,
             statistics_target: -1,
+            storage: None,
         }
     }
 
