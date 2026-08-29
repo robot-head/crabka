@@ -8358,7 +8358,9 @@ fn alter_foreign_options_update_catalog_records() {
 
     let kv = MemKv::new();
     for sql in [
-        "CREATE FOREIGN DATA WRAPPER w HANDLER old_handler VALIDATOR old_validator OPTIONS (host 'old', stale 'x')",
+        "CREATE FUNCTION old_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'",
+        "CREATE FUNCTION new_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'",
+        "CREATE FOREIGN DATA WRAPPER w HANDLER old_handler VALIDATOR postgresql_fdw_validator OPTIONS (host 'old', stale 'x')",
         "ALTER FOREIGN DATA WRAPPER w HANDLER new_handler NO VALIDATOR OPTIONS (SET host 'new', DROP stale, port '5432')",
         "CREATE SERVER s VERSION '1' FOREIGN DATA WRAPPER w OPTIONS (host 'old', stale 'x')",
         "ALTER SERVER s VERSION '2' OPTIONS (SET host 'new', DROP stale, ADD port '5432')",
@@ -8412,6 +8414,59 @@ fn alter_foreign_options_update_catalog_records() {
             ("password".into(), "secret".into())
         ]
     );
+}
+
+#[test]
+fn fdw_support_routines_must_have_postgresql_signatures() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FUNCTION good_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'",
+        "CREATE FUNCTION bad_handler() RETURNS int LANGUAGE sql RETURN 1",
+        "CREATE FUNCTION bad_validator(text[], oid) RETURNS int LANGUAGE sql RETURN 1",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("create support routine");
+    }
+    for (sql, expected) in [
+        (
+            "CREATE FOREIGN DATA WRAPPER bad HANDLER bad_handler",
+            "function bad_handler must return type fdw_handler",
+        ),
+        (
+            "CREATE FOREIGN DATA WRAPPER bad VALIDATOR bad_validator",
+            "function bad_validator must return type void",
+        ),
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let error = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+            .expect_err("invalid support routine");
+        assert!(
+            matches!(error, super::ExecError::Remote(ref error) if error.code == "42804" && error.message == expected)
+        );
+    }
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER good HANDLER good_handler VALIDATOR postgresql_fdw_validator",
+        "ALTER FOREIGN DATA WRAPPER good HANDLER good_handler VALIDATOR postgresql_fdw_validator",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply FDW DDL");
+    }
 }
 
 #[test]

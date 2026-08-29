@@ -1653,6 +1653,12 @@ pub(crate) fn execute_ddl(
             validator,
             options,
         } => {
+            if let Some(handler) = handler {
+                validate_fdw_routine(kv, handler, &[], "fdw_handler")?;
+            }
+            if let Some(validator) = validator {
+                validate_fdw_routine(kv, validator, &["text[]", "oid"], "void")?;
+            }
             let ops = ignore_duplicate(
                 crabka_pgcatalog::create_fdw_with_routines_owned_ops(
                     kv,
@@ -1683,6 +1689,12 @@ pub(crate) fn execute_ddl(
             let ops = if let Some(rename_to) = rename_to {
                 crabka_pgcatalog::rename_fdw_ops(kv, name, rename_to)?
             } else {
+                if let Some(Some(handler)) = handler {
+                    validate_fdw_routine(kv, handler, &[], "fdw_handler")?;
+                }
+                if let Some(Some(validator)) = validator {
+                    validate_fdw_routine(kv, validator, &["text[]", "oid"], "void")?;
+                }
                 let option_mutations = options.as_deref().map(foreign_option_mutations);
                 crabka_pgcatalog::alter_fdw_ops(
                     kv,
@@ -2051,6 +2063,48 @@ fn foreign_option_mutations(
             }
         })
         .collect()
+}
+
+/// Validate an FDW support routine before storing its name in the catalog.
+///
+/// The PostgreSQL fixture supplies `postgresql_fdw_validator`; other support
+/// routines are ordinary user functions and resolve from the routine catalog.
+fn validate_fdw_routine(
+    kv: &dyn Kv,
+    written: &str,
+    input_types: &[&str],
+    expected_return: &str,
+) -> Result<(), ExecError> {
+    if written == "postgresql_fdw_validator" && input_types == ["text[]", "oid"] {
+        return Ok(());
+    }
+    let name = written.strip_prefix("public.").unwrap_or(written);
+    let routine = crabka_pgcatalog::routine::routines_named(kv, name)?
+        .into_iter()
+        .find(|routine| {
+            routine
+                .input_params()
+                .map(|parameter| parameter.ty.name.as_str())
+                .eq(input_types.iter().copied())
+        })
+        .ok_or_else(|| {
+            ExecError::UndefinedFunction(format!(
+                "function {written}({}) does not exist",
+                input_types.join(", ")
+            ))
+        })?;
+    let returns_expected = matches!(
+        routine.result,
+        crabka_pgcatalog::routine::RoutineResult::Type { ref ty, setof: false }
+            if ty.name == expected_return
+    );
+    if returns_expected {
+        return Ok(());
+    }
+    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42804",
+        format!("function {written} must return type {expected_return}"),
+    )))
 }
 
 fn create_access_method(
