@@ -7908,6 +7908,47 @@ fn create_fdw_objects_if_not_exists_skip_duplicates() {
     }
 }
 
+#[test]
+fn alter_foreign_options_update_catalog_records() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (host 'old', stale 'x')",
+        "ALTER SERVER s OPTIONS (SET host 'new', DROP stale, ADD port '5432')",
+        "CREATE USER MAPPING FOR PUBLIC SERVER s OPTIONS (username 'old')",
+        "ALTER USER MAPPING FOR PUBLIC SERVER s OPTIONS (SET username 'new', ADD password 'secret')",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert_eq!(
+        crabka_pgcatalog::get_server(&kv, "s")
+            .expect("server")
+            .options,
+        vec![
+            ("host".into(), "new".into()),
+            ("port".into(), "5432".into())
+        ]
+    );
+    assert_eq!(
+        crabka_pgcatalog::get_user_mapping(&kv, "public", "s")
+            .expect("mapping")
+            .options,
+        vec![
+            ("username".into(), "new".into()),
+            ("password".into(), "secret".into())
+        ]
+    );
+}
+
 fn command_tag(r: &QueryResult) -> &str {
     match r {
         QueryResult::Command { tag } | QueryResult::Rows { tag, .. } => tag,

@@ -15106,6 +15106,42 @@ impl Parser {
         Ok(opts)
     }
 
+    fn parse_alter_options(&mut self) -> Result<Vec<crate::ast::ForeignOptionAction>, ParseError> {
+        use crate::ast::ForeignOptionAction;
+
+        self.expect(&Token::Keyword(Keyword::Options))?;
+        self.expect(&Token::LParen)?;
+        let mut actions = Vec::new();
+        loop {
+            let action = if self.eat_ident_eq("add") {
+                ForeignOptionAction::Add {
+                    name: self.expect_col_id()?,
+                    value: self.expect_string_lit()?,
+                }
+            } else if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
+                ForeignOptionAction::Set {
+                    name: self.expect_col_id()?,
+                    value: self.expect_string_lit()?,
+                }
+            } else if self.eat_keyword(Keyword::Drop) || self.eat_ident_eq("drop") {
+                ForeignOptionAction::Drop {
+                    name: self.expect_col_id()?,
+                }
+            } else {
+                return Err(ParseError::new(
+                    "expected ADD, SET, or DROP in OPTIONS",
+                    self.peek_pos(),
+                ));
+            };
+            actions.push(action);
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(actions)
+    }
+
     /// Parse the `FOR <user>` clause of `CREATE/ALTER/DROP USER MAPPING`.
     /// Returns the role spelling unchanged so quoted role names remain distinct
     /// from `CURRENT_USER`. `USER` is an alias for `CURRENT_USER` here.
@@ -15206,14 +15242,14 @@ impl Parser {
         })
     }
 
-    /// `ALTER SERVER <name> OPTIONS (…)`
+    /// `ALTER SERVER <name> OPTIONS (ADD/SET/DROP …)`.
     fn alter_server(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         // ALTER is not a keyword yet; matched as ident
         self.bump(); // ALTER
         self.expect(&Token::Keyword(Keyword::Server))?;
         let name = self.expect_col_id()?;
-        let options = self.parse_options()?;
+        let options = self.parse_alter_options()?;
         Ok(Statement::AlterServer { name, options })
     }
 
@@ -15251,7 +15287,7 @@ impl Parser {
         })
     }
 
-    /// `ALTER USER MAPPING FOR <user> SERVER <server> OPTIONS (…)`
+    /// `ALTER USER MAPPING FOR <user> SERVER <server> OPTIONS (ADD/SET/DROP …)`.
     fn alter_user_mapping(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         // ALTER is not a keyword yet; matched as ident
@@ -15261,7 +15297,7 @@ impl Parser {
         let user = self.parse_user_mapping_user()?;
         self.expect(&Token::Keyword(Keyword::Server))?;
         let server = self.expect_col_id()?;
-        let options = self.parse_options()?;
+        let options = self.parse_alter_options()?;
         Ok(Statement::AlterUserMapping {
             user,
             server,
@@ -17466,9 +17502,9 @@ mod tests {
 
     use super::*;
     use crate::ast::{
-        AlterTableAction, BinaryOp, ColumnConstraintKind, ColumnDef, Expr, HashShardingSpec,
-        IndexPlacement, IsolationLevel, RoleSpec, SelectItem, ShardingSpec, Statement,
-        TableConstraint, TableConstraintKind, UnaryOp,
+        AlterTableAction, BinaryOp, ColumnConstraintKind, ColumnDef, Expr, ForeignOptionAction,
+        HashShardingSpec, IndexPlacement, IsolationLevel, RoleSpec, SelectItem, ShardingSpec,
+        Statement, TableConstraint, TableConstraintKind, UnaryOp,
     };
 
     #[test]
@@ -24389,10 +24425,22 @@ mod tests {
     #[test]
     fn parses_alter_server() {
         assert_eq!(
-            one("ALTER SERVER s OPTIONS (bootstrap 'b:9092')"),
+            one("ALTER SERVER s OPTIONS (ADD bootstrap 'b:9092', SET port '9092', DROP stale)"),
             Statement::AlterServer {
                 name: "s".into(),
-                options: vec![("bootstrap".into(), "b:9092".into())],
+                options: vec![
+                    ForeignOptionAction::Add {
+                        name: "bootstrap".into(),
+                        value: "b:9092".into()
+                    },
+                    ForeignOptionAction::Set {
+                        name: "port".into(),
+                        value: "9092".into()
+                    },
+                    ForeignOptionAction::Drop {
+                        name: "stale".into()
+                    },
+                ],
             }
         );
     }
@@ -24440,7 +24488,7 @@ mod tests {
 
     #[test]
     fn parses_alter_user_mapping() {
-        match one("ALTER USER MAPPING FOR PUBLIC SERVER s OPTIONS (username 'newu')") {
+        match one("ALTER USER MAPPING FOR PUBLIC SERVER s OPTIONS (SET username 'newu')") {
             Statement::AlterUserMapping {
                 user,
                 server,
@@ -24448,7 +24496,13 @@ mod tests {
             } => {
                 assert_eq!(user, RoleSpec::Public);
                 assert_eq!(server, "s");
-                assert_eq!(options[0], ("username".into(), "newu".into()));
+                assert_eq!(
+                    options,
+                    vec![ForeignOptionAction::Set {
+                        name: "username".into(),
+                        value: "newu".into()
+                    }]
+                );
             }
             other => panic!("got {other:?}"),
         }
@@ -25054,25 +25108,6 @@ fn explicit_compatibility_refusals_parse_to_typed_statements() {
     for (sql, command) in cases {
         let statements = parse(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
         assert_eq!(statements, vec![Statement::CompatibilityRefusal(command)]);
-    }
-}
-
-#[test]
-fn fdw_alter_refusals_share_typed_metadata() {
-    use crate::ast::RefusalCommand;
-
-    for (sql, expected) in [
-        (
-            "ALTER SERVER s OPTIONS (host 'localhost')",
-            RefusalCommand::AlterServer,
-        ),
-        (
-            "ALTER USER MAPPING FOR PUBLIC SERVER s OPTIONS (username 'u')",
-            RefusalCommand::AlterUserMapping,
-        ),
-    ] {
-        let statement = parse(sql).expect(sql).pop().expect("one statement");
-        assert_eq!(statement.compatibility_refusal(), Some(expected));
     }
 }
 

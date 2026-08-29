@@ -1089,7 +1089,7 @@ pub enum Statement {
     /// `ALTER SERVER <name> OPTIONS (…)`
     AlterServer {
         name: String,
-        options: OptionList,
+        options: Vec<ForeignOptionAction>,
     },
     /// `DROP SERVER [IF EXISTS] <name>`
     DropServer {
@@ -1111,7 +1111,7 @@ pub enum Statement {
     AlterUserMapping {
         user: RoleSpec,
         server: String,
-        options: OptionList,
+        options: Vec<ForeignOptionAction>,
     },
     /// `DROP USER MAPPING [IF EXISTS] FOR <user> SERVER <server>`
     DropUserMapping {
@@ -2199,8 +2199,6 @@ pub enum RefusalCommand {
     PrepareTransaction,
     CommitPrepared,
     RollbackPrepared,
-    AlterServer,
-    AlterUserMapping,
     /// P5: extended planner statistics objects. Gres has no planner statistics,
     /// so the parser recognizes the whole family and refuses it. It does not
     /// persist metadata that nothing reads.
@@ -2222,8 +2220,6 @@ impl RefusalCommand {
             Self::PrepareTransaction => "PREPARE TRANSACTION",
             Self::CommitPrepared => "COMMIT PREPARED",
             Self::RollbackPrepared => "ROLLBACK PREPARED",
-            Self::AlterServer => "ALTER SERVER",
-            Self::AlterUserMapping => "ALTER USER MAPPING",
             Self::CreateStatistics => "CREATE STATISTICS",
             Self::AlterStatistics => "ALTER STATISTICS",
             Self::DropStatistics => "DROP STATISTICS",
@@ -2251,8 +2247,6 @@ impl RefusalCommand {
             Self::PrepareTransaction | Self::CommitPrepared | Self::RollbackPrepared => {
                 "SQL-level prepared transactions are not available"
             }
-            Self::AlterServer => "ALTER SERVER is not supported",
-            Self::AlterUserMapping => "ALTER USER MAPPING is not supported",
             Self::CreateStatistics | Self::AlterStatistics | Self::DropStatistics => {
                 "extended planner statistics objects are not supported"
             }
@@ -2267,8 +2261,6 @@ impl Statement {
     pub const fn compatibility_refusal(&self) -> Option<RefusalCommand> {
         match self {
             Self::CompatibilityRefusal(command) => Some(*command),
-            Self::AlterServer { .. } => Some(RefusalCommand::AlterServer),
-            Self::AlterUserMapping { .. } => Some(RefusalCommand::AlterUserMapping),
             _ => None,
         }
     }
@@ -2900,6 +2892,14 @@ pub struct HashShardingSpec {
 
 /// A key-value option list for FDW DDL: `OPTIONS (key 'value', …)`.
 pub type OptionList = Vec<(String, String)>;
+
+/// One mutation in an FDW `ALTER … OPTIONS` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignOptionAction {
+    Add { name: String, value: String },
+    Set { name: String, value: String },
+    Drop { name: String },
+}
 
 /// The optional table-filter for `IMPORT FOREIGN SCHEMA`.
 #[derive(Debug, Clone, PartialEq, Eq)]

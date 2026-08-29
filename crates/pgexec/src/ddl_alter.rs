@@ -1763,13 +1763,27 @@ pub(crate) fn execute_ddl(
             };
             Ok((command("DROP FOREIGN TABLE"), ops))
         }
-        // The catalog has no ALTER for foreign objects, and phase-1 querying does
-        // not need one — surface a clear 0A000 rather than silently no-op'ing.
-        Statement::AlterServer { .. } | Statement::AlterUserMapping { .. } => {
-            Err(ExecError::CompatibilityRefusal(
-                stmt.compatibility_refusal()
-                    .expect("ALTER refusal metadata is centralized on the AST"),
-            ))
+        Statement::AlterServer { name, options } => {
+            let ops = crabka_pgcatalog::alter_server_options_ops(
+                kv,
+                name,
+                &foreign_option_mutations(options),
+            )?;
+            Ok((command("ALTER SERVER"), ops))
+        }
+        Statement::AlterUserMapping {
+            user,
+            server,
+            options,
+        } => {
+            let user = role_spec_name(user, fctx);
+            let ops = crabka_pgcatalog::alter_user_mapping_options_ops(
+                kv,
+                user,
+                server,
+                &foreign_option_mutations(options),
+            )?;
+            Ok((command("ALTER USER MAPPING"), ops))
         }
         // SP40: IMPORT FOREIGN SCHEMA discovers the server's tables through the
         // registered scanner (the `kafka_fdw` seam enumerates Kafka topics and
@@ -1847,6 +1861,31 @@ pub(crate) fn execute_ddl(
         }
         _ => Err(ExecError::Unsupported("not a DDL statement".into())),
     }
+}
+
+fn foreign_option_mutations(
+    options: &[crabka_pgparser::ast::ForeignOptionAction],
+) -> Vec<crabka_pgcatalog::ForeignOptionMutation> {
+    options
+        .iter()
+        .map(|option| match option {
+            crabka_pgparser::ast::ForeignOptionAction::Add { name, value } => {
+                crabka_pgcatalog::ForeignOptionMutation::Add {
+                    name: name.clone(),
+                    value: value.clone(),
+                }
+            }
+            crabka_pgparser::ast::ForeignOptionAction::Set { name, value } => {
+                crabka_pgcatalog::ForeignOptionMutation::Set {
+                    name: name.clone(),
+                    value: value.clone(),
+                }
+            }
+            crabka_pgparser::ast::ForeignOptionAction::Drop { name } => {
+                crabka_pgcatalog::ForeignOptionMutation::Drop { name: name.clone() }
+            }
+        })
+        .collect()
 }
 
 fn create_access_method(

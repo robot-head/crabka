@@ -658,6 +658,14 @@ pub struct UserMapping {
     pub options: Vec<(String, String)>,
 }
 
+/// One mutation to a foreign object's `OPTIONS` list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignOptionMutation {
+    Add { name: String, value: String },
+    Set { name: String, value: String },
+    Drop { name: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Role {
     pub name: String,
@@ -972,6 +980,8 @@ pub enum CatalogError {
     /// An FDW option list names one setting more than once.
     #[error("option \"{0}\" provided more than once")]
     DuplicateOption(String),
+    #[error("option \"{0}\" not found")]
+    UndefinedOption(String),
     /// Generic "undefined object" (42704), for FDW, server, user-mapping.
     #[error("object \"{0}\" does not exist")]
     UndefinedObject(String),
@@ -1037,6 +1047,7 @@ impl CatalogError {
             CatalogError::UndefinedColumn(_) => "42703",
             CatalogError::UndefinedIndex(_)
             | CatalogError::UndefinedObject(_)
+            | CatalogError::UndefinedOption(_)
             | CatalogError::UndefinedConstraint(_)
             | CatalogError::UndefinedPolicy { .. } => "42704",
             CatalogError::DependentObjectsStillExist(_)
@@ -7175,6 +7186,26 @@ pub fn get_server(kv: &dyn Kv, name: &str) -> Result<ForeignServer, CatalogError
     Ok(deserialize_server(&bytes)?)
 }
 
+/// Apply option changes to a server and return the catalog write batch.
+pub fn alter_server_options_ops(
+    kv: &dyn Kv,
+    name: &str,
+    changes: &[ForeignOptionMutation],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut server = get_server(kv, name)?;
+    server.options = apply_foreign_option_mutations(&server.options, changes)?;
+    Ok(vec![WriteOp::Put {
+        key: key::server_key(name),
+        value: serialize_server(
+            &server.name,
+            &server.wrapper,
+            server.server_type.as_deref(),
+            server.version.as_deref(),
+            &server.options,
+        ),
+    }])
+}
+
 /// List foreign servers by name.
 ///
 /// # Errors
@@ -7270,6 +7301,21 @@ pub fn get_user_mapping(
         .get(&key::user_mapping_key(user, server))?
         .ok_or_else(|| CatalogError::UndefinedObject(format!("{user}@{server}")))?;
     Ok(deserialize_user_mapping(&bytes)?)
+}
+
+/// Apply option changes to a user mapping and return the catalog write batch.
+pub fn alter_user_mapping_options_ops(
+    kv: &dyn Kv,
+    user: &str,
+    server: &str,
+    changes: &[ForeignOptionMutation],
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut mapping = get_user_mapping(kv, user, server)?;
+    mapping.options = apply_foreign_option_mutations(&mapping.options, changes)?;
+    Ok(vec![WriteOp::Put {
+        key: key::user_mapping_key(user, server),
+        value: serialize_user_mapping(&mapping.user, &mapping.server, &mapping.options),
+    }])
 }
 
 /// List user mappings by server then user.
@@ -7422,6 +7468,37 @@ fn ensure_unique_options(options: &[(String, String)]) -> Result<(), CatalogErro
         }
     }
     Ok(())
+}
+
+/// Apply one `ALTER … OPTIONS` list left to right.
+pub fn apply_foreign_option_mutations(
+    options: &[(String, String)],
+    changes: &[ForeignOptionMutation],
+) -> Result<Vec<(String, String)>, CatalogError> {
+    let mut updated = options.to_vec();
+    for change in changes {
+        match change {
+            ForeignOptionMutation::Add { name, value } => {
+                if updated.iter().any(|(held, _)| held == name) {
+                    return Err(CatalogError::DuplicateOption(name.clone()));
+                }
+                updated.push((name.clone(), value.clone()));
+            }
+            ForeignOptionMutation::Set { name, value } => {
+                let Some((_, held)) = updated.iter_mut().find(|(held, _)| held == name) else {
+                    return Err(CatalogError::UndefinedOption(name.clone()));
+                };
+                *held = value.clone();
+            }
+            ForeignOptionMutation::Drop { name } => {
+                let Some(index) = updated.iter().position(|(held, _)| held == name) else {
+                    return Err(CatalogError::UndefinedOption(name.clone()));
+                };
+                updated.remove(index);
+            }
+        }
+    }
+    Ok(updated)
 }
 
 /// Read the next `TableId`. This is 1 when the meta key is absent.
@@ -9170,6 +9247,44 @@ mod tests {
         create_fdw(&kv, "w", vec![]).expect("create fdw");
         create_server(&kv, "valid", "w", vec![]).expect("create server");
         assert!(create_foreign_table(&kv, &rel("t"), vec![], "valid", options()).is_err());
+    }
+
+    #[test]
+    fn foreign_option_mutations_apply_in_order() {
+        let result = apply_foreign_option_mutations(
+            &[("host".into(), "old".into()), ("stale".into(), "x".into())],
+            &[
+                ForeignOptionMutation::Set {
+                    name: "host".into(),
+                    value: "new".into(),
+                },
+                ForeignOptionMutation::Drop {
+                    name: "stale".into(),
+                },
+                ForeignOptionMutation::Add {
+                    name: "port".into(),
+                    value: "5432".into(),
+                },
+            ],
+        )
+        .expect("valid mutations");
+        assert_eq!(
+            result,
+            vec![
+                ("host".into(), "new".into()),
+                ("port".into(), "5432".into())
+            ]
+        );
+        assert_eq!(
+            apply_foreign_option_mutations(
+                &result,
+                &[ForeignOptionMutation::Drop {
+                    name: "none".into()
+                }]
+            )
+            .expect_err("missing option"),
+            CatalogError::UndefinedOption("none".into())
+        );
     }
 
     #[test]
