@@ -2049,7 +2049,7 @@ fn pg_type_row_with_storage(
     defined: bool,
     storage: Option<char>,
 ) -> Vec<Datum> {
-    pg_type_row_with_metadata(row, proc_oids, defined, storage, [None; 6])
+    pg_type_row_with_metadata(row, proc_oids, defined, storage, [None; 6], None)
 }
 
 fn pg_type_row_with_metadata(
@@ -2058,6 +2058,7 @@ fn pg_type_row_with_metadata(
     defined: bool,
     storage: Option<char>,
     routine_overrides: [Option<&str>; 6],
+    default: Option<&str>,
 ) -> Vec<Datum> {
     let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
     let typalign = match row.name {
@@ -2120,7 +2121,7 @@ fn pg_type_row_with_metadata(
         int(0),
         oid(row.typcollation),
         Datum::Null,
-        Datum::Null,
+        default.map_or(Datum::Null, text),
         Datum::Null,
     ]
 }
@@ -2395,6 +2396,10 @@ pub(crate) fn user_type_rows(
                     base.typmod_out.as_deref(),
                 ],
                 _ => [None; 6],
+            },
+            match &ty.body {
+                usertype::UserTypeBody::Base(base) => base.default.as_deref(),
+                _ => None,
             },
         ));
         if column_type.is_some() {

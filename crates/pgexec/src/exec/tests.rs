@@ -2339,10 +2339,16 @@ async fn a_base_type_takes_its_layout_written_out() {
     assert!(
         text_rows_of(
             &mut session,
-            "SELECT typinput, typoutput, typmodin, typmodout FROM pg_type WHERE typname = 'vt'"
+            "SELECT typinput, typoutput, typmodin, typmodout, typdefault FROM pg_type WHERE typname = 'vt'"
         )
         .await
-            == vec![text_row(&["vt_in", "vt_out", "vt_mod_in", "vt_mod_out"])]
+            == vec![text_row(&[
+                "vt_in",
+                "vt_out",
+                "vt_mod_in",
+                "vt_mod_out",
+                "'zippo'",
+            ])]
     );
     run_s(&mut session, "CREATE TABLE base_defaults (v vt, f ft)").await;
     run_s(&mut session, "INSERT INTO base_defaults DEFAULT VALUES").await;
