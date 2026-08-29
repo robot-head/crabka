@@ -7866,6 +7866,48 @@ fn create_user_mapping_for_current_user_stored_under_current_role() {
     );
 }
 
+#[test]
+fn create_fdw_objects_if_not_exists_skip_duplicates() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for (sql, creates) in [
+        ("CREATE FOREIGN DATA WRAPPER IF NOT EXISTS w", true),
+        ("CREATE FOREIGN DATA WRAPPER IF NOT EXISTS w", false),
+        ("CREATE SERVER IF NOT EXISTS s FOREIGN DATA WRAPPER w", true),
+        (
+            "CREATE SERVER IF NOT EXISTS s FOREIGN DATA WRAPPER w",
+            false,
+        ),
+        (
+            "CREATE USER MAPPING IF NOT EXISTS FOR PUBLIC SERVER s",
+            true,
+        ),
+        (
+            "CREATE USER MAPPING IF NOT EXISTS FOR PUBLIC SERVER s",
+            false,
+        ),
+        (
+            "CREATE FOREIGN TABLE IF NOT EXISTS t (id int4) SERVER s",
+            true,
+        ),
+        (
+            "CREATE FOREIGN TABLE IF NOT EXISTS t (id int4) SERVER s",
+            false,
+        ),
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        assert_eq!(!ops.is_empty(), creates, "{sql}");
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+}
+
 fn command_tag(r: &QueryResult) -> &str {
     match r {
         QueryResult::Command { tag } | QueryResult::Rows { tag, .. } => tag,

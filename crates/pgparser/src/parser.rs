@@ -15127,6 +15127,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Foreign))?;
         self.expect(&Token::Keyword(Keyword::Data))?;
         self.expect(&Token::Keyword(Keyword::Wrapper))?;
+        let if_not_exists = self.eat_if_not_exists();
         let name = self.expect_col_id()?;
         let mut handler = None;
         let mut validator = None;
@@ -15150,6 +15151,7 @@ impl Parser {
             }
         };
         Ok(Statement::CreateFdw {
+            if_not_exists,
             name,
             handler,
             validator,
@@ -15179,6 +15181,7 @@ impl Parser {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect(&Token::Keyword(Keyword::Server))?;
+        let if_not_exists = self.eat_if_not_exists();
         let name = self.expect_col_id()?;
         let server_type = self
             .eat_ident_eq("type")
@@ -15194,6 +15197,7 @@ impl Parser {
         let wrapper = self.expect_col_id()?;
         let options = self.parse_options()?;
         Ok(Statement::CreateServer {
+            if_not_exists,
             name,
             wrapper,
             server_type,
@@ -15234,11 +15238,13 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect(&Token::Keyword(Keyword::User))?;
         self.expect(&Token::Keyword(Keyword::Mapping))?;
+        let if_not_exists = self.eat_if_not_exists();
         let user = self.parse_user_mapping_user()?;
         self.expect(&Token::Keyword(Keyword::Server))?;
         let server = self.expect_col_id()?;
         let options = self.parse_options()?;
         Ok(Statement::CreateUserMapping {
+            if_not_exists,
             user,
             server,
             options,
@@ -15288,6 +15294,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect(&Token::Keyword(Keyword::Foreign))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
+        let if_not_exists = self.eat_if_not_exists();
         let name = self.relation_ref()?;
         self.expect(&Token::LParen)?;
         let mut columns = Vec::new();
@@ -15326,6 +15333,7 @@ impl Parser {
         let server = self.expect_col_id()?;
         let options = self.parse_options()?;
         Ok(Statement::CreateForeignTable {
+            if_not_exists,
             name,
             columns,
             like,
@@ -24207,6 +24215,7 @@ mod tests {
                 "CREATE SERVER s TYPE 'kafka' VERSION '1' FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'h:9092', registry_url 'http://r')"
             ),
             Statement::CreateServer {
+                if_not_exists: false,
                 name: "s".into(),
                 wrapper: "kafka_fdw".into(),
                 server_type: Some("kafka".into()),
@@ -24230,6 +24239,7 @@ mod tests {
                 like,
                 server,
                 options,
+                ..
             } => {
                 assert2::assert!(name == crate::ast::RelationRef::bare("orders"));
                 assert_eq!(server, "s");
@@ -24295,12 +24305,45 @@ mod tests {
                 "CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_handler VALIDATOR kafka_validator OPTIONS (protocol 'kafka')",
             ),
             Statement::CreateFdw {
+                if_not_exists: false,
                 name: "kafka_fdw".into(),
                 handler: Some("kafka_handler".into()),
                 validator: Some("kafka_validator".into()),
                 options: vec![("protocol".into(), "kafka".into())],
             }
         );
+    }
+
+    #[test]
+    fn parses_fdw_objects_if_not_exists() {
+        assert!(matches!(
+            one("CREATE FOREIGN DATA WRAPPER IF NOT EXISTS w"),
+            Statement::CreateFdw {
+                if_not_exists: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            one("CREATE SERVER IF NOT EXISTS s FOREIGN DATA WRAPPER w"),
+            Statement::CreateServer {
+                if_not_exists: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            one("CREATE USER MAPPING IF NOT EXISTS FOR PUBLIC SERVER s"),
+            Statement::CreateUserMapping {
+                if_not_exists: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            one("CREATE FOREIGN TABLE IF NOT EXISTS t (id int4) SERVER s"),
+            Statement::CreateForeignTable {
+                if_not_exists: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -24361,6 +24404,7 @@ mod tests {
                 user,
                 server,
                 options,
+                ..
             } => {
                 assert_eq!(user, RoleSpec::CurrentUser);
                 assert_eq!(server, "s");
@@ -24378,6 +24422,7 @@ mod tests {
                 user: RoleSpec::CurrentUser,
                 server,
                 options,
+                ..
             } if server == "s" && options.is_empty()
         ));
     }
@@ -24494,6 +24539,7 @@ mod tests {
         assert_eq!(
             one("CREATE SERVER s FOREIGN DATA WRAPPER w"),
             Statement::CreateServer {
+                if_not_exists: false,
                 name: "s".into(),
                 wrapper: "w".into(),
                 server_type: None,
@@ -24512,6 +24558,7 @@ mod tests {
                 like,
                 server,
                 options,
+                ..
             } => {
                 assert2::assert!(name == crate::ast::RelationRef::bare("t"));
                 assert_eq!(server, "s");

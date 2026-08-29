@@ -1062,6 +1062,7 @@ pub enum Statement {
     // SP40: FDW DDL
     /// `CREATE FOREIGN DATA WRAPPER <name> OPTIONS (…)`
     CreateFdw {
+        if_not_exists: bool,
         name: String,
         handler: Option<String>,
         validator: Option<String>,
@@ -1078,6 +1079,7 @@ pub enum Statement {
     },
     /// `CREATE SERVER <name> FOREIGN DATA WRAPPER <wrapper> OPTIONS (…)`
     CreateServer {
+        if_not_exists: bool,
         name: String,
         wrapper: String,
         server_type: Option<String>,
@@ -1100,6 +1102,7 @@ pub enum Statement {
     },
     /// `CREATE USER MAPPING FOR <user> SERVER <server> OPTIONS (…)`
     CreateUserMapping {
+        if_not_exists: bool,
         user: RoleSpec,
         server: String,
         options: OptionList,
@@ -1122,6 +1125,7 @@ pub enum Statement {
     },
     /// `CREATE FOREIGN TABLE <name> (<col> <type> | LIKE <source>, …) SERVER <server> OPTIONS (…)`
     CreateForeignTable {
+        if_not_exists: bool,
         name: RelationRef,
         columns: Vec<ColumnDef>,
         like: Vec<LikeClause>,

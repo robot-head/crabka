@@ -1605,18 +1605,23 @@ pub(crate) fn execute_ddl(
             Ok((command("ALTER DEFAULT PRIVILEGES"), ops))
         }
         Statement::CreateFdw {
+            if_not_exists,
             name,
             handler,
             validator,
             options,
         } => {
-            let ops = crabka_pgcatalog::create_fdw_with_routines_ops(
-                kv,
-                name,
-                handler.as_deref(),
-                validator.as_deref(),
-                options.clone(),
-            )?;
+            let ops = ignore_duplicate(
+                crabka_pgcatalog::create_fdw_with_routines_ops(
+                    kv,
+                    name,
+                    handler.as_deref(),
+                    validator.as_deref(),
+                    options.clone(),
+                ),
+                *if_not_exists,
+            )?
+            .unwrap_or_default();
             Ok((command("CREATE FOREIGN DATA WRAPPER"), ops))
         }
         Statement::DropFdw {
@@ -1631,20 +1636,25 @@ pub(crate) fn execute_ddl(
             Ok((command("DROP FOREIGN DATA WRAPPER"), ops))
         }
         Statement::CreateServer {
+            if_not_exists,
             name,
             wrapper,
             server_type,
             version,
             options,
         } => {
-            let ops = crabka_pgcatalog::create_server_with_identity_ops(
-                kv,
-                name,
-                wrapper,
-                server_type.as_deref(),
-                version.as_deref(),
-                options.clone(),
-            )?;
+            let ops = ignore_duplicate(
+                crabka_pgcatalog::create_server_with_identity_ops(
+                    kv,
+                    name,
+                    wrapper,
+                    server_type.as_deref(),
+                    version.as_deref(),
+                    options.clone(),
+                ),
+                *if_not_exists,
+            )?
+            .unwrap_or_default();
             Ok((command("CREATE SERVER"), ops))
         }
         Statement::DropServer {
@@ -1659,17 +1669,22 @@ pub(crate) fn execute_ddl(
             Ok((command("DROP SERVER"), ops))
         }
         Statement::CreateUserMapping {
+            if_not_exists,
             user,
             server,
             options,
         } => {
             let resolved_user = role_spec_name(user, fctx);
-            let ops = crabka_pgcatalog::create_user_mapping_ops(
-                kv,
-                resolved_user,
-                server,
-                options.clone(),
-            )?;
+            let ops = ignore_duplicate(
+                crabka_pgcatalog::create_user_mapping_ops(
+                    kv,
+                    resolved_user,
+                    server,
+                    options.clone(),
+                ),
+                *if_not_exists,
+            )?
+            .unwrap_or_default();
             Ok((command("CREATE USER MAPPING"), ops))
         }
         Statement::DropUserMapping {
@@ -1689,6 +1704,7 @@ pub(crate) fn execute_ddl(
             Ok((command("DROP USER MAPPING"), ops))
         }
         Statement::CreateForeignTable {
+            if_not_exists,
             name,
             columns,
             like,
@@ -1706,15 +1722,19 @@ pub(crate) fn execute_ddl(
                 }
             }
             crate::scope::reject_system_column_names(cols.iter().map(|c| c.name.as_str()))?;
-            let (_id, ops) = crabka_pgcatalog::create_foreign_table_ops(
-                kv,
-                &name,
-                cols,
-                server,
-                options.clone(),
-                checks,
-                fctx.table_creation(),
-            )?;
+            let ops = ignore_duplicate(
+                crabka_pgcatalog::create_foreign_table_ops(
+                    kv,
+                    &name,
+                    cols,
+                    server,
+                    options.clone(),
+                    checks,
+                    fctx.table_creation(),
+                ),
+                *if_not_exists,
+            )?
+            .map_or_else(Vec::new, |(_id, ops)| ops);
             Ok((command("CREATE FOREIGN TABLE"), ops))
         }
         Statement::DropForeignTable {

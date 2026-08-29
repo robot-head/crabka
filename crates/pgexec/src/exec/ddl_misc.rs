@@ -55,6 +55,21 @@ pub(super) fn ignore_missing_ops(
     }
 }
 
+/// Convert an object-exists error to a no-op when `IF NOT EXISTS` was written.
+pub(super) fn ignore_duplicate<T>(
+    result: Result<T, crabka_pgcatalog::CatalogError>,
+    if_not_exists: bool,
+) -> Result<Option<T>, ExecError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(
+            crabka_pgcatalog::CatalogError::DuplicateObject(_)
+            | crabka_pgcatalog::CatalogError::DuplicateTable(_),
+        ) if if_not_exists => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(super) fn sequence_from_encoded_options(encoded: &[String]) -> Result<Sequence, ExecError> {
     let mut start = None;
     let mut increment = None;
