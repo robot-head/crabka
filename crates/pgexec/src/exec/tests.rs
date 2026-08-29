@@ -1533,6 +1533,7 @@ async fn create_foreign_table_like_keeps_the_written_column_position() {
         "CREATE TABLE source (a int4 DEFAULT 7, b text CHECK (b <> 'bad'))",
     )
     .await;
+    run_s(&mut session, "CREATE FOREIGN DATA WRAPPER kafka_fdw").await;
     run_s(
         &mut session,
         "CREATE SERVER like_server FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'b:9092')",
@@ -7946,9 +7947,14 @@ fn create_user_mapping_for_current_user_stored_under_current_role() {
     use crabka_pgkv::{Kv, MemKv};
 
     let kv = MemKv::new();
-    for role in ["owner", "alice"] {
-        crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
-    }
+    let mut owner_attributes = crabka_pgcatalog::RoleAttributes::default();
+    owner_attributes.set(crabka_pgcatalog::RoleAttribute::Superuser, true);
+    kv.write_batch(
+        &crabka_pgcatalog::create_role_ops(&kv, "owner", true, owner_attributes)
+            .expect("create superuser role"),
+    )
+    .expect("store superuser role");
+    crabka_pgcatalog::create_role(&kv, "alice", true).expect("create role");
     let owner = super::ForeignCtx {
         current_user: "owner",
         session_user: "owner",
@@ -8001,7 +8007,14 @@ fn user_mapping_requires_server_ownership_or_usage_for_the_mapped_role() {
     use crabka_pgkv::{Kv, MemKv};
 
     let kv = MemKv::new();
-    for role in ["owner", "reader", "other"] {
+    let mut owner_attributes = crabka_pgcatalog::RoleAttributes::default();
+    owner_attributes.set(crabka_pgcatalog::RoleAttribute::Superuser, true);
+    kv.write_batch(
+        &crabka_pgcatalog::create_role_ops(&kv, "owner", true, owner_attributes)
+            .expect("create superuser role"),
+    )
+    .expect("store superuser role");
+    for role in ["reader", "other"] {
         crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
     }
     let owner = super::ForeignCtx {
@@ -8093,37 +8106,24 @@ fn create_fdw_objects_if_not_exists_skip_duplicates() {
 }
 
 #[test]
-fn fdw_and_server_are_owned_by_the_creating_role() {
-    use crabka_pgkv::{Kv, MemKv};
+fn creating_an_fdw_requires_a_superuser() {
+    use crabka_pgkv::MemKv;
 
     let kv = MemKv::new();
-    crabka_pgcatalog::create_role(&kv, "alice", true).expect("create owner role");
+    crabka_pgcatalog::create_role(&kv, "alice", true).expect("create role");
+    let stmt = crabka_pgparser::parser::parse("CREATE FOREIGN DATA WRAPPER w")
+        .expect("parse")
+        .into_iter()
+        .next()
+        .expect("one statement");
     let fctx = super::ForeignCtx {
         current_user: "alice",
         session_user: "alice",
         ..super::ForeignCtx::none()
     };
-    for sql in [
-        "CREATE FOREIGN DATA WRAPPER w",
-        "CREATE SERVER s FOREIGN DATA WRAPPER w",
-    ] {
-        let stmt = crabka_pgparser::parser::parse(sql)
-            .expect(sql)
-            .into_iter()
-            .next()
-            .expect("one statement");
-        let (_result, ops) = super::execute_ddl(&kv, &stmt, fctx, true).expect(sql);
-        kv.write_batch(&ops).expect("apply DDL ops");
-    }
-    assert_eq!(
-        crabka_pgcatalog::get_fdw(&kv, "w").expect("fdw").owner,
-        "alice"
-    );
-    assert_eq!(
-        crabka_pgcatalog::get_server(&kv, "s")
-            .expect("server")
-            .owner,
-        "alice"
+    let error = super::execute_ddl(&kv, &stmt, fctx, true).expect_err("superuser required");
+    assert!(
+        matches!(error, super::ExecError::Remote(ref error) if error.code == "42501" && error.message == "permission denied to create foreign-data wrapper \"w\"")
     );
 }
 
@@ -8132,7 +8132,14 @@ fn foreign_usage_is_required_to_create_servers_and_foreign_tables() {
     use crabka_pgkv::{Kv, MemKv};
 
     let kv = MemKv::new();
-    for role in ["owner", "reader", "delegate"] {
+    let mut owner_attributes = crabka_pgcatalog::RoleAttributes::default();
+    owner_attributes.set(crabka_pgcatalog::RoleAttribute::Superuser, true);
+    kv.write_batch(
+        &crabka_pgcatalog::create_role_ops(&kv, "owner", true, owner_attributes)
+            .expect("create superuser role"),
+    )
+    .expect("store superuser role");
+    for role in ["reader", "delegate"] {
         crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
     }
     let owner = super::ForeignCtx {
@@ -8224,9 +8231,14 @@ fn foreign_object_usage_grants_follow_rename_and_require_the_owner() {
     use crabka_pgkv::{Kv, MemKv};
 
     let kv = MemKv::new();
-    for role in ["alice", "reader"] {
-        crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
-    }
+    let mut alice_attributes = crabka_pgcatalog::RoleAttributes::default();
+    alice_attributes.set(crabka_pgcatalog::RoleAttribute::Superuser, true);
+    kv.write_batch(
+        &crabka_pgcatalog::create_role_ops(&kv, "alice", true, alice_attributes)
+            .expect("create superuser role"),
+    )
+    .expect("store superuser role");
+    crabka_pgcatalog::create_role(&kv, "reader", true).expect("create role");
     let owner = super::ForeignCtx {
         current_user: "alice",
         session_user: "alice",

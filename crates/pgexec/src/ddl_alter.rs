@@ -1653,6 +1653,7 @@ pub(crate) fn execute_ddl(
             validator,
             options,
         } => {
+            require_fdw_create_superuser(kv, name, fctx)?;
             if let Some(handler) = handler {
                 validate_fdw_routine(kv, handler, &[], "fdw_handler")?;
             }
@@ -3718,6 +3719,22 @@ fn require_foreign_ownership(
         }
     }
     Ok(())
+}
+
+/// `CREATE FOREIGN DATA WRAPPER` installs arbitrary code hooks, so PostgreSQL
+/// reserves it for superusers even when the wrapper has no handler yet.
+fn require_fdw_create_superuser(
+    kv: &dyn Kv,
+    name: &str,
+    fctx: ForeignCtx<'_>,
+) -> Result<(), ExecError> {
+    if crate::rls::role_is_superuser(kv, fctx.effective_role())? {
+        return Ok(());
+    }
+    Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42501",
+        format!("permission denied to create foreign-data wrapper \"{name}\""),
+    )))
 }
 
 fn require_foreign_grant_authority(
