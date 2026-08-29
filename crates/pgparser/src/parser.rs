@@ -15473,21 +15473,14 @@ impl Parser {
                     like.push(self.like_clause(columns.len())?);
                 } else {
                     let col_name = self.expect_col_id()?;
-                    let ty = self.parse_type_name()?;
-                    let collation = if self.peek_ident_eq("collate")
-                        && matches!(self.peek2(), Token::Ident(_))
-                    {
-                        self.bump();
-                        Some(self.expect_collation_name()?)
-                    } else {
-                        None
-                    };
+                    let (ty, serial) = self.parse_column_type(&col_name)?;
+                    let qualifiers = self.column_qualifiers()?;
                     columns.push(ColumnDef {
                         name: col_name,
                         ty,
-                        serial: None,
-                        collation,
-                        constraints: Vec::new(),
+                        serial,
+                        collation: qualifiers.collation,
+                        constraints: qualifiers.constraints,
                     });
                 }
                 if self.eat_comma() {

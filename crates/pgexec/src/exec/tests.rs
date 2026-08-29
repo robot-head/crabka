@@ -8088,6 +8088,36 @@ fn drop_foreign_objects_restrict_or_cascade_dependents() {
 }
 
 #[test]
+fn foreign_table_columns_keep_normal_qualifiers() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE t (id int4 NOT NULL, value int4 CHECK (value > 0)) SERVER s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    let table = crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("t"))
+        .expect("foreign table");
+    assert!(
+        table
+            .columns
+            .iter()
+            .any(|column| column.name == "id" && column.not_null)
+    );
+    assert_eq!(table.checks.len(), 1);
+}
+
+#[test]
 fn comments_on_foreign_objects_are_persisted() {
     use crabka_pgcatalog::CommentObject;
     use crabka_pgkv::{Kv, MemKv};
