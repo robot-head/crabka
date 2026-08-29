@@ -569,6 +569,23 @@ pub(crate) fn create_table_definition(
             {
                 copied.identity = None;
                 copied.default = None;
+            } else if clause.includes(crabka_pgparser::ast::LikeOption::Identity)
+                && copied.identity.is_some()
+            {
+                let source_sequence =
+                    source_name.sibling(format!("{}_{}_seq", source_name.name, column.name));
+                let copied_sequence = name.sibling(format!("{}_{}_seq", name.name, column.name));
+                let source_sequence = crabka_pgcatalog::get_sequence(kv, &source_sequence)?;
+                sequences.push((
+                    copied_sequence.clone(),
+                    crabka_pgcatalog::Sequence {
+                        is_called: false,
+                        ..source_sequence
+                    },
+                ));
+                copied.default = Some(crabka_pgcatalog::ColumnDefault::NextVal(
+                    copied_sequence.to_string(),
+                ));
             }
             if !clause.includes(crabka_pgparser::ast::LikeOption::Generated) {
                 copied.generated = None;
