@@ -2509,12 +2509,20 @@ fn read_count(cur: &mut &[u8]) -> Result<usize, KvError> {
 
 // ── Foreign server ────────────────────────────────────────────────────────────
 
-/// Format: `name len | name | wrapper len | wrapper | options`.
+/// Format: `name | wrapper | type | version | options`.
 #[must_use]
-pub fn serialize_server(name: &str, wrapper: &str, options: &[(String, String)]) -> Vec<u8> {
+pub fn serialize_server(
+    name: &str,
+    wrapper: &str,
+    server_type: Option<&str>,
+    version: Option<&str>,
+    options: &[(String, String)],
+) -> Vec<u8> {
     let mut out = Vec::new();
     write_str(&mut out, name);
     write_str(&mut out, wrapper);
+    write_optional_string(&mut out, server_type);
+    write_optional_string(&mut out, version);
     write_options(&mut out, options);
     out
 }
@@ -2528,10 +2536,14 @@ pub fn deserialize_server(bytes: &[u8]) -> Result<ForeignServer, KvError> {
     let mut cur = bytes;
     let name = read_string(&mut cur)?;
     let wrapper = read_string(&mut cur)?;
+    let server_type = read_optional_string(&mut cur)?;
+    let version = read_optional_string(&mut cur)?;
     let options = read_options(&mut cur)?;
     Ok(ForeignServer {
         name,
         wrapper,
+        server_type,
+        version,
         options,
     })
 }
@@ -3426,11 +3438,15 @@ mod tests {
         let bytes = serialize_server(
             "kafka_s",
             "kafka_fdw",
+            Some("kafka"),
+            Some("1.0"),
             &[("bootstrap".into(), "h:9092".into())],
         );
         let s = deserialize_server(&bytes).expect("decode");
         assert_eq!(s.name, "kafka_s");
         assert_eq!(s.wrapper, "kafka_fdw");
+        assert_eq!(s.server_type.as_deref(), Some("kafka"));
+        assert_eq!(s.version.as_deref(), Some("1.0"));
         assert_eq!(s.options[0], ("bootstrap".into(), "h:9092".into()));
     }
 

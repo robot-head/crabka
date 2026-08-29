@@ -1633,9 +1633,18 @@ pub(crate) fn execute_ddl(
         Statement::CreateServer {
             name,
             wrapper,
+            server_type,
+            version,
             options,
         } => {
-            let ops = crabka_pgcatalog::create_server_ops(kv, name, wrapper, options.clone())?;
+            let ops = crabka_pgcatalog::create_server_with_identity_ops(
+                kv,
+                name,
+                wrapper,
+                server_type.as_deref(),
+                version.as_deref(),
+                options.clone(),
+            )?;
             Ok((command("CREATE SERVER"), ops))
         }
         Statement::DropServer {

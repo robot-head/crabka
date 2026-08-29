@@ -1531,8 +1531,8 @@ fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 text(&server.name),
                 int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
                 int(*wrapper_oids.get(&server.wrapper).unwrap_or(&0)),
-                Datum::Null,
-                Datum::Null,
+                server.server_type.as_deref().map_or(Datum::Null, text),
+                server.version.as_deref().map_or(Datum::Null, text),
                 Datum::Null,
                 foreign_option_array(&server.options),
             ]

@@ -1080,6 +1080,8 @@ pub enum Statement {
     CreateServer {
         name: String,
         wrapper: String,
+        server_type: Option<String>,
+        version: Option<String>,
         options: OptionList,
     },
     /// `ALTER SERVER <name> OPTIONS (…)`

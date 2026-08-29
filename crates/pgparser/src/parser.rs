@@ -15184,12 +15184,20 @@ impl Parser {
         })
     }
 
-    /// `CREATE SERVER <name> FOREIGN DATA WRAPPER <wrapper> OPTIONS (…)`
+    /// `CREATE SERVER <name> [TYPE 'type'] [VERSION 'version'] FOREIGN DATA WRAPPER <wrapper> OPTIONS (…)`
     fn create_server(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect(&Token::Keyword(Keyword::Server))?;
         let name = self.expect_col_id()?;
+        let server_type = self
+            .eat_ident_eq("type")
+            .then(|| self.expect_string_lit())
+            .transpose()?;
+        let version = self
+            .eat_ident_eq("version")
+            .then(|| self.expect_string_lit())
+            .transpose()?;
         self.expect(&Token::Keyword(Keyword::Foreign))?;
         self.expect(&Token::Keyword(Keyword::Data))?;
         self.expect(&Token::Keyword(Keyword::Wrapper))?;
@@ -15198,6 +15206,8 @@ impl Parser {
         Ok(Statement::CreateServer {
             name,
             wrapper,
+            server_type,
+            version,
             options,
         })
     }
@@ -24204,11 +24214,13 @@ mod tests {
     fn parses_create_server() {
         assert_eq!(
             one(
-                "CREATE SERVER s FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'h:9092', registry_url 'http://r')"
+                "CREATE SERVER s TYPE 'kafka' VERSION '1' FOREIGN DATA WRAPPER kafka_fdw OPTIONS (bootstrap 'h:9092', registry_url 'http://r')"
             ),
             Statement::CreateServer {
                 name: "s".into(),
                 wrapper: "kafka_fdw".into(),
+                server_type: Some("kafka".into()),
+                version: Some("1".into()),
                 options: vec![
                     ("bootstrap".into(), "h:9092".into()),
                     ("registry_url".into(), "http://r".into()),
@@ -24471,6 +24483,8 @@ mod tests {
             Statement::CreateServer {
                 name: "s".into(),
                 wrapper: "w".into(),
+                server_type: None,
+                version: None,
                 options: vec![],
             }
         );

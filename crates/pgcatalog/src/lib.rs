@@ -641,6 +641,10 @@ pub struct ForeignServer {
     pub name: String,
     /// The FDW this server belongs to.
     pub wrapper: String,
+    /// The optional server type named by `TYPE`.
+    pub server_type: Option<String>,
+    /// The optional server version named by `VERSION`.
+    pub version: Option<String>,
     /// Server-level OPTIONS, for example `bootstrap_servers`.
     pub options: Vec<(String, String)>,
 }
@@ -7127,12 +7131,28 @@ pub fn create_server_ops(
     wrapper: &str,
     options: Vec<(String, String)>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    create_server_with_identity_ops(kv, name, wrapper, None, None, options)
+}
+
+/// Build the write batch for registering a foreign server and its identity fields.
+///
+/// # Errors
+///
+/// Returns duplicate-object or storage/corruption errors from the catalog KV seam.
+pub fn create_server_with_identity_ops(
+    kv: &dyn Kv,
+    name: &str,
+    wrapper: &str,
+    server_type: Option<&str>,
+    version: Option<&str>,
+    options: Vec<(String, String)>,
+) -> Result<Vec<WriteOp>, CatalogError> {
     if kv.get(&key::server_key(name))?.is_some() {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
     Ok(vec![WriteOp::Put {
         key: key::server_key(name),
-        value: serialize_server(name, wrapper, &options),
+        value: serialize_server(name, wrapper, server_type, version, &options),
     }])
 }
 

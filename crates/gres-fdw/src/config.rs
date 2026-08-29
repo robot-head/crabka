@@ -302,6 +302,8 @@ mod tests {
         crabka_pgcatalog::ForeignServer {
             name: "s".into(),
             wrapper: "crabka_gres_fdw".into(),
+            server_type: None,
+            version: None,
             options: opts
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -333,6 +335,8 @@ mod tests {
         let server = crabka_pgcatalog::ForeignServer {
             name: "s".into(),
             wrapper: "crabka_gres_fdw".into(),
+            server_type: None,
+            version: None,
             options: vec![
                 ("bootstrap".into(), "h:9092".into()),
                 ("registry_url".into(), "http://r".into()),

@@ -149,7 +149,7 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     .await;
     run(
         &engine,
-        "CREATE SERVER server FOREIGN DATA WRAPPER fdw OPTIONS (host 'local')",
+        "CREATE SERVER server TYPE 'test' VERSION '1' FOREIGN DATA WRAPPER fdw OPTIONS (host 'local')",
     )
     .await;
     run(
@@ -172,8 +172,12 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
             == vec![some(&["fdw", "fdw_handler", "fdw_validator", "{kind=test}"])]
     );
     assert!(
-        grid(&engine, "SELECT srvname, srvoptions FROM pg_foreign_server",).await
-            == vec![some(&["server", "{host=local}"])]
+        grid(
+            &engine,
+            "SELECT srvname, srvtype, srvversion, srvoptions FROM pg_foreign_server",
+        )
+        .await
+            == vec![some(&["server", "test", "1", "{host=local}"])]
     );
     assert!(
         grid(
