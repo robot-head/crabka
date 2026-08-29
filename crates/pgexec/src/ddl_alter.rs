@@ -1755,6 +1755,9 @@ pub(crate) fn execute_ddl(
                     fctx,
                 )?;
             }
+            if !cascade {
+                reject_fdw_dependents(kv, name)?;
+            }
             let ops = ignore_missing_ops(
                 crabka_pgcatalog::drop_fdw_with_dependents_ops(kv, name, *cascade),
                 *if_exists,
@@ -1808,6 +1811,9 @@ pub(crate) fn execute_ddl(
                     std::slice::from_ref(name),
                     fctx,
                 )?;
+            }
+            if !cascade {
+                reject_server_dependents(kv, name)?;
             }
             let ops = ignore_missing_ops(
                 crabka_pgcatalog::drop_server_with_dependents_ops(kv, name, *cascade),
@@ -2176,6 +2182,75 @@ fn reject_foreign_role_dependencies(kv: &dyn Kv, role: &str) -> Result<(), ExecE
         )
         .with_detail(dependents.join("\n")),
     ))
+}
+
+fn reject_fdw_dependents(kv: &dyn Kv, name: &str) -> Result<(), ExecError> {
+    let servers = crabka_pgcatalog::list_servers(kv)?
+        .into_iter()
+        .filter(|server| server.wrapper == name)
+        .collect::<Vec<_>>();
+    if servers.is_empty() {
+        return Ok(());
+    }
+    let mut dependents = Vec::new();
+    for server in servers {
+        dependents.push(format!(
+            "server {} depends on foreign-data wrapper {name}",
+            server.name
+        ));
+        for mapping in crabka_pgcatalog::list_user_mappings(kv)?
+            .into_iter()
+            .filter(|mapping| mapping.server == server.name)
+        {
+            dependents.push(format!(
+                "user mapping for {} on server {} depends on server {}",
+                mapping.user, server.name, server.name
+            ));
+        }
+    }
+    Err(foreign_dependents_error(
+        format!("cannot drop foreign-data wrapper {name} because other objects depend on it"),
+        dependents,
+    ))
+}
+
+fn reject_server_dependents(kv: &dyn Kv, name: &str) -> Result<(), ExecError> {
+    let mut dependents = crabka_pgcatalog::list_user_mappings(kv)?
+        .into_iter()
+        .filter(|mapping| mapping.server == name)
+        .map(|mapping| {
+            format!(
+                "user mapping for {} on server {name} depends on server {name}",
+                mapping.user
+            )
+        })
+        .collect::<Vec<_>>();
+    dependents.extend(
+        crabka_pgcatalog::list_tables(kv)?
+            .into_iter()
+            .filter(|table| {
+                table
+                    .foreign
+                    .as_ref()
+                    .is_some_and(|foreign| foreign.server == name)
+            })
+            .map(|table| format!("foreign table {} depends on server {name}", table.name)),
+    );
+    if dependents.is_empty() {
+        return Ok(());
+    }
+    Err(foreign_dependents_error(
+        format!("cannot drop server {name} because other objects depend on it"),
+        dependents,
+    ))
+}
+
+fn foreign_dependents_error(message: String, dependents: Vec<String>) -> ExecError {
+    ExecError::Remote(
+        crabka_pgwire::error::PgError::error("2BP01", message)
+            .with_detail(dependents.join("\n"))
+            .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+    )
 }
 
 fn validate_postgresql_fdw_options<'a>(

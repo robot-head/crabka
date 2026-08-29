@@ -8797,7 +8797,29 @@ fn drop_foreign_objects_restrict_or_cascade_dependents() {
         .into_iter()
         .next()
         .expect("one statement");
-    assert!(super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).is_err());
+    let error = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+        .expect_err("dependent foreign objects must block the drop");
+    let super::ExecError::Remote(error) = error else {
+        panic!("expected wire error");
+    };
+    assert!(error.code == "2BP01");
+    assert!(error.message == "cannot drop server s because other objects depend on it");
+    assert_eq!(
+        error
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.detail.as_deref()),
+        Some(
+            "user mapping for public on server s depends on server s\nforeign table t depends on server s"
+        )
+    );
+    assert!(
+        error
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.hint.as_deref())
+            == Some("Use DROP ... CASCADE to drop the dependent objects too.")
+    );
 
     let stmt = crabka_pgparser::parser::parse("DROP FOREIGN DATA WRAPPER w CASCADE")
         .expect("parse")
