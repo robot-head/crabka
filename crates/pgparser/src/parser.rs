@@ -4480,7 +4480,7 @@ impl Parser {
             let if_not_exists = self.eat_if_not_exists();
             let _ = explicit_column;
             let name = self.expect_col_id()?;
-            let (ty, serial) = self.parse_column_type()?;
+            let (ty, serial) = self.parse_column_type(&name)?;
             let qualifiers = self.column_qualifiers()?;
             return Ok(AlterTableAction::AddColumn {
                 if_not_exists,
@@ -8079,7 +8079,7 @@ impl Parser {
                         constraints.push(self.table_constraint()?);
                     } else {
                         let col_name = self.expect_col_id()?;
-                        let (ty, serial) = self.parse_column_type()?;
+                        let (ty, serial) = self.parse_column_type(&col_name)?;
                         let qualifiers = self.column_qualifiers()?;
                         columns.push(ColumnDef {
                             name: col_name,
@@ -9042,9 +9042,17 @@ impl Parser {
 
     fn parse_column_type(
         &mut self,
+        column_name: &str,
     ) -> Result<(crabka_pgtypes::ColumnType, Option<crate::ast::SerialKind>), ParseError> {
         let type_pos = self.peek_pos();
         let type_name = self.expect_ident()?;
+        if type_name.eq_ignore_ascii_case("unknown") {
+            return Err(ParseError::new_sqlstate(
+                "42P16",
+                format!("column \"{column_name}\" has pseudo-type unknown"),
+                type_pos,
+            ));
+        }
         match type_name.as_str() {
             "serial" | "serial4" => Ok((
                 crabka_pgtypes::ColumnType::Int4,
@@ -9056,12 +9064,21 @@ impl Parser {
             )),
             _ => {
                 self.pos -= 1;
-                self.parse_type_name()
+                let ty = self
+                    .parse_type_name()
                     .map(|ty| (ty, None))
                     .map_err(|mut err| {
                         err.position = type_pos;
                         err
-                    })
+                    })?;
+                if matches!(ty.0, crabka_pgtypes::ColumnType::Record(None)) {
+                    return Err(ParseError::new_sqlstate(
+                        "42P16",
+                        format!("column \"{column_name}\" has pseudo-type record"),
+                        type_pos,
+                    ));
+                }
+                Ok(ty)
             }
         }
     }
@@ -19433,6 +19450,21 @@ mod tests {
                 Vec::new(),
             )
         );
+    }
+
+    #[test]
+    fn table_columns_reject_pseudo_types() {
+        for (sql, column, ty) in [
+            ("CREATE TABLE t (u unknown)", "u", "unknown"),
+            ("CREATE TABLE t (r record)", "r", "record"),
+        ] {
+            let error = parse(sql).expect_err(sql);
+            assert!(error.sqlstate() == "42P16", "{sql}");
+            assert!(
+                error.message == format!("column \"{column}\" has pseudo-type {ty}"),
+                "{sql}"
+            );
+        }
     }
 
     #[test]
