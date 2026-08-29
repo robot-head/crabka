@@ -5744,6 +5744,11 @@ pub fn role_can_set(kv: &dyn Kv, member: &str, role: &str) -> Result<bool, Catal
     if member == role || member == BOOTSTRAP_ROLE {
         return Ok(true);
     }
+    match get_role(kv, member) {
+        Ok(member) if member.attributes.has(RoleAttribute::Superuser) => return Ok(true),
+        Ok(_) | Err(CatalogError::UndefinedObject(_)) => {}
+        Err(error) => return Err(error),
+    }
     let memberships = kv.scan_prefix(ROLE_MEMBERSHIP_PREFIX)?;
     let mut pending = vec![member.to_string()];
     let mut seen = HashSet::new();

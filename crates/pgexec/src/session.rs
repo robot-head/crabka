@@ -28388,6 +28388,25 @@ mod session_conformance_tests {
     }
 
     #[tokio::test]
+    async fn non_bootstrap_superuser_can_set_any_role() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE ROLE admin LOGIN SUPERUSER; CREATE ROLE target")
+            .await
+            .expect("create roles");
+        session
+            .simple_query("SET SESSION AUTHORIZATION admin")
+            .await
+            .expect("become superuser");
+        session
+            .simple_query("SET ROLE target")
+            .await
+            .expect("superuser can assume any role");
+        assert!(scalar(&mut session, "SELECT current_user").await == "target");
+    }
+
+    #[tokio::test]
     async fn write_context_preserves_current_and_session_users() {
         let (_engine, mut session) = seeded().await;
         session.current_role = "current_role".to_owned();
