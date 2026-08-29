@@ -300,6 +300,7 @@ mod tests {
 
     fn make_server(opts: &[(&str, &str)]) -> crabka_pgcatalog::ForeignServer {
         crabka_pgcatalog::ForeignServer {
+            oid: 1,
             name: "s".into(),
             owner: "postgres".into(),
             wrapper: "crabka_gres_fdw".into(),
@@ -314,6 +315,7 @@ mod tests {
 
     fn make_mapping(opts: &[(&str, &str)]) -> crabka_pgcatalog::UserMapping {
         crabka_pgcatalog::UserMapping {
+            oid: 2,
             user: "public".into(),
             server: "s".into(),
             options: opts
@@ -334,6 +336,7 @@ mod tests {
     #[test]
     fn resolve_builds_scram_profile() {
         let server = crabka_pgcatalog::ForeignServer {
+            oid: 1,
             name: "s".into(),
             owner: "postgres".into(),
             wrapper: "crabka_gres_fdw".into(),
@@ -346,6 +349,7 @@ mod tests {
             ],
         };
         let mapping = crabka_pgcatalog::UserMapping {
+            oid: 2,
             user: "public".into(),
             server: "s".into(),
             options: vec![

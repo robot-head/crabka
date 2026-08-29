@@ -55,10 +55,6 @@ const FOREIGN_KEY_OID_BASE: i32 = 150_000;
 const ROWTYPE_OID_BASE: i32 = 160_000;
 /// First oid of the band reserved for arrays over relation composite types.
 const ROWTYPE_ARRAY_OID_BASE: i32 = 170_000;
-/// First oid of the band reserved for foreign-data wrappers.
-const FDW_OID_BASE: i32 = 180_000;
-/// First oid of the band reserved for foreign servers.
-const FOREIGN_SERVER_OID_BASE: i32 = 190_000;
 /// First oid of the band reserved for user mappings.
 const USER_MAPPING_OID_BASE: i32 = 200_000;
 /// First oid of the band reserved for column defaults (`pg_attrdef`).
@@ -1497,11 +1493,6 @@ fn foreign_option_array(options: &[(String, String)]) -> Datum {
 fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let wrappers = crabka_pgcatalog::list_fdws(kv)?;
     let role_oids = role_oids(kv)?;
-    let names = wrappers
-        .iter()
-        .map(|wrapper| wrapper.name.clone())
-        .collect::<Vec<_>>();
-    let oids = banded_oids(FDW_OID_BASE, &names);
     let routine_names = wrappers
         .iter()
         .flat_map(|wrapper| [wrapper.handler.clone(), wrapper.validator.clone()])
@@ -1512,7 +1503,7 @@ fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
         .into_iter()
         .map(|wrapper| {
             vec![
-                int(oids[&wrapper.name]),
+                int(i32::try_from(wrapper.oid).expect("foreign wrapper oid fits i32")),
                 text(&wrapper.name),
                 int(*role_oids.get(&wrapper.owner).unwrap_or(&0)),
                 foreign_routine_datum(wrapper.handler.as_deref(), &routine_oids),
@@ -1535,28 +1526,23 @@ fn foreign_routine_datum(name: Option<&str>, oids: &BTreeMap<String, i32>) -> Da
 
 fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let wrappers = crabka_pgcatalog::list_fdws(kv)?;
-    let wrapper_oids = banded_oids(
-        FDW_OID_BASE,
-        &wrappers
-            .iter()
-            .map(|wrapper| wrapper.name.clone())
-            .collect::<Vec<_>>(),
-    );
+    let wrapper_oids = wrappers
+        .iter()
+        .map(|wrapper| (wrapper.name.as_str(), wrapper.oid))
+        .collect::<BTreeMap<_, _>>();
     let servers = crabka_pgcatalog::list_servers(kv)?;
     let role_oids = role_oids(kv)?;
-    let names = servers
-        .iter()
-        .map(|server| server.name.clone())
-        .collect::<Vec<_>>();
-    let oids = banded_oids(FOREIGN_SERVER_OID_BASE, &names);
     Ok(servers
         .into_iter()
         .map(|server| {
             vec![
-                int(oids[&server.name]),
+                int(i32::try_from(server.oid).expect("foreign server oid fits i32")),
                 text(&server.name),
                 int(*role_oids.get(&server.owner).unwrap_or(&0)),
-                int(*wrapper_oids.get(&server.wrapper).unwrap_or(&0)),
+                int(
+                    i32::try_from(*wrapper_oids.get(server.wrapper.as_str()).unwrap_or(&0))
+                        .expect("foreign wrapper oid fits i32"),
+                ),
                 server.server_type.as_deref().map_or(Datum::Null, text),
                 server.version.as_deref().map_or(Datum::Null, text),
                 Datum::Null,
@@ -1568,32 +1554,26 @@ fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 
 fn pg_user_mapping_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let servers = crabka_pgcatalog::list_servers(kv)?;
-    let server_oids = banded_oids(
-        FOREIGN_SERVER_OID_BASE,
-        &servers
-            .iter()
-            .map(|server| server.name.clone())
-            .collect::<Vec<_>>(),
-    );
+    let server_oids = servers
+        .iter()
+        .map(|server| (server.name.as_str(), server.oid))
+        .collect::<BTreeMap<_, _>>();
     let role_oids = role_oids(kv)?;
     let mappings = crabka_pgcatalog::list_user_mappings(kv)?;
-    let names = mappings
-        .iter()
-        .map(|mapping| format!("{}\0{}", mapping.user, mapping.server))
-        .collect::<Vec<_>>();
-    let oids = banded_oids(USER_MAPPING_OID_BASE, &names);
     Ok(mappings
         .into_iter()
         .map(|mapping| {
-            let key = format!("{}\0{}", mapping.user, mapping.server);
             vec![
-                int(oids[&key]),
+                int(i32::try_from(mapping.oid).expect("user mapping oid fits i32")),
                 int(if mapping.user == "public" {
                     0
                 } else {
                     *role_oids.get(&mapping.user).unwrap_or(&0)
                 }),
-                int(*server_oids.get(&mapping.server).unwrap_or(&0)),
+                int(
+                    i32::try_from(*server_oids.get(mapping.server.as_str()).unwrap_or(&0))
+                        .expect("foreign server oid fits i32"),
+                ),
                 foreign_option_array(&mapping.options),
             ]
         })
@@ -1602,13 +1582,10 @@ fn pg_user_mapping_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 
 fn pg_foreign_table_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let servers = crabka_pgcatalog::list_servers(kv)?;
-    let server_oids = banded_oids(
-        FOREIGN_SERVER_OID_BASE,
-        &servers
-            .iter()
-            .map(|server| server.name.clone())
-            .collect::<Vec<_>>(),
-    );
+    let server_oids = servers
+        .iter()
+        .map(|server| (server.name.as_str(), server.oid))
+        .collect::<BTreeMap<_, _>>();
     crabka_pgcatalog::list_tables(kv)?
         .into_iter()
         .filter(|table| table.foreign.is_some())
@@ -1616,7 +1593,10 @@ fn pg_foreign_table_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             let foreign = table.foreign.expect("the filter keeps foreign tables");
             Ok(vec![
                 int(table_relation_oid(table.id)?),
-                int(*server_oids.get(&foreign.server).unwrap_or(&0)),
+                int(
+                    i32::try_from(*server_oids.get(foreign.server.as_str()).unwrap_or(&0))
+                        .expect("foreign server oid fits i32"),
+                ),
                 foreign_option_array(&foreign.options),
             ])
         })

@@ -8218,6 +8218,7 @@ fn alter_foreign_options_update_catalog_records() {
     assert_eq!(
         crabka_pgcatalog::get_fdw(&kv, "w").expect("fdw"),
         crabka_pgcatalog::ForeignDataWrapper {
+            oid: 330_000,
             name: "w".into(),
             owner: "postgres".into(),
             handler: Some("new_handler".into()),
@@ -8231,6 +8232,7 @@ fn alter_foreign_options_update_catalog_records() {
     assert_eq!(
         crabka_pgcatalog::get_server(&kv, "s").expect("server"),
         crabka_pgcatalog::ForeignServer {
+            oid: 330_001,
             name: "s".into(),
             owner: "postgres".into(),
             wrapper: "w".into(),

@@ -628,6 +628,8 @@ impl Sequence {
 /// A foreign-data wrapper registration (`CREATE FOREIGN DATA WRAPPER …`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignDataWrapper {
+    /// Stable catalog identity, retained when the wrapper is renamed.
+    pub oid: u32,
     pub name: String,
     /// Role that created the wrapper.
     pub owner: String,
@@ -642,6 +644,8 @@ pub struct ForeignDataWrapper {
 /// A foreign server registration (`CREATE SERVER … FOREIGN DATA WRAPPER …`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignServer {
+    /// Stable catalog identity, retained when the server is renamed.
+    pub oid: u32,
     pub name: String,
     /// Role that created the server.
     pub owner: String,
@@ -680,6 +684,8 @@ impl ForeignPrivilegeTarget {
 /// A user mapping (`CREATE USER MAPPING FOR … SERVER …`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserMapping {
+    /// Stable catalog identity, retained when its server is renamed.
+    pub oid: u32,
     pub user: String,
     pub server: String,
     /// Mapping-level OPTIONS.
@@ -1404,6 +1410,8 @@ const OPERATOR_FAMILY_OPERATOR_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_family
 const OPERATOR_FAMILY_FUNCTION_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_family_function/";
 const NEXT_OPERATOR_OBJECT_OID_KEY: &[u8] = b"\0\0\0\0meta/next_operator_object_oid";
 const FIRST_USER_OPERATOR_OBJECT_OID: u32 = 310_000;
+const NEXT_FOREIGN_OBJECT_OID_KEY: &[u8] = b"\0\0\0\0meta/next_foreign_object_oid";
+const FIRST_USER_FOREIGN_OBJECT_OID: u32 = 330_000;
 
 fn tablespace_key(name: &str) -> Vec<u8> {
     let mut key = TABLESPACE_PREFIX.to_vec();
@@ -1599,6 +1607,27 @@ fn operator_object_oid(kv: &dyn Kv) -> Result<u32, CatalogError> {
                     KvError::CorruptRow("next operator object oid is not u32".into()).into()
                 })
         })
+}
+
+fn allocate_foreign_object_oid(kv: &dyn Kv) -> Result<(u32, WriteOp), CatalogError> {
+    let oid = kv.get(NEXT_FOREIGN_OBJECT_OID_KEY)?.map_or(
+        Ok(FIRST_USER_FOREIGN_OBJECT_OID),
+        |bytes| {
+            U32::read_from_prefix(&bytes)
+                .map(|(oid, _)| oid.get())
+                .map_err(|_| KvError::CorruptRow("next foreign object oid is not u32".into()))
+        },
+    )?;
+    let next = oid
+        .checked_add(1)
+        .ok_or_else(|| KvError::CorruptRow("foreign object oid space exhausted".into()))?;
+    Ok((
+        oid,
+        WriteOp::Put {
+            key: NEXT_FOREIGN_OBJECT_OID_KEY.to_vec(),
+            value: U32::new(next).as_bytes().to_vec(),
+        },
+    ))
 }
 
 /// Create an operator family and advance the shared operator-object oid cursor.
@@ -7274,10 +7303,14 @@ pub fn create_fdw_with_routines_owned_ops(
     if kv.get(&key::fdw_key(name))?.is_some() {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
-    Ok(vec![WriteOp::Put {
-        key: key::fdw_key(name),
-        value: serialize_fdw(name, owner, handler, validator, &options),
-    }])
+    let (oid, next_oid) = allocate_foreign_object_oid(kv)?;
+    Ok(vec![
+        WriteOp::Put {
+            key: key::fdw_key(name),
+            value: serialize_fdw(oid, name, owner, handler, validator, &options),
+        },
+        next_oid,
+    ])
 }
 
 /// Look up a foreign-data wrapper by name.
@@ -7322,6 +7355,7 @@ pub fn alter_fdw_ops(
     Ok(vec![WriteOp::Put {
         key: key::fdw_key(name),
         value: serialize_fdw(
+            wrapper.oid,
             &wrapper.name,
             &wrapper.owner,
             wrapper.handler.as_deref(),
@@ -7345,6 +7379,7 @@ pub fn rename_fdw_ops(
         WriteOp::Put {
             key: key::fdw_key(new_name),
             value: serialize_fdw(
+                wrapper.oid,
                 new_name,
                 &wrapper.owner,
                 wrapper.handler.as_deref(),
@@ -7373,6 +7408,7 @@ pub fn rename_fdw_ops(
             ops.push(WriteOp::Put {
                 key: key::server_key(&server.name),
                 value: serialize_server(
+                    server.oid,
                     &server.name,
                     &server.owner,
                     new_name,
@@ -7538,10 +7574,14 @@ pub fn create_server_with_identity_owned_ops(
     if kv.get(&key::server_key(name))?.is_some() {
         return Err(CatalogError::DuplicateObject(name.to_string()));
     }
-    Ok(vec![WriteOp::Put {
-        key: key::server_key(name),
-        value: serialize_server(name, owner, wrapper, server_type, version, &options),
-    }])
+    let (oid, next_oid) = allocate_foreign_object_oid(kv)?;
+    Ok(vec![
+        WriteOp::Put {
+            key: key::server_key(name),
+            value: serialize_server(oid, name, owner, wrapper, server_type, version, &options),
+        },
+        next_oid,
+    ])
 }
 
 /// Look up a foreign server by name.
@@ -7582,6 +7622,7 @@ pub fn alter_server_ops(
     Ok(vec![WriteOp::Put {
         key: key::server_key(name),
         value: serialize_server(
+            server.oid,
             &server.name,
             &server.owner,
             &server.wrapper,
@@ -7606,6 +7647,7 @@ pub fn rename_server_ops(
         WriteOp::Put {
             key: key::server_key(new_name),
             value: serialize_server(
+                server.oid,
                 new_name,
                 &server.owner,
                 &server.wrapper,
@@ -7633,7 +7675,12 @@ pub fn rename_server_ops(
             });
             ops.push(WriteOp::Put {
                 key: key::user_mapping_key(&mapping.user, new_name),
-                value: serialize_user_mapping(&mapping.user, new_name, &mapping.options),
+                value: serialize_user_mapping(
+                    mapping.oid,
+                    &mapping.user,
+                    new_name,
+                    &mapping.options,
+                ),
             });
         }
     }
@@ -7796,10 +7843,14 @@ pub fn create_user_mapping_ops(
     if kv.get(&key::user_mapping_key(user, server))?.is_some() {
         return Err(CatalogError::DuplicateObject(format!("{user}@{server}")));
     }
-    Ok(vec![WriteOp::Put {
-        key: key::user_mapping_key(user, server),
-        value: serialize_user_mapping(user, server, &options),
-    }])
+    let (oid, next_oid) = allocate_foreign_object_oid(kv)?;
+    Ok(vec![
+        WriteOp::Put {
+            key: key::user_mapping_key(user, server),
+            value: serialize_user_mapping(oid, user, server, &options),
+        },
+        next_oid,
+    ])
 }
 
 /// Look up a user mapping.
@@ -7852,7 +7903,12 @@ pub fn alter_user_mapping_options_ops(
     mapping.options = apply_foreign_option_mutations(&mapping.options, changes)?;
     Ok(vec![WriteOp::Put {
         key: key::user_mapping_key(user, server),
-        value: serialize_user_mapping(&mapping.user, &mapping.server, &mapping.options),
+        value: serialize_user_mapping(
+            mapping.oid,
+            &mapping.user,
+            &mapping.server,
+            &mapping.options,
+        ),
     }])
 }
 
@@ -9879,6 +9935,40 @@ mod tests {
         let m = get_user_mapping(&kv, "alice", "s").expect("must be persisted");
         assert_eq!(m.user, "alice");
         assert_eq!(m.server, "s");
+    }
+
+    #[test]
+    fn foreign_object_oids_are_unique_and_survive_renames() {
+        let kv = MemKv::new();
+        create_fdw(&kv, "w", vec![]).expect("fdw");
+        create_server(&kv, "s", "w", vec![]).expect("server");
+        create_user_mapping(&kv, "alice", "s", vec![]).expect("mapping");
+        let wrapper_oid = get_fdw(&kv, "w").expect("fdw").oid;
+        let server_oid = get_server(&kv, "s").expect("server").oid;
+        let mapping_oid = get_user_mapping(&kv, "alice", "s").expect("mapping").oid;
+        assert_eq!(
+            [wrapper_oid, server_oid, mapping_oid],
+            [330_000, 330_001, 330_002]
+        );
+
+        kv.write_batch(&rename_fdw_ops(&kv, "w", "renamed_w").expect("rename fdw"))
+            .expect("apply fdw rename");
+        kv.write_batch(&rename_server_ops(&kv, "s", "renamed_s").expect("rename server"))
+            .expect("apply server rename");
+        assert_eq!(
+            get_fdw(&kv, "renamed_w").expect("renamed fdw").oid,
+            wrapper_oid
+        );
+        assert_eq!(
+            get_server(&kv, "renamed_s").expect("renamed server").oid,
+            server_oid
+        );
+        assert_eq!(
+            get_user_mapping(&kv, "alice", "renamed_s")
+                .expect("renamed mapping")
+                .oid,
+            mapping_oid
+        );
     }
 
     #[test]

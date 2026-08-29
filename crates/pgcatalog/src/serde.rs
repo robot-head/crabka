@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 23;
+pub const SCHEMA_VERSION: u8 = 24;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -2094,16 +2094,17 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
 
 // ── Foreign-data wrapper ──────────────────────────────────────────────────────
 
-/// Format: `name | owner | handler | validator | options`.
+/// Format: `oid | name | owner | handler | validator | options`.
 #[must_use]
 pub fn serialize_fdw(
+    oid: u32,
     name: &str,
     owner: &str,
     handler: Option<&str>,
     validator: Option<&str>,
     options: &[(String, String)],
 ) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = oid.to_be_bytes().to_vec();
     write_str(&mut out, name);
     write_str(&mut out, owner);
     write_optional_string(&mut out, handler);
@@ -2119,12 +2120,14 @@ pub fn serialize_fdw(
 /// Returns catalog corruption errors for truncated or invalid record bytes.
 pub fn deserialize_fdw(bytes: &[u8]) -> Result<ForeignDataWrapper, KvError> {
     let mut cur = bytes;
+    let oid = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
     let name = read_string(&mut cur)?;
     let owner = read_string(&mut cur)?;
     let handler = read_optional_string(&mut cur)?;
     let validator = read_optional_string(&mut cur)?;
     let options = read_options(&mut cur)?;
     Ok(ForeignDataWrapper {
+        oid,
         name,
         owner,
         handler,
@@ -2534,9 +2537,10 @@ fn read_count(cur: &mut &[u8]) -> Result<usize, KvError> {
 
 // ── Foreign server ────────────────────────────────────────────────────────────
 
-/// Format: `name | owner | wrapper | type | version | options`.
+/// Format: `oid | name | owner | wrapper | type | version | options`.
 #[must_use]
 pub fn serialize_server(
+    oid: u32,
     name: &str,
     owner: &str,
     wrapper: &str,
@@ -2544,7 +2548,7 @@ pub fn serialize_server(
     version: Option<&str>,
     options: &[(String, String)],
 ) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = oid.to_be_bytes().to_vec();
     write_str(&mut out, name);
     write_str(&mut out, owner);
     write_str(&mut out, wrapper);
@@ -2561,6 +2565,7 @@ pub fn serialize_server(
 /// Returns catalog corruption errors for truncated or invalid record bytes.
 pub fn deserialize_server(bytes: &[u8]) -> Result<ForeignServer, KvError> {
     let mut cur = bytes;
+    let oid = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
     let name = read_string(&mut cur)?;
     let owner = read_string(&mut cur)?;
     let wrapper = read_string(&mut cur)?;
@@ -2568,6 +2573,7 @@ pub fn deserialize_server(bytes: &[u8]) -> Result<ForeignServer, KvError> {
     let version = read_optional_string(&mut cur)?;
     let options = read_options(&mut cur)?;
     Ok(ForeignServer {
+        oid,
         name,
         owner,
         wrapper,
@@ -2579,10 +2585,15 @@ pub fn deserialize_server(bytes: &[u8]) -> Result<ForeignServer, KvError> {
 
 // ── User mapping ──────────────────────────────────────────────────────────────
 
-/// Format: `user len | user | server len | server | options`.
+/// Format: `oid | user len | user | server len | server | options`.
 #[must_use]
-pub fn serialize_user_mapping(user: &str, server: &str, options: &[(String, String)]) -> Vec<u8> {
-    let mut out = Vec::new();
+pub fn serialize_user_mapping(
+    oid: u32,
+    user: &str,
+    server: &str,
+    options: &[(String, String)],
+) -> Vec<u8> {
+    let mut out = oid.to_be_bytes().to_vec();
     write_str(&mut out, user);
     write_str(&mut out, server);
     write_options(&mut out, options);
@@ -2596,10 +2607,12 @@ pub fn serialize_user_mapping(user: &str, server: &str, options: &[(String, Stri
 /// Returns catalog corruption errors for truncated or invalid record bytes.
 pub fn deserialize_user_mapping(bytes: &[u8]) -> Result<UserMapping, KvError> {
     let mut cur = bytes;
+    let oid = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
     let user = read_string(&mut cur)?;
     let server = read_string(&mut cur)?;
     let options = read_options(&mut cur)?;
     Ok(UserMapping {
+        oid,
         user,
         server,
         options,
@@ -3451,6 +3464,7 @@ mod tests {
     #[test]
     fn roundtrip_fdw() {
         let bytes = serialize_fdw(
+            330_000,
             "kafka_fdw",
             "alice",
             Some("kafka_fdw_handler"),
@@ -3458,6 +3472,7 @@ mod tests {
             &[("handler".into(), "kafka_fdw_handler".into())],
         );
         let fdw = deserialize_fdw(&bytes).expect("decode");
+        assert_eq!(fdw.oid, 330_000);
         assert_eq!(fdw.name, "kafka_fdw");
         assert_eq!(fdw.owner, "alice");
         assert_eq!(fdw.handler.as_deref(), Some("kafka_fdw_handler"));
@@ -3468,6 +3483,7 @@ mod tests {
     #[test]
     fn roundtrip_server() {
         let bytes = serialize_server(
+            330_001,
             "kafka_s",
             "alice",
             "kafka_fdw",
@@ -3476,6 +3492,7 @@ mod tests {
             &[("bootstrap".into(), "h:9092".into())],
         );
         let s = deserialize_server(&bytes).expect("decode");
+        assert_eq!(s.oid, 330_001);
         assert_eq!(s.name, "kafka_s");
         assert_eq!(s.owner, "alice");
         assert_eq!(s.wrapper, "kafka_fdw");
@@ -3486,9 +3503,14 @@ mod tests {
 
     #[test]
     fn roundtrip_user_mapping() {
-        let bytes =
-            serialize_user_mapping("alice", "kafka_s", &[("token".into(), "secret".into())]);
+        let bytes = serialize_user_mapping(
+            330_002,
+            "alice",
+            "kafka_s",
+            &[("token".into(), "secret".into())],
+        );
         let m = deserialize_user_mapping(&bytes).expect("decode");
+        assert_eq!(m.oid, 330_002);
         assert_eq!(m.user, "alice");
         assert_eq!(m.server, "kafka_s");
         assert_eq!(m.options[0], ("token".into(), "secret".into()));
