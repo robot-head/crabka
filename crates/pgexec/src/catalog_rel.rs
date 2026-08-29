@@ -197,7 +197,9 @@ const INFORMATION_SCHEMA_RELATIONS: &[&str] = &[
     "information_schema.table_privileges",
     "information_schema.user_mapping_options",
     "information_schema.user_mappings",
+    "information_schema.usage_privileges",
     "information_schema.views",
+    "information_schema.role_usage_grants",
 ];
 
 static RELATION_NAMES: &[&str] = &[
@@ -271,7 +273,9 @@ static RELATION_NAMES: &[&str] = &[
     "information_schema.table_privileges",
     "information_schema.user_mapping_options",
     "information_schema.user_mappings",
+    "information_schema.usage_privileges",
     "information_schema.views",
+    "information_schema.role_usage_grants",
 ];
 
 /// The fixed `pg_class` oid of one of this module's relations.
@@ -364,6 +368,8 @@ fn system_view_oid(name: &str) -> i32 {
         "information_schema.user_mapping_options" => 120_029,
         "information_schema.user_mappings" => 120_030,
         "pg_user_mappings" => 120_031,
+        "information_schema.usage_privileges" => 120_032,
+        "information_schema.role_usage_grants" => 120_033,
         "information_schema.views" => 120_021,
         _ => 0,
     }
@@ -1126,7 +1132,7 @@ pub(crate) fn rows(
         "pg_user_mapping" => pg_user_mapping_rows(kv),
         "pg_user_mappings" => pg_user_mappings_rows(kv, current_user),
         "pg_views" => pg_views_rows(kv, style),
-        _ => information_schema_rows(kv, database, name, style),
+        _ => information_schema_rows(kv, database, current_user, name, style),
     }
 }
 
@@ -4024,6 +4030,16 @@ fn information_schema_columns_rest(name: &str) -> Vec<Column> {
             ("privilege_type", Text),
             ("is_grantable", Text),
         ]),
+        "information_schema.usage_privileges" | "information_schema.role_usage_grants" => cols(&[
+            ("grantor", Text),
+            ("grantee", Text),
+            ("object_catalog", Text),
+            ("object_schema", Text),
+            ("object_name", Text),
+            ("object_type", Text),
+            ("privilege_type", Text),
+            ("is_grantable", Text),
+        ]),
         "information_schema.user_mapping_options" => cols(&[
             ("authorization_identifier", Text),
             ("foreign_server_catalog", Text),
@@ -4044,6 +4060,7 @@ fn information_schema_columns_rest(name: &str) -> Vec<Column> {
 fn information_schema_rows(
     kv: &dyn Kv,
     database: &str,
+    current_user: &str,
     name: &str,
     style: crabka_pgtypes::encoding::OutputStyle<'_>,
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -4068,6 +4085,9 @@ fn information_schema_rows(
         "information_schema.column_privileges" => column_privilege_rows(kv, database),
         "information_schema.user_mapping_options" => user_mapping_option_rows(kv, database),
         "information_schema.user_mappings" => user_mapping_rows(kv, database),
+        "information_schema.usage_privileges" | "information_schema.role_usage_grants" => {
+            usage_privilege_rows(kv, database, current_user)
+        }
         // `routines`/`parameters` need user-defined routines, which crabka has
         // no object kind for yet, so both are correctly empty rather than
         // absent.
@@ -4201,6 +4221,65 @@ fn user_mapping_rows(kv: &dyn Kv, database: &str) -> Result<Vec<Vec<Datum>>, Exe
         .into_iter()
         .map(|mapping| vec![text(&mapping.user), text(database), text(&mapping.server)])
         .collect())
+}
+
+fn usage_privilege_rows(
+    kv: &dyn Kv,
+    database: &str,
+    current_user: &str,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    use crabka_pgcatalog::ForeignPrivilegeTarget;
+
+    let is_superuser = crate::rls::role_is_superuser(kv, current_user)?;
+    let mut objects = crabka_pgcatalog::list_fdws(kv)?
+        .into_iter()
+        .map(|wrapper| {
+            (
+                ForeignPrivilegeTarget::DataWrapper,
+                wrapper.name,
+                wrapper.owner,
+            )
+        })
+        .collect::<Vec<_>>();
+    objects.extend(
+        crabka_pgcatalog::list_servers(kv)?
+            .into_iter()
+            .map(|server| (ForeignPrivilegeTarget::Server, server.name, server.owner)),
+    );
+    let mut rows = Vec::new();
+    for (target, name, owner) in objects {
+        let object_type = match target {
+            ForeignPrivilegeTarget::DataWrapper => "FOREIGN DATA WRAPPER",
+            ForeignPrivilegeTarget::Server => "FOREIGN SERVER",
+        };
+        let mut push = |grantee: &str, grantable: bool| -> Result<(), ExecError> {
+            if is_superuser
+                || grantee == crabka_pgcatalog::PUBLIC_ROLE
+                || crabka_pgcatalog::role_has_privs_of(kv, current_user, grantee)?
+            {
+                rows.push(vec![
+                    text(&owner),
+                    text(grantee),
+                    text(database),
+                    Datum::Null,
+                    text(&name),
+                    text(object_type),
+                    text("USAGE"),
+                    text(if grantable { "YES" } else { "NO" }),
+                ]);
+            }
+            Ok(())
+        };
+        push(&owner, true)?;
+        for (grantee, privilege, grantable) in
+            crabka_pgcatalog::list_foreign_privileges(kv, target, &name)?
+        {
+            if privilege == "USAGE" {
+                push(&grantee, grantable)?;
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn catalog_name(database: &str) -> Datum {
@@ -4937,6 +5016,59 @@ mod tests {
                     text("guest"),
                 ]]
         );
+    }
+
+    #[test]
+    fn information_schema_usage_views_project_visible_foreign_grants() {
+        let kv = MemKv::new();
+        for role in ["owner", "reader"] {
+            crabka_pgcatalog::create_role(&kv, role, true).expect("role");
+        }
+        kv.write_batch(
+            &crabka_pgcatalog::create_fdw_with_routines_owned_ops(
+                &kv,
+                "w",
+                None,
+                None,
+                Vec::new(),
+                "owner",
+            )
+            .expect("fdw ops"),
+        )
+        .expect("create fdw");
+        kv.write_batch(
+            &crabka_pgcatalog::grant_foreign_privileges_with_option_ops(
+                &kv,
+                crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                &["w".into()],
+                &["reader".into()],
+                &["USAGE".into()],
+                true,
+            )
+            .expect("grant ops"),
+        )
+        .expect("grant usage");
+
+        let reader = SessionIdent {
+            current_user: "reader",
+            ..test_session()
+        };
+        let expected = vec![vec![
+            text("owner"),
+            text("reader"),
+            text(crate::exec::DEFAULT_DATABASE),
+            Datum::Null,
+            text("w"),
+            text("FOREIGN DATA WRAPPER"),
+            text("USAGE"),
+            text("YES"),
+        ]];
+        for name in [
+            "information_schema.usage_privileges",
+            "information_schema.role_usage_grants",
+        ] {
+            assert!(rows(&kv, name, reader).expect(name) == expected, "{name}");
+        }
     }
 
     #[test]
