@@ -55,6 +55,12 @@ const FOREIGN_KEY_OID_BASE: i32 = 150_000;
 const ROWTYPE_OID_BASE: i32 = 160_000;
 /// First oid of the band reserved for arrays over relation composite types.
 const ROWTYPE_ARRAY_OID_BASE: i32 = 170_000;
+/// First oid of the band reserved for foreign-data wrappers.
+const FDW_OID_BASE: i32 = 180_000;
+/// First oid of the band reserved for foreign servers.
+const FOREIGN_SERVER_OID_BASE: i32 = 190_000;
+/// First oid of the band reserved for user mappings.
+const USER_MAPPING_OID_BASE: i32 = 200_000;
 /// First oid of the band reserved for column defaults (`pg_attrdef`).
 const ATTRDEF_OID_BASE: i32 = 110_000;
 /// Width of every name-hashed oid band.
@@ -139,6 +145,9 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_enum",
     "pg_event_trigger",
     "pg_extension",
+    "pg_foreign_data_wrapper",
+    "pg_foreign_server",
+    "pg_foreign_table",
     "pg_indexes",
     "pg_inherits",
     "pg_init_privs",
@@ -169,6 +178,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_tables",
     "pg_tablespace",
     "pg_trigger",
+    "pg_user_mapping",
     "pg_views",
 ];
 
@@ -204,6 +214,9 @@ static RELATION_NAMES: &[&str] = &[
     "pg_enum",
     "pg_event_trigger",
     "pg_extension",
+    "pg_foreign_data_wrapper",
+    "pg_foreign_server",
+    "pg_foreign_table",
     "pg_indexes",
     "pg_inherits",
     "pg_init_privs",
@@ -233,6 +246,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_tables",
     "pg_tablespace",
     "pg_trigger",
+    "pg_user_mapping",
     "pg_views",
     "information_schema.applicable_roles",
     "information_schema.column_privileges",
@@ -271,6 +285,9 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
         "pg_enum" => 3501,
         "pg_event_trigger" => 3466,
         "pg_extension" => 3079,
+        "pg_foreign_data_wrapper" => 2328,
+        "pg_foreign_server" => 1417,
+        "pg_foreign_table" => 3118,
         "pg_inherits" => 2611,
         "pg_init_privs" => 3394,
         "pg_language" => 2612,
@@ -292,6 +309,7 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
         "pg_statistic_ext" => 3381,
         "pg_tablespace" => 1213,
         "pg_trigger" => 2620,
+        "pg_user_mapping" => 1418,
         "pg_type" => 1247,
         _ => system_view_oid(name),
     }
@@ -1059,6 +1077,9 @@ pub(crate) fn rows(
         "pg_depend" => pg_depend_rows(kv),
         "pg_description" => pg_description_rows(kv),
         "pg_event_trigger" => pg_event_trigger_rows(kv),
+        "pg_foreign_data_wrapper" => pg_foreign_data_wrapper_rows(kv),
+        "pg_foreign_server" => pg_foreign_server_rows(kv),
+        "pg_foreign_table" => pg_foreign_table_rows(kv),
         "pg_enum" => pg_enum_rows(kv),
         "pg_indexes" => pg_indexes_rows(kv),
         "pg_rewrite" => pg_rewrite_rows(kv),
@@ -1078,6 +1099,7 @@ pub(crate) fn rows(
         "pg_tables" => pg_tables_rows(kv),
         "pg_tablespace" => pg_tablespace_rows(kv),
         "pg_trigger" => pg_trigger_rows(kv),
+        "pg_user_mapping" => pg_user_mapping_rows(kv),
         "pg_views" => pg_views_rows(kv, style),
         _ => information_schema_rows(kv, database, name, style),
     }
@@ -1434,6 +1456,132 @@ fn pg_event_trigger_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .collect())
 }
 
+fn foreign_option_array(options: &[(String, String)]) -> Datum {
+    if options.is_empty() {
+        Datum::Null
+    } else {
+        Datum::Array(crabka_pgtypes::ArrayValue::new(
+            ElemType::Text,
+            options
+                .iter()
+                .map(|(name, value)| Datum::Text(format!("{name}={value}")))
+                .collect(),
+        ))
+    }
+}
+
+fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let wrappers = crabka_pgcatalog::list_fdws(kv)?;
+    let names = wrappers
+        .iter()
+        .map(|wrapper| wrapper.name.clone())
+        .collect::<Vec<_>>();
+    let oids = banded_oids(FDW_OID_BASE, &names);
+    Ok(wrappers
+        .into_iter()
+        .map(|wrapper| {
+            vec![
+                int(oids[&wrapper.name]),
+                text(&wrapper.name),
+                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                foreign_option_array(&wrapper.options),
+            ]
+        })
+        .collect())
+}
+
+fn pg_foreign_server_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let wrappers = crabka_pgcatalog::list_fdws(kv)?;
+    let wrapper_oids = banded_oids(
+        FDW_OID_BASE,
+        &wrappers
+            .iter()
+            .map(|wrapper| wrapper.name.clone())
+            .collect::<Vec<_>>(),
+    );
+    let servers = crabka_pgcatalog::list_servers(kv)?;
+    let names = servers
+        .iter()
+        .map(|server| server.name.clone())
+        .collect::<Vec<_>>();
+    let oids = banded_oids(FOREIGN_SERVER_OID_BASE, &names);
+    Ok(servers
+        .into_iter()
+        .map(|server| {
+            vec![
+                int(oids[&server.name]),
+                text(&server.name),
+                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+                int(*wrapper_oids.get(&server.wrapper).unwrap_or(&0)),
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                foreign_option_array(&server.options),
+            ]
+        })
+        .collect())
+}
+
+fn pg_user_mapping_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let servers = crabka_pgcatalog::list_servers(kv)?;
+    let server_oids = banded_oids(
+        FOREIGN_SERVER_OID_BASE,
+        &servers
+            .iter()
+            .map(|server| server.name.clone())
+            .collect::<Vec<_>>(),
+    );
+    let role_oids = role_oids(kv)?;
+    let mappings = crabka_pgcatalog::list_user_mappings(kv)?;
+    let names = mappings
+        .iter()
+        .map(|mapping| format!("{}\0{}", mapping.user, mapping.server))
+        .collect::<Vec<_>>();
+    let oids = banded_oids(USER_MAPPING_OID_BASE, &names);
+    Ok(mappings
+        .into_iter()
+        .map(|mapping| {
+            let key = format!("{}\0{}", mapping.user, mapping.server);
+            vec![
+                int(oids[&key]),
+                int(if mapping.user == "public" {
+                    0
+                } else {
+                    *role_oids.get(&mapping.user).unwrap_or(&0)
+                }),
+                int(*server_oids.get(&mapping.server).unwrap_or(&0)),
+                foreign_option_array(&mapping.options),
+            ]
+        })
+        .collect())
+}
+
+fn pg_foreign_table_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let servers = crabka_pgcatalog::list_servers(kv)?;
+    let server_oids = banded_oids(
+        FOREIGN_SERVER_OID_BASE,
+        &servers
+            .iter()
+            .map(|server| server.name.clone())
+            .collect::<Vec<_>>(),
+    );
+    crabka_pgcatalog::list_tables(kv)?
+        .into_iter()
+        .filter(|table| table.foreign.is_some())
+        .map(|table| {
+            let foreign = table.foreign.expect("the filter keeps foreign tables");
+            Ok(vec![
+                int(table_relation_oid(table.id)?),
+                int(*server_oids.get(&foreign.server).unwrap_or(&0)),
+                foreign_option_array(&foreign.options),
+            ])
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------- pg_catalog
 
 /// Column lists for the `pg_catalog` relations, in PostgreSQL 18.4 order.
@@ -1561,6 +1709,30 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("extversion", Text),
             ("extconfig", ColumnType::Array(ElemType::Int4)),
             ("extcondition", ColumnType::Array(ElemType::Text)),
+        ]),
+        "pg_foreign_data_wrapper" => cols(&[
+            ("oid", Int4),
+            ("fdwname", Text),
+            ("fdwowner", Int4),
+            ("fdwhandler", Regproc),
+            ("fdwvalidator", Regproc),
+            ("fdwacl", acl.clone()),
+            ("fdwoptions", ColumnType::Array(ElemType::Text)),
+        ]),
+        "pg_foreign_server" => cols(&[
+            ("oid", Int4),
+            ("srvname", Text),
+            ("srvowner", Int4),
+            ("srvfdw", Int4),
+            ("srvtype", Text),
+            ("srvversion", Text),
+            ("srvacl", acl.clone()),
+            ("srvoptions", ColumnType::Array(ElemType::Text)),
+        ]),
+        "pg_foreign_table" => cols(&[
+            ("ftrelid", Int4),
+            ("ftserver", Int4),
+            ("ftoptions", ColumnType::Array(ElemType::Text)),
         ]),
         "pg_enum" => cols(&[
             ("oid", Int4),
@@ -1702,6 +1874,12 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("tgqual", Text),
             ("tgoldtable", Text),
             ("tgnewtable", Text),
+        ]),
+        "pg_user_mapping" => cols(&[
+            ("oid", Int4),
+            ("umuser", Int4),
+            ("umserver", Int4),
+            ("umoptions", ColumnType::Array(ElemType::Text)),
         ]),
         "pg_event_trigger" => cols(&[
             ("oid", Int4),

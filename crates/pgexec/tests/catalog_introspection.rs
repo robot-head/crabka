@@ -94,9 +94,13 @@ async fn every_named_catalog_relation_resolves() {
         "pg_catalog.pg_inherits",
         "pg_catalog.pg_language",
         "pg_catalog.pg_extension",
+        "pg_catalog.pg_foreign_data_wrapper",
+        "pg_catalog.pg_foreign_server",
+        "pg_catalog.pg_foreign_table",
         "pg_catalog.pg_depend",
         "pg_catalog.pg_rewrite",
         "pg_catalog.pg_trigger",
+        "pg_catalog.pg_user_mapping",
         "pg_catalog.pg_sequence",
         "pg_catalog.pg_collation",
         "pg_catalog.pg_enum",
@@ -133,6 +137,60 @@ async fn every_named_catalog_relation_resolves() {
             .unwrap_or_else(|error| panic!("{relation} does not resolve: {error:?}"));
         assert2::assert!(result.len() == 1, "{relation}");
     }
+}
+
+#[tokio::test]
+async fn pg_foreign_catalogs_list_the_registered_objects() {
+    let engine = SqlEngine::new();
+    run(
+        &engine,
+        "CREATE FOREIGN DATA WRAPPER fdw OPTIONS (kind 'test')",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE SERVER server FOREIGN DATA WRAPPER fdw OPTIONS (host 'local')",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE USER MAPPING FOR CURRENT_USER SERVER server",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE FOREIGN TABLE remote (value text) SERVER server OPTIONS (topic 'events')",
+    )
+    .await;
+
+    assert!(
+        grid(
+            &engine,
+            "SELECT fdwname, fdwoptions FROM pg_foreign_data_wrapper",
+        )
+        .await
+            == vec![some(&["fdw", "{kind=test}"])]
+    );
+    assert!(
+        grid(&engine, "SELECT srvname, srvoptions FROM pg_foreign_server",).await
+            == vec![some(&["server", "{host=local}"])]
+    );
+    assert!(
+        grid(
+            &engine,
+            "SELECT umuser = 0, umserver > 0 FROM pg_user_mapping",
+        )
+        .await
+            == vec![some(&["t", "t"])]
+    );
+    assert!(
+        grid(
+            &engine,
+            "SELECT ftserver > 0, ftoptions FROM pg_foreign_table",
+        )
+        .await
+            == vec![some(&["t", "{topic=events}"])]
+    );
 }
 
 #[tokio::test]

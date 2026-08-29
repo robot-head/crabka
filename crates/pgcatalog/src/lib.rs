@@ -7037,6 +7037,21 @@ pub fn get_fdw(kv: &dyn Kv, name: &str) -> Result<ForeignDataWrapper, CatalogErr
     Ok(deserialize_fdw(&bytes)?)
 }
 
+/// List foreign-data wrappers by name.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_fdws(kv: &dyn Kv) -> Result<Vec<ForeignDataWrapper>, CatalogError> {
+    let mut wrappers = kv
+        .scan_prefix(&key::fdw_prefix())?
+        .into_iter()
+        .map(|(_, value)| deserialize_fdw(&value).map_err(CatalogError::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    wrappers.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(wrappers)
+}
+
 /// Drop a foreign-data wrapper.
 ///
 /// # Errors
@@ -7112,6 +7127,21 @@ pub fn get_server(kv: &dyn Kv, name: &str) -> Result<ForeignServer, CatalogError
         .get(&key::server_key(name))?
         .ok_or_else(|| CatalogError::UndefinedObject(name.to_string()))?;
     Ok(deserialize_server(&bytes)?)
+}
+
+/// List foreign servers by name.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_servers(kv: &dyn Kv) -> Result<Vec<ForeignServer>, CatalogError> {
+    let mut servers = kv
+        .scan_prefix(&key::server_prefix())?
+        .into_iter()
+        .map(|(_, value)| deserialize_server(&value).map_err(CatalogError::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    servers.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(servers)
 }
 
 /// Drop a foreign server.
@@ -7193,6 +7223,21 @@ pub fn get_user_mapping(
         .get(&key::user_mapping_key(user, server))?
         .ok_or_else(|| CatalogError::UndefinedObject(format!("{user}@{server}")))?;
     Ok(deserialize_user_mapping(&bytes)?)
+}
+
+/// List user mappings by server then user.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_user_mappings(kv: &dyn Kv) -> Result<Vec<UserMapping>, CatalogError> {
+    let mut mappings = kv
+        .scan_prefix(&key::user_mapping_prefix())?
+        .into_iter()
+        .map(|(_, value)| deserialize_user_mapping(&value).map_err(CatalogError::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    mappings.sort_by(|left, right| (&left.server, &left.user).cmp(&(&right.server, &right.user)));
+    Ok(mappings)
 }
 
 /// Drop a user mapping.

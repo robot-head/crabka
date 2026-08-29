@@ -582,6 +582,18 @@ pub fn user_mapping_key(user: &str, server: &str) -> Vec<u8> {
     k
 }
 
+/// Shared prefix for all foreign-data wrappers.
+#[must_use]
+pub fn fdw_prefix() -> Vec<u8> {
+    system_prefix("fdw")
+}
+
+/// Shared prefix for all user mappings.
+#[must_use]
+pub fn user_mapping_prefix() -> Vec<u8> {
+    system_prefix("umap")
+}
+
 /// Shared prefix for all foreign-server entries, for list and IMPORT scans.
 #[must_use]
 pub fn server_prefix() -> Vec<u8> {
@@ -1268,6 +1280,14 @@ mod tests {
         assert!(server_key("pg").starts_with(&prefix));
         assert!(!fdw_key("x").starts_with(&prefix));
         assert!(!catalog_key("public", "t").starts_with(&prefix));
+    }
+
+    #[test]
+    fn foreign_catalog_prefixes_select_only_their_namespace() {
+        assert!(fdw_key("x").starts_with(&fdw_prefix()));
+        assert!(!server_key("x").starts_with(&fdw_prefix()));
+        assert!(user_mapping_key("alice", "x").starts_with(&user_mapping_prefix()));
+        assert!(!fdw_key("x").starts_with(&user_mapping_prefix()));
     }
 
     #[test]
