@@ -482,6 +482,9 @@ pub(crate) fn builtin_proc_declared(name: &str, args: &[i32]) -> bool {
 /// [`crate::catalog_fn::relation_name_by_oid`] keeps the number for the same
 /// reason.
 fn proc_name(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
+    if oid == crate::routine::POSTGRESQL_FDW_VALIDATOR_OID {
+        return Ok(Some("postgresql_fdw_validator".into()));
+    }
     // The user routines are few; the built-ins are indexed.
     let user = crate::routine::user_pg_proc_rows(kv)?;
     let index = builtin_proc_index();

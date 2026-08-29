@@ -597,6 +597,12 @@ const STATIC_REGRESS_ENTRYPOINTS: &[&str] = &[
     "widget_in",
     "widget_out",
 ];
+/// The PostgreSQL regression fixture's `postgres_fdw` validator.
+///
+/// It is not part of the core `pg_proc` fixture, but FDW catalog rows retain
+/// its OID and `regproc` must print its name.
+pub(crate) const POSTGRESQL_FDW_VALIDATOR_OID: i32 = 215_410;
+
 const MAX_PGLZ_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 fn is_static_regress_object(object_file: &str) -> bool {

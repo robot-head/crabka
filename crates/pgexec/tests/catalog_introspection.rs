@@ -184,6 +184,14 @@ async fn pg_foreign_catalogs_list_the_registered_objects() {
     assert!(
         grid(
             &engine,
+            "SELECT fdwhandler::regproc, fdwvalidator::regproc FROM pg_foreign_data_wrapper",
+        )
+        .await
+            == vec![some(&["fdw_handler", "postgresql_fdw_validator"])]
+    );
+    assert!(
+        grid(
+            &engine,
             "SELECT array_to_string(ARRAY(SELECT option_name FROM pg_options_to_table(fdwoptions)), ',') \
              FROM pg_catalog.pg_foreign_data_wrapper fdw \
              LEFT JOIN pg_catalog.pg_description d \

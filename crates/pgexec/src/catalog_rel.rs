@@ -55,8 +55,6 @@ const FOREIGN_KEY_OID_BASE: i32 = 150_000;
 const ROWTYPE_OID_BASE: i32 = 160_000;
 /// First oid of the band reserved for arrays over relation composite types.
 const ROWTYPE_ARRAY_OID_BASE: i32 = 170_000;
-/// First oid of the band reserved for user mappings.
-const USER_MAPPING_OID_BASE: i32 = 200_000;
 /// First oid of the band reserved for column defaults (`pg_attrdef`).
 const ATTRDEF_OID_BASE: i32 = 110_000;
 /// Width of every name-hashed oid band.
@@ -1500,12 +1498,7 @@ fn foreign_option_array(options: &[(String, String)]) -> Datum {
 fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let wrappers = crabka_pgcatalog::list_fdws(kv)?;
     let role_oids = role_oids(kv)?;
-    let routine_names = wrappers
-        .iter()
-        .flat_map(|wrapper| [wrapper.handler.clone(), wrapper.validator.clone()])
-        .flatten()
-        .collect::<Vec<_>>();
-    let routine_oids = banded_oids(USER_MAPPING_OID_BASE + OID_BAND_WIDTH, &routine_names);
+    let routines = crabka_pgcatalog::routine::list_routines(kv)?;
     Ok(wrappers
         .into_iter()
         .map(|wrapper| {
@@ -1513,8 +1506,8 @@ fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
                 int(i32::try_from(wrapper.oid).expect("foreign wrapper oid fits i32")),
                 text(&wrapper.name),
                 int(*role_oids.get(&wrapper.owner).unwrap_or(&0)),
-                foreign_routine_datum(wrapper.handler.as_deref(), &routine_oids),
-                foreign_routine_datum(wrapper.validator.as_deref(), &routine_oids),
+                foreign_routine_datum(wrapper.handler.as_deref(), &routines, &[]),
+                foreign_routine_datum(wrapper.validator.as_deref(), &routines, &["text[]", "oid"]),
                 foreign_acl(
                     kv,
                     crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
@@ -1527,12 +1520,29 @@ fn pg_foreign_data_wrapper_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
         .collect::<Result<Vec<_>, ExecError>>()?)
 }
 
-fn foreign_routine_datum(name: Option<&str>, oids: &BTreeMap<String, i32>) -> Datum {
+fn foreign_routine_datum(
+    name: Option<&str>,
+    routines: &[crabka_pgcatalog::routine::Routine],
+    input_types: &[&str],
+) -> Datum {
     name.map_or(Datum::Null, |name| {
-        Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(
-            *oids.get(name).unwrap_or(&0),
-            name,
-        ))
+        let bare = name.rsplit('.').next().unwrap_or(name);
+        let oid = if bare == "postgresql_fdw_validator" && input_types == ["text[]", "oid"] {
+            crate::routine::POSTGRESQL_FDW_VALIDATOR_OID
+        } else {
+            routines
+                .iter()
+                .find(|routine| {
+                    routine.name == bare
+                        && routine
+                            .input_params()
+                            .map(|parameter| parameter.ty.name.as_str())
+                            .eq(input_types.iter().copied())
+                })
+                .and_then(|routine| i32::try_from(routine.oid).ok())
+                .unwrap_or(0)
+        };
+        Datum::Regclass(crabka_pgtypes::RegclassValue::resolved(oid, name))
     })
 }
 
