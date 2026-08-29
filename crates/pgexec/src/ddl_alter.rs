@@ -1771,21 +1771,47 @@ pub(crate) fn execute_ddl(
             constraints,
             column_options,
             like,
+            inherits,
+            partition_of,
             server,
             options,
         } => {
             let name = resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?;
             crate::usertype::ensure_relation_type_name_available(kv, &name)?;
             let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
-            let (mut cols, checks, _, _, _) =
-                create_table_definition(kv, &name, columns, constraints, like, &[], &ddl_ctx)?;
+            let inheritance_parents = inherits
+                .iter()
+                .map(|parent| {
+                    resolve_relation(kv, resolution, parent, SchemaDisposition::Reference)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (mut cols, checks, _, _, _) = match partition_of {
+                Some(spec) => partition_definition(kv, &name, spec, constraints, like, &ddl_ctx)?,
+                None if inheritance_parents.is_empty() => {
+                    create_table_definition(kv, &name, columns, constraints, like, &[], &ddl_ctx)?
+                }
+                None => inherited_table_definition(
+                    kv,
+                    &name,
+                    &inheritance_parents,
+                    columns,
+                    constraints,
+                    like,
+                    &ddl_ctx,
+                )?,
+            };
+            apply_table_not_null_constraints(&mut cols, constraints, &name)?;
             for column in &mut cols {
                 if column.identity.take().is_some() {
                     column.default = None;
                 }
             }
             crate::scope::reject_system_column_names(cols.iter().map(|c| c.name.as_str()))?;
-            let ops = ignore_duplicate(
+            let attachment = partition_of
+                .as_ref()
+                .map(|spec| partition_attachment(kv, &name, spec, &cols, &ddl_ctx))
+                .transpose()?;
+            let mut ops = ignore_duplicate(
                 crabka_pgcatalog::create_foreign_table_ops(
                     kv,
                     &name,
@@ -1799,6 +1825,12 @@ pub(crate) fn execute_ddl(
                 *if_not_exists,
             )?
             .map_or_else(Vec::new, |(_id, ops)| ops);
+            if let Some((parent, bound)) = attachment {
+                ops.extend(crate::partition::attach_ops(&parent, &name, &bound));
+            }
+            if !inheritance_parents.is_empty() {
+                ops.extend(crate::inheritance::attach_ops(&name, &inheritance_parents));
+            }
             Ok((command("CREATE FOREIGN TABLE"), ops))
         }
         Statement::DropForeignTable {

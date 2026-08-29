@@ -15499,7 +15499,7 @@ impl Parser {
         })
     }
 
-    /// `CREATE FOREIGN TABLE <name> (<col> <type> | LIKE <source>, …) SERVER <server> OPTIONS (…)`
+    /// `CREATE FOREIGN TABLE … [INHERITS … | PARTITION OF …] SERVER …`.
     fn create_foreign_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::{ColumnDef, Statement};
         self.expect(&Token::Keyword(Keyword::Create))?;
@@ -15507,40 +15507,88 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_not_exists = self.eat_if_not_exists();
         let name = self.relation_ref()?;
-        self.expect(&Token::LParen)?;
         let mut columns = Vec::new();
         let mut constraints = Vec::new();
         let mut column_options = Vec::new();
         let mut like = Vec::new();
-        if *self.peek() != Token::RParen {
-            loop {
-                if self.eat_keyword(Keyword::Like) {
-                    like.push(self.like_clause(columns.len())?);
-                } else if self.starts_table_constraint() {
-                    constraints.push(self.table_constraint()?);
-                } else {
-                    let col_name = self.expect_col_id()?;
-                    let (ty, serial) = self.parse_column_type(&col_name)?;
-                    let qualifiers = self.column_qualifiers()?;
-                    let options = self.parse_options()?;
-                    if !options.is_empty() {
-                        column_options.push((col_name.clone(), options));
+        let partition_parent = if self.peek_ident_eq("partition")
+            && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("of"))
+        {
+            self.bump();
+            self.bump();
+            Some(self.relation_ref()?)
+        } else {
+            None
+        };
+        let mut partition_column_options = Vec::new();
+        if partition_parent.is_some() {
+            if self.eat_token(&Token::LParen) {
+                loop {
+                    if self.starts_table_constraint() {
+                        constraints.push(self.table_constraint()?);
+                    } else {
+                        let column = self.expect_col_id()?;
+                        if self.eat_keyword(Keyword::With) {
+                            self.expect(&Token::Keyword(Keyword::Options))?;
+                        }
+                        let qualifiers = self.column_qualifiers()?;
+                        partition_column_options.push(crate::ast::PartitionColumnOption {
+                            column,
+                            collation: qualifiers.collation,
+                            constraints: qualifiers.constraints,
+                        });
                     }
-                    columns.push(ColumnDef {
-                        name: col_name,
-                        ty,
-                        serial,
-                        collation: qualifiers.collation,
-                        constraints: qualifiers.constraints,
-                    });
+                    if !self.eat_comma() {
+                        break;
+                    }
                 }
-                if self.eat_comma() {
-                    continue;
-                }
-                break;
+                self.expect(&Token::RParen)?;
             }
+        } else {
+            self.expect(&Token::LParen)?;
+            if *self.peek() != Token::RParen {
+                loop {
+                    if self.eat_keyword(Keyword::Like) {
+                        like.push(self.like_clause(columns.len())?);
+                    } else if self.starts_table_constraint() {
+                        constraints.push(self.table_constraint()?);
+                    } else {
+                        let col_name = self.expect_col_id()?;
+                        let (ty, serial) = self.parse_column_type(&col_name)?;
+                        let qualifiers = self.column_qualifiers()?;
+                        let options = self.parse_options()?;
+                        if !options.is_empty() {
+                            column_options.push((col_name.clone(), options));
+                        }
+                        columns.push(ColumnDef {
+                            name: col_name,
+                            ty,
+                            serial,
+                            collation: qualifiers.collation,
+                            constraints: qualifiers.constraints,
+                        });
+                    }
+                    if self.eat_comma() {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            self.expect(&Token::RParen)?;
         }
-        self.expect(&Token::RParen)?;
+        let partition_of = match partition_parent {
+            Some(parent) => Some(crate::ast::PartitionOf {
+                parent,
+                bound: self.partition_bound()?,
+                column_options: partition_column_options,
+            }),
+            None => None,
+        };
+        let inherits = if partition_of.is_none() && self.eat_ident_eq("inherits") {
+            self.parse_relation_ref_list()?
+        } else {
+            Vec::new()
+        };
         self.expect(&Token::Keyword(Keyword::Server))?;
         let server = self.expect_col_id()?;
         let options = self.parse_options()?;
@@ -15551,6 +15599,8 @@ impl Parser {
             constraints,
             column_options,
             like,
+            inherits,
+            partition_of,
             server,
             options,
         })
@@ -24503,6 +24553,26 @@ mod tests {
         assert!(like.len() == 1);
         assert!(like[0].source == crate::ast::RelationRef::bare("source"));
         assert!(like[0].position == 1);
+    }
+
+    #[test]
+    fn parses_foreign_table_inherits_and_partition_of_forms() {
+        let Statement::CreateForeignTable { inherits, .. } =
+            one("CREATE FOREIGN TABLE child (own text) INHERITS (parent) SERVER s")
+        else {
+            panic!("expected CREATE FOREIGN TABLE");
+        };
+        assert!(inherits == vec![crate::ast::RelationRef::bare("parent")]);
+
+        let Statement::CreateForeignTable { partition_of, .. } = one(
+            "CREATE FOREIGN TABLE leaf PARTITION OF parent (id NOT NULL) \
+             FOR VALUES FROM (0) TO (10) SERVER s",
+        ) else {
+            panic!("expected CREATE FOREIGN TABLE");
+        };
+        let partition = partition_of.expect("PARTITION OF");
+        assert!(partition.parent == crate::ast::RelationRef::bare("parent"));
+        assert!(partition.column_options[0].column == "id");
     }
 
     #[test]

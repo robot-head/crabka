@@ -1168,6 +1168,10 @@ pub enum Statement {
         /// Per-column `OPTIONS (...)`, keyed by the declared column name.
         column_options: Vec<(String, OptionList)>,
         like: Vec<LikeClause>,
+        /// `INHERITS (parent, …)` for a non-partitioned foreign table.
+        inherits: Vec<RelationRef>,
+        /// `PARTITION OF <parent> <bound>` for a foreign-table partition.
+        partition_of: Option<PartitionOf>,
         server: String,
         options: OptionList,
     },

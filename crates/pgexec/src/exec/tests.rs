@@ -1577,6 +1577,53 @@ async fn create_foreign_table_like_keeps_the_written_column_position() {
     );
 }
 
+#[tokio::test]
+async fn foreign_tables_record_inheritance_and_partition_parents() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE FOREIGN DATA WRAPPER kafka_fdw").await;
+    run_s(
+        &mut session,
+        "CREATE SERVER foreign_parent_server FOREIGN DATA WRAPPER kafka_fdw \
+         OPTIONS (bootstrap 'b:9092')",
+    )
+    .await;
+    run_s(&mut session, "CREATE TABLE foreign_parent_base (id int4)").await;
+    run_s(
+        &mut session,
+        "CREATE FOREIGN TABLE foreign_inherited (own text) INHERITS (foreign_parent_base) \
+         SERVER foreign_parent_server",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE TABLE foreign_partition_parent (id int4) PARTITION BY RANGE (id)",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE FOREIGN TABLE foreign_partition PARTITION OF foreign_partition_parent \
+         FOR VALUES FROM (0) TO (10) SERVER foreign_parent_server",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT ch.relname, pa.relname FROM pg_inherits i \
+                 JOIN pg_class ch ON ch.oid = i.inhrelid \
+                 JOIN pg_class pa ON pa.oid = i.inhparent \
+                 WHERE ch.relname IN ('foreign_inherited', 'foreign_partition') ORDER BY 1",
+        )
+        .await
+            == vec![
+                text_row(&["foreign_inherited", "foreign_parent_base"]),
+                text_row(&["foreign_partition", "foreign_partition_parent"]),
+            ]
+    );
+}
+
 /// A row-security policy that reads a column depends on it. `PostgreSQL`
 /// refuses the drop and names the policy, and `CASCADE` takes the whole
 /// policy — never a policy left reading a column that is gone.
