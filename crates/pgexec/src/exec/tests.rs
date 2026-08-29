@@ -1211,6 +1211,30 @@ async fn a_table_of_a_composite_type_copies_its_fields() {
                 text_row(&["keyed_people_pkey"]),
             ]
     );
+    assert!(
+        error_of(
+            &mut session,
+            "CREATE TABLE identity_people OF person_type \
+             (id WITH OPTIONS GENERATED ALWAYS AS IDENTITY)",
+        )
+        .await
+            == (
+                "0A000".into(),
+                "identity columns are not supported on typed tables".into(),
+            )
+    );
+    assert!(
+        error_of(
+            &mut session,
+            "CREATE TABLE generated_people OF person_type \
+             (name WITH OPTIONS GENERATED ALWAYS AS ('Ada'::text) STORED)",
+        )
+        .await
+            == (
+                "0A000".into(),
+                "generated columns are not supported on typed tables".into(),
+            )
+    );
     assert!(sqlstate_of(&mut session, "CREATE TABLE missing OF absent_type").await == "42704");
     run_s(&mut session, "CREATE TYPE label_type AS ENUM ('a')").await;
     assert!(sqlstate_of(&mut session, "CREATE TABLE labels OF label_type").await == "42809");

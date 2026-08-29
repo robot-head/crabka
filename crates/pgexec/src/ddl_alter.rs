@@ -322,6 +322,23 @@ pub(crate) fn execute_ddl(
                 else {
                     return Err(ExecError::UndefinedColumn(option.column.clone()));
                 };
+                if typed_type_oid.is_some() {
+                    for constraint in &option.constraints {
+                        match constraint.kind {
+                            crabka_pgparser::ast::ColumnConstraintKind::Identity(_) => {
+                                return Err(ExecError::Unsupported(
+                                    "identity columns are not supported on typed tables".into(),
+                                ));
+                            }
+                            crabka_pgparser::ast::ColumnConstraintKind::Generated(_) => {
+                                return Err(ExecError::Unsupported(
+                                    "generated columns are not supported on typed tables".into(),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 column.collation = option.collation.clone();
                 column.constraints.extend(option.constraints.clone());
             }
