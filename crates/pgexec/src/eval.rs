@@ -289,6 +289,10 @@ pub(crate) fn cast_value_in_at(
     if matches!(target, ColumnType::Aclitem | ColumnType::Refcursor) {
         return cast_value_in_at(value, ColumnType::Text, style, now);
     }
+    if let ColumnType::Base(base) = target {
+        let value = cast_value_in_at(value, *base.representation, style, now)?;
+        return crate::usertype::normalize_base_input(base, value);
+    }
     let base = target.temporal_base().map_or(target, |(base, _)| base);
     if let Datum::Text(text) = value {
         let parsed = match base {
@@ -359,6 +363,10 @@ pub(crate) fn cast_assign_value_in_at(
 ) -> Result<Datum, ExecError> {
     if matches!(target, ColumnType::Aclitem | ColumnType::Refcursor) {
         return cast_assign_value_in_at(value, ColumnType::Text, style, now);
+    }
+    if let ColumnType::Base(base) = target {
+        let value = cast_assign_value_in_at(value, *base.representation, style, now)?;
+        return crate::usertype::normalize_base_input(base, value);
     }
     let base = target.temporal_base().map_or(target, |(base, _)| base);
     if matches!(value, Datum::Text(_))
@@ -2777,6 +2785,10 @@ pub(crate) fn value_arg_types(args: &[Expr], vals: &[Datum]) -> Vec<ArgType> {
         .map(|(e, v)| {
             if is_unknown_literal(e) {
                 ArgType::Unknown
+            } else if let Expr::Cast { ty, .. } = e {
+                // Base types share their representation's Datum, but an explicit
+                // cast still selects the declared PostgreSQL type for overloads.
+                ArgType::Known(*ty)
             } else {
                 v.column_type().map_or(ArgType::Opaque, ArgType::Known)
             }
@@ -4567,8 +4579,8 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         }
         // SP31: a cast's static result type is the target type — but only if the
         // cast is defined; an undefined `(from, to)` pair is 42846 at plan time
-        // (so it is rejected before any row is produced). A bare `NULL` infers as
-        // text, and text → anything is defined, so `NULL::<any>` is accepted.
+        // (so it is rejected before any row is produced). A base-type literal is
+        // its input function, not a text cast, so it is the one exception.
         Expr::Cast { expr, ty } => {
             // `ARRAY[]::int[]`: the empty constructor has no element type of its
             // own — the cast supplies it (PostgreSQL pushes the type context down
@@ -4577,7 +4589,10 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
                 return Ok(*ty);
             }
             let from = infer_type(expr, scope)?;
-            if crabka_pgtypes::cast::cast_allowed(from, *ty) {
+            if crabka_pgtypes::cast::cast_allowed(from, *ty)
+                || (matches!(ty, ColumnType::Base(_))
+                    && matches!(expr.as_ref(), Expr::StringLiteral(_)))
+            {
                 Ok(*ty)
             } else {
                 Err(ExecError::Type(TypeError::CannotCast {

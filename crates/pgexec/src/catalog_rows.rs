@@ -1487,6 +1487,10 @@ pub(crate) fn attribute_rows_for_table(
         .iter()
         .enumerate()
         .map(|(idx, column)| {
+            let layout = crate::usertype::declared_base_layout(column.ty);
+            let typlen = layout.map_or_else(|| column.ty.type_size(), |layout| layout.length);
+            let typbyval = layout.map_or(typlen > 0, |layout| layout.by_value);
+            let typalign = layout.map_or(b'i', |layout| layout.alignment as u8);
             let attnum = i16::try_from(idx + 1)
                 .map_err(|_| ExecError::Unsupported("attnum exceeds int2 range".into()))?;
             let identity = match column.identity {
@@ -1498,12 +1502,12 @@ pub(crate) fn attribute_rows_for_table(
                 int(relid),
                 text(&column.name),
                 int(oid_i32(column.ty.oid())?),
-                Datum::Int2(column.ty.type_size()),
+                Datum::Int2(typlen),
                 Datum::Int2(attnum),
                 int(catalog_typmod(column.ty)),
                 Datum::Int2(i16::from(matches!(column.ty, ColumnType::Array(_)))),
-                Datum::Bool(column.ty.type_size() > 0),
-                Datum::InternalChar(b'i'),
+                Datum::Bool(typbyval),
+                Datum::InternalChar(typalign),
                 Datum::InternalChar(attribute_storage(column.ty).as_bytes()[0]),
                 Datum::InternalChar(b'\0'),
                 Datum::Bool(column.not_null),
@@ -2049,7 +2053,7 @@ fn pg_type_row_with_storage(
     defined: bool,
     storage: Option<char>,
 ) -> Vec<Datum> {
-    pg_type_row_with_metadata(row, proc_oids, defined, storage, [None; 6], None)
+    pg_type_row_with_metadata(row, proc_oids, defined, storage, [None; 6], None, None)
 }
 
 fn pg_type_row_with_metadata(
@@ -2059,20 +2063,31 @@ fn pg_type_row_with_metadata(
     storage: Option<char>,
     routine_overrides: [Option<&str>; 6],
     default: Option<&str>,
+    layout: Option<crabka_pgtypes::usertype::BaseLayout>,
 ) -> Vec<Datum> {
-    let typbyval = matches!(row.len, 1 | 2 | 4 | 8);
-    let typalign = match row.name {
-        "cstring" => "c",
-        "_aclitem" | "_record" | "_xid8" | "_pg_lsn" | "_int8" | "_float8" | "_time"
-        | "_time_stamp" | "_timestamp" | "_timestamptz" | "_money" | "_macaddr8" | "_tsrange"
-        | "_tstzrange" | "_int8range" => "d",
-        _ => row.range_align.unwrap_or(match row.len {
-            1 => "c",
-            2 => "s",
-            8 => "d",
-            _ => "i",
-        }),
-    };
+    let typlen = layout.map_or(row.len, |layout| i32::from(layout.length));
+    let typbyval = layout.map_or(matches!(row.len, 1 | 2 | 4 | 8), |layout| layout.by_value);
+    let typalign = layout.map_or_else(
+        || match row.name {
+            "cstring" => "c",
+            "_aclitem" | "_record" | "_xid8" | "_pg_lsn" | "_int8" | "_float8" | "_time"
+            | "_time_stamp" | "_timestamp" | "_timestamptz" | "_money" | "_macaddr8"
+            | "_tsrange" | "_tstzrange" | "_int8range" => "d",
+            _ => row.range_align.unwrap_or(match row.len {
+                1 => "c",
+                2 => "s",
+                8 => "d",
+                _ => "i",
+            }),
+        },
+        |layout| match layout.alignment {
+            'c' => "c",
+            's' => "s",
+            'i' => "i",
+            'd' => "d",
+            _ => unreachable!("base type layout is validated at creation"),
+        },
+    );
     let typstorage = storage.map_or_else(
         || {
             if row.name == "cstring" || row.len >= 0 {
@@ -2095,7 +2110,7 @@ fn pg_type_row_with_metadata(
         text(row.name),
         oid(row.namespace),
         oid(10),
-        Datum::Int2(row.len.try_into().expect("pg_type typlen must fit in int2")),
+        Datum::Int2(typlen.try_into().expect("pg_type typlen must fit in int2")),
         Datum::Bool(typbyval),
         Datum::InternalChar(row.typtype.as_bytes()[0]),
         Datum::InternalChar(row.category.as_bytes()[0]),
@@ -2399,6 +2414,10 @@ pub(crate) fn user_type_rows(
             },
             match &ty.body {
                 usertype::UserTypeBody::Base(base) => base.default.as_deref(),
+                _ => None,
+            },
+            match &ty.body {
+                usertype::UserTypeBody::Base(base) => Some(base.layout),
                 _ => None,
             },
         ));
@@ -4901,6 +4920,41 @@ mod tests {
         ] {
             let result = pg_type_row_with_storage(row(name, len), &BTreeMap::new(), true, None);
             assert!(result[23] == Datum::InternalChar(expected));
+        }
+    }
+
+    #[test]
+    fn pg_type_base_layout_reports_each_alignment() {
+        let row = || PgTypeRow {
+            oid: 1,
+            name: "synthetic",
+            namespace: PG_CATALOG_NAMESPACE_OID,
+            len: -1,
+            category: "U",
+            typtype: "b",
+            typrelid: 0,
+            typelem: 0,
+            typarray: 0,
+            typbasetype: 0,
+            typcollation: 0,
+            domain_base: None,
+            range_align: None,
+        };
+        for (alignment, expected) in [('c', b'c'), ('s', b's'), ('i', b'i'), ('d', b'd')] {
+            let result = pg_type_row_with_metadata(
+                row(),
+                &BTreeMap::new(),
+                true,
+                None,
+                [None; 6],
+                None,
+                Some(crabka_pgtypes::usertype::BaseLayout {
+                    length: -1,
+                    by_value: false,
+                    alignment,
+                }),
+            );
+            assert!(result[22] == Datum::InternalChar(expected));
         }
     }
 

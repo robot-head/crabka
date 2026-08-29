@@ -2261,6 +2261,110 @@ async fn a_base_type_needs_its_io_pair_and_a_representation() {
     );
 }
 
+/// The two C-backed fixed-width regression types retain their PostgreSQL
+/// layouts even though their Rust adapters store the values as text.
+#[tokio::test]
+async fn regression_c_base_types_keep_their_declared_layouts() {
+    use assert2::assert;
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for sql in [
+        "CREATE FUNCTION widget_in(cstring) RETURNS widget AS 'regress' LANGUAGE C STRICT",
+        "CREATE FUNCTION widget_out(widget) RETURNS cstring AS 'regress' LANGUAGE C STRICT",
+        "CREATE FUNCTION pt_in_widget(point, widget) RETURNS bool AS 'regress' LANGUAGE C STRICT",
+        "CREATE FUNCTION int44in(cstring) RETURNS city_budget AS 'regress' LANGUAGE C STRICT",
+        "CREATE FUNCTION int44out(city_budget) RETURNS cstring AS 'regress' LANGUAGE C STRICT",
+        "CREATE TYPE widget (internallength = 24, input = widget_in, output = widget_out, alignment = double)",
+        "CREATE TYPE city_budget (internallength = 16, input = int44in, output = int44out)",
+    ] {
+        run_s(&mut session, sql).await;
+    }
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT typname, typlen, typbyval, typalign FROM pg_type \
+             WHERE typname IN ('city_budget', 'widget') ORDER BY typname",
+        )
+        .await
+            == vec![
+                text_row(&["city_budget", "16", "f", "i"]),
+                text_row(&["widget", "24", "f", "d"]),
+            ]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT typname, typalign FROM pg_type \
+             WHERE typname IN ('char', 'int2', 'int4', 'int8') ORDER BY typname",
+        )
+        .await
+            == vec![
+                text_row(&["char", "c"]),
+                text_row(&["int2", "s"]),
+                text_row(&["int4", "i"]),
+                text_row(&["int8", "d"]),
+            ]
+    );
+    run_s(&mut session, "CREATE TABLE widget_values (value widget)").await;
+    run_s(
+        &mut session,
+        "INSERT INTO widget_values VALUES ('(1,2,3)'), ('(-44,5.5,12)'), ('(1.0,2.00,3.000)')",
+    )
+    .await;
+    assert!(
+        text_rows_of(&mut session, "SELECT value FROM widget_values").await
+            == vec![
+                text_row(&["(1,2,3)"]),
+                text_row(&["(-44,5.5,12)"]),
+                text_row(&["(1,2,3)"]),
+            ]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pt_in_widget('(2,2)'::point, '(1,1,1.5)'::widget)",
+        )
+        .await
+            == vec![text_row(&["t"])]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT attlen, attbyval, attalign FROM pg_attribute \
+             WHERE attrelid = 'widget_values'::regclass AND attname = 'value'",
+        )
+        .await
+            == vec![text_row(&["24", "f", "d"])]
+    );
+    run_s(&mut session, "CREATE TABLE builtin_layout (value int)").await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT attlen, attbyval, attalign FROM pg_attribute \
+             WHERE attrelid = 'builtin_layout'::regclass AND attname = 'value'",
+        )
+        .await
+            == vec![text_row(&["4", "t", "i"])]
+    );
+    let widget = crabka_pgtypes::usertype::lookup("widget")
+        .and_then(|definition| definition.column_type())
+        .expect("widget type");
+    assert!(super::result_types::field("value", widget).type_size == 24);
+    run_s(&mut session, "CREATE TABLE city (budget city_budget)").await;
+    run_s(
+        &mut session,
+        "INSERT INTO city VALUES ('100,127,1000'), ('123456,127,-1000,6789')",
+    )
+    .await;
+    assert!(
+        text_rows_of(&mut session, "SELECT budget FROM city ORDER BY budget").await
+            == vec![
+                text_row(&["100,127,1000,0"]),
+                text_row(&["123456,127,-1000,6789"]),
+            ]
+    );
+}
+
 /// `INTERNALLENGTH`/`PASSEDBYVALUE`/`ALIGNMENT` describe the same layout
 /// `LIKE` copies, so a type built either way is the same type: it carries
 /// its values in the built-in of that layout, and a `WITHOUT FUNCTION` cast

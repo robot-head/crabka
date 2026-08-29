@@ -747,6 +747,16 @@ fn resolve_type(
         }
         return Ok(RoutineType::named(lowered));
     }
+    if !lowered.ends_with("[]") {
+        if let Some(column) = crabka_pgtypes::usertype::lookup(&lowered)
+            .and_then(|definition| definition.column_type())
+        {
+            return Ok(RoutineType {
+                column: Some(column),
+                name: lowered,
+            });
+        }
+    }
     // A shell type resolves nowhere else — it has no `ColumnType`, so the
     // parser could not have resolved it — but a routine signature is precisely
     // what a shell exists to be named in. `CREATE TYPE xfloat4;` then
@@ -1973,6 +1983,25 @@ pub(crate) fn is_user_routine(kv: &dyn Kv, name: &str) -> bool {
     routines_named(kv, name).is_ok_and(|found| found.iter().any(|routine| !routine.is_aggregate()))
 }
 
+/// Shell-type routines are created before their type has a `ColumnType`.
+/// Once the shell is completed, make their stored named signature concrete at
+/// every call boundary.
+fn hydrate_user_type_signature(mut routine: Routine) -> Routine {
+    let hydrate = |ty: &mut RoutineType| {
+        if ty.column.is_none() {
+            ty.column = crabka_pgtypes::usertype::lookup(&ty.name)
+                .and_then(|definition| definition.column_type());
+        }
+    };
+    for param in &mut routine.params {
+        hydrate(&mut param.ty);
+    }
+    if let RoutineResult::Type { ty, .. } = &mut routine.result {
+        hydrate(ty);
+    }
+    routine
+}
+
 /// Resolve a call of `name` with `given` argument types.
 ///
 /// Returns `Ok(None)` when the name carries no routine at all, which lets the
@@ -1985,6 +2014,7 @@ pub(crate) fn resolve_call(
     // An aggregate is never the answer to a scalar call; `agg` resolves those.
     let candidates: Vec<Routine> = routines_named(kv, name)?
         .into_iter()
+        .map(hydrate_user_type_signature)
         .filter(|routine| !routine.is_aggregate())
         .collect();
     resolve_candidates(name, candidates, given)
@@ -2341,6 +2371,7 @@ pub(crate) fn normalize_named_call(
     };
     let candidates: Vec<Routine> = routines_named(kv, &call.name)?
         .into_iter()
+        .map(hydrate_user_type_signature)
         .filter(|routine| !routine.is_aggregate())
         .collect();
     if candidates.is_empty() {
@@ -2603,7 +2634,10 @@ pub(crate) fn bind_procedure_call(
     named: &[(String, Expr)],
     variadic: Option<&Expr>,
 ) -> Result<Option<BoundRoutineCall>, ExecError> {
-    let candidates = routines_named(kv, name)?;
+    let candidates = routines_named(kv, name)?
+        .into_iter()
+        .map(hydrate_user_type_signature)
+        .collect::<Vec<_>>();
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -2960,6 +2994,7 @@ enum RegressionCAdapter {
     PglzCompress,
     PglzDecompress,
     InterptPp,
+    PointInWidget,
     CatalogTextUniqueIndexOid,
 }
 
@@ -3006,6 +3041,8 @@ fn regression_c_adapter(routine: &Routine) -> Option<RegressionCAdapter> {
         ColumnType::Point,
     ) {
         Some(RegressionCAdapter::InterptPp)
+    } else if is_regression_point_in_widget(routine) {
+        Some(RegressionCAdapter::PointInWidget)
     } else if routine.kind == RoutineKind::Function
         && routine
             .name
@@ -3022,6 +3059,21 @@ fn regression_c_adapter(routine: &Routine) -> Option<RegressionCAdapter> {
     } else {
         None
     }
+}
+
+fn is_regression_point_in_widget(routine: &Routine) -> bool {
+    routine.kind == RoutineKind::Function
+        && routine.name.eq_ignore_ascii_case("pt_in_widget")
+        && is_regression_c_entrypoint(routine, "pt_in_widget")
+        && routine.strict
+        && routine.params.len() == 2
+        && routine.params[0].mode == ParamMode::In
+        && routine.params[0].default.is_none()
+        && routine.params[0].ty.column == Some(ColumnType::Point)
+        && routine.params[1].mode == ParamMode::In
+        && routine.params[1].default.is_none()
+        && routine.params[1].ty.name.eq_ignore_ascii_case("widget")
+        && matches!(&routine.result, RoutineResult::Type { ty, setof: false } if ty.column == Some(ColumnType::Bool))
 }
 
 fn pglz_internal_error(message: &'static str) -> ExecError {
@@ -3087,6 +3139,9 @@ fn eval_regression_c_adapter(
         }
         (RegressionCAdapter::InterptPp, [Datum::Path(left), Datum::Path(right)]) => {
             Ok(interpt_pp(left, right).map_or(Datum::Null, Datum::Point))
+        }
+        (RegressionCAdapter::PointInWidget, [Datum::Point(point), Datum::Text(widget)]) => {
+            crate::usertype::regression_widget_contains(*point, widget).map(Datum::Bool)
         }
         (RegressionCAdapter::CatalogTextUniqueIndexOid, [Datum::Oid(oid)]) => {
             Ok(Datum::Bool(matches!(*oid, 3593 | 3597 | 6002 | 6246)))
@@ -8146,6 +8201,117 @@ mod tests {
             .expect("adapter input")
                 == Datum::Null
         );
+    }
+
+    #[test]
+    fn point_in_widget_regression_c_adapter_uses_the_widget_radius() {
+        let point = crabka_pgtypes::Point { x: 1.0, y: 2.0 };
+        assert!(
+            eval_regression_c_adapter(
+                RegressionCAdapter::PointInWidget,
+                &[Datum::Point(point), Datum::Text("(0,0,3)".into())],
+            )
+            .expect("adapter input")
+                == Datum::Bool(true)
+        );
+        assert!(
+            eval_regression_c_adapter(
+                RegressionCAdapter::PointInWidget,
+                &[Datum::Point(point), Datum::Text("(0,0,1)".into())],
+            )
+            .expect("adapter input")
+                == Datum::Bool(false)
+        );
+        assert!(
+            eval_regression_c_adapter(
+                RegressionCAdapter::PointInWidget,
+                &[
+                    Datum::Point(crabka_pgtypes::Point { x: 2.0, y: 2.0 }),
+                    Datum::Text("(1,1,1.5)".into()),
+                ],
+            )
+            .expect("adapter input")
+                == Datum::Bool(true)
+        );
+        assert!(
+            eval_regression_c_adapter(
+                RegressionCAdapter::PointInWidget,
+                &[
+                    Datum::Point(crabka_pgtypes::Point { x: 3.0, y: 0.0 }),
+                    Datum::Text("(0,0,3)".into()),
+                ],
+            )
+            .expect("adapter input")
+                == Datum::Bool(false)
+        );
+    }
+
+    #[test]
+    fn point_in_widget_regression_c_adapter_is_exactly_metadata_gated() {
+        let kv = MemKv::default();
+        let ops = crate::usertype::create_routine_return_shell(
+            &kv,
+            &crabka_pgcatalog::RelationName::public("widget"),
+        )
+        .expect("widget shell");
+        kv.write_batch(&ops).expect("store widget shell");
+        let exact = defined(
+            &kv,
+            "CREATE FUNCTION pt_in_widget(point, widget) RETURNS bool \
+             AS 'regress' LANGUAGE C STRICT",
+        );
+        assert!(regression_c_adapter(&exact) == Some(RegressionCAdapter::PointInWidget));
+
+        let mut cases = Vec::new();
+        let mut changed = exact.clone();
+        changed.kind = RoutineKind::Procedure;
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.name.push_str("_other");
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.language = "sql".into();
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.object_file = Some("other".into());
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.body = "other".into();
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.strict = false;
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params.push(changed.params[0].clone());
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params[0].mode = ParamMode::Out;
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params[0].default = Some("0".into());
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params[0].ty = RoutineType::builtin(ColumnType::Int4);
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params[1].mode = ParamMode::Out;
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params[1].default = Some("0".into());
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.params[1].ty = RoutineType::named("other".into());
+        cases.push(changed);
+        let mut changed = exact.clone();
+        changed.result = RoutineResult::Type {
+            ty: RoutineType::builtin(ColumnType::Int4),
+            setof: false,
+        };
+        cases.push(changed);
+
+        for routine in cases {
+            assert!(regression_c_adapter(&routine).is_none(), "{routine:?}");
+        }
     }
 
     #[test]

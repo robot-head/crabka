@@ -147,6 +147,13 @@ pub(crate) fn coerce(
         crate::usertype::check_domain(target, &base, ctx)?;
         return Ok(base);
     }
+    if let ColumnType::Base(base) = target {
+        return if value.is_null() {
+            Ok(value)
+        } else {
+            coerce(value, *base.representation, ctx)
+        };
+    }
     // Assignment to a composite column accepts a record of the same shape, and
     // a `record` built by a bare `ROW(…)` is coerced field by field into the
     // target's attribute types.

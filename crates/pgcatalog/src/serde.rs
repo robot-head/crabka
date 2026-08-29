@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 21;
+pub const SCHEMA_VERSION: u8 = 22;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -2186,6 +2186,9 @@ pub fn serialize_user_type(ty: &UserType) -> Vec<u8> {
         UserTypeBody::Base(base) => {
             out.push(USER_TYPE_BASE);
             write_type(&mut out, base.representation);
+            out.extend_from_slice(&base.layout.length.to_be_bytes());
+            out.push(u8::from(base.layout.by_value));
+            out.push(base.layout.alignment as u8);
             write_optional_type(&mut out, base.element);
             write_optional_string(&mut out, base.default.as_deref());
             write_str(&mut out, &base.input);
@@ -2336,6 +2339,11 @@ pub(crate) fn deserialize_user_type_with(
         USER_TYPE_SHELL => UserTypeBody::Shell,
         USER_TYPE_BASE => {
             let representation = read_type_with(&mut cur, resolve_user_type)?;
+            let layout = crabka_pgtypes::usertype::BaseLayout {
+                length: i16::from_be_bytes(take_n(&mut cur, 2)?.try_into().expect("2")),
+                by_value: take_u8(&mut cur)? != 0,
+                alignment: char::from(take_u8(&mut cur)?),
+            };
             let element = read_optional_type(&mut cur, resolve_user_type)?;
             let default = read_optional_string(&mut cur)?;
             let input = read_string(&mut cur)?;
@@ -2348,6 +2356,7 @@ pub(crate) fn deserialize_user_type_with(
             let storage = char::from(take_u8(&mut cur)?);
             UserTypeBody::Base(BaseBody {
                 representation,
+                layout,
                 element,
                 default,
                 input,
@@ -3043,6 +3052,9 @@ mod tests {
                 body: crabka_pgtypes::usertype::UserTypeBody::Base(
                     crabka_pgtypes::usertype::BaseBody {
                         representation: ColumnType::Int4,
+                        layout: crabka_pgtypes::usertype::BaseLayout::from_representation(
+                            ColumnType::Int4,
+                        ),
                         element: None,
                         default: None,
                         input: "int4in".into(),
@@ -3440,6 +3452,7 @@ mod tests {
             name: "stored_text".into(),
             body: UserTypeBody::Base(BaseBody {
                 representation: ColumnType::Text,
+                layout: crabka_pgtypes::usertype::BaseLayout::from_representation(ColumnType::Text),
                 element: Some(ColumnType::Int4),
                 default: Some("'stored default'".into()),
                 input: "stored_text_in".into(),

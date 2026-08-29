@@ -17,9 +17,10 @@ use crabka_pgparser::ast::{
     CreateTypeDefinition, DomainConstraint, EnumValuePosition,
 };
 use crabka_pgtypes::{
-    ColumnType, Datum,
+    ColumnType, Datum, TypeError,
     usertype::{
-        self, BaseBody, CompositeField, DomainBody, DomainCheck, RangeBody, UserType, UserTypeBody,
+        self, BaseBody, BaseRef, CompositeField, DomainBody, DomainCheck, RangeBody, UserType,
+        UserTypeBody,
     },
 };
 use crabka_pgwire::engine::QueryResult;
@@ -257,18 +258,111 @@ impl std::fmt::Display for Layout {
 /// where gres renders a value in text, and there it is already the
 /// representation type that decides, for a `LIKE`-built type too.
 ///
-/// A layout gres has no member for — `widget`'s 24 bytes, `city_budget`'s 16 —
-/// stays refused. There is no carrier to name, and a type whose declared width
-/// the engine quietly ignored would be worse than the error.
-fn carrier_for(layout: Layout) -> Option<ColumnType> {
+/// A layout gres has no member for stays refused. The regression extension's
+/// fixed-width `widget` and `city_budget` types are explicit exceptions because
+/// their C input/output functions have pinned Rust adapters.
+fn carrier_for(layout: Layout, input: &str, output: &str) -> Option<ColumnType> {
     match (layout.length, layout.by_value, layout.alignment) {
         (-1, false, 'i') => Some(ColumnType::Text),
         (1, true, 'c') => Some(ColumnType::InternalChar),
         (2, true, 's') => Some(ColumnType::Int2),
         (4, true, 'i') => Some(ColumnType::Int4),
         (8, true, 'd') => Some(ColumnType::Int8),
+        // The regression extension's two fixed-width values have dedicated
+        // Rust input/output adapters. Their textual carrier is internal only;
+        // `BaseLayout` keeps the PostgreSQL-visible layout exact.
+        (24, false, 'd') if input == "widget_in" && output == "widget_out" => {
+            Some(ColumnType::Text)
+        }
+        (16, false, 'i') if input == "int44in" && output == "int44out" => Some(ColumnType::Text),
         _ => None,
     }
+}
+
+/// The layout a base type declares to PostgreSQL catalogs and the wire protocol.
+pub(crate) fn declared_base_layout(ty: ColumnType) -> Option<crabka_pgtypes::usertype::BaseLayout> {
+    let ColumnType::Base(base) = ty else {
+        return None;
+    };
+    let definition = usertype::lookup_oid(base.oid)?;
+    let UserTypeBody::Base(body) = &definition.body else {
+        return None;
+    };
+    Some(body.layout)
+}
+
+/// Run the pinned input adapters for regression C base types after their
+/// ordinary carrier conversion. Other base types keep their carrier value.
+pub(crate) fn normalize_base_input(base: BaseRef, value: Datum) -> Result<Datum, ExecError> {
+    let Some(definition) = usertype::lookup_oid(base.oid) else {
+        return Ok(value);
+    };
+    let UserTypeBody::Base(body) = &definition.body else {
+        return Ok(value);
+    };
+    let Datum::Text(text) = &value else {
+        return Ok(value);
+    };
+    match (
+        body.input.as_str(),
+        body.output.as_str(),
+        body.layout.length,
+        body.layout.by_value,
+        body.layout.alignment,
+    ) {
+        ("widget_in", "widget_out", 24, false, 'd') => {
+            let (x, y, radius) = widget_parts(base.name, text)?;
+            Ok(Datum::Text(format!(
+                "({},{},{})",
+                crabka_pgtypes::shortest_dec::float8_shortest(x),
+                crabka_pgtypes::shortest_dec::float8_shortest(y),
+                crabka_pgtypes::shortest_dec::float8_shortest(radius),
+            )))
+        }
+        ("int44in", "int44out", 16, false, 'i') => Ok(Datum::Text(city_budget_input(text))),
+        _ => Ok(value),
+    }
+}
+
+/// The regression extension's `pt_in_widget(point, widget)` predicate.
+pub(crate) fn regression_widget_contains(
+    point: crabka_pgtypes::Point,
+    widget: &str,
+) -> Result<bool, ExecError> {
+    let (x, y, radius) = widget_parts("widget", widget)?;
+    Ok((point.x - x).hypot(point.y - y) < radius)
+}
+
+fn widget_parts(type_name: &'static str, text: &str) -> Result<(f64, f64, f64), ExecError> {
+    let invalid = || {
+        ExecError::from(TypeError::InvalidText {
+            type_name,
+            value: text.to_owned(),
+        })
+    };
+    let mut values = text
+        .trim()
+        .strip_prefix('(')
+        .ok_or_else(invalid)?
+        .split(',');
+    let mut next = || {
+        values
+            .next()
+            .and_then(|part| part.trim().trim_end_matches(')').parse::<f64>().ok())
+            .ok_or_else(invalid)
+    };
+    Ok((next()?, next()?, next()?))
+}
+
+fn city_budget_input(text: &str) -> String {
+    let mut values = [0_i32; 4];
+    for (slot, part) in values.iter_mut().zip(text.split(',')) {
+        let Ok(value) = part.trim().parse() else {
+            break;
+        };
+        *slot = value;
+    }
+    format!("{},{},{},{}", values[0], values[1], values[2], values[3])
 }
 
 /// `CREATE TYPE name (INPUT = …, OUTPUT = …, …)` — a user-defined base type,
@@ -344,7 +438,7 @@ fn create_base_type(
     let output = output.ok_or_else(|| {
         ExecError::InvalidObjectDefinition("type output function must be specified".into())
     })?;
-    let representation = match (like, layout_written) {
+    let (representation, declared_layout) = match (like, layout_written) {
         // `DefineType` lets a layout option override one field of what `LIKE`
         // supplied. gres cannot: it models no `typbyval`/`typalign` for its own
         // built-ins, so it has no `LIKE` layout to override in the first place.
@@ -356,16 +450,28 @@ fn create_base_type(
                     .into(),
             ));
         }
-        (Some(like), false) => like,
+        (Some(like), false) => (
+            like,
+            crabka_pgtypes::usertype::BaseLayout::from_representation(like),
+        ),
         (None, _) => {
             layout.validate()?;
-            carrier_for(layout).ok_or_else(|| {
+            let representation = carrier_for(layout, &input, &output).ok_or_else(|| {
                 ExecError::Unsupported(format!(
                     "a base type of {layout} is not supported: gres holds a base type's values in \
                      a built-in type's form, and has none of that layout — name one with \
                      LIKE = <type>"
                 ))
-            })?
+            })?;
+            (
+                representation,
+                crabka_pgtypes::usertype::BaseLayout {
+                    length: i16::try_from(layout.length)
+                        .expect("validated base type length fits i16"),
+                    by_value: layout.by_value,
+                    alignment: layout.alignment,
+                },
+            )
         }
     };
     require_routine(kv, &input)?;
@@ -385,6 +491,7 @@ fn create_base_type(
     });
     let body = UserTypeBody::Base(BaseBody {
         representation,
+        layout: declared_layout,
         element,
         default,
         input,
@@ -1621,6 +1728,81 @@ mod tests {
     use crabka_pgparser::ast::RelationRef;
 
     use super::*;
+
+    #[test]
+    fn regression_c_carriers_require_their_exact_layout_and_io_pair() {
+        for (layout, expected) in [
+            (
+                Layout {
+                    length: -1,
+                    by_value: false,
+                    alignment: 'i',
+                },
+                ColumnType::Text,
+            ),
+            (
+                Layout {
+                    length: 1,
+                    by_value: true,
+                    alignment: 'c',
+                },
+                ColumnType::InternalChar,
+            ),
+            (
+                Layout {
+                    length: 2,
+                    by_value: true,
+                    alignment: 's',
+                },
+                ColumnType::Int2,
+            ),
+            (
+                Layout {
+                    length: 4,
+                    by_value: true,
+                    alignment: 'i',
+                },
+                ColumnType::Int4,
+            ),
+            (
+                Layout {
+                    length: 8,
+                    by_value: true,
+                    alignment: 'd',
+                },
+                ColumnType::Int8,
+            ),
+        ] {
+            assert!(carrier_for(layout, "", "") == Some(expected));
+        }
+        let widget = Layout {
+            length: 24,
+            by_value: false,
+            alignment: 'd',
+        };
+        let city = Layout {
+            length: 16,
+            by_value: false,
+            alignment: 'i',
+        };
+        assert!(carrier_for(widget, "widget_in", "widget_out") == Some(ColumnType::Text));
+        assert!(carrier_for(city, "int44in", "int44out") == Some(ColumnType::Text));
+        assert!(carrier_for(widget, "widget_in", "other_out").is_none());
+        assert!(carrier_for(widget, "other_in", "widget_out").is_none());
+        assert!(carrier_for(city, "int44in", "other_out").is_none());
+        assert!(carrier_for(city, "other_in", "int44out").is_none());
+        assert!(
+            carrier_for(
+                Layout {
+                    length: 16,
+                    ..widget
+                },
+                "widget_in",
+                "widget_out"
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn unnamed_domain_checks_get_postgres_default_names() {

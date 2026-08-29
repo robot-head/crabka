@@ -6,7 +6,8 @@ pub(crate) fn field(name: &str, ty: ColumnType) -> FieldDescription {
         table_oid: 0,
         column_id: 0,
         type_oid: ty.oid(),
-        type_size: ty.type_size(),
+        type_size: crate::usertype::declared_base_layout(ty)
+            .map_or_else(|| ty.type_size(), |layout| layout.length),
         type_modifier: ty.typmod(),
         format: 0,
     }

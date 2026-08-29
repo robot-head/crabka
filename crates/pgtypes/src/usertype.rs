@@ -230,6 +230,35 @@ pub enum UserTypeBody {
     Base(BaseBody),
 }
 
+/// The physical fields PostgreSQL reports for a user-defined base type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BaseLayout {
+    /// `pg_type.typlen`: a positive byte count, or -1 for a varlena.
+    pub length: i16,
+    /// `pg_type.typbyval`.
+    pub by_value: bool,
+    /// `pg_type.typalign`: `c`, `s`, `i` or `d`.
+    pub alignment: char,
+}
+
+impl BaseLayout {
+    /// The declared layout of a `LIKE = T` carrier.
+    #[must_use]
+    pub fn from_representation(representation: ColumnType) -> Self {
+        let length = representation.type_size();
+        Self {
+            length,
+            by_value: matches!(length, 1 | 2 | 4 | 8),
+            alignment: match length {
+                1 => 'c',
+                2 => 's',
+                8 => 'd',
+                _ => 'i',
+            },
+        }
+    }
+}
+
 /// A user-defined base type's definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseBody {
@@ -238,6 +267,8 @@ pub struct BaseBody {
     /// `Datum`, so the two are the same bytes — which is the whole content of
     /// binary coercibility between them.
     pub representation: ColumnType,
+    /// The physical layout PostgreSQL exposes for this type.
+    pub layout: BaseLayout,
     /// `pg_type.typelem`, when this base type has an element type.
     pub element: Option<ColumnType>,
     /// `pg_type.typdefault`, applied to columns that write no default.
@@ -1055,6 +1086,54 @@ mod tests {
     use assert2::assert;
 
     use super::*;
+
+    #[test]
+    fn base_layout_matches_its_carrier_width() {
+        for (representation, expected) in [
+            (
+                ColumnType::InternalChar,
+                BaseLayout {
+                    length: 1,
+                    by_value: true,
+                    alignment: 'c',
+                },
+            ),
+            (
+                ColumnType::Int2,
+                BaseLayout {
+                    length: 2,
+                    by_value: true,
+                    alignment: 's',
+                },
+            ),
+            (
+                ColumnType::Int4,
+                BaseLayout {
+                    length: 4,
+                    by_value: true,
+                    alignment: 'i',
+                },
+            ),
+            (
+                ColumnType::Int8,
+                BaseLayout {
+                    length: 8,
+                    by_value: true,
+                    alignment: 'd',
+                },
+            ),
+            (
+                ColumnType::Text,
+                BaseLayout {
+                    length: -1,
+                    by_value: false,
+                    alignment: 'i',
+                },
+            ),
+        ] {
+            assert!(BaseLayout::from_representation(representation) == expected);
+        }
+    }
 
     /// The stride the catalog allocates user-type oids at
     /// (`crabka_pgcatalog`'s `USER_TYPE_OID_STRIDE`). Restated here because
