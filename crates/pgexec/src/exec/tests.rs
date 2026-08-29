@@ -1398,6 +1398,29 @@ async fn create_table_like_identity_owns_a_new_sequence() {
     run_s(&mut session, "INSERT INTO copied_plain VALUES (1)").await;
 }
 
+#[tokio::test]
+async fn create_table_like_including_indexes_copies_ordinary_indexes() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE source (id int4, label text)").await;
+    run_s(&mut session, "CREATE INDEX ON source (label)").await;
+    run_s(
+        &mut session,
+        "CREATE TABLE copied (LIKE source INCLUDING INDEXES)",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'copied'",
+        )
+        .await
+            == vec![text_row(&["copied_label_idx"])]
+    );
+}
+
 /// A row-security policy that reads a column depends on it. `PostgreSQL`
 /// refuses the drop and names the policy, and `CASCADE` takes the whole
 /// policy — never a policy left reading a column that is gone.

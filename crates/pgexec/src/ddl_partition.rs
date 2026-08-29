@@ -604,24 +604,13 @@ pub(crate) fn create_table_definition(
             }
         }
         if clause.includes(crabka_pgparser::ast::LikeOption::Indexes) {
+            let mut taken: HashSet<String> =
+                indexes.iter().map(|index| index.name.clone()).collect();
             for index in crabka_pgcatalog::list_table_indexes(kv, source_name)? {
-                let Some(constraint) = index.constraint else {
-                    continue;
-                };
-                indexes.push(crabka_pgcatalog::NewIndex {
-                    name: constraint_index_name(
-                        name,
-                        &index.columns,
-                        constraint == crabka_pgcatalog::IndexConstraint::PrimaryKey,
-                    ),
-                    columns: index.columns.clone(),
-                    unique: true,
-                    placement: crabka_pgcatalog::IndexPlacement::Local,
-                    method: index.method,
-                    constraint: Some(constraint),
-                    without_overlaps: index.without_overlaps,
-                    deferral: index.deferral,
-                });
+                let index_name =
+                    available_index_name(kv, name, &cloned_index_base_name(name, &index), &taken);
+                taken.insert(index_name.clone());
+                indexes.push(cloned_partition_index(index_name, &index));
             }
         }
     }
@@ -1357,23 +1346,6 @@ pub(crate) fn exclusion_constraint_index(
         without_overlaps: false,
         deferral: crabka_pgcatalog::ConstraintDeferral::Immediate,
     })
-}
-
-/// `PostgreSQL`'s default index name for a `PRIMARY KEY`/`UNIQUE` constraint.
-///
-/// It is built from the relation's own name, not its qualified spelling: the
-/// index for `s1.t`'s primary key is `t_pkey`, sitting in `s1` beside the
-/// table.
-pub(crate) fn constraint_index_name(
-    table_name: &crabka_pgcatalog::RelationName,
-    columns: &[String],
-    primary_key: bool,
-) -> String {
-    if primary_key {
-        format!("{}_pkey", table_name.name)
-    } else {
-        format!("{}_{}_key", table_name.name, columns.join("_"))
-    }
 }
 
 /// `PostgreSQL`'s default `CHECK` constraint name: `<table>_<column>_check` when
