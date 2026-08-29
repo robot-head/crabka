@@ -15240,6 +15240,16 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Data))?;
         self.expect(&Token::Keyword(Keyword::Wrapper))?;
         let name = self.expect_col_id()?;
+        if self.eat_ident_eq("rename") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            return Ok(Statement::AlterFdw {
+                name,
+                rename_to: Some(self.expect_col_id()?),
+                handler: None,
+                validator: None,
+                options: None,
+            });
+        }
         let mut handler = None;
         let mut validator = None;
         let mut options = None;
@@ -15301,6 +15311,7 @@ impl Parser {
         }
         Ok(Statement::AlterFdw {
             name,
+            rename_to: None,
             handler,
             validator,
             options,
@@ -24526,6 +24537,7 @@ mod tests {
             ),
             Statement::AlterFdw {
                 name: "w".into(),
+                rename_to: None,
                 handler: None,
                 validator: None,
                 options: Some(vec![
@@ -24551,6 +24563,7 @@ mod tests {
             one("ALTER FOREIGN DATA WRAPPER w HANDLER public.h NO VALIDATOR OPTIONS (host 'new')"),
             Statement::AlterFdw {
                 name: "w".into(),
+                rename_to: None,
                 handler: Some(Some("public.h".into())),
                 validator: Some(None),
                 options: Some(vec![ForeignOptionAction::Add {
@@ -24559,6 +24572,20 @@ mod tests {
                 }]),
             }
         );
+    }
+
+    #[test]
+    fn parses_alter_fdw_rename() {
+        assert!(matches!(
+            one("ALTER FOREIGN DATA WRAPPER w RENAME TO renamed"),
+            Statement::AlterFdw {
+                name,
+                rename_to: Some(rename_to),
+                handler: None,
+                validator: None,
+                options: None,
+            } if name == "w" && rename_to == "renamed"
+        ));
     }
 
     #[test]

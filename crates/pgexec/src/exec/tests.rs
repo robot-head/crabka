@@ -7967,6 +7967,42 @@ fn alter_foreign_options_update_catalog_records() {
 }
 
 #[test]
+fn alter_fdw_rename_updates_servers_and_comments() {
+    use crabka_pgcatalog::CommentObject;
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "COMMENT ON FOREIGN DATA WRAPPER w IS 'a wrapper'",
+        "ALTER FOREIGN DATA WRAPPER w RENAME TO renamed",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert!(crabka_pgcatalog::get_fdw(&kv, "w").is_err());
+    assert!(crabka_pgcatalog::get_fdw(&kv, "renamed").is_ok());
+    assert_eq!(
+        crabka_pgcatalog::get_server(&kv, "s")
+            .expect("server")
+            .wrapper,
+        "renamed"
+    );
+    assert_eq!(
+        crabka_pgcatalog::get_comment(&kv, "foreign data wrapper", CommentObject::Named("renamed"))
+            .expect("comment"),
+        Some("a wrapper".into())
+    );
+}
+
+#[test]
 fn comments_on_foreign_objects_are_persisted() {
     use crabka_pgcatalog::CommentObject;
     use crabka_pgkv::{Kv, MemKv};

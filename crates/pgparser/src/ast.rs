@@ -1071,6 +1071,8 @@ pub enum Statement {
     /// `ALTER FOREIGN DATA WRAPPER <name> OPTIONS (…)`
     AlterFdw {
         name: String,
+        /// The `RENAME TO` target; exclusive with the definition clauses.
+        rename_to: Option<String>,
         /// `Some(None)` means `NO HANDLER`; outer `None` leaves it unchanged.
         handler: Option<Option<String>>,
         /// `Some(None)` means `NO VALIDATOR`; outer `None` leaves it unchanged.

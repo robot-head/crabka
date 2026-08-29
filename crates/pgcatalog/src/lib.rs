@@ -7114,6 +7114,59 @@ pub fn alter_fdw_ops(
     }])
 }
 
+/// Rename an FDW and update every server that names it.
+pub fn rename_fdw_ops(
+    kv: &dyn Kv,
+    name: &str,
+    new_name: &str,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let wrapper = get_fdw(kv, name)?;
+    if kv.get(&key::fdw_key(new_name))?.is_some() {
+        return Err(CatalogError::DuplicateObject(new_name.to_string()));
+    }
+    let mut ops = vec![
+        WriteOp::Put {
+            key: key::fdw_key(new_name),
+            value: serialize_fdw(
+                new_name,
+                wrapper.handler.as_deref(),
+                wrapper.validator.as_deref(),
+                &wrapper.options,
+            ),
+        },
+        WriteOp::Delete {
+            key: key::fdw_key(name),
+        },
+    ];
+    if let Some(comment) = get_comment(kv, "foreign data wrapper", CommentObject::Named(name))? {
+        ops.push(set_comment_op(
+            "foreign data wrapper",
+            CommentObject::Named(name),
+            None,
+        ));
+        ops.push(set_comment_op(
+            "foreign data wrapper",
+            CommentObject::Named(new_name),
+            Some(&comment),
+        ));
+    }
+    for server in list_servers(kv)? {
+        if server.wrapper == name {
+            ops.push(WriteOp::Put {
+                key: key::server_key(&server.name),
+                value: serialize_server(
+                    &server.name,
+                    new_name,
+                    server.server_type.as_deref(),
+                    server.version.as_deref(),
+                    &server.options,
+                ),
+            });
+        }
+    }
+    Ok(ops)
+}
+
 /// List foreign-data wrappers by name.
 ///
 /// # Errors
