@@ -3848,6 +3848,8 @@ fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
         27 => ("tid", NoMod),
         28 => ("xid", NoMod),
         29 => ("cid", NoMod),
+        30 => ("oidvector", NoMod),
+        22 => ("int2vector", NoMod),
         271 => ("xid8[]", NoMod),
         1010 => ("tid[]", NoMod),
         1011 => ("xid[]", NoMod),

@@ -834,6 +834,8 @@ async fn the_shared_helpers_still_answer_for_other_types() {
         ("16", "boolean"),
         ("1700", "numeric"),
         ("1082", "date"),
+        ("30", "oidvector"),
+        ("22", "int2vector"),
     ] {
         for spelling in [
             oid.to_string(),
