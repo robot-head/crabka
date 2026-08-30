@@ -126,6 +126,12 @@ pub(crate) fn local_index_backfill_ops_for_rows(
                 ),
                 value: Vec::new(),
             });
+            if let Some(key) = local_index_ordered_entry_key(table, index, &values, *rowid) {
+                ops.push(crabka_pgkv::WriteOp::Put {
+                    key,
+                    value: Vec::new(),
+                });
+            }
         }
     }
     Ok(ops)

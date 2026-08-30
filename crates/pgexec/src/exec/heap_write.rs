@@ -405,9 +405,41 @@ pub(super) fn local_index_entry_ops(
                 ),
                 value: Vec::new(),
             });
+            if let Some(key) = local_index_ordered_entry_key(table, index, &values, rowid) {
+                ops.push(crabka_pgkv::WriteOp::Put {
+                    key,
+                    value: Vec::new(),
+                });
+            }
         }
     }
     Ok(ops)
+}
+
+pub(super) fn local_index_ordered_entry_key(
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    values: &[Datum],
+    rowid: u64,
+) -> Option<Vec<u8>> {
+    (index.method == crabka_pgcatalog::IndexMethod::Btree).then(|| {
+        crabka_pgkv::key::secondary_index_ordered_entry_key(
+            table.id,
+            index.id,
+            values,
+            &index
+                .key_options
+                .iter()
+                .map(|option| option.descending)
+                .collect::<Vec<_>>(),
+            &index
+                .key_options
+                .iter()
+                .map(|option| option.nulls_first)
+                .collect::<Vec<_>>(),
+            rowid,
+        )
+    })?
 }
 
 pub(super) fn index_entries(

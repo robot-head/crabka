@@ -204,6 +204,9 @@ pub(crate) fn prune_rowid_chain_ops(
                         table.id, index.id, &values, rowid,
                     ),
                 });
+                if let Some(key) = local_index_ordered_entry_key(table, index, &values, rowid) {
+                    ops.push(crabka_pgkv::WriteOp::Delete { key });
+                }
                 removed.push((index.id, values));
                 index_entries_pruned += 1;
             }

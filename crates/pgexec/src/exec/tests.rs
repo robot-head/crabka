@@ -4092,7 +4092,7 @@ async fn drop_index_removes_catalog_metadata_and_local_entries_in_one_ddl_batch(
             .scan_prefix(&entry_prefix)
             .expect("scan index entries")
             .len(),
-        1
+        2
     );
 
     session
@@ -4138,6 +4138,45 @@ async fn select_uses_local_index_for_simple_equality_with_residual_filter() {
 
     assert_eq!(rows_of(&result[0]).len(), 1);
     assert_eq!(text(&rows_of(&result[0])[0][0]).as_deref(), Some("1"));
+}
+
+#[tokio::test]
+async fn ordered_local_index_stream_returns_order_by_order() {
+    let engine = SqlEngine::new();
+    run(&engine, "CREATE TABLE t (a int4 NOT NULL)").await;
+    run(&engine, "INSERT INTO t VALUES (2), (1), (3)").await;
+    run(&engine, "CREATE INDEX t_a_idx ON t (a DESC)").await;
+    let table = crabka_pgcatalog::get_table(engine.catalog_kv.as_ref(), &RelationName::public("t"))
+        .expect("table");
+    let index =
+        crabka_pgcatalog::get_index(engine.catalog_kv.as_ref(), &RelationName::public("t_a_idx"))
+            .expect("index");
+    let snapshot = engine.procarray.snapshot();
+    let gsnap = settled_snapshot();
+    let values = super::lookup_local_index_ordered(
+        &super::MvccReadContext {
+            kv: engine.kv.as_ref(),
+            global: engine.kv.as_ref(),
+            global_snapshot: &gsnap,
+            snapshot: &snapshot,
+            own: None,
+            command_id: None,
+        },
+        &table,
+        &index,
+    )
+    .expect("ordered index scan")
+    .expect("supported index")
+    .into_iter()
+    .map(|row| row.row)
+    .map(|row| row[0].clone())
+    .map(|value| match value {
+        crabka_pgtypes::Datum::Int4(value) => value,
+        got => panic!("expected int4, got {got:?}"),
+    })
+    .collect::<Vec<_>>();
+
+    assert_eq!(values, vec![3, 2, 1]);
 }
 
 #[tokio::test]

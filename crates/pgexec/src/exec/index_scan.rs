@@ -26,6 +26,75 @@ pub(super) fn lookup_local_index_equal(
     Ok(exact)
 }
 
+/// Read one local B-tree in physical key order. The ordered stream is separate
+/// from equality entries so it cannot alter uniqueness or foreign-key probes.
+pub(super) fn lookup_local_index_ordered(
+    mvcc: &MvccReadContext<'_>,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+) -> Result<Option<Vec<ScannedRow>>, ExecError> {
+    if !local_index_supports_ordered_scan(table, index) {
+        return Ok(None);
+    }
+    let prefix = crabka_pgkv::key::secondary_index_ordered_prefix(table.id, index.id);
+    let mut rows = Vec::new();
+    for (key, _) in mvcc.kv.scan_prefix(&prefix)? {
+        let rowid = crabka_pgkv::key::secondary_index_rowid_of(table.id, index.id, &key)?;
+        rows.extend(visible_rows_for_rowids(
+            mvcc,
+            table,
+            BTreeSet::from([rowid]),
+        )?);
+    }
+    Ok(Some(rows))
+}
+
+pub(super) fn local_index_supports_ordered_scan(
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+) -> bool {
+    index.placement == crabka_pgcatalog::IndexPlacement::Local
+        && index.method == crabka_pgcatalog::IndexMethod::Btree
+        && index.predicate.is_none()
+        && index.columns.len() == index.key_options.len()
+        && index
+            .columns
+            .iter()
+            .zip(&index.key_options)
+            .all(|(column, option)| {
+                option
+                    .collation
+                    .as_deref()
+                    .is_none_or(|collation| matches!(collation, "C" | "POSIX"))
+                    && table
+                        .column_index(column)
+                        .is_some_and(|column| ordered_column_type(table.columns[column].ty))
+            })
+}
+
+fn ordered_column_type(ty: crabka_pgtypes::ColumnType) -> bool {
+    matches!(
+        ty,
+        crabka_pgtypes::ColumnType::Bool
+            | crabka_pgtypes::ColumnType::Int2
+            | crabka_pgtypes::ColumnType::Int4
+            | crabka_pgtypes::ColumnType::Int8
+            | crabka_pgtypes::ColumnType::Text
+            | crabka_pgtypes::ColumnType::Varchar(_)
+            | crabka_pgtypes::ColumnType::InternalChar
+            | crabka_pgtypes::ColumnType::Float4
+            | crabka_pgtypes::ColumnType::Float8
+            | crabka_pgtypes::ColumnType::Bytea
+            | crabka_pgtypes::ColumnType::Oid
+            | crabka_pgtypes::ColumnType::Xid
+            | crabka_pgtypes::ColumnType::Xid8
+            | crabka_pgtypes::ColumnType::Cid
+            | crabka_pgtypes::ColumnType::PgLsn
+            | crabka_pgtypes::ColumnType::Money
+            | crabka_pgtypes::ColumnType::JsonPath
+    )
+}
+
 pub(super) fn lookup_local_gin(
     mvcc: &MvccReadContext<'_>,
     table: &Table,

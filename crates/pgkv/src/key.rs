@@ -4,11 +4,14 @@
 
 use crate::{
     KvError,
-    keyenc::{put_u32, put_u64, take_u32, take_u64},
+    keyenc::{put_bytes, put_i32, put_i64, put_u32, put_u64, take_u32, take_u64},
 };
 
 /// The primary storage index for a table's rows.
 pub const INDEX_PRIMARY: u32 = 1;
+
+const SECONDARY_INDEX_EQUALITY: u8 = 0;
+const SECONDARY_INDEX_ORDERED: u8 = 1;
 
 /// Reserved table id for system metadata (catalog, sequences, global meta).
 pub const SYSTEM_TABLE_ID: u32 = 0;
@@ -270,10 +273,101 @@ pub fn secondary_index_entry_prefix(
     let canonical = crabka_pgtypes::canonicalize_row_for_key(indexed_values);
     let encoded_values = crate::rowenc::encode_row(&canonical);
     let mut k = secondary_index_prefix(table_id, index_id);
+    k.push(SECONDARY_INDEX_EQUALITY);
     let encoded_len = u32::try_from(encoded_values.len()).expect("index key exceeds 4 GiB");
     k.extend_from_slice(&encoded_len.to_be_bytes());
     k.extend_from_slice(&encoded_values);
     k
+}
+
+/// Prefix for the ordered entry stream of one local B-tree index.
+#[must_use]
+pub fn secondary_index_ordered_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
+    let mut key = secondary_index_prefix(table_id, index_id);
+    key.push(SECONDARY_INDEX_ORDERED);
+    key
+}
+
+/// Full, lexicographically ordered local B-tree entry key.
+///
+/// Equality entries intentionally stay in their separate stream: uniqueness
+/// and foreign-key probes require the full canonical tuple as a byte prefix,
+/// while an ordered encoding cannot provide that property for composite keys.
+/// `None` means this datum family does not yet have a faithful sortable
+/// representation and must use the regular table-order scan instead.
+#[must_use]
+pub fn secondary_index_ordered_entry_key(
+    table_id: u32,
+    index_id: u32,
+    indexed_values: &[crabka_pgtypes::Datum],
+    descending: &[bool],
+    nulls_first: &[bool],
+    rowid: u64,
+) -> Option<Vec<u8>> {
+    if indexed_values.len() != descending.len() || indexed_values.len() != nulls_first.len() {
+        return None;
+    }
+    let canonical = crabka_pgtypes::canonicalize_row_for_key(indexed_values);
+    let mut key = secondary_index_ordered_prefix(table_id, index_id);
+    for ((value, descending), nulls_first) in canonical.iter().zip(descending).zip(nulls_first) {
+        let mut component = ordered_index_component(value, *nulls_first)?;
+        if *descending && !value.is_null() {
+            for byte in &mut component[1..] {
+                *byte = !*byte;
+            }
+        }
+        key.extend_from_slice(&component);
+    }
+    put_u64(&mut key, rowid);
+    Some(key)
+}
+
+fn ordered_index_component(value: &crabka_pgtypes::Datum, nulls_first: bool) -> Option<Vec<u8>> {
+    use crabka_pgtypes::Datum;
+
+    if value.is_null() {
+        return Some(vec![if nulls_first { 0 } else { u8::MAX }]);
+    }
+    let mut out = vec![if nulls_first { 1 } else { 0 }];
+    match value {
+        Datum::Bool(value) => out.push(u8::from(*value)),
+        Datum::Int2(value) => put_i32(&mut out, i32::from(*value)),
+        Datum::Int4(value) => put_i32(&mut out, *value),
+        Datum::Int8(value) | Datum::Money(value) => put_i64(&mut out, *value),
+        Datum::Text(value) | Datum::JsonPath(value) => put_bytes(&mut out, value.as_bytes()),
+        Datum::Bytea(value) => put_bytes(&mut out, value),
+        Datum::InternalChar(value) => out.push(*value),
+        Datum::Float4(value) => put_u32(&mut out, ordered_float4(*value)),
+        Datum::Float8(value) => put_u64(&mut out, ordered_float8(*value)),
+        Datum::Oid(value) | Datum::Xid(value) | Datum::Cid(value) => put_u32(&mut out, *value),
+        Datum::Xid8(value) | Datum::PgLsn(value) => put_u64(&mut out, *value),
+        _ => return None,
+    }
+    Some(out)
+}
+
+fn ordered_float4(value: f32) -> u32 {
+    if value.is_nan() {
+        return u32::MAX;
+    }
+    let bits = if value == 0.0 { 0 } else { value.to_bits() };
+    if bits >> 31 == 0 {
+        bits ^ (1 << 31)
+    } else {
+        !bits
+    }
+}
+
+fn ordered_float8(value: f64) -> u64 {
+    if value.is_nan() {
+        return u64::MAX;
+    }
+    let bits = if value == 0.0 { 0 } else { value.to_bits() };
+    if bits >> 63 == 0 {
+        bits ^ (1 << 63)
+    } else {
+        !bits
+    }
 }
 
 /// Full local secondary-index entry key.
@@ -302,16 +396,28 @@ pub fn secondary_index_rowid_of(table_id: u32, index_id: u32, key: &[u8]) -> Res
             "key does not belong to this secondary index".into(),
         ));
     }
-    if key.len() < prefix.len() + 4 + 8 {
+    let Some((&kind, rest)) = key[prefix.len()..].split_first() else {
         return Err(KvError::CorruptRow("secondary index key too short".into()));
+    };
+    if kind == SECONDARY_INDEX_ORDERED {
+        if rest.len() < 8 {
+            return Err(KvError::CorruptRow("secondary index key too short".into()));
+        }
+        let mut rowid = &rest[rest.len() - 8..];
+        return take_u64(&mut rowid);
+    }
+    if kind != SECONDARY_INDEX_EQUALITY || rest.len() < 4 + 8 {
+        return Err(KvError::CorruptRow(
+            "secondary index key has unknown layout".into(),
+        ));
     }
 
     let mut len_bytes = [0_u8; 4];
-    len_bytes.copy_from_slice(&key[prefix.len()..prefix.len() + 4]);
+    len_bytes.copy_from_slice(&rest[..4]);
     let value_len = usize::try_from(u32::from_be_bytes(len_bytes)).map_err(|_| {
         KvError::CorruptRow("secondary index value length does not fit usize".into())
     })?;
-    let rowid_offset = prefix.len() + 4 + value_len;
+    let rowid_offset = prefix.len() + 1 + 4 + value_len;
     if key.len() != rowid_offset + 8 {
         return Err(KvError::CorruptRow(
             "secondary index key has trailing bytes".into(),
@@ -922,6 +1028,40 @@ mod tests {
         assert!(
             secondary_index_entry_prefix(7, 1, &[iv("1 mon")])
                 != secondary_index_entry_prefix(7, 1, &[iv("31 days")])
+        );
+    }
+
+    #[test]
+    fn ordered_index_entries_follow_direction_and_null_order() {
+        use crabka_pgtypes::Datum;
+
+        let ascending = |value| {
+            secondary_index_ordered_entry_key(7, 1, &[value], &[false], &[false], 1)
+                .expect("supported value")
+        };
+        assert!(ascending(Datum::Int4(-1)) < ascending(Datum::Int4(0)));
+        assert!(ascending(Datum::Int4(0)) < ascending(Datum::Int4(1)));
+        assert!(ascending(Datum::Text("a".into())) < ascending(Datum::Text("a\0".into())));
+        assert!(ascending(Datum::Text("a\0".into())) < ascending(Datum::Text("b".into())));
+        assert!(ascending(Datum::Int4(1)) < ascending(Datum::Null));
+
+        let descending = |value| {
+            secondary_index_ordered_entry_key(7, 1, &[value], &[true], &[true], 1)
+                .expect("supported value")
+        };
+        assert!(descending(Datum::Null) < descending(Datum::Int4(1)));
+        assert!(descending(Datum::Int4(1)) < descending(Datum::Int4(0)));
+        assert!(
+            secondary_index_entry_prefix(7, 1, &[Datum::Int4(1)])
+                != secondary_index_ordered_entry_key(
+                    7,
+                    1,
+                    &[Datum::Int4(1)],
+                    &[false],
+                    &[false],
+                    1
+                )
+                .expect("ordered key")
         );
     }
 

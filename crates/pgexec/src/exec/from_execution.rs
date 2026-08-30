@@ -564,6 +564,32 @@ pub(super) fn try_scan_with_local_index(
     if table.sharded || plan.partial_aggregate.is_some() {
         return Ok(None);
     }
+    if let Some(top_k) = &plan.top_k
+        && plan.predicate == PredicatePushdown::FullScan
+        && let Some(index) = choose_local_ordered_index(read_ctx.catalog_kv, table, top_k)?
+        && let Some(mut rows) = lookup_local_index_ordered(
+            &MvccReadContext {
+                kv: read_ctx.kv,
+                global: read_ctx.global,
+                global_snapshot: read_ctx.gsnap,
+                snapshot: read_ctx.snapshot,
+                own: read_ctx.own,
+                command_id: read_ctx.command_id,
+            },
+            table,
+            &index,
+        )?
+    {
+        rows.truncate(usize::try_from(top_k.limit).unwrap_or(usize::MAX));
+        return crate::scanner::apply_executable_scan_pushdown(
+            rows,
+            &plan.predicate,
+            &plan.projection,
+            None,
+            None,
+        )
+        .map(Some);
+    }
     if let Some(predicate) = &plan.text_search
         && let Some(index) = choose_local_gin_index(read_ctx.catalog_kv, table, predicate.column)?
         && let Some(rows) = lookup_local_gin(
@@ -608,6 +634,30 @@ pub(super) fn try_scan_with_local_index(
         plan.top_k.as_ref(),
     )
     .map(Some)
+}
+
+fn choose_local_ordered_index(
+    catalog_kv: &dyn Kv,
+    table: &Table,
+    top_k: &crate::TopKSpec,
+) -> Result<Option<crabka_pgcatalog::Index>, ExecError> {
+    Ok(
+        crabka_pgcatalog::list_table_indexes(catalog_kv, &table.name)?
+            .into_iter()
+            .find(|index| {
+                local_index_supports_ordered_scan(table, index)
+                    && index.columns.len() == top_k.order_by.len()
+                    && index
+                        .columns
+                        .iter()
+                        .zip(&index.key_options)
+                        .zip(&top_k.order_by)
+                        .all(|((column, option), order)| {
+                            table.column_index(column) == Some(order.column)
+                                && option.descending != order.asc
+                        })
+            }),
+    )
 }
 
 fn choose_local_gin_index(
