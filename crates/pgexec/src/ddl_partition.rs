@@ -143,6 +143,7 @@ pub(crate) fn matches_parent_index(
 ) -> bool {
     candidate.columns == source.columns
         && candidate.include == source.include
+        && candidate.key_options == source.key_options
         && candidate.predicate == source.predicate
         && candidate.unique == source.unique
         && candidate.method == source.method
@@ -158,6 +159,7 @@ pub(crate) fn cloned_partition_index(
     crabka_pgcatalog::NewIndex {
         name,
         columns: source.columns.clone(),
+        key_options: source.key_options.clone(),
         include: source.include.clone(),
         predicate: source.predicate.clone(),
         nulls_not_distinct: source.nulls_not_distinct,
@@ -284,6 +286,7 @@ pub(crate) fn clone_indexes_onto_partitions(
                 table: relation.clone(),
                 table_id: table.id,
                 columns: clone.columns,
+                key_options: clone.key_options,
                 include: clone.include,
                 predicate: clone.predicate,
                 nulls_not_distinct: clone.nulls_not_distinct,
@@ -1487,9 +1490,11 @@ pub(crate) fn exclusion_constraint_index(
         || format!("{}_{}_excl", table_name.name, columns.join("_")),
         str::to_string,
     );
+    let key_options = crabka_pgcatalog::default_index_key_options(columns.len());
     Ok(crabka_pgcatalog::NewIndex {
         name,
         columns,
+        key_options,
         include: Vec::new(),
         predicate: None,
         nulls_not_distinct: false,

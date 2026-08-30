@@ -2840,17 +2840,24 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             // index poisons the projection for every other.
             let mut expressions = Vec::new();
             let mut indkey = Vec::with_capacity(index.columns.len() + index.include.len());
+            let mut key_types = Vec::with_capacity(index.columns.len());
             for column in &index.columns {
                 if let Some(source) = crabka_pgcatalog::index_key_expression(column) {
                     expressions.push(source);
                     indkey.push(Datum::Int4(0));
+                    key_types.push(crate::eval::infer_type(
+                        &crabka_pgparser::parser::parse_expression(source)?,
+                        &Scope::single(&table, &table.name.name),
+                    )?);
                     continue;
                 }
-                let attnum = table
+                let column_index = table
                     .column_index(column)
-                    .and_then(|idx| i32::try_from(idx + 1).ok())
                     .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+                let attnum = i32::try_from(column_index + 1)
+                    .map_err(|_| ExecError::UndefinedColumn(column.clone()))?;
                 indkey.push(Datum::Int4(attnum));
+                key_types.push(table.columns[column_index].ty);
             }
             for column in &index.include {
                 let attnum = table
@@ -2872,6 +2879,47 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
                 .map_err(|_| ExecError::Unsupported("indnkeyatts exceeds int2 range".into()))?;
             let natts = i16::try_from(index.columns.len() + index.include.len())
                 .map_err(|_| ExecError::Unsupported("indnatts exceeds int2 range".into()))?;
+            let indcollation = crabka_pgtypes::ArrayValue::with_dims(
+                crabka_pgtypes::ElemType::Int4,
+                index
+                    .key_options
+                    .iter()
+                    .zip(&key_types)
+                    .map(|(option, ty)| {
+                        Datum::Int4(
+                            option
+                                .collation
+                                .as_deref()
+                                .and_then(crate::catalog_rel::collation_oid)
+                                .unwrap_or_else(|| text_collation_oid(*ty)),
+                        )
+                    })
+                    .collect(),
+                vec![crabka_pgtypes::ArrayDim::new(0, i32::from(nkeyatts))],
+            );
+            let indclass = crabka_pgtypes::ArrayValue::with_dims(
+                crabka_pgtypes::ElemType::Int4,
+                index
+                    .key_options
+                    .iter()
+                    .zip(&key_types)
+                    .map(|(option, ty)| index_opclass_oid(catalog_kv, index.method, *ty, option))
+                    .collect::<Result<Vec<_>, _>>()?,
+                vec![crabka_pgtypes::ArrayDim::new(0, i32::from(nkeyatts))],
+            );
+            let indoption = crabka_pgtypes::ArrayValue::with_dims(
+                crabka_pgtypes::ElemType::Int2,
+                index
+                    .key_options
+                    .iter()
+                    .map(|option| {
+                        Datum::Int2(
+                            (i16::from(option.descending)) | (i16::from(option.nulls_first) << 1),
+                        )
+                    })
+                    .collect(),
+                vec![crabka_pgtypes::ArrayDim::new(0, i32::from(nkeyatts))],
+            );
             Ok(vec![
                 int(catalog_index_oid(index.id)?),
                 int(crate::catalog_rel::table_relation_oid(index.table_id)?),
@@ -2910,10 +2958,9 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
                     indkey,
                     vec![crabka_pgtypes::ArrayDim::new(0, i32::from(natts))],
                 )),
-                // indcollation, indclass, indoption.
-                Datum::Null,
-                Datum::Null,
-                Datum::Null,
+                Datum::OidVector(indcollation),
+                Datum::OidVector(indclass),
+                Datum::OidVector(indoption),
                 indexprs,
                 index
                     .predicate
@@ -2962,6 +3009,58 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         ]);
     }
     Ok(rows)
+}
+
+fn index_opclass_oid(
+    kv: &dyn Kv,
+    method: crabka_pgcatalog::IndexMethod,
+    ty: ColumnType,
+    option: &crabka_pgcatalog::IndexKeyOptions,
+) -> Result<Datum, ExecError> {
+    let method_oid = match method {
+        crabka_pgcatalog::IndexMethod::Btree => crate::catalog_rel::BTREE_AM_OID,
+        crabka_pgcatalog::IndexMethod::Hash => crate::catalog_rel::HASH_AM_OID,
+        crabka_pgcatalog::IndexMethod::Gist => crate::catalog_rel::GIST_AM_OID,
+        crabka_pgcatalog::IndexMethod::Gin => crate::catalog_rel::GIN_AM_OID,
+        crabka_pgcatalog::IndexMethod::Spgist => crate::catalog_rel::SPGIST_AM_OID,
+    };
+    let compatible = |input_oid: i32| {
+        input_oid == ty.oid() as i32
+            || (input_oid == crabka_pgtypes::oids::TEXT as i32
+                && matches!(ty, ColumnType::Text | ColumnType::Varchar(_)))
+    };
+    let explicit = option
+        .opclass
+        .as_deref()
+        .and_then(|name| name.rsplit('.').next());
+    if let Some(name) = explicit {
+        if let Some((oid, ..)) = crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
+            .iter()
+            .find(
+                |(_, candidate_method, candidate_name, _, input_oid, _, _)| {
+                    *candidate_method == method_oid
+                        && *candidate_name == name
+                        && compatible(*input_oid)
+                },
+            )
+        {
+            return Ok(Datum::Int4(*oid));
+        }
+        if let Some(class) = crabka_pgcatalog::list_operator_classes(kv)?
+            .into_iter()
+            .find(|class| class.method == index_method_name(method) && class.name.name == name)
+        {
+            return i32::try_from(class.oid)
+                .map(Datum::Int4)
+                .map_err(|_| ExecError::Unsupported("operator class oid exceeds int4".into()));
+        }
+    }
+    Ok(crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
+        .iter()
+        .find(|(_, candidate_method, _, _, input_oid, default, _)| {
+            *candidate_method == method_oid && *default && compatible(*input_oid)
+        })
+        .map_or(Datum::Int4(0), |(oid, ..)| Datum::Int4(*oid)))
 }
 
 pub(crate) fn pg_settings_rows() -> Result<Vec<Vec<Datum>>, ExecError> {

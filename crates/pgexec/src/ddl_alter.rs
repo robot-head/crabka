@@ -1142,6 +1142,7 @@ pub(crate) fn execute_ddl(
                 }
             };
             let columns = index_key_columns(keys, predicate.as_deref())?;
+            let key_options = index_key_options(keys);
             if *if_not_exists && crabka_pgcatalog::get_index(kv, &name).is_ok() {
                 return Ok((command("CREATE INDEX"), Vec::new()));
             }
@@ -1186,6 +1187,7 @@ pub(crate) fn execute_ddl(
                 index_method,
                 predicate.clone(),
                 include.clone(),
+                key_options.clone(),
                 *nulls_not_distinct,
             )?;
             if let Some(tablespace) = tablespace {
@@ -1200,6 +1202,7 @@ pub(crate) fn execute_ddl(
                     table: table.clone(),
                     table_id: table_meta.id,
                     columns: columns.clone(),
+                    key_options,
                     include: include.clone(),
                     predicate: predicate.clone(),
                     nulls_not_distinct: *nulls_not_distinct,

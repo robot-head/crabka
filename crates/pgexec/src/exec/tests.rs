@@ -3870,6 +3870,29 @@ async fn create_index_resolves_and_validates_operator_classes() {
         "CREATE INDEX i2 ON t (data pg_catalog.int4_ops)",
     )
     .await;
+    run_s(
+        &mut session,
+        "CREATE INDEX i6 ON t (b COLLATE \"C\" text_ops)",
+    )
+    .await;
+    let index = crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("i6"))
+        .expect("index metadata");
+    assert!(index.key_options[0].collation.as_deref() == Some("C"));
+    assert!(index.key_options[0].opclass.as_deref() == Some("text_ops"));
+    assert!(
+        text_rows_of(&mut session, "SELECT pg_get_indexdef('i6'::regclass)").await
+            == vec![text_row(&[
+                "CREATE INDEX i6 ON public.t USING btree (b COLLATE \"C\" text_ops)"
+            ])]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT indcollation, indclass, indoption FROM pg_index WHERE indexrelid = 'i6'::regclass",
+        )
+        .await
+            == vec![text_row(&["950", "3126", "0"])]
+    );
     assert!(
         sqlstate_of(
             &mut session,
@@ -11166,6 +11189,7 @@ fn arbiter_fixture(
                 table: RelationName::public("t"),
                 table_id: 1,
                 columns: cols.iter().map(|c| (*c).to_string()).collect(),
+                key_options: crabka_pgcatalog::default_index_key_options(cols.len()),
                 include: Vec::new(),
                 predicate: None,
                 nulls_not_distinct: false,

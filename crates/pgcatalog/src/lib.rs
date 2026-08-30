@@ -411,6 +411,19 @@ impl ConstraintDeferral {
     }
 }
 
+/// Ordering and lookup metadata for one index key column or expression.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexKeyOptions {
+    /// `DESC` reverses the key's natural order.
+    pub descending: bool,
+    /// The resolved NULL order (`false` is `NULLS LAST`).
+    pub nulls_first: bool,
+    /// The explicitly selected operator class, if any.
+    pub opclass: Option<String>,
+    /// The explicitly selected collation, if any.
+    pub collation: Option<String>,
+}
+
 /// Secondary-index catalog definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Index {
@@ -420,6 +433,8 @@ pub struct Index {
     pub table_id: TableId,
     /// Key columns, including NUL-prefixed expression source entries.
     pub columns: Vec<String>,
+    /// Per-key ordering, operator-class, and collation metadata.
+    pub key_options: Vec<IndexKeyOptions>,
     /// Non-key payload columns from `CREATE INDEX … INCLUDE`.
     pub include: Vec<String>,
     /// Source text of a partial-index predicate, without the `WHERE` keyword.
@@ -495,6 +510,8 @@ impl Index {
 pub struct NewIndex {
     pub name: String,
     pub columns: Vec<String>,
+    /// See [`Index::key_options`].
+    pub key_options: Vec<IndexKeyOptions>,
     pub include: Vec<String>,
     /// See [`Index::predicate`]. Constraint indexes are never partial.
     pub predicate: Option<String>,
@@ -508,6 +525,12 @@ pub struct NewIndex {
     pub without_overlaps: bool,
     /// See [`Index::deferral`].
     pub deferral: ConstraintDeferral,
+}
+
+/// The default ascending, NULLS-LAST options for ordinary index keys.
+#[must_use]
+pub fn default_index_key_options(count: usize) -> Vec<IndexKeyOptions> {
+    vec![IndexKeyOptions::default(); count]
 }
 
 const INDEX_EXPRESSION_PREFIX: &str = "\0expr:";
@@ -4534,6 +4557,7 @@ pub fn create_index_with_method_ops(
     placement: IndexPlacement,
     method: IndexMethod,
 ) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
+    let key_options = default_index_key_options(columns.len());
     create_index_with_method_and_predicate_ops(
         kv,
         name,
@@ -4544,6 +4568,7 @@ pub fn create_index_with_method_ops(
         method,
         None,
         Vec::new(),
+        key_options,
         false,
     )
 }
@@ -4563,6 +4588,7 @@ pub fn create_index_with_method_and_predicate_ops(
     method: IndexMethod,
     predicate: Option<String>,
     include: Vec<String>,
+    key_options: Vec<IndexKeyOptions>,
     nulls_not_distinct: bool,
 ) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
     if kv.get(&catalog_index_key(&table.sibling(name)))?.is_some() {
@@ -4571,6 +4597,11 @@ pub fn create_index_with_method_and_predicate_ops(
     let table_meta = get_table(kv, table)?;
     validate_index_columns(&table_meta, &columns)?;
     validate_index_include_columns(&table_meta, &columns, &include)?;
+    if key_options.len() != columns.len() {
+        return Err(CatalogError::Storage(KvError::CorruptRow(
+            "index key options do not match index columns".into(),
+        )));
+    }
     let id = read_next_index_id(kv)?;
     let index = Index {
         id,
@@ -4578,6 +4609,7 @@ pub fn create_index_with_method_and_predicate_ops(
         table: table.clone(),
         table_id: table_meta.id,
         columns,
+        key_options,
         include,
         predicate,
         nulls_not_distinct,
@@ -4629,6 +4661,7 @@ pub fn create_index_on_table_ops(
         return Err(CatalogError::DuplicateIndex(name.to_string()));
     }
     validate_index_columns(table, &columns)?;
+    let key_options = default_index_key_options(columns.len());
     let id = read_next_index_id(kv)?;
     let index = Index {
         id,
@@ -4636,6 +4669,7 @@ pub fn create_index_on_table_ops(
         table: table.name.clone(),
         table_id: table.id,
         columns,
+        key_options,
         include: Vec::new(),
         predicate: None,
         nulls_not_distinct: false,
@@ -4691,6 +4725,11 @@ pub fn create_constraint_index_ops(
         return Err(CatalogError::DuplicateIndex(new_index.name.clone()));
     }
     validate_index_columns(table, &new_index.columns)?;
+    if new_index.key_options.len() != new_index.columns.len() {
+        return Err(CatalogError::Storage(KvError::CorruptRow(
+            "index key options do not match index columns".into(),
+        )));
+    }
     let id = read_next_index_id(kv)?;
     let index = Index {
         id,
@@ -4698,6 +4737,7 @@ pub fn create_constraint_index_ops(
         table: table.name.clone(),
         table_id: table.id,
         columns: new_index.columns.clone(),
+        key_options: new_index.key_options.clone(),
         include: new_index.include.clone(),
         predicate: new_index.predicate.clone(),
         nulls_not_distinct: new_index.nulls_not_distinct,
@@ -4795,6 +4835,11 @@ pub fn create_indexes_on_table_ops(
             return Err(CatalogError::DuplicateIndex(index.name.clone()));
         }
         validate_index_columns(table, &index.columns)?;
+        if index.key_options.len() != index.columns.len() {
+            return Err(CatalogError::Storage(KvError::CorruptRow(
+                "index key options do not match index columns".into(),
+            )));
+        }
     }
 
     let first_id = read_next_index_id(kv)?;
@@ -4810,6 +4855,7 @@ pub fn create_indexes_on_table_ops(
             table: table.name.clone(),
             table_id: table.id,
             columns: new_index.columns.clone(),
+            key_options: new_index.key_options.clone(),
             include: new_index.include.clone(),
             predicate: new_index.predicate.clone(),
             nulls_not_distinct: new_index.nulls_not_distinct,
@@ -9347,6 +9393,7 @@ mod tests {
             &NewIndex {
                 name: "t_pkey".into(),
                 columns: vec!["id".into()],
+                key_options: default_index_key_options(1),
                 include: Vec::new(),
                 predicate: None,
                 nulls_not_distinct: false,
@@ -10841,6 +10888,7 @@ mod tests {
             table: rel("users"),
             table_id,
             columns: vec!["name".into()],
+            key_options: default_index_key_options(1),
             include: Vec::new(),
             predicate: None,
             nulls_not_distinct: false,

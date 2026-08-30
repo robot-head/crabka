@@ -192,9 +192,9 @@ pub(crate) fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             // `OidVector` is crabka's existing representation with those same
             // catalog-facing semantics, including `indkey[0]` subscripting.
             ("indkey", ColumnType::OidVector),
-            ("indcollation", Text),
-            ("indclass", Text),
-            ("indoption", Text),
+            ("indcollation", ColumnType::OidVector),
+            ("indclass", ColumnType::OidVector),
+            ("indoption", ColumnType::Int2Vector),
             ("indexprs", Text),
             ("indpred", Text),
         ]),

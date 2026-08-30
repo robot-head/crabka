@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 28;
+pub const SCHEMA_VERSION: u8 = 29;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -60,7 +60,8 @@ const TABLE_OPTION_KNOWN: u8 =
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 10;
+const INDEX_VERSION: u8 = 11;
+const INDEX_VERSION_KEY_OPTIONS: u8 = 10;
 const INDEX_VERSION_INCLUDE: u8 = 9;
 const INDEX_VERSION_PREDICATE: u8 = 8;
 const INDEX_VERSION_LEGACY: u8 = 7;
@@ -1605,6 +1606,24 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
         write_str(&mut out, column);
     }
     out.push(u8::from(index.nulls_not_distinct));
+    out.extend_from_slice(
+        &u32::try_from(index.key_options.len())
+            .expect("index key-option count must fit in u32")
+            .to_be_bytes(),
+    );
+    for option in &index.key_options {
+        out.push(u8::from(option.descending));
+        out.push(u8::from(option.nulls_first));
+        for name in [&option.opclass, &option.collation] {
+            match name {
+                Some(name) => {
+                    out.push(1);
+                    write_str(&mut out, name);
+                }
+                None => out.push(0),
+            }
+        }
+    }
     out
 }
 
@@ -1622,6 +1641,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
     if version != INDEX_VERSION
+        && version != INDEX_VERSION_KEY_OPTIONS
         && version != INDEX_VERSION_INCLUDE
         && version != INDEX_VERSION_PREDICATE
         && version != INDEX_VERSION_LEGACY
@@ -1760,7 +1780,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     } else {
         Vec::new()
     };
-    let nulls_not_distinct = if version == INDEX_VERSION {
+    let nulls_not_distinct = if version >= INDEX_VERSION_KEY_OPTIONS {
         match take_u8(&mut cur)? {
             0 => false,
             1 => true,
@@ -1772,6 +1792,38 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         }
     } else {
         false
+    };
+    let key_options = if version == INDEX_VERSION {
+        let count = usize::try_from(u32::from_be_bytes(
+            take_n(&mut cur, 4)?.try_into().expect("4"),
+        ))
+        .expect("u32 fits in usize on supported targets");
+        if count != columns.len() {
+            return Err(KvError::CorruptRow(
+                "index key-option count does not match index columns".into(),
+            ));
+        }
+        let mut options = Vec::with_capacity(count.min(16));
+        for _ in 0..count {
+            let descending = read_index_flag(&mut cur, "descending")?;
+            let nulls_first = read_index_flag(&mut cur, "NULLS FIRST")?;
+            let read_name = |cur: &mut &[u8]| match take_u8(cur)? {
+                0 => Ok(None),
+                1 => Ok(Some(read_string(cur)?)),
+                flag => Err(KvError::CorruptRow(format!(
+                    "unknown index key-option name flag {flag}"
+                ))),
+            };
+            options.push(crate::IndexKeyOptions {
+                descending,
+                nulls_first,
+                opclass: read_name(&mut cur)?,
+                collation: read_name(&mut cur)?,
+            });
+        }
+        options
+    } else {
+        crate::default_index_key_options(columns.len())
     };
     if let Some(IndexConstraint::Exclusion(operators)) = &constraint
         && operators.len() != columns.len()
@@ -1786,6 +1838,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         table,
         table_id,
         columns,
+        key_options,
         include,
         predicate,
         nulls_not_distinct,
@@ -1797,6 +1850,16 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         clustered,
         deferral,
     })
+}
+
+fn read_index_flag(cur: &mut &[u8], what: &str) -> Result<bool, KvError> {
+    match take_u8(cur)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        flag => Err(KvError::CorruptRow(format!(
+            "unknown index {what} flag {flag}"
+        ))),
+    }
 }
 
 // ── Foreign keys ──────────────────────────────────────────────────────────────
@@ -2846,7 +2909,9 @@ mod tests {
     use crabka_pgtypes::{ColumnType, Datum};
 
     use super::*;
-    use crate::{Column, ForeignTableMeta, RelationName};
+    use crate::{
+        Column, ForeignTableMeta, IndexKeyOptions, RelationName, default_index_key_options,
+    };
 
     #[test]
     fn roundtrip_schema() {
@@ -3899,6 +3964,12 @@ mod tests {
                 table: RelationName::public("orders"),
                 table_id: 3,
                 columns: vec!["email".into()],
+                key_options: vec![IndexKeyOptions {
+                    descending: true,
+                    nulls_first: true,
+                    opclass: Some("text_pattern_ops".into()),
+                    collation: Some("C".into()),
+                }],
                 include: vec!["name".into()],
                 predicate: Some("email IS NOT NULL".into()),
                 nulls_not_distinct: true,
@@ -3922,6 +3993,7 @@ mod tests {
             table: RelationName::public("booking"),
             table_id: 4,
             columns: vec!["room".into(), "during".into()],
+            key_options: default_index_key_options(2),
             include: Vec::new(),
             predicate: None,
             nulls_not_distinct: false,
@@ -3951,6 +4023,7 @@ mod tests {
             table: RelationName::public("temporal_rng"),
             table_id: 5,
             columns: vec!["id".into(), "valid_at".into()],
+            key_options: default_index_key_options(2),
             include: Vec::new(),
             predicate: None,
             nulls_not_distinct: false,
@@ -3983,6 +4056,7 @@ mod tests {
                     table: RelationName::public("orders"),
                     table_id: 3,
                     columns: vec!["placed".into()],
+                    key_options: default_index_key_options(1),
                     include: Vec::new(),
                     predicate: None,
                     nulls_not_distinct: false,
@@ -4019,6 +4093,7 @@ mod tests {
                 table: RelationName::public("unique_tbl"),
                 table_id: 6,
                 columns: vec!["i".into()],
+                key_options: default_index_key_options(1),
                 include: Vec::new(),
                 predicate: None,
                 nulls_not_distinct: false,

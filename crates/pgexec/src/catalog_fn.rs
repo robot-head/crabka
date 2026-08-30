@@ -3408,7 +3408,7 @@ fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
             crabka_pgcatalog::IndexMethod::Gin => "gin",
             crabka_pgcatalog::IndexMethod::Spgist => "spgist",
         },
-        index_key_list(&index.columns),
+        index_key_list(&index.columns, &index.key_options),
     );
     if !index.include.is_empty() {
         definition.push_str(" INCLUDE (");
@@ -3650,13 +3650,33 @@ fn quoted_column_list(columns: &[String]) -> String {
         .join(", ")
 }
 
-fn index_key_list(keys: &[String]) -> String {
+fn index_key_list(keys: &[String], options: &[crabka_pgcatalog::IndexKeyOptions]) -> String {
     keys.iter()
-        .map(|key| {
-            crabka_pgcatalog::index_key_expression(key).map_or_else(
+        .zip(options)
+        .map(|(key, option)| {
+            let mut definition = crabka_pgcatalog::index_key_expression(key).map_or_else(
                 || quote_identifier(key),
                 |expression| format!("({expression})"),
-            )
+            );
+            if let Some(collation) = &option.collation {
+                definition.push_str(" COLLATE ");
+                definition.push_str(&quote_identifier(collation));
+            }
+            if let Some(opclass) = &option.opclass {
+                definition.push(' ');
+                definition.push_str(opclass);
+            }
+            if option.descending {
+                definition.push_str(" DESC");
+            }
+            if option.nulls_first != option.descending {
+                definition.push_str(if option.nulls_first {
+                    " NULLS FIRST"
+                } else {
+                    " NULLS LAST"
+                });
+            }
+            definition
         })
         .collect::<Vec<_>>()
         .join(", ")

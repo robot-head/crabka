@@ -44,6 +44,21 @@ pub(crate) fn index_key_columns(
         .collect()
 }
 
+/// Catalog metadata that stays aligned with [`index_key_columns`].
+#[must_use]
+pub(crate) fn index_key_options(
+    keys: &[crabka_pgparser::ast::IndexKey],
+) -> Vec<crabka_pgcatalog::IndexKeyOptions> {
+    keys.iter()
+        .map(|key| crabka_pgcatalog::IndexKeyOptions {
+            descending: key.descending,
+            nulls_first: key.nulls_first.unwrap_or(key.descending),
+            opclass: key.opclass.clone(),
+            collation: key.collation.clone(),
+        })
+        .collect()
+}
+
 pub(crate) fn validate_index_predicate(
     table: &Table,
     predicate: Option<&str>,

@@ -2388,6 +2388,7 @@ mod tests {
         NewIndex {
             name: name.to_string(),
             columns: cols.iter().map(|c| (*c).to_string()).collect(),
+            key_options: crabka_pgcatalog::default_index_key_options(cols.len()),
             include: Vec::new(),
             predicate: None,
             nulls_not_distinct: false,
@@ -2681,6 +2682,7 @@ mod tests {
             table: self_name.clone(),
             table_id: 9,
             columns: names(&["id"]),
+            key_options: crabka_pgcatalog::default_index_key_options(1),
             include: Vec::new(),
             predicate: None,
             nulls_not_distinct: false,
