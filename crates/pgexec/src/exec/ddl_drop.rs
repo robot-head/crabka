@@ -682,6 +682,19 @@ pub(crate) fn skipped_drop_notice(
             }
             Ok(None)
         }
+        Statement::AlterTable {
+            table,
+            if_exists: true,
+            ..
+        } => {
+            let resolution = resolution();
+            match resolve_relation(kv, &resolution, table, SchemaDisposition::Utility) {
+                Ok(name) => Ok(relation_kind(kv, &name)
+                    .is_none()
+                    .then(|| missing("relation", &name.name))),
+                Err(_) => Ok(Some(missing("relation", &table.to_string()))),
+            }
+        }
         Statement::DropUserMapping {
             user,
             server,

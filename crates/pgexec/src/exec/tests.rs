@@ -9532,6 +9532,22 @@ async fn dropping_missing_foreign_objects_with_if_exists_emits_notices() {
 }
 
 #[tokio::test]
+async fn altering_missing_foreign_table_with_if_exists_emits_notice() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    run_s(
+        &mut session,
+        "ALTER FOREIGN TABLE IF EXISTS missing_table ADD COLUMN id int4",
+    )
+    .await;
+    assert!(
+        notices.try_recv().expect("missing relation notice").message
+            == "relation \"missing_table\" does not exist, skipping"
+    );
+}
+
+#[tokio::test]
 async fn dropping_a_missing_user_mapping_with_if_exists_skips_missing_role_and_server() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
