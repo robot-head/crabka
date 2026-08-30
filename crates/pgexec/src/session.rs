@@ -7443,6 +7443,32 @@ impl SqlSession {
             | Datum::Json(value)
             | Datum::Xml(value) => 4 + value.len(),
             Datum::Bytea(value) => 4 + value.len(),
+            Datum::Array(array) => {
+                if array.elems.is_empty() {
+                    return 13;
+                }
+                let mut width = 13 + 8 * array.dims.len();
+                let mut has_null = false;
+                for value in &array.elems {
+                    if matches!(value, Datum::Null) {
+                        has_null = true;
+                    } else {
+                        width += Self::statistics_width(value);
+                    }
+                }
+                if has_null {
+                    width += 8;
+                }
+                width + usize::from(width >= 127) * 3
+            }
+            Datum::Range(range) => {
+                if range.empty {
+                    6
+                } else {
+                    6 + range.lower.as_deref().map_or(0, Self::statistics_width)
+                        + range.upper.as_deref().map_or(0, Self::statistics_width)
+                }
+            }
             _ => 4 + crabka_pgtypes::encoding::encode_text(value, &jiff::tz::TimeZone::UTC).len(),
         }
     }
@@ -31551,12 +31577,12 @@ mod session_conformance_tests {
         assert!(
             scalar(
                 &mut session,
-                "SELECT most_common_elems || ',' || most_common_elem_freqs::text || ',' || \
-                 elem_count_histogram::text FROM pg_stats \
+                "SELECT avg_width::text || ',' || most_common_elems || ',' || \
+                 most_common_elem_freqs::text || ',' || elem_count_histogram::text FROM pg_stats \
                  WHERE tablename = 'analyzed_array' AND attname = 'value'",
             )
             .await
-                == "{1,2,3},{0.5,0.5,0.25,0.25,0.5,0.25},{0,2,1.25}"
+                == "27,{1,2,3},{0.5,0.5,0.25,0.25,0.5,0.25},{0,2,1.25}"
         );
     }
 
@@ -31575,12 +31601,13 @@ mod session_conformance_tests {
         assert!(
             scalar(
                 &mut session,
-                "SELECT range_length_histogram::text || ',' || range_empty_frac::text || ',' || \
+                "SELECT null_frac::text || ',' || avg_width::text || ',' || n_distinct::text || ',' || \
+                 range_length_histogram::text || ',' || range_empty_frac::text || ',' || \
                  range_bounds_histogram::text FROM pg_stats \
                  WHERE tablename = 'analyzed_range' AND attname = 'value'",
             )
             .await
-                == "{2,3},0.33333334,{\"[1,3)\",\"[2,5)\"}"
+                == "0.25,11,-0.75,{2,3},0.33333334,{\"[1,3)\",\"[2,5)\"}"
         );
     }
 
