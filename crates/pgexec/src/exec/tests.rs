@@ -8438,6 +8438,18 @@ fn foreign_usage_lookup_names_the_missing_object() {
             "CREATE FOREIGN TABLE t (id int4) SERVER missing_server",
             "server \"missing_server\" does not exist",
         ),
+        (
+            "DROP FOREIGN DATA WRAPPER missing_wrapper",
+            "foreign-data wrapper \"missing_wrapper\" does not exist",
+        ),
+        (
+            "DROP SERVER missing_server",
+            "server \"missing_server\" does not exist",
+        ),
+        (
+            "CREATE USER MAPPING FOR PUBLIC SERVER missing_server",
+            "server \"missing_server\" does not exist",
+        ),
     ] {
         let stmt = crabka_pgparser::parser::parse(sql)
             .expect(sql)

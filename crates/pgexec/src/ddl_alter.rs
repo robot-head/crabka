@@ -1758,10 +1758,17 @@ pub(crate) fn execute_ddl(
             if !cascade {
                 reject_fdw_dependents(kv, name)?;
             }
-            let ops = ignore_missing_ops(
-                crabka_pgcatalog::drop_fdw_with_dependents_ops(kv, name, *cascade),
-                *if_exists,
-            )?;
+            let ops = match crabka_pgcatalog::drop_fdw_with_dependents_ops(kv, name, *cascade) {
+                Ok(ops) => ops,
+                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => Vec::new(),
+                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+                    return Err(foreign_object_missing(
+                        crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                        name,
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
             Ok((command("DROP FOREIGN DATA WRAPPER"), ops))
         }
         Statement::CreateServer {
@@ -1815,10 +1822,17 @@ pub(crate) fn execute_ddl(
             if !cascade {
                 reject_server_dependents(kv, name)?;
             }
-            let ops = ignore_missing_ops(
-                crabka_pgcatalog::drop_server_with_dependents_ops(kv, name, *cascade),
-                *if_exists,
-            )?;
+            let ops = match crabka_pgcatalog::drop_server_with_dependents_ops(kv, name, *cascade) {
+                Ok(ops) => ops,
+                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if *if_exists => Vec::new(),
+                Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) => {
+                    return Err(foreign_object_missing(
+                        crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                        name,
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
             Ok((command("DROP SERVER"), ops))
         }
         Statement::CreateUserMapping {
@@ -2383,7 +2397,11 @@ fn validate_postgresql_user_mapping_options<'a>(
     server: &str,
     names: impl Iterator<Item = &'a String>,
 ) -> Result<(), ExecError> {
-    let server = crabka_pgcatalog::get_server(kv, server)?;
+    let server = foreign_object_lookup(
+        crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+        server,
+        crabka_pgcatalog::get_server(kv, server),
+    )?;
     let fdw = crabka_pgcatalog::get_fdw(kv, &server.wrapper)?;
     validate_postgresql_fdw_options(
         fdw.validator.as_deref(),
@@ -4047,15 +4065,17 @@ fn require_foreign_ownership(
     fctx: ForeignCtx<'_>,
 ) -> Result<(), ExecError> {
     for name in names {
-        let (owner, kind) = match target {
-            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => (
-                crabka_pgcatalog::get_fdw(kv, name)?.owner,
-                "foreign-data wrapper",
-            ),
-            crabka_pgcatalog::ForeignPrivilegeTarget::Server => (
-                crabka_pgcatalog::get_server(kv, name)?.owner,
-                "foreign server",
-            ),
+        let owner = match target {
+            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => {
+                foreign_object_lookup(target, name, crabka_pgcatalog::get_fdw(kv, name))?.owner
+            }
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server => {
+                foreign_object_lookup(target, name, crabka_pgcatalog::get_server(kv, name))?.owner
+            }
+        };
+        let kind = match target {
+            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => "foreign-data wrapper",
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server => "foreign server",
         };
         if !crabka_pgcatalog::role_has_privs_of(kv, fctx.effective_role(), &owner)?
             && !crate::rls::role_is_superuser(kv, fctx.effective_role())?
@@ -4163,7 +4183,12 @@ fn require_user_mapping_authority(
     server: &str,
     fctx: ForeignCtx<'_>,
 ) -> Result<(), ExecError> {
-    let owner = crabka_pgcatalog::get_server(kv, server)?.owner;
+    let owner = foreign_object_lookup(
+        crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+        server,
+        crabka_pgcatalog::get_server(kv, server),
+    )?
+    .owner;
     let role = fctx.effective_role();
     if crate::rls::role_is_superuser(kv, role)?
         || crabka_pgcatalog::role_has_privs_of(kv, role, &owner)?
@@ -4214,16 +4239,34 @@ fn foreign_usage_object_error(
         error,
         ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedObject(_))
     ) {
-        let kind = match target {
-            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => "foreign-data wrapper",
-            crabka_pgcatalog::ForeignPrivilegeTarget::Server => "server",
-        };
-        return ExecError::Remote(crabka_pgwire::error::PgError::error(
-            "42704",
-            format!("{kind} \"{name}\" does not exist"),
-        ));
+        return foreign_object_missing(target, name);
     }
     error
+}
+
+fn foreign_object_lookup<T>(
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    name: &str,
+    result: Result<T, crabka_pgcatalog::CatalogError>,
+) -> Result<T, ExecError> {
+    result.map_err(|error| match error {
+        crabka_pgcatalog::CatalogError::UndefinedObject(_) => foreign_object_missing(target, name),
+        error => error.into(),
+    })
+}
+
+fn foreign_object_missing(
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    name: &str,
+) -> ExecError {
+    let kind = match target {
+        crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => "foreign-data wrapper",
+        crabka_pgcatalog::ForeignPrivilegeTarget::Server => "server",
+    };
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "42704",
+        format!("{kind} \"{name}\" does not exist"),
+    ))
 }
 
 /// The role an `OWNER TO` or `CREATE SCHEMA AUTHORIZATION` clause names,

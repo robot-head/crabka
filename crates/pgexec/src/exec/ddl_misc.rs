@@ -43,18 +43,6 @@ pub(super) fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecE
     ))
 }
 
-/// Swallow a missing foreign-object error when `IF EXISTS` was given.
-pub(super) fn ignore_missing_ops(
-    result: Result<Vec<crabka_pgkv::WriteOp>, crabka_pgcatalog::CatalogError>,
-    if_exists: bool,
-) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
-    match result {
-        Ok(ops) => Ok(ops),
-        Err(crabka_pgcatalog::CatalogError::UndefinedObject(_)) if if_exists => Ok(Vec::new()),
-        Err(error) => Err(error.into()),
-    }
-}
-
 /// Convert an object-exists error to a no-op when `IF NOT EXISTS` was written.
 pub(super) fn ignore_duplicate<T>(
     result: Result<T, crabka_pgcatalog::CatalogError>,
