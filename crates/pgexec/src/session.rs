@@ -6921,6 +6921,10 @@ impl SqlSession {
         let [field] = fields.as_slice() else {
             return None;
         };
+        let scalar_type = !matches!(
+            crate::exec::column_type_from_oid(field.type_oid).ok()?,
+            ColumnType::Array(_) | ColumnType::Record(_)
+        );
         if rows.is_empty() {
             return None;
         }
@@ -6992,7 +6996,7 @@ impl SqlSession {
                     CmpOrdering::Equal
                 })
         });
-        let correlation = (!comparison_failed && ordered_values.len() >= 2)
+        let correlation = (scalar_type && !comparison_failed && ordered_values.len() >= 2)
             .then(|| {
                 let count = ordered_values.len() as f64;
                 let sum_x = count * (count - 1.0) / 2.0;
@@ -7017,7 +7021,7 @@ impl SqlSession {
             })
             .flatten();
         ordered_values.retain(|(_, _, value)| !common_values.contains(value));
-        let histogram_bounds = if comparison_failed {
+        let histogram_bounds = if !scalar_type || comparison_failed {
             None
         } else {
             ordered_values.dedup_by(|(_, left, _), (_, right, _)| {
