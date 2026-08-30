@@ -26,6 +26,11 @@ pub fn put_i64(out: &mut Vec<u8>, v: i64) {
     put_u64(out, (v as u64) ^ (1_u64 << 63));
 }
 
+/// Append a signed 32-bit integer in lexicographic numeric order.
+pub fn put_i32(out: &mut Vec<u8>, v: i32) {
+    put_u32(out, (v as u32) ^ (1_u32 << 31));
+}
+
 /// Decodes and consumes one big-endian `u32` key component.
 ///
 /// # Errors
@@ -115,6 +120,18 @@ mod tests {
         assert!(enc(i64::MIN) < enc(-1));
         assert!(enc(-1) < enc(0));
         assert!(enc(0) < enc(i64::MAX));
+    }
+
+    #[test]
+    fn signed_i32_encoding_preserves_numeric_order() {
+        let enc = |v| {
+            let mut bytes = Vec::new();
+            put_i32(&mut bytes, v);
+            bytes
+        };
+        assert!(enc(i32::MIN) < enc(-1));
+        assert!(enc(-1) < enc(0));
+        assert!(enc(0) < enc(i32::MAX));
     }
 
     proptest! {
