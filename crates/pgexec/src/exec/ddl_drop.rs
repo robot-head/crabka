@@ -339,6 +339,14 @@ pub(crate) fn cascade_drop_notice(
             [only] => only,
             _ => return Ok(None),
         },
+        Statement::DropForeignTable {
+            names,
+            cascade: true,
+            ..
+        } => match names.as_slice() {
+            [only] => only,
+            _ => return Ok(None),
+        },
         Statement::DropView {
             name,
             cascade: true,

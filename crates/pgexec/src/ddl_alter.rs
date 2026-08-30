@@ -1974,15 +1974,13 @@ pub(crate) fn execute_ddl(
         Statement::DropForeignTable {
             names,
             if_exists,
-            cascade: _,
+            cascade,
         } => {
-            // No object can depend on this one in this engine, so CASCADE and
-            // RESTRICT are indistinguishable; both are accepted.
-
-            let mut ops = Vec::new();
+            let mut targets = Vec::with_capacity(names.len());
             for reference in names {
                 // A foreign table shares the ordinary table catalog key, so
-                // `drop_table` removes it (catalog entry + sequence + rows).
+                // the ordinary table drop path removes it (catalog entry,
+                // sequence, rows, and dependent relations).
                 let name =
                     &resolve_relation(kv, resolution, reference, SchemaDisposition::Utility)?;
                 // Sharing that key is exactly why the kind has to be checked:
@@ -1990,15 +1988,56 @@ pub(crate) fn execute_ddl(
                 if let Some(error) = drop_kind_mismatch(kv, name, "foreign table") {
                     return Err(error);
                 }
-                match crabka_pgcatalog::drop_table_ops(kv, name) {
-                    Ok(drop_ops) => {
-                        ops.extend(crate::partition::drop_metadata_ops(kv, name)?);
-                        ops.extend(drop_ops);
-                    }
+                match crabka_pgcatalog::get_table(kv, name) {
+                    Ok(table) => targets.push(table),
                     Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => {}
-                    Err(e) => return Err(e.into()),
+                    Err(crabka_pgcatalog::CatalogError::UndefinedTable(missing)) => {
+                        return Err(ExecError::UndefinedRelationOfKind {
+                            kind: "foreign table",
+                            name: missing,
+                        });
+                    }
+                    Err(error) => return Err(error.into()),
                 }
             }
+            let mut dropping: std::collections::HashSet<_> =
+                targets.iter().map(|table| table.name.clone()).collect();
+            if !*cascade {
+                for table in &targets {
+                    let dependents: Vec<_> = crate::inheritance::children_of(kv, &table.name)?
+                        .into_iter()
+                        .filter(|child| !dropping.contains(child))
+                        .map(|child| (child, table.name.clone()))
+                        .collect();
+                    if !dependents.is_empty() {
+                        return Err(dependent_objects_error(
+                            kv,
+                            &format!(
+                                "cannot drop foreign table {} because other objects depend on it",
+                                table.name
+                            ),
+                            &dependents,
+                        ));
+                    }
+                }
+            }
+            let mut removed = targets.clone();
+            if *cascade {
+                for table in &targets {
+                    for descendant in crate::inheritance::descendants(kv, &table.name)? {
+                        if dropping.insert(descendant.clone()) {
+                            removed.push(crabka_pgcatalog::get_table(kv, &descendant)?);
+                        }
+                    }
+                }
+            }
+            let mut ops = Vec::new();
+            for table in &removed {
+                ops.extend(drop_table_and_dependents_ops(
+                    kv, table, &dropping, *cascade,
+                )?);
+            }
+            ops.extend(crate::inheritance::drop_metadata_ops(kv, &dropping)?);
             Ok((command("DROP FOREIGN TABLE"), ops))
         }
         Statement::AlterServer {

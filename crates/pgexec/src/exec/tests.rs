@@ -9507,6 +9507,50 @@ fn drop_foreign_table_accepts_a_comma_list() {
     );
 }
 
+#[test]
+fn dropping_a_foreign_table_cascades_to_inheritance_children() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE parent (id int4) SERVER s",
+        "CREATE TABLE table_child () INHERITS (parent)",
+        "CREATE FOREIGN TABLE foreign_child () INHERITS (parent) SERVER s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    let drop = crabka_pgparser::parser::parse("DROP FOREIGN TABLE parent")
+        .expect("parse")
+        .into_iter()
+        .next()
+        .expect("one statement");
+    assert!(super::execute_ddl(&kv, &drop, super::ForeignCtx::none(), true).is_err());
+
+    let cascade = crabka_pgparser::parser::parse("DROP FOREIGN TABLE parent CASCADE")
+        .expect("parse")
+        .into_iter()
+        .next()
+        .expect("one statement");
+    let (_result, ops) =
+        super::execute_ddl(&kv, &cascade, super::ForeignCtx::none(), true).expect("cascade");
+    kv.write_batch(&ops).expect("apply cascade ops");
+    for table in ["parent", "table_child", "foreign_child"] {
+        assert!(
+            crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public(table))
+                .is_err()
+        );
+    }
+}
+
 fn command_tag(r: &QueryResult) -> &str {
     match r {
         QueryResult::Command { tag } | QueryResult::Rows { tag, .. } => tag,
