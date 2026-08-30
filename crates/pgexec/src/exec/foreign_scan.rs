@@ -2,6 +2,21 @@
 
 use super::*;
 
+pub(super) fn require_handler(catalog_kv: &dyn Kv, table: &Table) -> Result<(), ExecError> {
+    let Some(foreign) = &table.foreign else {
+        return Ok(());
+    };
+    let server = crabka_pgcatalog::get_server(catalog_kv, &foreign.server)?;
+    let fdw = crabka_pgcatalog::get_fdw(catalog_kv, &server.wrapper)?;
+    if fdw.handler.is_none() {
+        return Err(ExecError::Unsupported(format!(
+            "foreign-data wrapper \"{}\" has no handler",
+            fdw.name
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn is_single_foreign_table(
     catalog_kv: &dyn Kv,
     from: &[crabka_pgparser::ast::TableExpr],

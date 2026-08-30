@@ -134,13 +134,7 @@ pub(super) fn scan_stored_relation(
     // runs even for `WHERE false` — there is no skip path.
     if let Some(meta) = &t.foreign {
         let server = crabka_pgcatalog::get_server(catalog_kv, &meta.server)?;
-        let fdw = crabka_pgcatalog::get_fdw(catalog_kv, &server.wrapper)?;
-        if fdw.handler.is_none() {
-            return Err(ExecError::Unsupported(format!(
-                "foreign-data wrapper \"{}\" has no handler",
-                fdw.name
-            )));
-        }
+        crate::exec::foreign_scan::require_handler(catalog_kv, t)?;
         let scanner = read_ctx.fctx.scanner.ok_or_else(|| {
             ExecError::Unsupported("foreign tables require the `kafka` feature".into())
         })?;

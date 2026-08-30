@@ -220,6 +220,7 @@ fn build_table_expr_schema_with_ctes(
             let t = crabka_pgcatalog::get_table(catalog_kv, name).map_err(|error| {
                 open_wrong_kind(catalog_kv, name).unwrap_or_else(|| error.into())
             })?;
+            crate::exec::foreign_scan::require_handler(catalog_kv, &t)?;
             let qualifier = alias.as_deref().unwrap_or(&t.name.name);
             // A view, a CTE, a derived table and a VALUES list all return above
             // with no system column, which is what makes `SELECT tableoid FROM
