@@ -6653,6 +6653,12 @@ pub(crate) fn drop_table_column(
         crabka_pgcatalog::CommentObject::Column(&table_name, column),
         None,
     ));
+    state.ops.extend(drop_statistics_referencing_column_ops(
+        kv,
+        &state.table,
+        column,
+        index,
+    )?);
     for trigger in crabka_pgcatalog::trigger::triggers_for_table(kv, state.table.id)? {
         if trigger_references_column(&trigger, &state.table, column) {
             state
@@ -6707,6 +6713,39 @@ pub(crate) fn drop_table_column(
         .checks
         .retain(|check| !check_references_column(&check.expr, column, &column_names));
     Ok(())
+}
+
+/// `DROP COLUMN` owns statistics definitions that name the removed attribute
+/// directly or through an expression. Their derived payload shares the
+/// definition record, so deleting that one record clears both catalogs.
+fn drop_statistics_referencing_column_ops(
+    kv: &dyn Kv,
+    table: &Table,
+    column: &str,
+    index: usize,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let attnum = i16::try_from(index + 1)
+        .map_err(|_| ExecError::Unsupported("attribute number exceeds int2".into()))?;
+    let columns = table
+        .columns
+        .iter()
+        .map(|candidate| candidate.name.clone())
+        .collect::<Vec<_>>();
+    crabka_pgcatalog::statistics::list(kv)?
+        .into_iter()
+        .filter(|statistics| {
+            statistics.table_id == table.id
+                && (statistics.keys.contains(&attnum)
+                    || statistics
+                        .expressions
+                        .iter()
+                        .any(|expression| check_references_column(expression, column, &columns)))
+        })
+        .map(|statistics| {
+            crabka_pgcatalog::statistics::drop_ops(kv, &statistics.name).map_err(Into::into)
+        })
+        .collect::<Result<Vec<_>, ExecError>>()
+        .map(|ops| ops.into_iter().flatten().collect())
 }
 
 fn triggers_referencing_column(

@@ -754,6 +754,33 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
 }
 
 #[tokio::test]
+async fn dropping_a_column_removes_only_its_statistics_objects() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(
+        &mut session,
+        "CREATE TABLE stat_column_drop (a int, b int, c int)",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE STATISTICS stat_bc ON b, c FROM stat_column_drop;\
+         CREATE STATISTICS stat_ab ON a, b FROM stat_column_drop;\
+         CREATE STATISTICS stat_ba ON b, a FROM stat_column_drop",
+    )
+    .await;
+    run_s(&mut session, "ALTER TABLE stat_column_drop DROP COLUMN a").await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT stxname FROM pg_statistic_ext ORDER BY stxname",
+        )
+        .await
+            == vec![text_row(&["stat_bc"])]
+    );
+}
+
+#[tokio::test]
 async fn restored_attribute_statistics_are_visible_through_both_catalogs() {
     use assert2::assert;
 
