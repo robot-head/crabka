@@ -9485,6 +9485,13 @@ impl Parser {
             } else {
                 None
             };
+            let opclass_options = if opclass.is_some() && *self.peek() == Token::LParen {
+                let start = self.peek_pos();
+                self.storage_parameter_list()?;
+                Some(self.source[start..self.peek_pos()].to_string())
+            } else {
+                None
+            };
             let descending = if self.eat_keyword(Keyword::Desc) {
                 true
             } else {
@@ -9508,6 +9515,7 @@ impl Parser {
                 column,
                 text,
                 opclass,
+                opclass_options,
                 collation,
                 descending,
                 nulls_first,
@@ -17838,6 +17846,7 @@ fn encode_sequence_options(options: &crate::ast::SequenceOptions) -> Vec<crate::
             column: None,
             text,
             opclass: None,
+            opclass_options: None,
             collation: None,
             descending: false,
             nulls_first: None,
@@ -25289,6 +25298,7 @@ mod tests {
             column: Some(column.into()),
             text: column.into(),
             opclass: None,
+            opclass_options: None,
             collation: None,
             descending: false,
             nulls_first: None,
@@ -25316,6 +25326,13 @@ mod tests {
             assert!(keys[0].column.as_deref() == Some("a"), "{sql}");
             assert!(keys[0].opclass.as_deref() == Some(expected), "{sql}");
         }
+
+        let Statement::CreateIndex { keys, .. } =
+            one("CREATE INDEX i ON t USING gist (a tsvector_ops (siglen='1000'))")
+        else {
+            panic!("expected CREATE INDEX");
+        };
+        assert!(keys[0].opclass_options.as_deref() == Some("(siglen='1000')"));
 
         let Statement::CreateIndex {
             keys,

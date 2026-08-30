@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 29;
+pub const SCHEMA_VERSION: u8 = 30;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -60,7 +60,7 @@ const TABLE_OPTION_KNOWN: u8 =
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 11;
+const INDEX_VERSION: u8 = 12;
 const INDEX_VERSION_KEY_OPTIONS: u8 = 10;
 const INDEX_VERSION_INCLUDE: u8 = 9;
 const INDEX_VERSION_PREDICATE: u8 = 8;
@@ -1623,6 +1623,13 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
                 None => out.push(0),
             }
         }
+        match &option.opclass_options {
+            Some(options) => {
+                out.push(1);
+                write_str(&mut out, options);
+            }
+            None => out.push(0),
+        }
     }
     out
 }
@@ -1793,7 +1800,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     } else {
         false
     };
-    let key_options = if version == INDEX_VERSION {
+    let key_options = if version >= INDEX_VERSION_KEY_OPTIONS {
         let count = usize::try_from(u32::from_be_bytes(
             take_n(&mut cur, 4)?.try_into().expect("4"),
         ))
@@ -1819,6 +1826,11 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
                 nulls_first,
                 opclass: read_name(&mut cur)?,
                 collation: read_name(&mut cur)?,
+                opclass_options: if version >= INDEX_VERSION {
+                    read_name(&mut cur)?
+                } else {
+                    None
+                },
             });
         }
         options
@@ -3968,6 +3980,7 @@ mod tests {
                     descending: true,
                     nulls_first: true,
                     opclass: Some("text_pattern_ops".into()),
+                    opclass_options: Some("(siglen='1000')".into()),
                     collation: Some("C".into()),
                 }],
                 include: vec!["name".into()],

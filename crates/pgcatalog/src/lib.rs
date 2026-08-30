@@ -420,6 +420,8 @@ pub struct IndexKeyOptions {
     pub nulls_first: bool,
     /// The explicitly selected operator class, if any.
     pub opclass: Option<String>,
+    /// The parenthesized operator-class option list, if any.
+    pub opclass_options: Option<String>,
     /// The explicitly selected collation, if any.
     pub collation: Option<String>,
 }

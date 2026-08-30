@@ -3666,6 +3666,10 @@ fn index_key_list(keys: &[String], options: &[crabka_pgcatalog::IndexKeyOptions]
                 definition.push(' ');
                 definition.push_str(opclass);
             }
+            if let Some(options) = &option.opclass_options {
+                definition.push(' ');
+                definition.push_str(options);
+            }
             if option.descending {
                 definition.push_str(" DESC");
             }

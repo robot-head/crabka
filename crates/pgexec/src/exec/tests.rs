@@ -3895,6 +3895,23 @@ async fn create_index_resolves_and_validates_operator_classes() {
         crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("i7"))
             .expect("expression index metadata");
     assert!(expression_index.key_options[0].opclass.as_deref() == Some("text_ops"));
+    run_s(&mut session, "CREATE TABLE g (i tsvector, j tsvector)").await;
+    run_s(
+        &mut session,
+        "CREATE INDEX i8 ON g USING gist (i tsvector_ops (siglen='1000'), j tsvector_ops (siglen='500'))",
+    )
+    .await;
+    run_s(&mut session, "REINDEX TABLE g").await;
+    let option_index =
+        crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("i8"))
+            .expect("opclass option metadata");
+    assert!(option_index.key_options[0].opclass_options.as_deref() == Some("(siglen='1000')"));
+    assert!(
+        text_rows_of(&mut session, "SELECT pg_get_indexdef('i8'::regclass)").await
+            == vec![text_row(&[
+                "CREATE INDEX i8 ON public.g USING gist (i tsvector_ops (siglen='1000'), j tsvector_ops (siglen='500'))"
+            ])]
+    );
     assert!(
         text_rows_of(&mut session, "SELECT pg_get_indexdef('i6'::regclass)").await
             == vec![text_row(&[

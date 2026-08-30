@@ -2812,6 +2812,8 @@ pub struct IndexKey {
     pub text: String,
     /// The operator-class name, when written.
     pub opclass: Option<String>,
+    /// The parenthesized operator-class option list, when written.
+    pub opclass_options: Option<String>,
     /// The explicitly written collation, if any.
     pub collation: Option<String>,
     pub descending: bool,

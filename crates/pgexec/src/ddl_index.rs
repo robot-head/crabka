@@ -47,6 +47,7 @@ pub(crate) fn index_key_options(
             descending: key.descending,
             nulls_first: key.nulls_first.unwrap_or(key.descending),
             opclass: key.opclass.clone(),
+            opclass_options: key.opclass_options.clone(),
             collation: key.collation.clone(),
         })
         .collect()
