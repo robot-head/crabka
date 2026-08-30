@@ -63,7 +63,7 @@ pub(crate) fn partition_hash(values: &[Datum]) -> Result<u64, ExecError> {
 ///
 /// The dispatch mirrors the `hashextended` support procedures (`amprocnum = 2`)
 /// that `pg_amproc` records for each type's default hash operator family.
-fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
+pub(crate) fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
     let hash = match value {
         Datum::Null => return Ok(None),
         // `hashboolextended` widens the bool to int32 first, so it agrees with

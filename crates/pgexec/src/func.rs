@@ -179,6 +179,12 @@ enum ScalarFunc {
     EnumHash {
         extended: bool,
     },
+    RangeHash {
+        extended: bool,
+    },
+    MultirangeHash {
+        extended: bool,
+    },
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
     UuidV4,
@@ -557,6 +563,10 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_lsn_hash_extended" => ScalarFunc::PgLsnHash { extended: true },
         "hashenum" => ScalarFunc::EnumHash { extended: false },
         "hashenumextended" => ScalarFunc::EnumHash { extended: true },
+        "hash_range" => ScalarFunc::RangeHash { extended: false },
+        "hash_range_extended" => ScalarFunc::RangeHash { extended: true },
+        "hash_multirange" => ScalarFunc::MultirangeHash { extended: false },
+        "hash_multirange_extended" => ScalarFunc::MultirangeHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1761,6 +1771,40 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::RangeHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if !matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Range(_)
+            ) {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
+        ScalarFunc::MultirangeHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if !matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Multirange(_)
+            ) {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::FloatHash { ty, extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             let accepts = |input: ColumnType| {
@@ -2344,6 +2388,7 @@ fn coerce_unknown_args(
         ScalarFunc::UuidHash { .. } => ColumnType::Uuid,
         ScalarFunc::PgLsnHash { .. } => ColumnType::PgLsn,
         ScalarFunc::EnumHash { .. } => return Ok(()),
+        ScalarFunc::RangeHash { .. } | ScalarFunc::MultirangeHash { .. } => return Ok(()),
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -3827,6 +3872,35 @@ fn eval_eager(
                 )))
             })
         }
+        ScalarFunc::RangeHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let Datum::Range(range) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            hash_range(range, seed, extended)
+        }
+        ScalarFunc::MultirangeHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let Datum::Multirange(multirange) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            let mut hash = 1_u64;
+            for range in &multirange.ranges {
+                let value = hash_range_value(range, seed, extended)?;
+                hash = hash.wrapping_mul(31).wrapping_add(value);
+            }
+            Ok(hash_result(hash, extended))
+        }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
             crate::catalog_fn::relation_is_visible(&vals[0], ctx)
@@ -3857,6 +3931,67 @@ fn enum_arg_type(
         }
     }
     ty.ok_or_else(|| undefined_function_spelled(&fc.name, args, scope))
+}
+
+fn hash_range(
+    range: &crabka_pgtypes::RangeValue,
+    seed: u64,
+    extended: bool,
+) -> Result<Datum, ExecError> {
+    Ok(hash_result(
+        hash_range_value(range, seed, extended)?,
+        extended,
+    ))
+}
+
+fn hash_range_value(
+    range: &crabka_pgtypes::RangeValue,
+    seed: u64,
+    extended: bool,
+) -> Result<u64, ExecError> {
+    const EMPTY: u8 = 0x01;
+    const LB_INC: u8 = 0x02;
+    const UB_INC: u8 = 0x04;
+    const LB_INF: u8 = 0x08;
+    const UB_INF: u8 = 0x10;
+
+    let mut flags = if range.empty { EMPTY } else { 0 };
+    flags |= match (&range.lower, range.lower_inclusive) {
+        (None, _) => LB_INF,
+        (Some(_), true) => LB_INC,
+        (Some(_), false) => 0,
+    };
+    flags |= match (&range.upper, range.upper_inclusive) {
+        (None, _) => UB_INF,
+        (Some(_), true) => UB_INC,
+        (Some(_), false) => 0,
+    };
+    let lower = range.lower.as_deref().map_or(Ok(0), |value| {
+        crate::partition::hash::column_hash(value, seed)?
+            .ok_or_else(|| type_error("hash_range", value))
+    })?;
+    let upper = range.upper.as_deref().map_or(Ok(0), |value| {
+        crate::partition::hash::column_hash(value, seed)?
+            .ok_or_else(|| type_error("hash_range", value))
+    })?;
+    let mut hash =
+        crate::partition::hash::hash_int32_extended(i32::from(flags), seed).cast_unsigned() ^ lower;
+    hash = if extended {
+        ((hash << 1) & 0xffff_fffe_ffff_fffe) | ((hash >> 31) & 0x0000_0001_0000_0001)
+    } else {
+        u64::from((hash as u32).rotate_left(1))
+    };
+    Ok(hash ^ upper)
+}
+
+fn hash_result(hash: u64, extended: bool) -> Datum {
+    if extended {
+        Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
+    } else {
+        Datum::Int4(i32::from_ne_bytes(
+            hash.to_ne_bytes()[..4].try_into().expect("u64"),
+        ))
+    }
 }
 
 fn eval_enum_support(
@@ -6556,6 +6691,8 @@ mod tests {
         assert!(ty("hashfloat8extended(42, 1::int8)") == ColumnType::Int8);
         assert!(ty("uuid_hash('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')") == ColumnType::Int4);
         assert!(ty("pg_lsn_hash('16/B374D84'::pg_lsn)") == ColumnType::Int4);
+        assert!(ty("hash_range(int4range(1, 2))") == ColumnType::Int4);
+        assert!(ty("hash_multirange('{[1,2)}'::int4multirange)") == ColumnType::Int4);
         assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
         assert!(
             ev("hashchar('x'::\"char\")")
@@ -6624,6 +6761,19 @@ mod tests {
                     crate::partition::hash::hash_int64_extended(lsn.cast_signed(), 1).to_ne_bytes(),
                 ))
         );
+        assert!(matches!(ev("hash_range(int4range(1, 2))"), Datum::Int4(_)));
+        assert!(matches!(
+            ev("hash_range_extended(int4range(1, 2), 0)"),
+            Datum::Int8(_)
+        ));
+        assert!(matches!(
+            ev("hash_multirange('{[1,2)}'::int4multirange)"),
+            Datum::Int4(_)
+        ));
+        assert!(matches!(
+            ev("hash_multirange_extended('{[1,2)}'::int4multirange, 0)"),
+            Datum::Int8(_)
+        ));
         assert!(ev("hashint4(null::int4)") == Datum::Null);
         assert!(err_code("hashint4(42::int8)", None) == "42883");
         assert!(err_code("hashint2(42)", None) == "42883");
