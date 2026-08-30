@@ -116,6 +116,7 @@ pub(crate) fn virtual_catalog_rows(
         "pg_statistic" => pg_statistic_rows(catalog_kv),
         "pg_stats" => pg_stats_rows(catalog_kv),
         "pg_stats_ext" => pg_stats_ext_rows(catalog_kv, ctx),
+        "pg_stats_ext_exprs" => pg_stats_ext_exprs_rows(catalog_kv, ctx),
         "information_schema.schemata" => {
             information_schema_schemata_rows(catalog_kv, ctx.database())
         }
@@ -3639,6 +3640,63 @@ pub(crate) fn pg_stats_ext_rows(
     Ok(rows)
 }
 
+/// `pg_stats_ext_exprs` exposes scalar statistics for expression keys using
+/// the same ownership and row-security rule as `pg_stats_ext`.
+pub(crate) fn pg_stats_ext_exprs_rows(
+    catalog_kv: &dyn Kv,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let role = if ctx.current_user == crabka_pgcatalog::PUBLIC_ROLE {
+        crabka_pgcatalog::BOOTSTRAP_ROLE
+    } else {
+        &ctx.current_user
+    };
+    let superuser = crate::rls::role_is_superuser(catalog_kv, role)?;
+    let tables = crabka_pgcatalog::list_tables(catalog_kv)?;
+    let mut rows = Vec::new();
+    for object in crabka_pgcatalog::statistics::list(catalog_kv)? {
+        let Some(data) = object.data else { continue };
+        let Some(table) = tables.iter().find(|table| table.id == object.table_id) else {
+            continue;
+        };
+        if crate::rls::row_security_active(catalog_kv, role, table)?
+            || (!superuser && !crabka_pgcatalog::role_has_privs_of(catalog_kv, role, &table.owner)?)
+        {
+            continue;
+        }
+        for (expression, stats) in object.expressions.iter().zip(data.expression_stats.iter()) {
+            rows.push(vec![
+                text(&table.name.schema),
+                text(&table.name.name),
+                text(&object.name.schema),
+                text(&object.name.name),
+                text(&object.owner),
+                text(expression),
+                Datum::Bool(data.inherited),
+                stats
+                    .null_frac
+                    .as_deref()
+                    .and_then(|value| value.parse::<f32>().ok().map(Datum::Float4))
+                    .unwrap_or(Datum::Null),
+                stats.avg_width.map_or(Datum::Null, Datum::Int4),
+                stats
+                    .n_distinct
+                    .as_deref()
+                    .and_then(|value| value.parse::<f32>().ok().map(Datum::Float4))
+                    .unwrap_or(Datum::Null),
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+            ]);
+        }
+    }
+    Ok(rows)
+}
+
 /// Render the inner dimension of `pg_stats_ext.most_common_vals` with
 /// PostgreSQL array quoting rules for the catalog's text-backed `anyarray`.
 fn pg_text_array(values: &[Option<String>]) -> String {
@@ -3789,6 +3847,7 @@ pub(crate) fn virtual_table_names() -> &'static [&'static str] {
             "pg_statistic",
             "pg_stats",
             "pg_stats_ext",
+            "pg_stats_ext_exprs",
             "information_schema.schemata",
             "information_schema.tables",
             "information_schema.columns",
@@ -4213,6 +4272,7 @@ pub(crate) fn virtual_relation_oid(name: &str) -> i32 {
         "pg_statistic" => 2619,
         "pg_stats" => 100_006,
         "pg_stats_ext" => 100_007,
+        "pg_stats_ext_exprs" => 100_008,
         "information_schema.schemata" => 100_010,
         "information_schema.tables" => 100_011,
         "information_schema.columns" => 100_012,

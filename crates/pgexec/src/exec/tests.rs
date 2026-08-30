@@ -915,6 +915,42 @@ async fn analyze_derives_and_expands_mcv_statistics() {
 }
 
 #[tokio::test]
+async fn analyze_projects_expression_statistics() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE stat_expr (a int, b text)").await;
+    run_s(
+        &mut session,
+        "CREATE STATISTICS stat_expr_s ON (a + 1), lower(b) FROM stat_expr; \
+         INSERT INTO stat_expr VALUES (1, 'hi'), (NULL, 'HI'), (3, NULL); ANALYZE stat_expr",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT expr, null_frac::text, avg_width::text, n_distinct::text \
+             FROM pg_stats_ext_exprs ORDER BY expr",
+        )
+        .await
+            == vec![
+                text_row(&["(a + 1)", "0.33333334", "1", "2"]),
+                text_row(&["lower(b)", "0.33333334", "2", "1"]),
+            ]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT stxexprs IS NOT NULL, stxdexpr IS NOT NULL \
+             FROM pg_statistic_ext JOIN pg_statistic_ext_data ON oid = stxoid",
+        )
+        .await
+            == vec![text_row(&["t", "t"])]
+    );
+}
+
+#[tokio::test]
 async fn pg_stats_ext_hides_data_from_nonowners() {
     use assert2::assert;
 
@@ -925,6 +961,7 @@ async fn pg_stats_ext_hides_data_from_nonowners() {
     run_s(
         &mut session,
         "CREATE STATISTICS stat_visibility_s (dependencies) ON a, b FROM stat_visibility; \
+         CREATE STATISTICS stat_visibility_expr ON (a + 1), (b + 1) FROM stat_visibility; \
          INSERT INTO stat_visibility VALUES (1, 1), (2, 2); ANALYZE stat_visibility",
     )
     .await;
@@ -933,6 +970,14 @@ async fn pg_stats_ext_hides_data_from_nonowners() {
         text_rows_of(
             &mut session,
             "SELECT statistics_name FROM pg_stats_ext WHERE tablename = 'stat_visibility'",
+        )
+        .await
+            == Vec::<Vec<Option<String>>>::new()
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT statistics_name FROM pg_stats_ext_exprs WHERE tablename = 'stat_visibility'",
         )
         .await
             == Vec::<Vec<Option<String>>>::new()
@@ -950,7 +995,21 @@ async fn pg_stats_ext_hides_data_from_nonowners() {
             "SELECT statistics_name FROM pg_stats_ext WHERE tablename = 'stat_visibility'",
         )
         .await
-            == vec![text_row(&["stat_visibility_s"])]
+            == vec![
+                text_row(&["stat_visibility_expr"]),
+                text_row(&["stat_visibility_s"]),
+            ]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT statistics_name FROM pg_stats_ext_exprs WHERE tablename = 'stat_visibility' ORDER BY expr",
+        )
+        .await
+            == vec![
+                text_row(&["stat_visibility_expr"]),
+                text_row(&["stat_visibility_expr"]),
+            ]
     );
 }
 

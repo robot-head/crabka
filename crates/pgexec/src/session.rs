@@ -6697,12 +6697,46 @@ impl SqlSession {
             .then(|| Self::statistics_mcv(&rows, object.target))
             .flatten()
             .map(|items| crabka_pgcatalog::statistics::encode_mcv(&items));
+        let expression_stats = object
+            .keys
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| **key == 0)
+            .map(|(index, _)| Self::statistics_expression_stats(&rows, index))
+            .collect();
         Some(crabka_pgcatalog::statistics::StatisticsData {
             inherited: false,
             ndistinct,
             dependencies,
             mcv,
+            expression_stats,
         })
+    }
+
+    fn statistics_expression_stats(
+        rows: &[Vec<Option<Cell>>],
+        index: usize,
+    ) -> crabka_pgcatalog::statistics::ExpressionStats {
+        if rows.is_empty() {
+            return crabka_pgcatalog::statistics::ExpressionStats::default();
+        }
+        let mut values = BTreeSet::new();
+        let mut nulls = 0usize;
+        let mut width = 0usize;
+        for row in rows {
+            let Some(value) = row.get(index).and_then(Option::as_ref) else {
+                nulls += 1;
+                continue;
+            };
+            width = width.saturating_add(value.text.len());
+            values.insert(value.text.to_vec());
+        }
+        let non_null = rows.len().saturating_sub(nulls);
+        crabka_pgcatalog::statistics::ExpressionStats {
+            null_frac: Some((nulls as f32 / rows.len() as f32).to_string()),
+            avg_width: (non_null > 0).then(|| i32::try_from(width / non_null).unwrap_or(i32::MAX)),
+            n_distinct: Some((values.len() as f32).to_string()),
+        }
     }
 
     /// Select the most frequent distinct value combinations and the independent

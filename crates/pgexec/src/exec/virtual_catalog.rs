@@ -62,6 +62,7 @@ pub(crate) fn virtual_table(name: &str) -> Option<&'static str> {
         "pg_statistic" => Some("pg_statistic"),
         "pg_stats" => Some("pg_stats"),
         "pg_stats_ext" => Some("pg_stats_ext"),
+        "pg_stats_ext_exprs" => Some("pg_stats_ext_exprs"),
         _ => None,
     }
     .or_else(|| match name.strip_prefix("information_schema.")? {
@@ -364,6 +365,34 @@ pub(crate) fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             (
                 "most_common_base_freqs",
                 ColumnType::Array(crabka_pgtypes::ElemType::Float8),
+            ),
+        ]),
+        "pg_stats_ext_exprs" => cols(&[
+            ("schemaname", Text),
+            ("tablename", Text),
+            ("statistics_schemaname", Text),
+            ("statistics_name", Text),
+            ("statistics_owner", Text),
+            ("expr", Text),
+            ("inherited", Bool),
+            ("null_frac", ColumnType::Float4),
+            ("avg_width", Int4),
+            ("n_distinct", ColumnType::Float4),
+            ("most_common_vals", Text),
+            (
+                "most_common_freqs",
+                ColumnType::Array(crabka_pgtypes::ElemType::Float4),
+            ),
+            ("histogram_bounds", Text),
+            ("correlation", ColumnType::Float4),
+            ("most_common_elems", Text),
+            (
+                "most_common_elem_freqs",
+                ColumnType::Array(crabka_pgtypes::ElemType::Float4),
+            ),
+            (
+                "elem_count_histogram",
+                ColumnType::Array(crabka_pgtypes::ElemType::Float4),
             ),
         ]),
         // The full standard projection, in PostgreSQL 18.4's column order. The

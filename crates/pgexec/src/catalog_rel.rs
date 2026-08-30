@@ -2068,6 +2068,7 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("stxstattarget", Int2),
             ("stxkeys", Text),
             ("stxkind", ColumnType::Array(ElemType::Text)),
+            ("stxexprs", Text),
         ]),
         "pg_statistic_ext_data" => cols(&[
             ("stxoid", Int4),
@@ -2429,6 +2430,9 @@ fn pg_statistic_ext_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                     ElemType::Text,
                     object.kinds.into_iter().map(Datum::Text).collect(),
                 )),
+                (!object.expressions.is_empty())
+                    .then(|| text(&format!("{{{}}}", object.expressions.join(","))))
+                    .unwrap_or(Datum::Null),
             ])
         })
         .collect()
@@ -2440,6 +2444,24 @@ fn pg_statistic_ext_data_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError>
         .into_iter()
         .filter_map(|object| object.data.map(|data| (object.oid, data)))
         .map(|(oid, data)| {
+            let expression_stats = (!data.expression_stats.is_empty()).then(|| {
+                text(
+                    &data
+                        .expression_stats
+                        .iter()
+                        .map(|stat| {
+                            format!(
+                                "({},{},{})",
+                                stat.null_frac.as_deref().unwrap_or(""),
+                                stat.avg_width
+                                    .map_or_else(String::new, |value| value.to_string()),
+                                stat.n_distinct.as_deref().unwrap_or(""),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            });
             Ok(vec![
                 int(i32::try_from(oid)
                     .map_err(|_| ExecError::Unsupported("statistics oid exceeds int4".into()))?),
@@ -2447,7 +2469,7 @@ fn pg_statistic_ext_data_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError>
                 data.ndistinct.map_or(Datum::Null, |value| text(&value)),
                 data.dependencies.map_or(Datum::Null, |value| text(&value)),
                 data.mcv.map_or(Datum::Null, |value| text(&value)),
-                Datum::Null,
+                expression_stats.unwrap_or(Datum::Null),
             ])
         })
         .collect()

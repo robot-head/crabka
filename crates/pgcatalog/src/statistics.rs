@@ -12,8 +12,7 @@ use crate::{CatalogError, CommentObject, RelationName, TableId, set_comment_op};
 pub const STATISTICS_OID_BASE: u32 = 180_000;
 const PREFIX: &[u8] = b"\0\0\0\0catalog_statistics/";
 const NEXT_OID_KEY: &[u8] = b"\0\0\0\0meta/next_statistics_oid";
-const VERSION: u8 = 2;
-const PREVIOUS_VERSION: u8 = 1;
+const VERSION: u8 = 3;
 
 /// The derived `pg_statistic_ext_data` payload for one statistics object.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -25,6 +24,16 @@ pub struct StatisticsData {
     pub dependencies: Option<String>,
     /// PostgreSQL's serialized multi-column MCV list.
     pub mcv: Option<String>,
+    /// Scalar `pg_statistic` fields for each expression in definition order.
+    pub expression_stats: Vec<ExpressionStats>,
+}
+
+/// The scalar statistics `pg_stats_ext_exprs` exposes for one expression.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExpressionStats {
+    pub null_frac: Option<String>,
+    pub avg_width: Option<i32>,
+    pub n_distinct: Option<String>,
 }
 
 /// One item in PostgreSQL's multi-column most-common-values list.
@@ -267,6 +276,7 @@ fn encode(object: &Statistics) -> Vec<u8> {
             push_optional_string(&mut out, data.ndistinct.as_deref());
             push_optional_string(&mut out, data.dependencies.as_deref());
             push_optional_string(&mut out, data.mcv.as_deref());
+            push_expression_stats(&mut out, &data.expression_stats);
         }
     }
     out
@@ -275,7 +285,7 @@ fn encode(object: &Statistics) -> Vec<u8> {
 fn decode(value: &[u8]) -> Result<Statistics, CatalogError> {
     let mut input = value;
     let version = take_u8(&mut input)?;
-    if version != PREVIOUS_VERSION && version != VERSION {
+    if version != VERSION {
         return Err(corrupt("unknown statistics record version"));
     }
     let oid = take_u32(&mut input)?;
@@ -290,19 +300,16 @@ fn decode(value: &[u8]) -> Result<Statistics, CatalogError> {
     }
     let kinds = take_strings(&mut input)?;
     let expressions = take_strings(&mut input)?;
-    let data = if version == PREVIOUS_VERSION {
-        None
-    } else {
-        match take_u8(&mut input)? {
-            0 => None,
-            1 => Some(StatisticsData {
-                inherited: take_u8(&mut input)? != 0,
-                ndistinct: take_optional_string(&mut input)?,
-                dependencies: take_optional_string(&mut input)?,
-                mcv: take_optional_string(&mut input)?,
-            }),
-            _ => return Err(corrupt("invalid statistics data presence")),
-        }
+    let data = match take_u8(&mut input)? {
+        0 => None,
+        1 => Some(StatisticsData {
+            inherited: take_u8(&mut input)? != 0,
+            ndistinct: take_optional_string(&mut input)?,
+            dependencies: take_optional_string(&mut input)?,
+            mcv: take_optional_string(&mut input)?,
+            expression_stats: take_expression_stats(&mut input)?,
+        }),
+        _ => return Err(corrupt("invalid statistics data presence")),
     };
     if !input.is_empty() {
         return Err(corrupt("trailing statistics record bytes"));
@@ -338,6 +345,22 @@ fn push_optional_string(out: &mut Vec<u8>, value: Option<&str>) {
     out.push(u8::from(value.is_some()));
     if let Some(value) = value {
         push_string(out, value);
+    }
+}
+
+fn push_expression_stats(out: &mut Vec<u8>, stats: &[ExpressionStats]) {
+    let len = u16::try_from(stats.len()).expect("expression statistics count exceeds u16");
+    out.extend_from_slice(&len.to_be_bytes());
+    for stat in stats {
+        push_optional_string(out, stat.null_frac.as_deref());
+        match stat.avg_width {
+            None => out.push(0),
+            Some(width) => {
+                out.push(1);
+                out.extend_from_slice(&width.to_be_bytes());
+            }
+        }
+        push_optional_string(out, stat.n_distinct.as_deref());
     }
 }
 
@@ -386,6 +409,25 @@ fn take_optional_string(input: &mut &[u8]) -> Result<Option<String>, CatalogErro
     }
 }
 
+fn take_expression_stats(input: &mut &[u8]) -> Result<Vec<ExpressionStats>, CatalogError> {
+    let count = usize::from(take_u16(input)?);
+    (0..count)
+        .map(|_| {
+            let null_frac = take_optional_string(input)?;
+            let avg_width = match take_u8(input)? {
+                0 => None,
+                1 => Some(i32::from_be_bytes(take(input)?)),
+                _ => return Err(corrupt("invalid expression statistics width presence")),
+            };
+            Ok(ExpressionStats {
+                null_frac,
+                avg_width,
+                n_distinct: take_optional_string(input)?,
+            })
+        })
+        .collect()
+}
+
 fn take_strings(input: &mut &[u8]) -> Result<Vec<String>, CatalogError> {
     let count = usize::from(take_u16(input)?);
     (0..count).map(|_| take_string(input)).collect()
@@ -401,8 +443,9 @@ mod tests {
     use crabka_pgkv::{Kv, MemKv};
 
     use super::{
-        McvItem, STATISTICS_OID_BASE, Statistics, StatisticsData, create_ops, decode_mcv,
-        drop_for_table_ops, drop_ops, encode_mcv, get, list, next_oid, rename_ops,
+        ExpressionStats, McvItem, STATISTICS_OID_BASE, Statistics, StatisticsData, create_ops,
+        decode, decode_mcv, drop_for_table_ops, drop_ops, encode, encode_mcv, get, list, next_oid,
+        rename_ops,
     };
     use crate::{CommentObject, RelationName, get_comment, set_comment_op};
 
@@ -453,6 +496,11 @@ mod tests {
             ndistinct: Some(r#"{"1, 2": 3}"#.into()),
             dependencies: None,
             mcv: Some("mcv".into()),
+            expression_stats: vec![ExpressionStats {
+                null_frac: Some("0.25".into()),
+                avg_width: Some(12),
+                n_distinct: Some("3".into()),
+            }],
         });
         kv.write_batch(&create_ops(&kv, &record).expect("create"))
             .expect("write");
@@ -463,6 +511,9 @@ mod tests {
                 .data
                 == record.data
         );
+        let mut older = encode(&record);
+        older[0] -= 1;
+        assert!(decode(&older).is_err());
     }
 
     #[test]
