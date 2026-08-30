@@ -9604,6 +9604,36 @@ async fn altering_missing_foreign_table_with_if_exists_emits_notice() {
 }
 
 #[tokio::test]
+async fn altering_foreign_table_with_if_exists_subcommands_emits_notices() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    run_s(
+        &mut session,
+        "CREATE FOREIGN DATA WRAPPER w; CREATE SERVER s FOREIGN DATA WRAPPER w; \
+         CREATE FOREIGN TABLE t (id int4) SERVER s",
+    )
+    .await;
+    for (sql, expected) in [
+        (
+            "ALTER FOREIGN TABLE t ADD COLUMN IF NOT EXISTS id int4",
+            "column \"id\" of relation \"t\" already exists, skipping",
+        ),
+        (
+            "ALTER FOREIGN TABLE t DROP COLUMN IF EXISTS absent",
+            "column \"absent\" of relation \"t\" does not exist, skipping",
+        ),
+        (
+            "ALTER FOREIGN TABLE t DROP CONSTRAINT IF EXISTS absent",
+            "constraint \"absent\" of relation \"t\" does not exist, skipping",
+        ),
+    ] {
+        run_s(&mut session, sql).await;
+        assert!(notices.try_recv().expect(sql).message == expected);
+    }
+}
+
+#[tokio::test]
 async fn altering_fdw_routines_emits_warnings() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
