@@ -191,6 +191,9 @@ enum ScalarFunc {
     JsonbHash {
         extended: bool,
     },
+    NumericHash {
+        extended: bool,
+    },
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
     UuidV4,
@@ -577,6 +580,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "hash_record_extended" => ScalarFunc::RecordHash { extended: true },
         "jsonb_hash" => ScalarFunc::JsonbHash { extended: false },
         "jsonb_hash_extended" => ScalarFunc::JsonbHash { extended: true },
+        "hash_numeric" => ScalarFunc::NumericHash { extended: false },
+        "hash_numeric_extended" => ScalarFunc::NumericHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1846,6 +1851,23 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::NumericHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if !matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 | ColumnType::Numeric(_)
+            ) {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::FloatHash { ty, extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             let accepts = |input: ColumnType| {
@@ -2432,6 +2454,7 @@ fn coerce_unknown_args(
         ScalarFunc::RangeHash { .. } | ScalarFunc::MultirangeHash { .. } => return Ok(()),
         ScalarFunc::RecordHash { .. } => return Ok(()),
         ScalarFunc::JsonbHash { .. } => ColumnType::Jsonb,
+        ScalarFunc::NumericHash { .. } => ColumnType::Numeric(None),
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -3984,6 +4007,20 @@ fn eval_eager(
                 extended,
             ))
         }
+        ScalarFunc::NumericHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let value =
+                crabka_pgtypes::cast::cast(&vals[0], ColumnType::Numeric(None), &ctx.time_zone)?;
+            let Datum::Numeric(value) = &value else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            Ok(hash_result(numeric_hash(value, seed), extended))
+        }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
             crate::catalog_fn::relation_is_visible(&vals[0], ctx)
@@ -4077,6 +4114,24 @@ fn hash_result(hash: u64, extended: bool) -> Datum {
     }
 }
 
+fn numeric_hash(value: &crabka_pgtypes::numeric::NumericValue, seed: u64) -> u64 {
+    if value.is_special() {
+        return seed;
+    }
+    if value.is_zero() {
+        return seed.wrapping_sub(1);
+    }
+    let binary = crabka_pgtypes::numeric::binary(value);
+    let weight = i16::from_be_bytes(binary[2..4].try_into().expect("weight"));
+    let digits = binary[8..]
+        .chunks_exact(2)
+        .flat_map(|group| [group[1], group[0]])
+        .collect::<Vec<_>>();
+    crate::partition::hash::hash_bytes_extended(&digits, seed)
+        .expect("numeric digits are a valid hash input")
+        ^ (weight as i64).cast_unsigned()
+}
+
 fn jsonb_hash(
     value: &crabka_pgtypes::JsonbValue,
     seed: u64,
@@ -4111,25 +4166,10 @@ fn jsonb_hash(
             JsonbValue::String(value) => {
                 crate::partition::hash::hash_bytes_extended(value.as_bytes(), seed)?
             }
-            JsonbValue::Number(value) => {
-                let binary = crabka_pgtypes::numeric::binary(
-                    &crabka_pgtypes::numeric::NumericValue::Finite(value.clone()),
-                );
-                if binary[..2] == [0, 0] {
-                    return Ok(if extended {
-                        seed.wrapping_sub(1)
-                    } else {
-                        u64::MAX
-                    });
-                }
-                let weight = i16::from_be_bytes(binary[2..4].try_into().expect("weight"));
-                let digits = binary[8..]
-                    .chunks_exact(2)
-                    .flat_map(|group| [group[1], group[0]])
-                    .collect::<Vec<_>>();
-                crate::partition::hash::hash_bytes_extended(&digits, seed)?
-                    ^ (weight as i64).cast_unsigned()
-            }
+            JsonbValue::Number(value) => numeric_hash(
+                &crabka_pgtypes::numeric::NumericValue::Finite(value.clone()),
+                seed,
+            ),
             JsonbValue::Array(_) | JsonbValue::Object(_) => unreachable!("jsonb scalar"),
         };
         Ok(hash)
@@ -6878,6 +6918,8 @@ mod tests {
         assert!(ty("pg_lsn_hash('16/B374D84'::pg_lsn)") == ColumnType::Int4);
         assert!(ty("hash_range(int4range(1, 2))") == ColumnType::Int4);
         assert!(ty("hash_multirange('{[1,2)}'::int4multirange)") == ColumnType::Int4);
+        assert!(ty("hash_numeric(42.5)") == ColumnType::Int4);
+        assert!(ty("hash_numeric_extended(42.5, 1::int8)") == ColumnType::Int8);
         assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
         assert!(
             ev("hashchar('x'::\"char\")")
@@ -6959,6 +7001,10 @@ mod tests {
             ev("hash_multirange_extended('{[1,2)}'::int4multirange, 0)"),
             Datum::Int8(_)
         ));
+        assert!(ev("hash_numeric(0)") == Datum::Int4(-1));
+        assert!(ev("hash_numeric_extended(0, 1::int8)") == Datum::Int8(0));
+        assert!(ev("hash_numeric('NaN'::numeric)") == Datum::Int4(0));
+        assert!(ev("hash_numeric_extended('NaN'::numeric, 1::int8)") == Datum::Int8(1));
         assert!(ev("hashint4(null::int4)") == Datum::Null);
         assert!(err_code("hashint4(42::int8)", None) == "42883");
         assert!(err_code("hashint2(42)", None) == "42883");
