@@ -1169,6 +1169,9 @@ pub(crate) fn execute_ddl(
                 ));
             }
             let table_meta = crabka_pgcatalog::get_table(kv, table)?;
+            if *unique {
+                reject_unique_index_with_foreign_partition(kv, &table_meta)?;
+            }
             reject_index_over_virtual_generated(&table_meta, columns, None)?;
             validate_index_opclasses(kv, resolution, &table_meta, keys, index_method)?;
             validate_index_expressions(&table_meta, keys, *unique, placement, index_method)?;
@@ -6154,6 +6157,9 @@ pub(crate) fn descendant_constraint_clone_ops(
     let Some(scheme) = crate::partition::scheme_of(kv, &state.table.name)? else {
         return Ok(Vec::new());
     };
+    if index.unique {
+        reject_unique_index_with_foreign_partition(kv, &state.table)?;
+    }
     reject_incomplete_partitioned_key(&scheme.keys, &index.columns, index.constraint.as_ref())?;
     let relations = crate::partition::descendants(kv, &state.table.name)?;
     clone_indexes_onto_partitions(

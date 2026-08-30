@@ -9365,6 +9365,37 @@ async fn foreign_table_type_change_rejects_rowtype_dependents() {
     );
 }
 
+#[tokio::test]
+async fn partitioned_unique_keys_reject_foreign_partitions() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE TABLE parent (id int4) PARTITION BY RANGE (id)",
+        "CREATE FOREIGN TABLE foreign_leaf PARTITION OF parent FOR VALUES FROM (0) TO (10) SERVER s",
+    ] {
+        run_s(&mut session, sql).await;
+    }
+    for sql in [
+        "CREATE UNIQUE INDEX parent_id_idx ON parent (id)",
+        "ALTER TABLE parent ADD PRIMARY KEY (id)",
+    ] {
+        let error = session.simple_query(sql).await.expect_err(sql);
+        assert_eq!(
+            error.message,
+            "cannot create unique index on partitioned table \"parent\""
+        );
+        assert_eq!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.detail.as_deref()),
+            Some("Table \"parent\" contains partitions that are foreign tables.")
+        );
+    }
+}
+
 #[test]
 fn comments_on_foreign_objects_are_persisted() {
     use crabka_pgcatalog::CommentObject;

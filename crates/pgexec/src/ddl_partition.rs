@@ -347,6 +347,43 @@ pub(crate) fn reject_incomplete_partitioned_key(
     )))
 }
 
+/// A unique index on a partitioned table needs one enforceable index per leaf.
+/// Foreign partitions have no local index storage.
+pub(crate) fn reject_unique_index_with_foreign_partition(
+    kv: &dyn Kv,
+    table: &Table,
+) -> Result<(), ExecError> {
+    if !crate::partition::is_partitioned(kv, &table.name)? {
+        return Ok(());
+    }
+    if crate::partition::descendants(kv, &table.name)?
+        .into_iter()
+        .try_fold(false, |found, relation| {
+            Ok::<_, ExecError>(
+                found
+                    || crabka_pgcatalog::get_table(kv, &relation)?
+                        .foreign
+                        .is_some(),
+            )
+        })?
+    {
+        return Err(ExecError::Remote(
+            crabka_pgwire::error::PgError::error(
+                "0A000",
+                format!(
+                    "cannot create unique index on partitioned table \"{}\"",
+                    table.name.name
+                ),
+            )
+            .with_detail(format!(
+                "Table \"{}\" contains partitions that are foreign tables.",
+                table.name.name
+            )),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a written partition bound against its parent and resolve it into
 /// the stored form, returning `(parent, bound)`.
 pub(crate) fn partition_attachment(
