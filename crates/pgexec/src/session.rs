@@ -6802,9 +6802,18 @@ impl SqlSession {
         let limit = usize::try_from(if target < 0 { 100 } else { target }).ok()?;
         let mut items = counts.into_iter().collect::<Vec<_>>();
         items.sort_by(|(left_values, left_count), (right_values, right_count)| {
-            right_count
-                .cmp(left_count)
-                .then_with(|| left_values.cmp(right_values))
+            right_count.cmp(left_count).then_with(|| {
+                left_values
+                    .iter()
+                    .zip(right_values)
+                    .find_map(|(left, right)| match (left, right) {
+                        (None, Some(_)) => Some(CmpOrdering::Greater),
+                        (Some(_), None) => Some(CmpOrdering::Less),
+                        (Some(left), Some(right)) if left != right => Some(left.cmp(right)),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| left_values.len().cmp(&right_values.len()))
+            })
         });
         items.truncate(limit);
         Some(

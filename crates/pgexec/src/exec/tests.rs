@@ -915,6 +915,39 @@ async fn analyze_derives_and_expands_mcv_statistics() {
 }
 
 #[tokio::test]
+async fn analyze_orders_tied_mcv_items_with_nulls_last() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(
+        &mut session,
+        "CREATE TABLE stat_mcv_null_order (a int, b text, c text)",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE STATISTICS stat_mcv_null_order_s (mcv) ON a, b, c FROM stat_mcv_null_order; \
+         INSERT INTO stat_mcv_null_order VALUES \
+         (NULL, 'x', 'x'), (NULL, 'x', 'x'), (NULL, NULL, NULL), (NULL, NULL, NULL); \
+         ANALYZE stat_mcv_null_order",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT m.values::text, m.nulls::text FROM pg_statistic_ext_data d, \
+             pg_mcv_list_items(d.stxdmcv) AS m ORDER BY m.index",
+        )
+        .await
+            == vec![
+                text_row(&["{NULL,x,x}", "{t,f,f}"]),
+                text_row(&["{NULL,NULL,NULL}", "{t,t,t}"]),
+            ]
+    );
+}
+
+#[tokio::test]
 async fn analyze_projects_expression_statistics() {
     use assert2::assert;
 
