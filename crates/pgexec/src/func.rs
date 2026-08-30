@@ -406,6 +406,14 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "binary_coercible" => ScalarFunc::BinaryCoercible,
         "pg_numa_available" => ScalarFunc::PgNumaAvailable,
         "interval_hash" => ScalarFunc::IntervalHash,
+        "hashchar" => ScalarFunc::IntegerHash {
+            ty: ColumnType::InternalChar,
+            extended: false,
+        },
+        "hashcharextended" => ScalarFunc::IntegerHash {
+            ty: ColumnType::InternalChar,
+            extended: true,
+        },
         "hashint2" => ScalarFunc::IntegerHash {
             ty: ColumnType::Int2,
             extended: false,
@@ -1528,6 +1536,7 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                         ColumnType::Int4 | ColumnType::Int8 | ColumnType::Oid
                     ) | (ColumnType::Int8, ColumnType::Int8 | ColumnType::Oid)
                         | (ColumnType::Oid, ColumnType::Oid)
+                        | (ColumnType::InternalChar, ColumnType::InternalChar)
                 )
             };
             if !widens_to(crate::eval::infer_type(&args[0], scope)?, ty)
@@ -3361,9 +3370,12 @@ fn eval_eager(
             } else {
                 0
             };
-            let value = int_arg(&vals[0])?;
+            let value = match vals[0] {
+                Datum::InternalChar(value) => i64::from(value.cast_signed()),
+                _ => int_arg(&vals[0])?,
+            };
             match (ty, extended) {
-                (ColumnType::Int2 | ColumnType::Int4, false) => {
+                (ColumnType::Int2 | ColumnType::Int4 | ColumnType::InternalChar, false) => {
                     Ok(Datum::Int4(crate::partition::hash::hash_int32(
                         i32::try_from(value).map_err(|_| type_error(&fc.name, &vals[0]))?,
                     )))
@@ -3378,7 +3390,7 @@ fn eval_eager(
                 (ColumnType::Int8, false) => {
                     Ok(Datum::Int4(crate::partition::hash::hash_int64(value)))
                 }
-                (ColumnType::Int2 | ColumnType::Int4, true) => {
+                (ColumnType::Int2 | ColumnType::Int4 | ColumnType::InternalChar, true) => {
                     Ok(Datum::Int8(crate::partition::hash::hash_int32_extended(
                         i32::try_from(value).map_err(|_| type_error(&fc.name, &vals[0]))?,
                         seed,
@@ -6101,11 +6113,23 @@ mod tests {
             |sql: &str| crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type");
 
         assert!(ty("hashint2(42::int2)") == ColumnType::Int4);
+        assert!(ty("hashchar('x'::\"char\")") == ColumnType::Int4);
         assert!(ty("hashint4extended(42, 1::int8)") == ColumnType::Int8);
         assert!(ty("hashoid(42)") == ColumnType::Int4);
         assert!(ty("hashfloat4(42)") == ColumnType::Int4);
         assert!(ty("hashfloat8extended(42, 1::int8)") == ColumnType::Int8);
         assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
+        assert!(
+            ev("hashchar('x'::\"char\")")
+                == Datum::Int4(crate::partition::hash::hash_int32(i32::from(b'x')))
+        );
+        assert!(
+            ev("hashcharextended('x'::\"char\", 1::int8)")
+                == Datum::Int8(crate::partition::hash::hash_int32_extended(
+                    i32::from(b'x'),
+                    1
+                ))
+        );
         assert!(
             ev("hashint4extended(42, 1::int8)")
                 == Datum::Int8(crate::partition::hash::hash_int32_extended(42, 1))
