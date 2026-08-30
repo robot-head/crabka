@@ -156,6 +156,10 @@ enum ScalarFunc {
         ty: ColumnType,
         extended: bool,
     },
+    /// PostgreSQL's `oidvector` hash support functions.
+    OidVectorHash {
+        extended: bool,
+    },
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
     UuidV4,
@@ -483,6 +487,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
             ty: ColumnType::Text,
             extended: true,
         },
+        "hashoidvector" => ScalarFunc::OidVectorHash { extended: false },
+        "hashoidvectorextended" => ScalarFunc::OidVectorHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1590,6 +1596,20 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::OidVectorHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if crate::eval::infer_type(&args[0], scope)? != ColumnType::OidVector {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::FloatHash { ty, extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             let accepts = |input: ColumnType| {
@@ -2167,6 +2187,7 @@ fn coerce_unknown_args(
         ScalarFunc::IntegerHash { ty, .. } => ty,
         ScalarFunc::FloatHash { ty, .. } => ty,
         ScalarFunc::TextHash { ty, .. } => ty,
+        ScalarFunc::OidVectorHash { .. } => ColumnType::OidVector,
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -3484,6 +3505,30 @@ fn eval_eager(
                 Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
             } else {
                 Datum::Int4(crate::partition::hash::hash_bytes(value.as_bytes())?)
+            })
+        }
+        ScalarFunc::OidVectorHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            let Datum::OidVector(vector) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let mut bytes = Vec::with_capacity(vector.elems.len() * size_of::<i32>());
+            for value in &vector.elems {
+                let Datum::Int4(value) = value else {
+                    return Err(type_error(&fc.name, value));
+                };
+                bytes.extend(value.to_ne_bytes());
+            }
+            let hash = crate::partition::hash::hash_bytes_extended(&bytes, seed)?;
+            Ok(if extended {
+                Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
+            } else {
+                Datum::Int4(crate::partition::hash::hash_bytes(&bytes)?)
             })
         }
         ScalarFunc::PgTableIsVisible => {
@@ -6174,6 +6219,7 @@ mod tests {
         assert!(ty("hashname('gres')") == ColumnType::Int4);
         assert!(ty("hashname('gres'::text)") == ColumnType::Int4);
         assert!(ty("hashtextextended('gres', 1::int8)") == ColumnType::Int8);
+        assert!(ty("hashoidvector('1 2'::oidvector)") == ColumnType::Int4);
         assert!(ty("hashfloat4(42)") == ColumnType::Int4);
         assert!(ty("hashfloat8extended(42, 1::int8)") == ColumnType::Int8);
         assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
@@ -6204,6 +6250,17 @@ mod tests {
                     crate::partition::hash::hash_bytes_extended(b"gres", 1)
                         .expect("hash")
                         .to_ne_bytes(),
+                ))
+        );
+        assert!(
+            ev("hashoidvectorextended('1 2'::oidvector, 1::int8)")
+                == Datum::Int8(i64::from_ne_bytes(
+                    crate::partition::hash::hash_bytes_extended(
+                        &[1_i32.to_ne_bytes(), 2_i32.to_ne_bytes()].concat(),
+                        1,
+                    )
+                    .expect("hash")
+                    .to_ne_bytes(),
                 ))
         );
         assert!(ev("hashfloat4(42)") == ev("hashfloat8(42)"));
