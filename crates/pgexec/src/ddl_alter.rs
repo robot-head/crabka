@@ -1991,7 +1991,10 @@ pub(crate) fn execute_ddl(
                     return Err(error);
                 }
                 match crabka_pgcatalog::drop_table_ops(kv, name) {
-                    Ok(drop_ops) => ops.extend(drop_ops),
+                    Ok(drop_ops) => {
+                        ops.extend(crate::partition::drop_metadata_ops(kv, name)?);
+                        ops.extend(drop_ops);
+                    }
                     Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => {}
                     Err(e) => return Err(e.into()),
                 }

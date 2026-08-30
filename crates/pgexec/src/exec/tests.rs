@@ -9480,8 +9480,9 @@ fn drop_foreign_table_accepts_a_comma_list() {
     for sql in [
         "CREATE FOREIGN DATA WRAPPER w",
         "CREATE SERVER s FOREIGN DATA WRAPPER w",
-        "CREATE FOREIGN TABLE t1 (id int4) SERVER s",
-        "CREATE FOREIGN TABLE t2 (id int4) SERVER s",
+        "CREATE TABLE p (id int4) PARTITION BY RANGE (id)",
+        "CREATE FOREIGN TABLE t1 PARTITION OF p FOR VALUES FROM (0) TO (10) SERVER s",
+        "CREATE FOREIGN TABLE t2 PARTITION OF p FOR VALUES FROM (10) TO (20) SERVER s",
         "DROP FOREIGN TABLE t1, t2",
     ] {
         let stmt = crabka_pgparser::parser::parse(sql)
@@ -9499,6 +9500,11 @@ fn drop_foreign_table_accepts_a_comma_list() {
                 .is_err()
         );
     }
+    assert!(
+        crate::partition::partitions_of(&kv, &crabka_pgcatalog::RelationName::public("p"))
+            .expect("partitions")
+            .is_empty()
+    );
 }
 
 fn command_tag(r: &QueryResult) -> &str {
