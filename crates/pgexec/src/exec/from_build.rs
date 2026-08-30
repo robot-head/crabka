@@ -93,18 +93,20 @@ pub(crate) fn append_from_item(
                 next_is_security_free,
             )?;
         }
-        let pushed_constraint = filter
-            .filter(|filter| {
-                matches!(kind, crabka_pgparser::ast::JoinKind::Cross)
-                    && matches!(constraint, crabka_pgparser::ast::JoinConstraint::None)
-                    && immutable_row_predicate(filter)
-                    && {
-                        let mut scope = acc.scope.clone();
-                        scope.extend(&next.scope);
-                        crate::eval::check_predicate_resolves(filter, &scope).is_ok()
-                    }
-            })
-            .map(|filter| crabka_pgparser::ast::JoinConstraint::On(filter.clone()));
+        let pushed_constraint = if matches!(kind, crabka_pgparser::ast::JoinKind::Cross)
+            && matches!(constraint, crabka_pgparser::ast::JoinConstraint::None)
+        {
+            let mut scope = acc.scope.clone();
+            scope.extend(&next.scope);
+            inner_join_predicate(
+                filter,
+                &scope,
+                acc_is_security_free && next_is_security_free,
+            )
+            .map(crabka_pgparser::ast::JoinConstraint::On)
+        } else {
+            None
+        };
         return join_relations(
             acc,
             next,

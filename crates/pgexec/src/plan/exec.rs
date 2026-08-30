@@ -142,9 +142,7 @@ fn try_execute_nested_loop_with_state(
             input: Box::new(loop_plan),
         },
     };
-    let pruned_columns = (!aggregate && !project_set)
-        .then(|| nested_loop_pruned_columns(select, &filter, &scope))
-        .flatten();
+    let pruned_columns = nested_loop_pruned_columns(select, &filter, &exprs, &scope);
     if aggregate {
         let plan = Plan {
             target_list: bind_target_list(&exprs, &fields, &scope)?,
@@ -695,6 +693,7 @@ fn plan_nested_loop_source(
 fn nested_loop_pruned_columns(
     select: &SelectStmt,
     filter: &Plan,
+    projection: &[Expr],
     scope: &Scope,
 ) -> Option<Vec<ColumnBinding>> {
     if !select
@@ -711,6 +710,7 @@ fn nested_loop_pruned_columns(
         .iter()
         .map(|target| target.expr.expr())
         .chain(filter.quals.iter().map(|qual| qual.clause.expr()))
+        .chain(projection.iter())
     {
         crate::grouping::visit_expr(expr, &mut |node| {
             if let Expr::Column { table, name } = node {
@@ -722,7 +722,12 @@ fn nested_loop_pruned_columns(
                         Err(_) => all_bound = false,
                     }
                 } else {
-                    all_bound = false;
+                    match scope.resolve(table.as_deref(), name) {
+                        Ok(position) => {
+                            positions.insert(position);
+                        }
+                        Err(_) => all_bound = false,
+                    }
                 }
             }
         });
@@ -862,9 +867,13 @@ fn execute_nested_loop_plan(
                 scope
                     .columns
                     .extend(inner_relation.scope.columns.iter().cloned());
-                exec::inner_join_predicate(filter, &scope)
-                    .map(crabka_pgparser::ast::JoinConstraint::On)
-                    .unwrap_or(constraint)
+                exec::inner_join_predicate(
+                    filter,
+                    &scope,
+                    outer_security_free && inner_security_free,
+                )
+                .map(crabka_pgparser::ast::JoinConstraint::On)
+                .unwrap_or(constraint)
             } else {
                 constraint
             };
@@ -3835,5 +3844,45 @@ mod tests {
             panic!("expected join rows");
         };
         assert!(rows.len() == 1);
+    }
+
+    #[tokio::test]
+    async fn comma_join_prunes_unreferenced_aggregate_inputs() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{Engine, QueryResult, Session};
+
+        let engine = crate::SqlEngine::new_with_policy(crate::RuntimePolicy {
+            blocking_query_memory: crabka_units::bytes(128 * 1024),
+            ..Default::default()
+        })
+        .expect("policy");
+        let padding = "x".repeat(2048);
+        let values = (1..=128)
+            .map(|id| format!("({id},'{padding}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut session = engine.connect();
+        session
+            .simple_query(&format!(
+                "CREATE TABLE a (id int4, padding text); CREATE TABLE b (id int4, padding text); \
+                 INSERT INTO a VALUES {values}; INSERT INTO b VALUES {values}"
+            ))
+            .await
+            .expect("fixture");
+
+        let result = session
+            .simple_query("SELECT count(*) FROM a, b WHERE a.id = b.id AND random() > -1")
+            .await
+            .expect("aggregate must retain only columns its inputs use");
+        let [QueryResult::Rows { rows, .. }] = result.as_slice() else {
+            panic!("expected count rows");
+        };
+        let [row] = rows.as_slice() else {
+            panic!("expected one count");
+        };
+        let [Some(cell)] = row.as_slice() else {
+            panic!("expected count");
+        };
+        assert!(cell.text.as_ref() == b"128");
     }
 }

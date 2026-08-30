@@ -275,11 +275,11 @@ fn lookup_function(
                 && row.get(2) == Some(&Datum::Int4(namespace))
                 && argument_oids(row).as_deref() == Some(&wanted[..])
         });
-        if let (Some(Datum::Int4(oid)), Some(Datum::Int4(result))) = (
+        if let (Some(Datum::Int4(oid)), Some(Datum::Oid(result))) = (
             found.and_then(|row| row.first()),
             found.and_then(|row| row.get(18)),
         ) {
-            return Ok((oid.unsigned_abs(), result.unsigned_abs()));
+            return Ok((oid.unsigned_abs(), *result));
         }
     }
     Err(undefined_operator(format!(

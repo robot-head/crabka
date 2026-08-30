@@ -1437,8 +1437,8 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
         }
         ScalarFunc::BinaryCoercible => {
             require_arity(fc, n == 2)?;
-            require_int(&args[0], scope)?;
-            require_int(&args[1], scope)?;
+            require_oid_or_null(&args[0], scope)?;
+            require_oid_or_null(&args[1], scope)?;
             Ok(ColumnType::Bool)
         }
         ScalarFunc::PgNumaAvailable => {
@@ -4827,6 +4827,7 @@ mod tests {
     #[test]
     fn binary_coercible_matches_builtin_identity_and_relabel_casts() {
         assert!(ev("binary_coercible(23, 23)") == Datum::Bool(true));
+        assert!(ev("binary_coercible(23::oid, 23::oid)") == Datum::Bool(true));
         assert!(ev("binary_coercible(23, 26)") == Datum::Bool(true));
         assert!(ev("binary_coercible(25, 1043)") == Datum::Bool(true));
         assert!(ev("binary_coercible(23, 25)") == Datum::Bool(false));

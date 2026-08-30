@@ -124,16 +124,21 @@ pub(crate) fn immutable_row_predicate(expr: &Expr) -> bool {
     immutable
 }
 
-/// The immutable `WHERE` conjuncts that an inner join over `scope` can already
-/// evaluate. The residual `WHERE` remains above the join; this only avoids
-/// materializing rows that it will discard.
-pub(crate) fn inner_join_predicate(filter: Option<&Expr>, scope: &Scope) -> Option<Expr> {
+/// The immutable, safe `WHERE` conjuncts that an inner join over `scope` can
+/// already evaluate. The residual `WHERE` remains above the join; this only
+/// avoids materializing rows that it will discard.
+pub(crate) fn inner_join_predicate(
+    filter: Option<&Expr>,
+    scope: &Scope,
+    security_free: bool,
+) -> Option<Expr> {
     let mut conjuncts = Vec::new();
     collect_conjuncts(filter?, &mut conjuncts);
     conjuncts
         .into_iter()
         .filter(|conjunct| {
             immutable_row_predicate(conjunct)
+                && (security_free || leakproof_predicate(conjunct))
                 && expr_references_scope(conjunct, scope)
                 && crate::eval::check_predicate_resolves(conjunct, scope).is_ok()
         })

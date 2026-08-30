@@ -39,6 +39,39 @@ fn immutable_row_predicate_rejects_volatile_calls() {
 }
 
 #[test]
+fn inner_join_predicate_keeps_equality_with_a_volatile_residual() {
+    let scope = Scope {
+        columns: vec![
+            ColumnBinding {
+                qualifier: Some("a".into()),
+                name: "id".into(),
+                ty: crabka_pgtypes::ColumnType::Int4,
+                exposure: Exposure::Output,
+            },
+            ColumnBinding {
+                qualifier: Some("b".into()),
+                name: "id".into(),
+                ty: crabka_pgtypes::ColumnType::Int4,
+                exposure: Exposure::Output,
+            },
+        ],
+        ..Default::default()
+    };
+    let filter = crabka_pgparser::parser::parse_expr_for_test("a.id = b.id AND random() > -1")
+        .expect("parse");
+
+    let predicate = super::inner_join_predicate(Some(&filter), &scope, false)
+        .expect("the equality conjunct remains pushable");
+    assert2::assert!(matches!(
+        predicate,
+        Expr::Binary {
+            op: crabka_pgparser::ast::BinaryOp::Eq,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn structural_figure_colnames_match_parser_rules() {
     let cases: &[(&str, &str)] = &[
         ("CASE WHEN true THEN 1 ELSE (SELECT 2 AS x) END", "x"),

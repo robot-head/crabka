@@ -666,7 +666,7 @@ fn builtin_support(
     else {
         return Ok(None);
     };
-    let (Some(Datum::Int4(result_oid)), Some(Datum::Bool(strict)), Some(Datum::Bool(setof))) =
+    let (Some(Datum::Oid(result_oid)), Some(Datum::Bool(strict)), Some(Datum::Bool(setof))) =
         (row.get(18), row.get(12), row.get(13))
     else {
         return Err(ExecError::Unsupported(
@@ -679,7 +679,7 @@ fn builtin_support(
     else {
         unreachable!("matched built-in support function has oidvector arguments")
     };
-    let result = builtin_support_result_type(*result_oid as u32, &args.elems, wanted)?;
+    let result = builtin_support_result_type(*result_oid, &args.elems, wanted)?;
     Ok(Some(SupportRoutine::Builtin {
         result: RoutineResult::Type {
             ty: result,

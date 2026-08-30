@@ -6057,6 +6057,7 @@ fn decode_builtin_named_signatures() -> Result<Vec<BuiltinNamedSignature>, ExecE
                 _,
                 argument_types,
                 _,
+                _,
                 argument_modes,
                 _,
                 argument_names,
@@ -6588,10 +6589,11 @@ mod tests {
         assert!(
             aclexplode[20]
                 == Datum::Array(crabka_pgtypes::ArrayValue::new(
-                    crabka_pgtypes::ElemType::Int4,
-                    vec![1034, 26, 26, 25, 16]
+                    crabka_pgtypes::ElemType::from_column_type(crabka_pgtypes::ColumnType::Oid)
+                        .expect("oid array element"),
+                    vec![1034_i32, 26, 26, 25, 16]
                         .into_iter()
-                        .map(Datum::Int4)
+                        .map(|oid| Datum::Oid(oid.cast_unsigned()))
                         .collect(),
                 ))
         );
