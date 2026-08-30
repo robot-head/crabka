@@ -685,13 +685,54 @@ pub(crate) fn skipped_drop_notice(
         Statement::AlterTable {
             table,
             if_exists: true,
+            actions,
             ..
         } => {
             let resolution = resolution();
             match resolve_relation(kv, &resolution, table, SchemaDisposition::Utility) {
-                Ok(name) => Ok(relation_kind(kv, &name)
-                    .is_none()
-                    .then(|| missing("relation", &name.name))),
+                Ok(name) => {
+                    if relation_kind(kv, &name).is_none() {
+                        return Ok(Some(missing("relation", &name.name)));
+                    }
+                    let table = crabka_pgcatalog::get_table(kv, &name)?;
+                    for action in actions {
+                        use crabka_pgparser::ast::AlterTableAction;
+                        match action {
+                            AlterTableAction::AddColumn {
+                                if_not_exists: true,
+                                column,
+                                ..
+                            } if table.column_index(&column.name).is_some() => {
+                                return Ok(Some(crabka_pgwire::error::PgError::notice(format!(
+                                    "column \"{}\" of relation \"{}\" already exists, skipping",
+                                    column.name, name.name
+                                ))));
+                            }
+                            AlterTableAction::DropColumn {
+                                column,
+                                if_exists: true,
+                                ..
+                            } if table.column_index(column).is_none() => {
+                                return Ok(Some(crabka_pgwire::error::PgError::notice(format!(
+                                    "column \"{column}\" of relation \"{}\" does not exist, skipping",
+                                    name.name
+                                ))));
+                            }
+                            AlterTableAction::DropConstraint {
+                                name: constraint,
+                                if_exists: true,
+                                ..
+                            } if !table.checks.iter().any(|check| check.name == *constraint) => {
+                                return Ok(Some(crabka_pgwire::error::PgError::notice(format!(
+                                    "constraint \"{constraint}\" of relation \"{}\" does not exist, skipping",
+                                    name.name
+                                ))));
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(None)
+                }
                 Err(_) => Ok(Some(missing("relation", &table.to_string()))),
             }
         }
