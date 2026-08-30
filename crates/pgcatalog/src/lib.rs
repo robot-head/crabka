@@ -10,6 +10,7 @@ pub mod policy;
 pub mod routine;
 pub mod rule;
 pub mod serde;
+pub mod statistics;
 pub mod trigger;
 
 use std::{
