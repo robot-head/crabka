@@ -30,7 +30,7 @@ use crabka_pgparser::ast::{
     QueryExpr, ResetTarget, SelectItem, SetExpr, Statement, TableExpr, TableLockMode, UnaryOp,
     UnlistenTarget, UtilityStatement,
 };
-use crabka_pgtypes::{ColumnType, Datum, ElemType};
+use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
 use crabka_pgwire::{
     engine::{
         BoundParam, Cell, CloseTarget, CopyInResponse, CopyOutResponse, CopyOutStream,
@@ -6948,6 +6948,7 @@ impl SqlSession {
         let mut values = BTreeSet::new();
         let mut frequencies = BTreeMap::<Vec<u8>, usize>::new();
         let mut ordered_values = Vec::new();
+        let mut arrays = Vec::new();
         let mut nulls = 0usize;
         let mut width = 0usize;
         for (position, row) in rows.into_iter().enumerate() {
@@ -6961,11 +6962,11 @@ impl SqlSession {
             width = width.saturating_add(value.text.len());
             values.insert(value.text.to_vec());
             *frequencies.entry(value.text.to_vec()).or_default() += 1;
-            ordered_values.push((
-                position,
-                self.plpgsql_decode_cell(field, Some(value)).ok()?,
-                value.text.to_vec(),
-            ));
+            let decoded = self.plpgsql_decode_cell(field, Some(value)).ok()?;
+            if let Datum::Array(array) = &decoded {
+                arrays.push(array.clone());
+            }
+            ordered_values.push((position, decoded, value.text.to_vec()));
         }
         let non_null = total.checked_sub(nulls)?;
         let null_frac = nulls as f32 / total as f32;
@@ -7094,6 +7095,8 @@ impl SqlSession {
                 )
             })
         };
+        let (most_common_elems, most_common_elem_freqs, elem_count_histogram) =
+            self.array_statistics(&arrays, statistics_target);
         Some(crate::attrstats::AttributeStats {
             null_frac: Some(null_frac),
             avg_width: (non_null > 0).then(|| i32::try_from(width / non_null).unwrap_or(i32::MAX)),
@@ -7102,8 +7105,109 @@ impl SqlSession {
             most_common_freqs,
             histogram_bounds,
             correlation,
+            most_common_elems,
+            most_common_elem_freqs,
+            elem_count_histogram,
             ..Default::default()
         })
+    }
+
+    /// The array-specific `ANALYZE` slots. PostgreSQL tracks an element once
+    /// per containing array, then keeps up to ten times the column target.
+    fn array_statistics(
+        &self,
+        arrays: &[ArrayValue],
+        statistics_target: usize,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        if arrays.is_empty() {
+            return (None, None, None);
+        }
+        let mut frequencies = HashMap::<Datum, usize>::new();
+        let mut distinct_counts = Vec::with_capacity(arrays.len());
+        let mut null_element_arrays = 0usize;
+        for array in arrays {
+            let mut distinct = HashSet::new();
+            let mut has_null = false;
+            for element in &array.elems {
+                if matches!(element, Datum::Null) {
+                    has_null = true;
+                } else {
+                    distinct.insert(element.clone());
+                }
+            }
+            if has_null {
+                null_element_arrays += 1;
+            }
+            for element in &distinct {
+                *frequencies.entry(element.clone()).or_default() += 1;
+            }
+            distinct_counts.push(distinct.len());
+        }
+
+        let mut elements = frequencies.into_iter().collect::<Vec<_>>();
+        elements.sort_by(|(left, left_count), (right, right_count)| {
+            right_count.cmp(left_count).then_with(|| {
+                crabka_pgtypes::ops::compare(left, right)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(CmpOrdering::Equal)
+            })
+        });
+        elements.truncate(statistics_target.saturating_mul(10));
+        let min_frequency = elements.iter().map(|(_, count)| *count).min();
+        let max_frequency = elements.iter().map(|(_, count)| *count).max();
+        elements.sort_by(|(left, _), (right, _)| {
+            crabka_pgtypes::ops::compare(left, right)
+                .ok()
+                .flatten()
+                .unwrap_or(CmpOrdering::Equal)
+        });
+
+        let denominator = arrays.len() as f32;
+        let (most_common_elems, most_common_elem_freqs) = if elements.is_empty() {
+            (None, None)
+        } else {
+            let time_zone = self.effective_time_zone();
+            let values = format!(
+                "{{{}}}",
+                elements
+                    .iter()
+                    .map(|(value, _)| {
+                        Self::pg_stats_array_element(&crabka_pgtypes::encoding::encode_text(
+                            value, &time_zone,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            let mut frequencies = elements
+                .iter()
+                .map(|(_, count)| (*count as f32 / denominator).to_string())
+                .collect::<Vec<_>>();
+            frequencies.extend([
+                (min_frequency.expect("nonempty elements") as f32 / denominator).to_string(),
+                (max_frequency.expect("nonempty elements") as f32 / denominator).to_string(),
+                (null_element_arrays as f32 / denominator).to_string(),
+            ]);
+            (Some(values), Some(format!("{{{}}}", frequencies.join(","))))
+        };
+
+        distinct_counts.sort_unstable();
+        let histogram_count = statistics_target.max(2);
+        let histogram = format!(
+            "{{{}}}",
+            (0..histogram_count)
+                .map(|index| {
+                    let offset = index * (distinct_counts.len() - 1) / (histogram_count - 1);
+                    distinct_counts[offset].to_string()
+                })
+                .chain(std::iter::once(
+                    (distinct_counts.iter().sum::<usize>() as f32 / denominator).to_string(),
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        (most_common_elems, most_common_elem_freqs, Some(histogram))
     }
 
     /// PostgreSQL uses a column's explicit target when present, otherwise the
@@ -31205,6 +31309,31 @@ mod session_conformance_tests {
             )
             .await
                 == "{2,10},{3,4}"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_derives_array_element_statistics() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "SET default_statistics_target = 1",
+            "CREATE TABLE analyzed_array (value int4[])",
+            "INSERT INTO analyzed_array VALUES (ARRAY[1, 1, 2]), (ARRAY[1, 3]), \
+             (ARRAY[2, NULL]), ('{}'), (NULL)",
+            "ANALYZE analyzed_array",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT most_common_elems || ',' || most_common_elem_freqs::text || ',' || \
+                 elem_count_histogram::text FROM pg_stats \
+                 WHERE tablename = 'analyzed_array' AND attname = 'value'",
+            )
+            .await
+                == "{1,2,3},{0.5,0.5,0.25,0.25,0.5,0.25},{0,2,1.25}"
         );
     }
 
