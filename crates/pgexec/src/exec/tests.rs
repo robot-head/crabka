@@ -870,6 +870,51 @@ async fn analyze_derives_functional_dependencies_for_statistics_objects() {
 }
 
 #[tokio::test]
+async fn analyze_derives_and_expands_mcv_statistics() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE stat_mcv (a int, b text)").await;
+    run_s(
+        &mut session,
+        "CREATE STATISTICS stat_mcv_s (mcv) ON a, b FROM stat_mcv; \
+         INSERT INTO stat_mcv VALUES \
+         (1, 'x'), (1, 'x'), (1, 'x'), (1, 'x'), (1, NULL), (1, NULL), (2, 'y'), (2, 'y'); \
+         ANALYZE stat_mcv",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT m.index::text, m.values::text, m.nulls::text, m.frequency::text, \
+             m.base_frequency::text FROM pg_statistic_ext_data d, \
+             pg_mcv_list_items(d.stxdmcv) AS m ORDER BY m.index",
+        )
+        .await
+            == vec![
+                text_row(&["0", "{1,x}", "{f,f}", "0.5", "0.375"]),
+                text_row(&["1", "{1,NULL}", "{f,t}", "0.25", "0.1875"]),
+                text_row(&["2", "{2,y}", "{f,f}", "0.25", "0.0625"]),
+            ]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT most_common_vals, most_common_val_nulls, most_common_freqs::text, \
+             most_common_base_freqs::text FROM pg_stats_ext",
+        )
+        .await
+            == vec![text_row(&[
+                "{{1,x},{1,NULL},{2,y}}",
+                "{{f,f},{f,t},{f,f}}",
+                "{0.5,0.25,0.25}",
+                "{0.375,0.1875,0.0625}",
+            ])]
+    );
+}
+
+#[tokio::test]
 async fn pg_stats_ext_hides_data_from_nonowners() {
     use assert2::assert;
 

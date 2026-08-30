@@ -103,6 +103,9 @@ enum Srf {
     /// `pg_options_to_table(text[])` parses catalog option strings into their
     /// name/value rows.
     PgOptionsToTable,
+    /// `pg_mcv_list_items(pg_mcv_list)` expands an extended-statistics MCV
+    /// payload into its documented record fields.
+    PgMcvListItems,
     PgShowAllSettings,
     /// `pg_snapshot_xip(pg_snapshot)` → `xid8`, and `txid_snapshot_xip`, which
     /// is the same expansion reported as `bigint`. One row per running
@@ -333,6 +336,7 @@ fn classify(name: &str) -> Option<Srf> {
         "pg_input_error_info" => Srf::PgInputErrorInfo,
         "pg_listening_channels" => Srf::PgListeningChannels,
         "pg_options_to_table" => Srf::PgOptionsToTable,
+        "pg_mcv_list_items" => Srf::PgMcvListItems,
         "pg_show_all_settings" => Srf::PgShowAllSettings,
         "pg_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Modern),
         "txid_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Legacy),
@@ -381,6 +385,7 @@ impl Srf {
             Srf::Each(_)
                 | Srf::EachText(_)
                 | Srf::PgInputErrorInfo
+                | Srf::PgMcvListItems
                 | Srf::EventDdlCommands
                 | Srf::EventDroppedObjects
         )
@@ -567,6 +572,16 @@ pub(crate) fn plan(
             vec![
                 column("option_name", ColumnType::Text),
                 column("option_value", ColumnType::Text),
+            ]
+        }
+        Srf::PgMcvListItems => {
+            require_arity(name, &given, (1, 1))?;
+            vec![
+                column("index", ColumnType::Int4),
+                column("values", ColumnType::Array(ElemType::Text)),
+                column("nulls", ColumnType::Array(ElemType::Bool)),
+                column("frequency", ColumnType::Float8),
+                column("base_frequency", ColumnType::Float8),
             ]
         }
         Srf::PgShowAllSettings => {
@@ -799,6 +814,7 @@ pub(crate) fn rows_with_memory(
         Srf::PgInputErrorInfo => input_error_info_rows(vals, ctx)?,
         Srf::PgListeningChannels => pg_listening_channel_rows(ctx),
         Srf::PgOptionsToTable => pg_options_to_table_rows(vals)?,
+        Srf::PgMcvListItems => pg_mcv_list_item_rows(vals)?,
         Srf::PgShowAllSettings => crate::exec::catalog_rows::pg_show_all_settings_rows()?,
         Srf::SnapshotXip(family) => snapshot_xip_rows(family, &plan.name, &vals[0], ctx)?,
         Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
@@ -855,6 +871,7 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
         Srf::PgInputErrorInfo => vec![text, text],
         Srf::PgListeningChannels => Vec::new(),
         Srf::PgOptionsToTable => vec![Some(ColumnType::Array(ElemType::Text))],
+        Srf::PgMcvListItems => vec![text],
         Srf::PgShowAllSettings => Vec::new(),
         Srf::SnapshotXip(family) => vec![Some(family.snapshot_type())],
         // `regclass`, but resolving a *name* to a relation needs the catalog and
@@ -1045,6 +1062,51 @@ fn pg_options_to_table_rows(vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError
                     (name, Datum::Text(value.to_string()))
                 });
             Ok(vec![Datum::Text(name.to_string()), value])
+        })
+        .collect()
+}
+
+/// Expand Gres's opaque durable `pg_mcv_list` text into PostgreSQL's five
+/// documented `pg_mcv_list_items` fields.
+fn pg_mcv_list_item_rows(vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let Datum::Text(value) = &vals[0] else {
+        return Err(type_error("pg_mcv_list_items", &vals[0]));
+    };
+    let items = crabka_pgcatalog::statistics::decode_mcv(value)
+        .ok_or_else(|| ExecError::Unsupported("invalid pg_mcv_list value".into()))?;
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let frequency = item
+                .frequency
+                .parse::<f64>()
+                .map_err(|_| ExecError::Unsupported("invalid pg_mcv_list frequency".into()))?;
+            let base_frequency = item
+                .base_frequency
+                .parse::<f64>()
+                .map_err(|_| ExecError::Unsupported("invalid pg_mcv_list base frequency".into()))?;
+            Ok(vec![
+                Datum::Int4(i32::try_from(index).map_err(|_| {
+                    ExecError::Unsupported("pg_mcv_list has too many items".into())
+                })?),
+                Datum::Array(ArrayValue::new(
+                    ElemType::Text,
+                    item.values
+                        .iter()
+                        .map(|value| value.clone().map_or(Datum::Null, Datum::Text))
+                        .collect(),
+                )),
+                Datum::Array(ArrayValue::new(
+                    ElemType::Bool,
+                    item.values
+                        .iter()
+                        .map(|value| Datum::Bool(value.is_none()))
+                        .collect(),
+                )),
+                Datum::Float8(frequency),
+                Datum::Float8(base_frequency),
+            ])
         })
         .collect()
 }

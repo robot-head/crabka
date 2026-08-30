@@ -27,6 +27,95 @@ pub struct StatisticsData {
     pub mcv: Option<String>,
 }
 
+/// One item in PostgreSQL's multi-column most-common-values list.
+///
+/// Frequencies stay as their shortest round-trippable float strings. The
+/// durable catalog has no floating-point field encoding, and the SQL boundary
+/// parses them back to `float8`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McvItem {
+    pub values: Vec<Option<String>>,
+    pub frequency: String,
+    pub base_frequency: String,
+}
+
+/// Encode a multi-column MCV list for `pg_statistic_ext_data.stxdmcv`.
+///
+/// The physical PostgreSQL type is opaque. This self-delimiting text encoding
+/// keeps Gres's text-backed catalog surface opaque too, while allowing the
+/// built-in `pg_mcv_list_items` implementation to recover exact values.
+#[must_use]
+pub fn encode_mcv(items: &[McvItem]) -> String {
+    let mut out = format!("mcv1{:08x}", items.len());
+    for item in items {
+        push_mcv_string(&mut out, &item.frequency);
+        push_mcv_string(&mut out, &item.base_frequency);
+        out.push_str(&format!("{:08x}", item.values.len()));
+        for value in &item.values {
+            match value {
+                None => out.push('n'),
+                Some(value) => {
+                    out.push('s');
+                    push_mcv_string(&mut out, value);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Decode one payload created by [`encode_mcv`].
+#[must_use]
+pub fn decode_mcv(value: &str) -> Option<Vec<McvItem>> {
+    let mut input = value.as_bytes();
+    let (prefix, rest) = input.split_at_checked(4)?;
+    if prefix != b"mcv1" {
+        return None;
+    }
+    input = rest;
+    let item_count = take_mcv_hex(&mut input)?;
+    let mut items = Vec::with_capacity(item_count);
+    for _ in 0..item_count {
+        let frequency = take_mcv_string(&mut input)?;
+        let base_frequency = take_mcv_string(&mut input)?;
+        let value_count = take_mcv_hex(&mut input)?;
+        let mut values = Vec::with_capacity(value_count);
+        for _ in 0..value_count {
+            let (tag, rest) = input.split_first()?;
+            input = rest;
+            values.push(match tag {
+                b'n' => None,
+                b's' => Some(take_mcv_string(&mut input)?),
+                _ => return None,
+            });
+        }
+        items.push(McvItem {
+            values,
+            frequency,
+            base_frequency,
+        });
+    }
+    input.is_empty().then_some(items)
+}
+
+fn push_mcv_string(out: &mut String, value: &str) {
+    out.push_str(&format!("{:08x}", value.len()));
+    out.push_str(value);
+}
+
+fn take_mcv_hex(input: &mut &[u8]) -> Option<usize> {
+    let (digits, rest) = input.split_at_checked(8)?;
+    *input = rest;
+    usize::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()
+}
+
+fn take_mcv_string(input: &mut &[u8]) -> Option<String> {
+    let len = take_mcv_hex(input)?;
+    let (bytes, rest) = input.split_at_checked(len)?;
+    *input = rest;
+    String::from_utf8(bytes.to_vec()).ok()
+}
+
 /// One `pg_statistic_ext` object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statistics {
@@ -312,8 +401,8 @@ mod tests {
     use crabka_pgkv::{Kv, MemKv};
 
     use super::{
-        STATISTICS_OID_BASE, Statistics, StatisticsData, create_ops, drop_for_table_ops, drop_ops,
-        get, list, next_oid, rename_ops,
+        McvItem, STATISTICS_OID_BASE, Statistics, StatisticsData, create_ops, decode_mcv,
+        drop_for_table_ops, drop_ops, encode_mcv, get, list, next_oid, rename_ops,
     };
     use crate::{CommentObject, RelationName, get_comment, set_comment_op};
 
@@ -374,6 +463,17 @@ mod tests {
                 .data
                 == record.data
         );
+    }
+
+    #[test]
+    fn mcv_payload_round_trips_nulls_and_delimiters() {
+        let items = vec![McvItem {
+            values: vec![Some("comma, brace{} and \\ slash".into()), None],
+            frequency: "0.6666666666666666".into(),
+            base_frequency: "0.5".into(),
+        }];
+        assert!(decode_mcv(&encode_mcv(&items)) == Some(items));
+        assert!(decode_mcv("mcv1not-a-list").is_none());
     }
 
     #[test]

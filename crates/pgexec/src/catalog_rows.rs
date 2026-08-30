@@ -3542,6 +3542,65 @@ pub(crate) fn pg_stats_ext_rows(
                     .map(|column| Datum::Text(column.name.clone()))
             })
             .collect::<Vec<_>>();
+        let mcv = data
+            .mcv
+            .as_deref()
+            .and_then(crabka_pgcatalog::statistics::decode_mcv);
+        let mcv_values = mcv.as_ref().and_then(|items| {
+            (!items.is_empty()).then(|| {
+                Datum::Text(format!(
+                    "{{{}}}",
+                    items
+                        .iter()
+                        .map(|item| pg_text_array(&item.values))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+            })
+        });
+        let mcv_nulls = mcv.as_ref().and_then(|items| {
+            (!items.is_empty()).then(|| {
+                Datum::Text(format!(
+                    "{{{}}}",
+                    items
+                        .iter()
+                        .map(|item| format!(
+                            "{{{}}}",
+                            item.values
+                                .iter()
+                                .map(|value| if value.is_some() { "f" } else { "t" })
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+            })
+        });
+        let mcv_frequencies = mcv.as_ref().and_then(|items| {
+            items
+                .iter()
+                .map(|item| item.frequency.parse::<f64>().ok().map(Datum::Float8))
+                .collect::<Option<Vec<_>>>()
+                .map(|values| {
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Float8,
+                        values,
+                    ))
+                })
+        });
+        let mcv_base_frequencies = mcv.as_ref().and_then(|items| {
+            items
+                .iter()
+                .map(|item| item.base_frequency.parse::<f64>().ok().map(Datum::Float8))
+                .collect::<Option<Vec<_>>>()
+                .map(|values| {
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Float8,
+                        values,
+                    ))
+                })
+        });
         rows.push(vec![
             text(&table.name.schema),
             text(&table.name.name),
@@ -3571,13 +3630,44 @@ pub(crate) fn pg_stats_ext_rows(
             Datum::Bool(data.inherited),
             data.ndistinct.map_or(Datum::Null, Datum::Text),
             data.dependencies.map_or(Datum::Null, Datum::Text),
-            Datum::Null,
-            Datum::Null,
-            Datum::Null,
-            Datum::Null,
+            mcv_values.unwrap_or(Datum::Null),
+            mcv_nulls.unwrap_or(Datum::Null),
+            mcv_frequencies.unwrap_or(Datum::Null),
+            mcv_base_frequencies.unwrap_or(Datum::Null),
         ]);
     }
     Ok(rows)
+}
+
+/// Render the inner dimension of `pg_stats_ext.most_common_vals` with
+/// PostgreSQL array quoting rules for the catalog's text-backed `anyarray`.
+fn pg_text_array(values: &[Option<String>]) -> String {
+    format!(
+        "{{{}}}",
+        values
+            .iter()
+            .map(|value| value
+                .as_deref()
+                .map_or_else(|| "NULL".into(), pg_array_element))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn pg_array_element(value: &str) -> String {
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("null")
+        || value.bytes().any(|byte| {
+            matches!(
+                byte,
+                b'"' | b'\\' | b'{' | b'}' | b',' | b' ' | b'\t' | b'\n' | b'\r'
+            )
+        })
+    {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        value.into()
+    }
 }
 
 /// `pg_statistic` is the durable form of the same records `pg_stats` projects.

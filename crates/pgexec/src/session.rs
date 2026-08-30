@@ -6690,12 +6690,76 @@ impl SqlSession {
             .any(|kind| kind == "f")
             .then(|| Self::statistics_dependencies(&rows, &positions))
             .flatten();
+        let mcv = object
+            .kinds
+            .iter()
+            .any(|kind| kind == "m")
+            .then(|| Self::statistics_mcv(&rows, object.target))
+            .flatten()
+            .map(|items| crabka_pgcatalog::statistics::encode_mcv(&items));
         Some(crabka_pgcatalog::statistics::StatisticsData {
             inherited: false,
             ndistinct,
             dependencies,
-            mcv: None,
+            mcv,
         })
+    }
+
+    /// Select the most frequent distinct value combinations and the independent
+    /// marginal-frequency estimate each one is compared against.
+    fn statistics_mcv(
+        rows: &[Vec<Option<Cell>>],
+        target: i16,
+    ) -> Option<Vec<crabka_pgcatalog::statistics::McvItem>> {
+        let width = rows.first()?.len();
+        if width == 0 {
+            return None;
+        }
+        let mut counts = BTreeMap::<Vec<Option<String>>, usize>::new();
+        let mut marginals = vec![BTreeMap::<Option<String>, usize>::new(); width];
+        for row in rows {
+            let values = row
+                .iter()
+                .map(|value| {
+                    value.as_ref().map(|value| {
+                        String::from_utf8(value.text.to_vec()).expect("cell text is utf8")
+                    })
+                })
+                .collect::<Vec<_>>();
+            for (index, value) in values.iter().enumerate() {
+                *marginals[index].entry(value.clone()).or_default() += 1;
+            }
+            *counts.entry(values).or_default() += 1;
+        }
+        let total = rows.len() as f64;
+        let limit = usize::try_from(if target < 0 { 100 } else { target }).ok()?;
+        let mut items = counts.into_iter().collect::<Vec<_>>();
+        items.sort_by(|(left_values, left_count), (right_values, right_count)| {
+            right_count
+                .cmp(left_count)
+                .then_with(|| left_values.cmp(right_values))
+        });
+        items.truncate(limit);
+        Some(
+            items
+                .into_iter()
+                .map(|(values, count)| {
+                    let base_frequency =
+                        values.iter().enumerate().fold(1.0, |base, (index, value)| {
+                            base * *marginals[index]
+                                .get(value)
+                                .expect("every MCV value has a marginal count")
+                                as f64
+                                / total
+                        });
+                    crabka_pgcatalog::statistics::McvItem {
+                        values,
+                        frequency: (count as f64 / total).to_string(),
+                        base_frequency: base_frequency.to_string(),
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// Build PostgreSQL's functional-dependency display data.  A dependency's

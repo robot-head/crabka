@@ -359,11 +359,11 @@ pub(crate) fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("most_common_val_nulls", Text),
             (
                 "most_common_freqs",
-                ColumnType::Array(crabka_pgtypes::ElemType::Float4),
+                ColumnType::Array(crabka_pgtypes::ElemType::Float8),
             ),
             (
                 "most_common_base_freqs",
-                ColumnType::Array(crabka_pgtypes::ElemType::Float4),
+                ColumnType::Array(crabka_pgtypes::ElemType::Float8),
             ),
         ]),
         // The full standard projection, in PostgreSQL 18.4's column order. The
