@@ -1821,6 +1821,24 @@ async fn catalog_only_builtin_types_link_to_their_io_functions() {
     assert2::assert!(rows == vec![some(&["30"])]);
 }
 
+#[tokio::test]
+async fn oidvector_compares_equal_to_its_oid_array_projection() {
+    let engine = fixture().await;
+    let rows = grid(
+        &engine,
+        "SELECT count(*) \
+         FROM pg_proc \
+         WHERE proallargtypes IS NOT NULL \
+           AND proargtypes != ARRAY( \
+               SELECT proallargtypes[i] \
+               FROM generate_series(1, array_length(proallargtypes, 1)) AS g(i) \
+               WHERE proargmodes IS NULL OR proargmodes[i] IN ('i', 'b', 'v') \
+           )",
+    )
+    .await;
+    assert2::assert!(rows == vec![some(&["0"])]);
+}
+
 /// `pg_attribute.attstorage` is the column type's own storage class, which is
 /// what `\d+` prints in its Storage column.
 ///

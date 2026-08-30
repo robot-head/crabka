@@ -716,6 +716,12 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
         (Datum::OidVector(x), Datum::OidVector(y)) => compare_vectors(x, y)?,
+        // `oidvector` has the same element representation as the catalog's
+        // oid arrays, and PostgreSQL resolves this catalog comparison through
+        // the oid-array operator.
+        (Datum::OidVector(x), Datum::Array(y)) | (Datum::Array(y), Datum::OidVector(x)) => {
+            compare_vectors(x, y)?
+        }
         // Every circle comparison operator orders by area through PostgreSQL's
         // epsilon FP macros. A NaN area makes all of them false there; here it
         // yields NULL, which excludes the row from a WHERE just the same. No
