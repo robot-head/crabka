@@ -5156,6 +5156,14 @@ pub(crate) fn alter_table_action_ops(
             state.table.checks = checks;
             revalidated?;
             rebuild_indexes_on_column(kv, state, column, &build)?;
+            state
+                .ops
+                .extend(clear_statistics_data_referencing_column_ops(
+                    kv,
+                    &state.table,
+                    column,
+                    index,
+                )?);
             state.retyped_columns.push(column.clone());
             Ok(())
         }
@@ -6724,28 +6732,52 @@ fn drop_statistics_referencing_column_ops(
     column: &str,
     index: usize,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
-    let attnum = i16::try_from(index + 1)
-        .map_err(|_| ExecError::Unsupported("attribute number exceeds int2".into()))?;
-    let columns = table
-        .columns
-        .iter()
-        .map(|candidate| candidate.name.clone())
-        .collect::<Vec<_>>();
     crabka_pgcatalog::statistics::list(kv)?
         .into_iter()
-        .filter(|statistics| {
-            statistics.table_id == table.id
-                && (statistics.keys.contains(&attnum)
-                    || statistics
-                        .expressions
-                        .iter()
-                        .any(|expression| check_references_column(expression, column, &columns)))
-        })
+        .filter(|statistics| statistics_references_column(statistics, table, column, index))
         .map(|statistics| {
             crabka_pgcatalog::statistics::drop_ops(kv, &statistics.name).map_err(Into::into)
         })
         .collect::<Result<Vec<_>, ExecError>>()
         .map(|ops| ops.into_iter().flatten().collect())
+}
+
+fn clear_statistics_data_referencing_column_ops(
+    kv: &dyn Kv,
+    table: &Table,
+    column: &str,
+    index: usize,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    Ok(crabka_pgcatalog::statistics::list(kv)?
+        .into_iter()
+        .filter(|statistics| statistics_references_column(statistics, table, column, index))
+        .map(|mut statistics| {
+            statistics.data = None;
+            crabka_pgcatalog::statistics::put_op(&statistics)
+        })
+        .collect())
+}
+
+fn statistics_references_column(
+    statistics: &crabka_pgcatalog::statistics::Statistics,
+    table: &Table,
+    column: &str,
+    index: usize,
+) -> bool {
+    let Ok(attnum) = i16::try_from(index + 1) else {
+        return false;
+    };
+    let columns = table
+        .columns
+        .iter()
+        .map(|candidate| candidate.name.clone())
+        .collect::<Vec<_>>();
+    statistics.table_id == table.id
+        && (statistics.keys.contains(&attnum)
+            || statistics
+                .expressions
+                .iter()
+                .any(|expression| check_references_column(expression, column, &columns)))
 }
 
 fn triggers_referencing_column(
