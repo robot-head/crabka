@@ -101,9 +101,7 @@ pub trait ForeignScanner: Send + Sync {
     /// Enumerate the importable tables for `IMPORT FOREIGN SCHEMA`.
     ///
     /// Returns one [`ImportedTable`] per table the server exposes that survives
-    /// `filter`. Each one carries the decoded value-schema columns, because the
-    /// executor's [`crabka_pgcatalog::create_foreign_table`] prepends the
-    /// envelope columns. Each one also carries the table OPTIONS the executor
+    /// `filter`. Each one carries its complete table schema. Each one also carries the table OPTIONS the executor
     /// must persist, so a later `scan` decodes consistently. The `value_format`
     /// is the crucial one, and it must match the schema the columns were derived
     /// from. The Kafka FDW enumerates every topic and derives `value_columns`
@@ -139,15 +137,14 @@ pub trait ForeignScanner: Send + Sync {
 }
 
 /// One table `IMPORT FOREIGN SCHEMA` materializes. It carries the table's name,
-/// its decoded value columns, and the table OPTIONS to persist, such as `topic`
-/// and `value_format`. The executor prepends the envelope columns. The persisted
-/// OPTIONS let a later `scan` decode the value bytes the same way the import
-/// derived the columns.
+/// complete column schema, and table OPTIONS to persist, such as `topic` and
+/// `value_format`. The persisted OPTIONS let a later `scan` decode the value
+/// bytes the same way the import derived the columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportedTable {
     /// The foreign table name, which is also the Kafka topic name.
     pub name: String,
-    /// The value-schema columns ONLY. There are no envelope columns here.
+    /// The complete schema the foreign-data wrapper exposes.
     pub columns: Vec<Column>,
     /// Table OPTIONS to store on the created foreign table.
     pub options: Vec<(String, String)>,

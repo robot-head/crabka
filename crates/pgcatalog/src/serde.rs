@@ -2792,6 +2792,9 @@ mod tests {
                 generated: None,
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
             Column {
                 name: "ratio".into(),
@@ -2801,6 +2804,9 @@ mod tests {
                 generated: None,
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
             Column::new("code", ColumnType::Varchar(Some(8))),
             Column::new("flag", ColumnType::Char(Some(2))),
@@ -2816,6 +2822,9 @@ mod tests {
                 generated: None,
                 identity: None,
                 collation: Some("POSIX".into()),
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
         ];
         let bytes = serialize_schema(
@@ -2845,6 +2854,9 @@ mod tests {
             generated: None,
             identity: None,
             collation: None,
+            statistics_target: -1,
+            storage: None,
+            attribute_options: Vec::new(),
         }];
 
         let bytes = serialize_schema(
@@ -2888,6 +2900,9 @@ mod tests {
                 generated,
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             }];
 
             let bytes = serialize_schema(
@@ -2925,6 +2940,9 @@ mod tests {
                     generated,
                     identity: None,
                     collation: None,
+                    statistics_target: -1,
+                    storage: None,
+                    attribute_options: Vec::new(),
                 }],
                 TableOptions::default(),
                 "postgres",
@@ -2968,6 +2986,9 @@ mod tests {
                 generated: None,
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
             Column {
                 name: "holes".into(),
@@ -2980,6 +3001,9 @@ mod tests {
                 generated: None,
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
             Column {
                 name: "empty".into(),
@@ -2992,6 +3016,9 @@ mod tests {
                 generated: None,
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
             Column {
                 name: "docs".into(),
@@ -3004,6 +3031,9 @@ mod tests {
                 generated: None,
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
             Column {
                 name: "path".into(),
@@ -3013,6 +3043,9 @@ mod tests {
                 generated: None,
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
             Column {
                 name: "paths".into(),
@@ -3025,6 +3058,9 @@ mod tests {
                 generated: None,
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
         ];
 

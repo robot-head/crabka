@@ -26074,7 +26074,10 @@ mod tests {
         engine.set_foreign_scanner(Arc::new(FakeImporter));
         let mut s = engine.connect();
 
-        s.simple_query("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+        s.simple_query(
+            "CREATE FUNCTION kafka_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'; \
+             CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_handler",
+        )
             .await
             .expect("create FDW");
         s.simple_query(
@@ -26093,8 +26096,8 @@ mod tests {
             "expected IMPORT FOREIGN SCHEMA command tag, got {res:?}"
         );
 
-        // `orders` exists as a foreign table; envelope columns are prepended, then
-        // the value column `id`; OPTIONS carries the topic name.
+        // `orders` exists as a foreign table with the scanner's declared `id`
+        // column; OPTIONS carries the topic name.
         let orders = crabka_pgcatalog::get_table(
             &*engine.kv,
             &crabka_pgcatalog::RelationName::public("orders"),
@@ -26106,12 +26109,7 @@ mod tests {
             meta.options
                 .contains(&("topic".to_string(), "orders".to_string()))
         );
-        let last = orders.columns.last().expect("at least one value column");
-        assert_eq!(last.name, "id");
-        assert!(
-            orders.columns.len() > 1,
-            "envelope columns must be prepended before the value column"
-        );
+        assert!(orders.columns == vec![Column::new("id", ColumnType::Int8)]);
 
         // `payments` was excluded by LIMIT TO and must not exist.
         assert!(

@@ -8124,22 +8124,10 @@ pub fn drop_user_mapping_ops(
 
 // ── Foreign table ─────────────────────────────────────────────────────────────
 
-/// The envelope columns that go in front of every foreign (Kafka) table.
-fn envelope_columns() -> Vec<Column> {
-    vec![
-        Column::new("_partition", ColumnType::Int4),
-        Column::new("_offset", ColumnType::Int8),
-        Column::new("_timestamp", ColumnType::Timestamptz),
-        Column::new("_key", ColumnType::Bytea),
-        Column::new("_headers", ColumnType::Text),
-    ]
-}
-
 /// Create a foreign table linked to an existing server.
 ///
 /// The server must already exist. If it does not, this function returns
-/// `UndefinedObject`. The envelope columns come first, and the user-supplied
-/// value columns follow.
+/// `UndefinedObject`. Its columns are exactly the caller-provided schema.
 ///
 /// # Errors
 ///
@@ -8148,14 +8136,14 @@ fn envelope_columns() -> Vec<Column> {
 pub fn create_foreign_table(
     kv: &dyn Kv,
     name: &RelationName,
-    value_columns: Vec<Column>,
+    columns: Vec<Column>,
     server: &str,
     options: Vec<(String, String)>,
 ) -> Result<TableId, CatalogError> {
     let (next, batch) = create_foreign_table_ops(
         kv,
         name,
-        value_columns,
+        columns,
         server,
         options,
         Vec::new(),
@@ -8175,7 +8163,7 @@ pub fn create_foreign_table(
 pub fn create_foreign_table_ops(
     kv: &dyn Kv,
     name: &RelationName,
-    value_columns: Vec<Column>,
+    columns: Vec<Column>,
     server: &str,
     options: Vec<(String, String)>,
     column_options: Vec<(String, Vec<(String, String)>)>,
@@ -8184,16 +8172,13 @@ pub fn create_foreign_table_ops(
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     let _ = get_server(kv, server)?;
     ensure_unique_options(&options)?;
-    ensure_foreign_column_options(&value_columns, &column_options)?;
+    ensure_foreign_column_options(&columns, &column_options)?;
 
     if relation_exists(kv, name)? {
         return Err(CatalogError::DuplicateTable(name.to_string()));
     }
 
     let (next, bump) = creation.id.allocate(kv)?;
-    let mut columns = envelope_columns();
-    columns.extend(value_columns);
-
     let meta = ForeignTableMeta {
         server: server.to_string(),
         options,
@@ -8793,6 +8778,9 @@ mod tests {
                 generated: None,
                 identity: Some(IdentityKind::Always),
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
             Column {
                 name: "doubled".into(),
@@ -8805,6 +8793,9 @@ mod tests {
                 }),
                 identity: None,
                 collation: None,
+                statistics_target: -1,
+                storage: None,
+                attribute_options: Vec::new(),
             },
         ];
         let checks = vec![
@@ -9990,10 +9981,7 @@ mod tests {
         .expect("ft");
         let t = get_table(kv, &rel("orders")).expect("get ft");
         assert!(t.foreign.is_some());
-        assert_eq!(t.columns[0].name, "_partition");
-        assert_eq!(t.columns[0].ty, ColumnType::Int4);
-        assert_eq!(t.columns[3].name, "_key");
-        assert_eq!(t.columns.last().expect("value col").name, "id");
+        assert_eq!(t.columns, vec![Column::new("id", ColumnType::Int4)]);
     }
 
     #[test]

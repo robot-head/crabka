@@ -30,6 +30,16 @@ pub use types::{
     avro_schema_to_columns, json_schema_to_columns, project, protobuf_message_to_columns,
 };
 
+fn envelope_columns() -> Vec<Column> {
+    vec![
+        Column::new("_partition", ColumnType::Int4),
+        Column::new("_offset", ColumnType::Int8),
+        Column::new("_timestamp", ColumnType::Timestamptz),
+        Column::new("_key", ColumnType::Bytea),
+        Column::new("_headers", ColumnType::Text),
+    ]
+}
+
 /// The Kafka foreign-data wrapper.
 ///
 /// The optional default bootstrap is process configuration, not catalog state.
@@ -271,9 +281,11 @@ impl ForeignScanner for KafkaFdw {
                         ("topic".to_string(), entry.name.clone()),
                         ("value_format".to_string(), wire_option(wire).to_string()),
                     ];
+                    let mut columns = envelope_columns();
+                    columns.extend(value_columns);
                     out.push(ImportedTable {
                         name: entry.name,
-                        columns: value_columns,
+                        columns,
                         options,
                     });
                 }

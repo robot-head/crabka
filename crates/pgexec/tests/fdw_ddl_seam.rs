@@ -118,7 +118,12 @@ async fn fdw_ddl_routes_all_catalog_writes_through_committer() {
     let (engine, committer) = engine_with_recording_committer();
     let mut session = engine.connect();
 
-    run(&mut session, "CREATE FOREIGN DATA WRAPPER kafka_fdw").await;
+    run(
+        &mut session,
+        "CREATE FUNCTION kafka_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'; \
+         CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_handler",
+    )
+    .await;
     run(
         &mut session,
         "CREATE SERVER kafka_srv FOREIGN DATA WRAPPER kafka_fdw",
@@ -229,7 +234,12 @@ async fn import_foreign_schema_routes_created_tables_through_committer() {
     engine.set_foreign_scanner(Arc::new(ImportingScanner));
     let mut session = engine.connect();
 
-    run(&mut session, "CREATE FOREIGN DATA WRAPPER kafka_fdw").await;
+    run(
+        &mut session,
+        "CREATE FUNCTION kafka_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'; \
+         CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_handler",
+    )
+    .await;
     run(
         &mut session,
         "CREATE SERVER kafka_srv FOREIGN DATA WRAPPER kafka_fdw",
@@ -245,7 +255,7 @@ async fn import_foreign_schema_routes_created_tables_through_committer() {
     let import_batch = batches.last().expect("import batch recorded");
     // `IMPORT FOREIGN SCHEMA` allocates from the counter under the counter's own
     // lock rather than claiming a block, so it adds no batch of its own.
-    assert!(batches.len() == 3);
+    assert!(batches.len() == 4);
     // The imported table's schema, its rowid sequence, its id-index entry, and
     // the one counter bump the batch owes.
     assert!(import_batch.len() == 4);

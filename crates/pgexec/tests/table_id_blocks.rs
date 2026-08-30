@@ -189,7 +189,12 @@ async fn import_foreign_schema_gives_every_imported_table_a_distinct_id() {
     engine.set_foreign_scanner(Arc::new(ThreeTableScanner));
     let mut session = engine.connect();
 
-    run(&mut session, "CREATE FOREIGN DATA WRAPPER kafka_fdw").await;
+    run(
+        &mut session,
+        "CREATE FUNCTION kafka_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'; \
+         CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_handler",
+    )
+    .await;
     run(
         &mut session,
         "CREATE SERVER kafka_srv FOREIGN DATA WRAPPER kafka_fdw",

@@ -1860,7 +1860,10 @@ async fn spawn_with_scanner(scanner: Arc<dyn ForeignScanner>) -> u16 {
 async fn create_drop_foreign_objects_roundtrip() {
     let client = connect(spawn().await).await;
     client
-        .batch_execute("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+        .batch_execute(
+            "CREATE FUNCTION kafka_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'; \
+             CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_handler",
+        )
         .await
         .expect("create FDW");
     client
@@ -1925,7 +1928,10 @@ async fn foreign_select_reads_scanner_rows_with_projection_and_where() {
     });
     let client = connect(spawn_with_scanner(scanner).await).await;
     client
-        .batch_execute("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+        .batch_execute(
+            "CREATE FUNCTION kafka_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'; \
+             CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_handler",
+        )
         .await
         .expect("create FDW");
     client
@@ -2023,7 +2029,10 @@ async fn import_foreign_schema_materializes_foreign_tables() {
     });
     let client = connect(spawn_with_scanner(scanner).await).await;
     client
-        .batch_execute("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+        .batch_execute(
+            "CREATE FUNCTION kafka_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'; \
+             CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_handler",
+        )
         .await
         .expect("create FDW");
     client
@@ -2038,10 +2047,10 @@ async fn import_foreign_schema_materializes_foreign_tables() {
         .await
         .expect("import foreign schema");
 
-    // `orders` is now a queryable foreign table: its value column `id` plus the
-    // envelope columns are present (the scanner returns no rows → empty result).
+    // `orders` is now a queryable foreign table with its scanner-provided `id`
+    // column (the scanner returns no rows → empty result).
     let rows = client
-        .query("SELECT _partition, id FROM orders", &[])
+        .query("SELECT id FROM orders", &[])
         .await
         .expect("select imported orders");
     assert_eq!(rows.len(), 0, "fake scanner returns no rows");
