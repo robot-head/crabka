@@ -11191,6 +11191,19 @@ impl SqlSession {
         // Computed before the drop runs, while the dependents still exist.
         let cascade_notice =
             crate::exec::cascade_drop_notice(&*self.catalog_kv, &resolution, stmt)?;
+        let fdw_change_warning = match stmt {
+            Statement::AlterFdw {
+                handler: Some(_), ..
+            } => Some(
+                "changing the foreign-data wrapper handler can change behavior of existing foreign tables",
+            ),
+            Statement::AlterFdw {
+                validator: Some(_), ..
+            } => Some(
+                "changing the foreign-data wrapper validator can cause the options for dependent objects to become invalid",
+            ),
+            _ => None,
+        };
         let text_search_notice = match stmt {
             Statement::Utility(UtilityStatement::TextSearch(ddl)) => {
                 crate::text_search_catalog::skipped_mapping_notice(&*self.catalog_kv, ddl)?
@@ -11362,6 +11375,9 @@ impl SqlSession {
         }
         for notice in shell_notices {
             self.plpgsql_notice(notice)?;
+        }
+        if let Some(warning) = fdw_change_warning {
+            self.plpgsql_notice(PgError::warning(warning))?;
         }
         if let Some((message, detail)) = cascade_notice {
             let notice = PgError::notice(message);
