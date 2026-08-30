@@ -139,8 +139,11 @@ enum ScalarFunc {
     /// Regression helper exposing PostgreSQL's `IsBinaryCoercible`.
     BinaryCoercible,
     PgNumaAvailable,
-    /// `interval_hash(interval)`: hash the canonical 30-day-month span.
-    IntervalHash,
+    /// PostgreSQL's temporal hash support functions.
+    TemporalHash {
+        ty: ColumnType,
+        extended: bool,
+    },
     /// PostgreSQL's integer hash support functions, including seeded variants.
     IntegerHash {
         ty: ColumnType,
@@ -421,7 +424,46 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "pg_input_is_valid" => ScalarFunc::PgInputIsValid,
         "binary_coercible" => ScalarFunc::BinaryCoercible,
         "pg_numa_available" => ScalarFunc::PgNumaAvailable,
-        "interval_hash" => ScalarFunc::IntervalHash,
+        "interval_hash" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Interval,
+            extended: false,
+        },
+        "interval_hash_extended" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Interval,
+            extended: true,
+        },
+        "time_hash" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Time,
+            extended: false,
+        },
+        "time_hash_extended" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Time,
+            extended: true,
+        },
+        "timetz_hash" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Timetz,
+            extended: false,
+        },
+        "timetz_hash_extended" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Timetz,
+            extended: true,
+        },
+        "timestamp_hash" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Timestamp,
+            extended: false,
+        },
+        "timestamp_hash_extended" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Timestamp,
+            extended: true,
+        },
+        "timestamptz_hash" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Timestamptz,
+            extended: false,
+        },
+        "timestamptz_hash_extended" => ScalarFunc::TemporalHash {
+            ty: ColumnType::Timestamptz,
+            extended: true,
+        },
         "hashchar" => ScalarFunc::IntegerHash {
             ty: ColumnType::InternalChar,
             extended: false,
@@ -1549,14 +1591,19 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
             require_arity(fc, n == 0)?;
             Ok(ColumnType::Bool)
         }
-        ScalarFunc::IntervalHash => {
-            require_arity(fc, n == 1)?;
+        ScalarFunc::TemporalHash { ty, extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
             if is_unknown_literal(&args[0])
                 || crate::eval::infer_type(&args[0], scope)?
                     .temporal_base()
-                    .is_some_and(|(base, _)| base == ColumnType::Interval)
+                    .is_some_and(|(base, _)| base == ty)
             {
-                Ok(ColumnType::Int4)
+                if extended {
+                    require_int(&args[1], scope)?;
+                    Ok(ColumnType::Int8)
+                } else {
+                    Ok(ColumnType::Int4)
+                }
             } else {
                 Err(no_matching_function())
             }
@@ -2223,7 +2270,7 @@ fn coerce_unknown_args(
     }
     let target = match f {
         ScalarFunc::BoolCompare { .. } => ColumnType::Bool,
-        ScalarFunc::IntervalHash => ColumnType::Interval,
+        ScalarFunc::TemporalHash { ty, .. } => ty,
         ScalarFunc::IntegerHash { ty, .. } => ty,
         ScalarFunc::FloatHash { ty, .. } => ty,
         ScalarFunc::TextHash { ty, .. } => ty,
@@ -3457,14 +3504,58 @@ fn eval_eager(
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Bool(false))
         }
-        ScalarFunc::IntervalHash => {
-            require_arity(fc, vals.len() == 1)?;
-            let Datum::Interval(interval) = vals[0] else {
-                return Err(type_error("interval_hash", &vals[0]));
+        ScalarFunc::TemporalHash { ty, extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
             };
-            Ok(Datum::Int4(crate::partition::hash::hash_int64(
-                interval.canonical_micros() as i64,
-            )))
+            let hash = match (ty, &vals[0]) {
+                (ColumnType::Interval, Datum::Interval(value)) => {
+                    crate::partition::hash::hash_int64_extended(
+                        value.canonical_micros() as i64,
+                        seed,
+                    )
+                }
+                (ColumnType::Time, Datum::Time(value)) => {
+                    crate::partition::hash::hash_int64_extended(
+                        i64::from_be_bytes(crabka_pgtypes::datetime::time_to_binary(*value)),
+                        seed,
+                    )
+                }
+                (ColumnType::Timestamp, Datum::Timestamp(value)) => {
+                    crate::partition::hash::hash_int64_extended(
+                        i64::from_be_bytes(crabka_pgtypes::datetime::timestamp_to_binary(*value)),
+                        seed,
+                    )
+                }
+                (ColumnType::Timestamptz, Datum::Timestamptz(value)) => {
+                    crate::partition::hash::hash_int64_extended(
+                        i64::from_be_bytes(crabka_pgtypes::datetime::timestamptz_to_binary(*value)),
+                        seed,
+                    )
+                }
+                (ColumnType::Timetz, Datum::Timetz(value)) => {
+                    let binary = crabka_pgtypes::datetime::timetz_to_binary(*value);
+                    crate::partition::hash::hash_int64_extended(
+                        i64::from_be_bytes(binary[..8].try_into().expect("eight bytes")),
+                        seed,
+                    ) ^ crate::partition::hash::hash_int32_extended(
+                        i32::from_be_bytes(binary[8..].try_into().expect("four bytes")),
+                        seed,
+                    )
+                    .cast_unsigned()
+                }
+                _ => return Err(type_error(&fc.name, &vals[0])),
+            };
+            Ok(if extended {
+                Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
+            } else {
+                Datum::Int4(i32::from_ne_bytes(
+                    hash.to_ne_bytes()[..4].try_into().expect("u64"),
+                ))
+            })
         }
         ScalarFunc::IntegerHash { ty, extended } => {
             require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
@@ -6280,6 +6371,40 @@ mod tests {
             assert!(ev(sql) == Datum::Int4(expected), "{sql}");
         }
         assert!(err_code("interval_hash(1)", None) == "42883");
+    }
+
+    #[test]
+    fn temporal_hashes_share_postgres_integer_hashes() {
+        let scope = Scope::empty();
+        let ty =
+            |sql: &str| crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type");
+
+        for sql in [
+            "time_hash('00:00')",
+            "timetz_hash('00:00+00')",
+            "timestamp_hash('2000-01-01 00:00')",
+            "timestamptz_hash('2000-01-01 00:00+00')",
+        ] {
+            assert!(ty(sql) == ColumnType::Int4, "{sql}");
+        }
+        for sql in [
+            "time_hash_extended('00:00', 1::int8)",
+            "timetz_hash_extended('00:00+00', 1::int8)",
+            "interval_hash_extended('1 month', 1::int8)",
+            "timestamp_hash_extended('2000-01-01 00:00', 1::int8)",
+            "timestamptz_hash_extended('2000-01-01 00:00+00', 1::int8)",
+        ] {
+            assert!(ty(sql) == ColumnType::Int8, "{sql}");
+        }
+        assert!(ev("time_hash('00:00')") == ev("hashint8(0)"));
+        assert!(ev("timestamp_hash('2000-01-01 00:00')") == ev("hashint8(0)"));
+        assert!(ev("timestamptz_hash('2000-01-01 00:00+00')") == ev("hashint8(0)"));
+        assert!(
+            ev("interval_hash_extended('1 month', 1::int8)")
+                == ev("hashint8extended(2592000000000::int8, 1::int8)")
+        );
+        assert!(err_code("time_hash(1)", None) == "42883");
+        assert!(err_code("timetz_hash_extended('00:00+00', 'x')", None) == "42883");
     }
 
     #[test]
