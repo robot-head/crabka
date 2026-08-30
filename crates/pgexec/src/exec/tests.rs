@@ -8306,6 +8306,37 @@ fn foreign_owner_changes_enforce_fdw_and_server_rules() {
         session_user: "alice",
         ..super::ForeignCtx::none()
     };
+    for sql in ["CREATE ROLE recipient", "GRANT recipient TO alice"] {
+        let (_, ops) = super::execute_ddl(&kv, &alter(sql), owner, true).expect(sql);
+        kv.write_batch(&ops).expect("apply role setup");
+    }
+    let error = super::execute_ddl(
+        &kv,
+        &alter("ALTER SERVER s OWNER TO recipient"),
+        alice,
+        true,
+    )
+    .expect_err("server owner requires FDW usage");
+    assert!(matches!(error, super::ExecError::Remote(ref error)
+        if error.code == "42501" && error.message == "permission denied for foreign-data wrapper w"));
+
+    let (_, ops) = super::execute_ddl(
+        &kv,
+        &alter("GRANT USAGE ON FOREIGN DATA WRAPPER w TO alice"),
+        owner,
+        true,
+    )
+    .expect("grant FDW usage");
+    kv.write_batch(&ops).expect("apply FDW usage grant");
+    let (_, ops) = super::execute_ddl(
+        &kv,
+        &alter("ALTER SERVER s OWNER TO recipient"),
+        alice,
+        true,
+    )
+    .expect("FDW usage permits server ownership transfer");
+    kv.write_batch(&ops).expect("apply server owner transfer");
+
     let error = super::execute_ddl(&kv, &alter("ALTER SERVER s OWNER TO owner"), alice, true)
         .expect_err("new owner must be assumable");
     assert!(matches!(error, super::ExecError::Remote(ref error)

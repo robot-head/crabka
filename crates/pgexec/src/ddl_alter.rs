@@ -2013,6 +2013,17 @@ pub(crate) fn execute_ddl(
             } else if let Some(owner) = owner_to {
                 let owner = resolve_new_owner(kv, fctx, owner)?;
                 require_new_owner_role(kv, fctx, &owner)?;
+                let server = foreign_object_lookup(
+                    crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                    name,
+                    crabka_pgcatalog::get_server(kv, name),
+                )?;
+                require_foreign_usage(
+                    kv,
+                    crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                    &server.wrapper,
+                    fctx,
+                )?;
                 crabka_pgcatalog::set_server_owner_ops(kv, name, &owner)?
             } else {
                 let server = crabka_pgcatalog::get_server(kv, name)?;
@@ -4219,7 +4230,16 @@ fn require_foreign_usage(
     name: &str,
     fctx: ForeignCtx<'_>,
 ) -> Result<(), ExecError> {
-    if crate::catalog_fn::foreign_usage_is_held(kv, target, name, fctx.effective_role())
+    require_foreign_usage_for_role(kv, target, name, fctx.effective_role())
+}
+
+fn require_foreign_usage_for_role(
+    kv: &dyn Kv,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    name: &str,
+    role: &str,
+) -> Result<(), ExecError> {
+    if crate::catalog_fn::foreign_usage_is_held(kv, target, name, role)
         .map_err(|error| foreign_usage_object_error(target, name, error))?
     {
         return Ok(());
