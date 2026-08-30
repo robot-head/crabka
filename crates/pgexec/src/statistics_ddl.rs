@@ -211,11 +211,16 @@ pub(crate) fn require_statistics_owner(
 pub(crate) fn alter(
     kv: &dyn Kv,
     name: RelationName,
+    if_exists: bool,
     action: &ast::AlterStatisticsAction,
     fctx: ForeignCtx<'_>,
 ) -> DdlResult {
-    let mut object = crabka_pgcatalog::statistics::get(kv, &name)?
-        .ok_or_else(|| crabka_pgcatalog::CatalogError::UndefinedObject(name.to_string()))?;
+    let Some(mut object) = crabka_pgcatalog::statistics::get(kv, &name)? else {
+        if if_exists {
+            return Ok((command("ALTER STATISTICS"), Vec::new()));
+        }
+        return Err(crabka_pgcatalog::CatalogError::UndefinedObject(name.to_string()).into());
+    };
     require_statistics_owner(kv, &object, fctx.effective_role())?;
     let ops = match action {
         ast::AlterStatisticsAction::RenameTo(new_name) => {

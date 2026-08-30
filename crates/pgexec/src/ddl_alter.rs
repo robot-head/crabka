@@ -15,12 +15,17 @@ pub(crate) fn execute_ddl(
             Ok((command(tag), ops))
         }
         Statement::CreateStatistics(stats) => crate::statistics_ddl::create(kv, stats, fctx),
-        Statement::AlterStatistics { name, action } => crate::statistics_ddl::alter(
-            kv,
-            resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?,
+        Statement::AlterStatistics {
+            name,
+            if_exists,
             action,
-            fctx,
-        ),
+        } => match resolve_relation(kv, resolution, name, SchemaDisposition::Utility) {
+            Ok(name) => crate::statistics_ddl::alter(kv, name, *if_exists, action, fctx),
+            Err(error) if *if_exists && is_missing_schema(&error) => {
+                Ok((command("ALTER STATISTICS"), Vec::new()))
+            }
+            Err(error) => Err(error),
+        },
         Statement::DropStatistics { names, if_exists } => {
             crate::statistics_ddl::drop(kv, names, *if_exists, fctx)
         }

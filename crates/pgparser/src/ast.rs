@@ -598,6 +598,7 @@ pub enum Statement {
     CreateStatistics(CreateStatistics),
     AlterStatistics {
         name: RelationRef,
+        if_exists: bool,
         action: AlterStatisticsAction,
     },
     DropStatistics {

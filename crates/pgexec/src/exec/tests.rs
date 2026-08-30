@@ -785,6 +785,11 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
         "ALTER STATISTICS stat_ddl_s RENAME TO stat_ddl_s_renamed",
     )
     .await;
+    run_s(
+        &mut session,
+        "ALTER STATISTICS IF EXISTS stat_ddl_missing SET STATISTICS 10",
+    )
+    .await;
     run_s(&mut session, "DROP TABLE stat_ddl").await;
     assert!(
         text_rows_of(&mut session, "SELECT count(*)::text FROM pg_statistic_ext").await

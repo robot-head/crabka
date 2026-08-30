@@ -7222,6 +7222,7 @@ impl Parser {
     fn alter_statistics_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("alter")?;
         self.expect_ident_eq("statistics")?;
+        let if_exists = self.eat_if_exists();
         let name = self.relation_ref()?;
         let pos = self.peek_pos();
         let action = if self.eat_ident_eq("owner") {
@@ -7250,7 +7251,11 @@ impl Parser {
                 pos,
             ));
         };
-        Ok(crate::ast::Statement::AlterStatistics { name, action })
+        Ok(crate::ast::Statement::AlterStatistics {
+            name,
+            if_exists,
+            action,
+        })
     }
 
     /// `DROP STATISTICS [IF EXISTS] <name> [, …]`.
@@ -20806,12 +20811,13 @@ mod tests {
             matches!(&stats.from, TableExpr::Table { name, .. } if *name == RelationRef::qualified("public", "t"))
         );
 
-        let statements = crate::parse("ALTER STATISTICS audit.s SET STATISTICS DEFAULT")
+        let statements = crate::parse("ALTER STATISTICS IF EXISTS audit.s SET STATISTICS DEFAULT")
             .expect("alter statistics");
         assert!(matches!(
             statements.as_slice(),
             [Statement::AlterStatistics {
                 name,
+                if_exists: true,
                 action: AlterStatisticsAction::SetStatistics(None),
             }] if *name == RelationRef::qualified("audit", "s")
         ));
