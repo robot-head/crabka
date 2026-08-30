@@ -1636,6 +1636,19 @@ pub(crate) fn apply_binary_of(
         typed_literal(right, r, left)?,
     );
     let (l, r) = (nl.as_ref().unwrap_or(l), nr.as_ref().unwrap_or(r));
+    // Virtual catalog scans retain an array's values but can erase the
+    // oidvector datum tag. Restore it from the column's static type before
+    // comparison, so its zero lower bound is not treated as int4[] metadata.
+    let oidvector = |expr: &Expr, value: &Datum| -> Result<Option<Datum>, ExecError> {
+        if infer_type(expr, scope)? == ColumnType::OidVector
+            && let Datum::Array(array) = value
+        {
+            return Ok(Some(Datum::OidVector(array.clone())));
+        }
+        Ok(None)
+    };
+    let (ol, or) = (oidvector(left, l)?, oidvector(right, r)?);
+    let (l, r) = (ol.as_ref().unwrap_or(l), or.as_ref().unwrap_or(r));
     let (lc, rc) = coerce_untyped_literal_operands(op, left, right, l, r, ctx)?;
     let (l, r) = (lc.as_ref().unwrap_or(l), rc.as_ref().unwrap_or(r));
     if op == BinaryOp::Concat {

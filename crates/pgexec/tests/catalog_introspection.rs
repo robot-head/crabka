@@ -1824,6 +1824,22 @@ async fn catalog_only_builtin_types_link_to_their_io_functions() {
 #[tokio::test]
 async fn oidvector_compares_equal_to_its_oid_array_projection() {
     let engine = fixture().await;
+    let builtin = grid(
+        &engine,
+        "SELECT proargtypes != ARRAY( \
+             SELECT proallargtypes[i] \
+             FROM generate_series(1, array_length(proallargtypes, 1)) AS g(i) \
+             WHERE proargmodes IS NULL OR proargmodes[i] IN ('i', 'b', 'v') \
+         ) FROM pg_proc WHERE oid = 438",
+    )
+    .await;
+    assert2::assert!(builtin == vec![some(&["f"])]);
+    run(
+        &engine,
+        "CREATE FUNCTION oidvector_projection_fixture(IN value integer, OUT result integer) \
+         LANGUAGE sql AS 'SELECT value'",
+    )
+    .await;
     let rows = grid(
         &engine,
         "SELECT count(*) \
