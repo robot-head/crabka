@@ -8082,7 +8082,7 @@ pub(crate) fn create_index_wrong_kind(
             format!("cannot open relation \"{}\"", name.name),
             kind,
         )),
-        "view" | "sequence" => Some(relkind_not_supported(
+        "view" | "sequence" | "foreign table" => Some(relkind_not_supported(
             format!("cannot create index on relation \"{}\"", name.name),
             kind,
         )),

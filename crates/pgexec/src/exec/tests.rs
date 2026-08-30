@@ -9189,6 +9189,32 @@ fn foreign_tables_reject_index_backed_constraints() {
 }
 
 #[test]
+fn create_index_on_a_foreign_table_is_rejected() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE t (id int4) SERVER s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
+        let (_, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply setup DDL");
+    }
+    let stmt = crabka_pgparser::parser::parse("CREATE INDEX t_id_idx ON t (id)")
+        .expect("parse")
+        .remove(0);
+    let error = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+        .expect_err("foreign table index is rejected");
+    assert!(matches!(error, super::ExecError::Remote(ref error)
+        if error.code == "42809"
+            && error.message == "cannot create index on relation \"t\""
+            && error.diagnostics.as_ref().and_then(|diagnostics| diagnostics.detail.as_deref())
+                == Some("This operation is not supported for foreign tables.")));
+}
+
+#[test]
 fn comments_on_foreign_objects_are_persisted() {
     use crabka_pgcatalog::CommentObject;
     use crabka_pgkv::{Kv, MemKv};
