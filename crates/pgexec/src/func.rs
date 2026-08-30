@@ -188,6 +188,9 @@ enum ScalarFunc {
     RecordHash {
         extended: bool,
     },
+    JsonbHash {
+        extended: bool,
+    },
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
     UuidV4,
@@ -572,6 +575,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "hash_multirange_extended" => ScalarFunc::MultirangeHash { extended: true },
         "hash_record" => ScalarFunc::RecordHash { extended: false },
         "hash_record_extended" => ScalarFunc::RecordHash { extended: true },
+        "jsonb_hash" => ScalarFunc::JsonbHash { extended: false },
+        "jsonb_hash_extended" => ScalarFunc::JsonbHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1827,6 +1832,20 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::JsonbHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if crate::eval::infer_type(&args[0], scope)? != ColumnType::Jsonb {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::FloatHash { ty, extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             let accepts = |input: ColumnType| {
@@ -2412,6 +2431,7 @@ fn coerce_unknown_args(
         ScalarFunc::EnumHash { .. } => return Ok(()),
         ScalarFunc::RangeHash { .. } | ScalarFunc::MultirangeHash { .. } => return Ok(()),
         ScalarFunc::RecordHash { .. } => return Ok(()),
+        ScalarFunc::JsonbHash { .. } => ColumnType::Jsonb,
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -3949,6 +3969,21 @@ fn eval_eager(
             }
             Ok(hash_result(hash, extended))
         }
+        ScalarFunc::JsonbHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let Datum::Jsonb(value) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            Ok(hash_result(
+                jsonb_hash(value, seed, extended, true)?,
+                extended,
+            ))
+        }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
             crate::catalog_fn::relation_is_visible(&vals[0], ctx)
@@ -4040,6 +4075,108 @@ fn hash_result(hash: u64, extended: bool) -> Datum {
             hash.to_ne_bytes()[..4].try_into().expect("u64"),
         ))
     }
+}
+
+fn jsonb_hash(
+    value: &crabka_pgtypes::JsonbValue,
+    seed: u64,
+    extended: bool,
+    root: bool,
+) -> Result<u64, ExecError> {
+    use crabka_pgtypes::JsonbValue;
+    if root && matches!(value, JsonbValue::Array(items) if items.is_empty())
+        || root && matches!(value, JsonbValue::Object(items) if items.is_empty())
+    {
+        return Ok(if extended { seed } else { 0 });
+    }
+    let scalar = |value: &JsonbValue| -> Result<u64, ExecError> {
+        let hash = match value {
+            JsonbValue::Null => {
+                if extended {
+                    seed.wrapping_add(1)
+                } else {
+                    1
+                }
+            }
+            JsonbValue::Bool(value) => {
+                if extended && seed != 0 {
+                    crate::partition::hash::hash_int32_extended(i32::from(*value), seed)
+                        .cast_unsigned()
+                } else if *value {
+                    2
+                } else {
+                    4
+                }
+            }
+            JsonbValue::String(value) => {
+                crate::partition::hash::hash_bytes_extended(value.as_bytes(), seed)?
+            }
+            JsonbValue::Number(value) => {
+                let binary = crabka_pgtypes::numeric::binary(
+                    &crabka_pgtypes::numeric::NumericValue::Finite(value.clone()),
+                );
+                if binary[..2] == [0, 0] {
+                    return Ok(if extended {
+                        seed.wrapping_sub(1)
+                    } else {
+                        u64::MAX
+                    });
+                }
+                let weight = i16::from_be_bytes(binary[2..4].try_into().expect("weight"));
+                let digits = binary[8..]
+                    .chunks_exact(2)
+                    .flat_map(|group| [group[1], group[0]])
+                    .collect::<Vec<_>>();
+                crate::partition::hash::hash_bytes_extended(&digits, seed)?
+                    ^ (weight as i64).cast_unsigned()
+            }
+            JsonbValue::Array(_) | JsonbValue::Object(_) => unreachable!("jsonb scalar"),
+        };
+        Ok(hash)
+    };
+    fn visit(
+        value: &JsonbValue,
+        hash: &mut u64,
+        seed: u64,
+        extended: bool,
+        scalar: &impl Fn(&JsonbValue) -> Result<u64, ExecError>,
+    ) -> Result<(), ExecError> {
+        let rotate = |hash: u64| {
+            if extended {
+                ((hash << 1) & 0xffff_fffe_ffff_fffe) | ((hash >> 31) & 0x0000_0001_0000_0001)
+            } else {
+                u64::from((hash as u32).rotate_left(1))
+            }
+        };
+        match value {
+            JsonbValue::Array(values) => {
+                *hash ^= if extended {
+                    0x4000_0000_4000_0000
+                } else {
+                    0x4000_0000
+                };
+                for value in values {
+                    visit(value, hash, seed, extended, scalar)?;
+                }
+            }
+            JsonbValue::Object(values) => {
+                *hash ^= if extended {
+                    0x2000_0000_2000_0000
+                } else {
+                    0x2000_0000
+                };
+                for (key, value) in values {
+                    *hash = rotate(*hash) ^ scalar(&JsonbValue::String(key.clone()))?;
+                    visit(value, hash, seed, extended, scalar)?;
+                }
+            }
+            _ => *hash = rotate(*hash) ^ scalar(value)?,
+        }
+        Ok(())
+    }
+    let mut hash = 0;
+    visit(value, &mut hash, seed, extended, &scalar)?;
+    Ok(hash)
 }
 
 fn eval_enum_support(
