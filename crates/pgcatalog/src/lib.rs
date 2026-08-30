@@ -419,6 +419,8 @@ pub struct Index {
     pub table: RelationName,
     pub table_id: TableId,
     pub columns: Vec<String>,
+    /// Source text of a partial-index predicate, without the `WHERE` keyword.
+    pub predicate: Option<String>,
     pub unique: bool,
     pub placement: IndexPlacement,
     pub method: IndexMethod,
@@ -488,6 +490,8 @@ impl Index {
 pub struct NewIndex {
     pub name: String,
     pub columns: Vec<String>,
+    /// See [`Index::predicate`]. Constraint indexes are never partial.
+    pub predicate: Option<String>,
     pub unique: bool,
     pub placement: IndexPlacement,
     pub method: IndexMethod,
@@ -4522,6 +4526,26 @@ pub fn create_index_with_method_ops(
     placement: IndexPlacement,
     method: IndexMethod,
 ) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
+    create_index_with_method_and_predicate_ops(
+        kv, name, table, columns, unique, placement, method, None,
+    )
+}
+
+/// Build the write batch for an index that may carry a partial predicate.
+///
+/// # Errors
+///
+/// Returns duplicate-index, undefined-table/column, or storage/corruption errors.
+pub fn create_index_with_method_and_predicate_ops(
+    kv: &dyn Kv,
+    name: &str,
+    table: &RelationName,
+    columns: Vec<String>,
+    unique: bool,
+    placement: IndexPlacement,
+    method: IndexMethod,
+    predicate: Option<String>,
+) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
     if kv.get(&catalog_index_key(&table.sibling(name)))?.is_some() {
         return Err(CatalogError::DuplicateIndex(name.to_string()));
     }
@@ -4534,6 +4558,7 @@ pub fn create_index_with_method_ops(
         table: table.clone(),
         table_id: table_meta.id,
         columns,
+        predicate,
         unique,
         placement,
         method,
@@ -4589,6 +4614,7 @@ pub fn create_index_on_table_ops(
         table: table.name.clone(),
         table_id: table.id,
         columns,
+        predicate: None,
         unique,
         placement,
         method: IndexMethod::Btree,
@@ -4648,6 +4674,7 @@ pub fn create_constraint_index_ops(
         table: table.name.clone(),
         table_id: table.id,
         columns: new_index.columns.clone(),
+        predicate: new_index.predicate.clone(),
         unique: new_index.unique,
         placement: new_index.placement,
         method: new_index.method,
@@ -4757,6 +4784,7 @@ pub fn create_indexes_on_table_ops(
             table: table.name.clone(),
             table_id: table.id,
             columns: new_index.columns.clone(),
+            predicate: new_index.predicate.clone(),
             unique: new_index.unique,
             placement: new_index.placement,
             method: new_index.method,
@@ -9278,6 +9306,7 @@ mod tests {
             &NewIndex {
                 name: "t_pkey".into(),
                 columns: vec!["id".into()],
+                predicate: None,
                 unique: true,
                 placement: IndexPlacement::Local,
                 method: IndexMethod::Btree,
@@ -10769,6 +10798,7 @@ mod tests {
             table: rel("users"),
             table_id,
             columns: vec!["name".into()],
+            predicate: None,
             unique: true,
             placement: IndexPlacement::Global,
             method: IndexMethod::Btree,

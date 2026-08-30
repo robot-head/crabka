@@ -1175,8 +1175,9 @@ pub(crate) fn execute_ddl(
             reject_index_over_virtual_generated(&table_meta, columns, None)?;
             validate_index_opclasses(kv, resolution, &table_meta, keys, index_method)?;
             validate_index_expressions(&table_meta, keys, *unique, placement, index_method)?;
+            validate_index_predicate(&table_meta, predicate.as_deref())?;
             validate_index_method(&table_meta, columns, *unique, placement, index_method)?;
-            let (id, mut ops) = crabka_pgcatalog::create_index_with_method_ops(
+            let (id, mut ops) = crabka_pgcatalog::create_index_with_method_and_predicate_ops(
                 kv,
                 &name.name,
                 table,
@@ -1184,6 +1185,7 @@ pub(crate) fn execute_ddl(
                 *unique,
                 placement,
                 index_method,
+                predicate.clone(),
             )?;
             if let Some(tablespace) = tablespace {
                 let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
@@ -1197,6 +1199,7 @@ pub(crate) fn execute_ddl(
                     table: table.clone(),
                     table_id: table_meta.id,
                     columns: columns.clone(),
+                    predicate: predicate.clone(),
                     unique: *unique,
                     placement,
                     method: index_method,

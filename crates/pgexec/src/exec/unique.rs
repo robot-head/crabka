@@ -17,9 +17,12 @@ pub(super) async fn enforce_unique_local_index_updates(
         .iter()
         .filter(|index| index.unique && index.exclusion_operators().is_none())
     {
+        if !index_applies(table, index, new_row)? {
+            continue;
+        }
         let old_values = indexed_values(table, index, old_row)?;
         let new_values = indexed_values(table, index, new_row)?;
-        if old_values == new_values {
+        if index_applies(table, index, old_row)? && old_values == new_values {
             // The indexed key is untouched: no probe, and — crucially for
             // write throughput — no key lock (a PK-preserving UPDATE takes
             // only its row lock).
@@ -53,6 +56,9 @@ pub(super) async fn enforce_unique_local_indexes(
         .iter()
         .filter(|index| index.unique && index.exclusion_operators().is_none())
     {
+        if !index_applies(table, index, row)? {
+            continue;
+        }
         let values = indexed_values(table, index, row)?;
         enforce_unique_local_index(write_ctx, table, index, rowid, values, writes).await?;
     }

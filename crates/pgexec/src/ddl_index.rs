@@ -25,15 +25,8 @@ pub(crate) fn index_name_or_default(
 /// catalog's NUL-prefixed encoding, which cannot collide with a SQL identifier.
 pub(crate) fn index_key_columns(
     keys: &[crabka_pgparser::ast::IndexKey],
-    predicate: Option<&str>,
+    _predicate: Option<&str>,
 ) -> Result<Vec<String>, ExecError> {
-    if predicate.is_some() {
-        return Err(ExecError::Unsupported(
-            "partial indexes (CREATE INDEX … WHERE) are not supported: the scanner would treat \
-             the index as covering every row"
-                .into(),
-        ));
-    }
     keys.iter()
         .map(|key| {
             if key.descending || key.nulls_first == Some(true) {
@@ -49,6 +42,34 @@ pub(crate) fn index_key_columns(
                 .unwrap_or_else(|| crabka_pgcatalog::expression_index_key(&key.text)))
         })
         .collect()
+}
+
+pub(crate) fn validate_index_predicate(
+    table: &Table,
+    predicate: Option<&str>,
+) -> Result<(), ExecError> {
+    let Some(predicate) = predicate else {
+        return Ok(());
+    };
+    let expression = crabka_pgparser::parser::parse_expression(predicate)?;
+    let scope = Scope::single(table, &table.name.name);
+    crate::eval::check_predicate_resolves(&expression, &scope)?;
+    let mut invalid = crate::agg::contains_aggregate(&expression);
+    crate::grouping::visit_expr(&expression, &mut |node| {
+        invalid |= matches!(
+            node,
+            crabka_pgparser::ast::Expr::ScalarSubquery(_)
+                | crabka_pgparser::ast::Expr::Exists(_)
+                | crabka_pgparser::ast::Expr::InSubquery { .. }
+                | crabka_pgparser::ast::Expr::Quantified { .. }
+        ) || matches!(node, crabka_pgparser::ast::Expr::Func(call) if !is_immutable_function(&call.name));
+    });
+    if invalid {
+        return Err(ExecError::InvalidObjectDefinition(
+            "functions in index predicate must be marked IMMUTABLE".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_index_expressions(

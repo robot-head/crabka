@@ -415,6 +415,9 @@ pub(super) fn index_entries(
     index: &crabka_pgcatalog::Index,
     row: &[Datum],
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
+    if !index_applies(table, index, row)? {
+        return Ok(Vec::new());
+    }
     if index
         .columns
         .iter()
@@ -440,6 +443,23 @@ pub(super) fn index_entries(
             .collect()),
         got => Err(crate::func::type_error("tsvector", got)),
     }
+}
+
+pub(super) fn index_applies(
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    row: &[Datum],
+) -> Result<bool, ExecError> {
+    let Some(predicate) = &index.predicate else {
+        return Ok(true);
+    };
+    let expression = crabka_pgparser::parser::parse_expression(predicate)?;
+    Ok(crate::eval::eval(
+        &expression,
+        &Scope::single(table, &table.name.name),
+        row,
+        &crate::clock::EvalCtx::test_default(),
+    )? == Datum::Bool(true))
 }
 
 pub(super) fn indexed_values(

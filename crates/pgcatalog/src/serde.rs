@@ -60,7 +60,8 @@ const TABLE_OPTION_KNOWN: u8 =
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 7;
+const INDEX_VERSION: u8 = 8;
+const INDEX_VERSION_LEGACY: u8 = 7;
 const SEQUENCE_VERSION: u8 = 1;
 const INDEX_PLACEMENT_LOCAL: u8 = 0;
 const INDEX_PLACEMENT_GLOBAL: u8 = 1;
@@ -1586,6 +1587,13 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
     for column in &index.columns {
         write_str(&mut out, column);
     }
+    match &index.predicate {
+        Some(predicate) => {
+            out.push(1);
+            write_str(&mut out, predicate);
+        }
+        None => out.push(0),
+    }
     out
 }
 
@@ -1602,7 +1610,7 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
 pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
-    if version != INDEX_VERSION {
+    if version != INDEX_VERSION && version != INDEX_VERSION_LEGACY {
         return Err(KvError::CorruptRow(format!(
             "unknown index version {version}"
         )));
@@ -1711,6 +1719,19 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     for _ in 0..column_count {
         columns.push(read_string(&mut cur)?);
     }
+    let predicate = if version == INDEX_VERSION_LEGACY {
+        None
+    } else {
+        match take_u8(&mut cur)? {
+            0 => None,
+            1 => Some(read_string(&mut cur)?),
+            tag => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown index predicate flag {tag}"
+                )));
+            }
+        }
+    };
     if let Some(IndexConstraint::Exclusion(operators)) = &constraint
         && operators.len() != columns.len()
     {
@@ -1724,6 +1745,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         table,
         table_id,
         columns,
+        predicate,
         unique,
         placement,
         method,
@@ -3834,6 +3856,7 @@ mod tests {
                 table: RelationName::public("orders"),
                 table_id: 3,
                 columns: vec!["email".into()],
+                predicate: Some("email IS NOT NULL".into()),
                 unique: true,
                 placement: IndexPlacement::Global,
                 method,
@@ -3854,6 +3877,7 @@ mod tests {
             table: RelationName::public("booking"),
             table_id: 4,
             columns: vec!["room".into(), "during".into()],
+            predicate: None,
             unique: false,
             placement: IndexPlacement::Local,
             method: IndexMethod::Gist,
@@ -3880,6 +3904,7 @@ mod tests {
             table: RelationName::public("temporal_rng"),
             table_id: 5,
             columns: vec!["id".into(), "valid_at".into()],
+            predicate: None,
             unique: true,
             placement: IndexPlacement::Local,
             method: IndexMethod::Gist,
@@ -3909,6 +3934,7 @@ mod tests {
                     table: RelationName::public("orders"),
                     table_id: 3,
                     columns: vec!["placed".into()],
+                    predicate: None,
                     unique: false,
                     placement: IndexPlacement::Local,
                     method: IndexMethod::Btree,
@@ -3942,6 +3968,7 @@ mod tests {
                 table: RelationName::public("unique_tbl"),
                 table_id: 6,
                 columns: vec!["i".into()],
+                predicate: None,
                 unique: true,
                 placement: IndexPlacement::Local,
                 method: IndexMethod::Btree,

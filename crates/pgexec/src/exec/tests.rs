@@ -3575,7 +3575,6 @@ async fn unsupported_index_options_are_refused_not_silently_built() {
     let mut session = engine.connect();
     run_s(&mut session, "CREATE TABLE t (a int4, b text)").await;
     for sql in [
-        "CREATE INDEX i ON t (a) WHERE a > 5",
         "CREATE INDEX i ON t (a DESC)",
         "CREATE INDEX i ON t (a NULLS FIRST)",
         "CREATE INDEX i ON t (a) INCLUDE (b)",
@@ -3628,6 +3627,48 @@ async fn unsupported_index_options_are_refused_not_silently_built() {
         crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_expr_idx"))
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn partial_unique_indexes_store_and_enforce_only_matching_rows() {
+    use assert2::assert;
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE t (a int4, b int4)").await;
+    run_s(&mut session, "INSERT INTO t VALUES (1, 0), (2, 1)").await;
+    run_s(
+        &mut session,
+        "CREATE UNIQUE INDEX t_a_positive ON t (a) WHERE b > 0",
+    )
+    .await;
+
+    let index =
+        crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_a_positive"))
+            .expect("partial index");
+    assert!(index.predicate.as_deref() == Some("b > 0"));
+    assert!(text_rows_of(
+        &mut session,
+        "SELECT pg_get_expr(indpred, indrelid) FROM pg_index WHERE indexrelid = 't_a_positive'::regclass",
+    )
+    .await == vec![text_row(&["b > 0"])]);
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_get_indexdef('t_a_positive'::regclass)",
+        )
+        .await
+            == vec![text_row(&[
+                "CREATE UNIQUE INDEX t_a_positive ON public.t USING btree (a) WHERE (b > 0)"
+            ])]
+    );
+
+    run_s(&mut session, "INSERT INTO t VALUES (2, 0)").await;
+    assert!(
+        text_rows_of(&mut session, "SELECT a, b FROM t WHERE a = 2 ORDER BY b").await
+            == vec![text_row(&["2", "0"]), text_row(&["2", "1"])]
+    );
+    assert!(sqlstate_of(&mut session, "INSERT INTO t VALUES (2, 1)").await == "23505");
+    assert!(sqlstate_of(&mut session, "UPDATE t SET b = 1 WHERE a = 2 AND b = 0").await == "23505");
 }
 
 #[tokio::test]
@@ -8100,7 +8141,13 @@ mod pushdown {
         }));
         {
             let mut s = engine.connect();
-            s.simple_query("CREATE FOREIGN DATA WRAPPER kafka_fdw")
+            s.simple_query(
+                "CREATE FUNCTION kafka_fdw_handler() RETURNS fdw_handler \
+                 LANGUAGE c AS 'regress', 'test_fdw_handler'",
+            )
+            .await
+            .expect("create FDW handler");
+            s.simple_query("CREATE FOREIGN DATA WRAPPER kafka_fdw HANDLER kafka_fdw_handler")
                 .await
                 .expect("create FDW");
             s.simple_query(
@@ -8108,9 +8155,12 @@ mod pushdown {
             )
             .await
             .expect("create server");
-            s.simple_query("CREATE FOREIGN TABLE f (v int8) SERVER k OPTIONS (topic 'topic')")
-                .await
-                .expect("create foreign table");
+            s.simple_query(
+                "CREATE FOREIGN TABLE f (_partition int4, _offset int8, _timestamp text, \
+                 _key text, _headers text, v int8) SERVER k OPTIONS (topic 'topic')",
+            )
+            .await
+            .expect("create foreign table");
         }
         (engine, seen)
     }
@@ -8901,7 +8951,7 @@ fn alter_foreign_options_update_catalog_records() {
     for sql in [
         "CREATE FUNCTION old_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'",
         "CREATE FUNCTION new_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'",
-        "CREATE FOREIGN DATA WRAPPER w HANDLER old_handler VALIDATOR postgresql_fdw_validator OPTIONS (host 'old', stale 'x')",
+        "CREATE FOREIGN DATA WRAPPER w HANDLER old_handler OPTIONS (host 'old', stale 'x')",
         "ALTER FOREIGN DATA WRAPPER w HANDLER new_handler NO VALIDATOR OPTIONS (SET host 'new', DROP stale, port '5432')",
         "CREATE SERVER s VERSION '1' FOREIGN DATA WRAPPER w OPTIONS (host 'old', stale 'x')",
         "ALTER SERVER s VERSION '2' OPTIONS (SET host 'new', DROP stale, ADD port '5432')",
@@ -10967,6 +11017,7 @@ fn arbiter_fixture(
                 table: RelationName::public("t"),
                 table_id: 1,
                 columns: cols.iter().map(|c| (*c).to_string()).collect(),
+                predicate: None,
                 unique: *unique,
                 placement: crabka_pgcatalog::IndexPlacement::Local,
                 method: crabka_pgcatalog::IndexMethod::Btree,

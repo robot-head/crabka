@@ -142,6 +142,7 @@ pub(crate) fn matches_parent_index(
     source: &crabka_pgcatalog::Index,
 ) -> bool {
     candidate.columns == source.columns
+        && candidate.predicate == source.predicate
         && candidate.unique == source.unique
         && candidate.method == source.method
         && candidate.without_overlaps == source.without_overlaps
@@ -156,6 +157,7 @@ pub(crate) fn cloned_partition_index(
     crabka_pgcatalog::NewIndex {
         name,
         columns: source.columns.clone(),
+        predicate: source.predicate.clone(),
         unique: source.unique,
         placement: source.placement,
         method: source.method,
@@ -279,6 +281,7 @@ pub(crate) fn clone_indexes_onto_partitions(
                 table: relation.clone(),
                 table_id: table.id,
                 columns: clone.columns,
+                predicate: clone.predicate,
                 unique: clone.unique,
                 placement: clone.placement,
                 method: clone.method,
@@ -1482,6 +1485,7 @@ pub(crate) fn exclusion_constraint_index(
     Ok(crabka_pgcatalog::NewIndex {
         name,
         columns,
+        predicate: None,
         unique: false,
         placement: crabka_pgcatalog::IndexPlacement::Local,
         method: crabka_pgcatalog::IndexMethod::Gist,

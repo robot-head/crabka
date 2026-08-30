@@ -694,7 +694,32 @@ pub(crate) fn skipped_drop_notice(
                     if relation_kind(kv, &name).is_none() {
                         return Ok((*if_exists).then(|| missing("relation", &name.name)));
                     }
-                    let table = crabka_pgcatalog::get_table(kv, &name)?;
+                    let needs_table = actions.iter().any(|action| {
+                        use crabka_pgparser::ast::AlterTableAction;
+                        matches!(
+                            action,
+                            AlterTableAction::AddColumn {
+                                if_not_exists: true,
+                                ..
+                            } | AlterTableAction::DropColumn {
+                                if_exists: true,
+                                ..
+                            } | AlterTableAction::DropConstraint {
+                                if_exists: true,
+                                ..
+                            }
+                        )
+                    });
+                    if !needs_table {
+                        return Ok(None);
+                    }
+                    let table = match crabka_pgcatalog::get_table(kv, &name) {
+                        Ok(table) => table,
+                        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+                            return Ok(None);
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
                     for action in actions {
                         use crabka_pgparser::ast::AlterTableAction;
                         match action {

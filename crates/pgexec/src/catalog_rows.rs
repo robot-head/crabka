@@ -2905,9 +2905,10 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
                 Datum::Null,
                 Datum::Null,
                 indexprs,
-                // `indpred`: crabka has no partial indexes — `CREATE INDEX …
-                // WHERE` is refused — so a stored index is never predicated.
-                Datum::Null,
+                index
+                    .predicate
+                    .as_ref()
+                    .map_or(Datum::Null, |predicate| text(predicate)),
             ])
         })
         .collect::<Result<Vec<_>, ExecError>>()?;

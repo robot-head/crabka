@@ -3397,7 +3397,7 @@ fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
     } else {
         quote_identifier(&table.name.name)
     };
-    format!(
+    let mut definition = format!(
         "CREATE {}INDEX {} ON {relation} USING {} ({})",
         if index.unique { "UNIQUE " } else { "" },
         quote_identifier(&index.name),
@@ -3409,7 +3409,13 @@ fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
             crabka_pgcatalog::IndexMethod::Spgist => "spgist",
         },
         index_key_list(&index.columns),
-    )
+    );
+    if let Some(predicate) = &index.predicate {
+        definition.push_str(" WHERE (");
+        definition.push_str(predicate);
+        definition.push(')');
+    }
+    definition
 }
 
 /// `pg_get_partkeydef(oid)` — the `PARTITION BY` body a partitioned relation

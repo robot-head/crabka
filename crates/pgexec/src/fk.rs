@@ -2388,6 +2388,7 @@ mod tests {
         NewIndex {
             name: name.to_string(),
             columns: cols.iter().map(|c| (*c).to_string()).collect(),
+            predicate: None,
             unique: true,
             method: IndexMethod::Btree,
             placement: IndexPlacement::Local,
@@ -2678,6 +2679,7 @@ mod tests {
             table: self_name.clone(),
             table_id: 9,
             columns: names(&["id"]),
+            predicate: None,
             unique: true,
             method: IndexMethod::Btree,
             placement: IndexPlacement::Local,
