@@ -532,6 +532,27 @@ async fn sqlstate_of(session: &mut SqlSession, sql: &str) -> String {
         .code
 }
 
+#[tokio::test]
+async fn foreign_table_without_a_handler_fails_before_scanner_lookup() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER dummy",
+        "CREATE SERVER s FOREIGN DATA WRAPPER dummy",
+        "CREATE FOREIGN TABLE t (id int4) SERVER s",
+    ] {
+        run_s(&mut session, sql).await;
+    }
+    let error = session
+        .simple_query("SELECT * FROM t")
+        .await
+        .expect_err("handler-less FDW is rejected");
+    assert_eq!(
+        error.message,
+        "foreign-data wrapper \"dummy\" has no handler"
+    );
+}
+
 fn text_row(values: &[&str]) -> Vec<Option<String>> {
     values
         .iter()

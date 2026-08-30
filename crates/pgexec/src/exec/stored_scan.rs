@@ -133,6 +133,14 @@ pub(super) fn scan_stored_relation(
     // MVCC version store. `build_from` materializes BEFORE WHERE, so this scan
     // runs even for `WHERE false` — there is no skip path.
     if let Some(meta) = &t.foreign {
+        let server = crabka_pgcatalog::get_server(catalog_kv, &meta.server)?;
+        let fdw = crabka_pgcatalog::get_fdw(catalog_kv, &server.wrapper)?;
+        if fdw.handler.is_none() {
+            return Err(ExecError::Unsupported(format!(
+                "foreign-data wrapper \"{}\" has no handler",
+                fdw.name
+            )));
+        }
         let scanner = read_ctx.fctx.scanner.ok_or_else(|| {
             ExecError::Unsupported("foreign tables require the `kafka` feature".into())
         })?;
@@ -147,7 +155,6 @@ pub(super) fn scan_stored_relation(
                 format!("permission denied for foreign server {}", meta.server),
             )));
         }
-        let server = crabka_pgcatalog::get_server(catalog_kv, &meta.server)?;
         // A per-user mapping is optional; PostgreSQL falls back to PUBLIC when
         // the current role has no mapping on this server.
         let mapping = crabka_pgcatalog::get_user_mapping_or_public(
