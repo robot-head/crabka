@@ -9319,6 +9319,28 @@ fn foreign_table_type_change_with_using_is_rejected() {
     ));
 }
 
+#[tokio::test]
+async fn foreign_table_type_change_rejects_rowtype_dependents() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE foreign_table (value text) SERVER s",
+        "CREATE TABLE dependent (item foreign_table)",
+    ] {
+        run_s(&mut session, sql).await;
+    }
+    let error = session
+        .simple_query("ALTER FOREIGN TABLE foreign_table ALTER COLUMN value TYPE integer")
+        .await
+        .expect_err("foreign rowtype dependent rejects retype");
+    assert_eq!(
+        error.message,
+        "cannot alter foreign table \"foreign_table\" because column \"dependent.item\" uses its row type"
+    );
+}
+
 #[test]
 fn comments_on_foreign_objects_are_persisted() {
     use crabka_pgcatalog::CommentObject;

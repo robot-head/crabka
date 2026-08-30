@@ -1222,8 +1222,8 @@ pub fn drop_types(
                     .iter()
                     .map(|cast| format!("{} depends on type {name}", cast_dependency_line(cast))),
             );
-            if let Some(user) = column_using_type(kv, &ty)? {
-                details.push(format!("column {user} depends on type {name}"));
+            if let Some((table, column)) = column_using_type(kv, ty.oid)? {
+                details.push(format!("column {table}.{column} depends on type {name}"));
             }
             if !details.is_empty() {
                 return Err(dependency_refusal(name, &details));
@@ -1526,12 +1526,15 @@ pub(crate) fn drop_schema_types_ops(kv: &dyn Kv, schema: &str) -> Result<Vec<Wri
     Ok(ops)
 }
 
-/// `table.column` of the first table column declared with `ty`, if any.
-fn column_using_type(kv: &dyn Kv, ty: &UserType) -> Result<Option<String>, ExecError> {
+/// `table.column` of the first table column declared with `oid`, if any.
+pub(crate) fn column_using_type(
+    kv: &dyn Kv,
+    oid: u32,
+) -> Result<Option<(crabka_pgcatalog::RelationName, String)>, ExecError> {
     for table in crabka_pgcatalog::list_tables(kv)? {
         for column in &table.columns {
-            if column.ty.oid() == ty.oid {
-                return Ok(Some(format!("{}.{}", table.name, column.name)));
+            if column.ty.oid() == oid {
+                return Ok(Some((table.name, column.name.clone())));
             }
         }
     }

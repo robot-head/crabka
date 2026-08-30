@@ -3164,6 +3164,18 @@ pub(crate) fn alter_table_ops(
             table_name.name
         )));
     }
+    if kind == Some("foreign table")
+        && actions
+            .iter()
+            .any(|action| matches!(action, Action::SetType { .. }))
+        && let Some(rowtype) = crate::catalog_rel::relation_rowtype(kv, table_name)?
+        && let Some((dependent, column)) = crate::usertype::column_using_type(kv, rowtype.oid)?
+    {
+        return Err(ExecError::Unsupported(format!(
+            "cannot alter foreign table \"{}\" because column \"{}.{}\" uses its row type",
+            table_name.name, dependent.name, column
+        )));
+    }
     let table = match fetched {
         Ok(table) => table,
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if if_exists => {
