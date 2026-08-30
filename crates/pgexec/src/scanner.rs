@@ -1486,6 +1486,64 @@ struct LocalRangeCursor<'a> {
     done: bool,
 }
 
+struct LocalIndexCursor<'a> {
+    request: ScanRequest<'a>,
+    index_id: u32,
+    entries: Vec<Vec<u8>>,
+    next: usize,
+}
+
+#[async_trait::async_trait]
+impl RangeCursor for LocalIndexCursor<'_> {
+    async fn next_page(&mut self, max_rows: usize) -> Result<ScanPage, ExecError> {
+        if max_rows == 0 {
+            return Err(ExecError::Unsupported(
+                "range cursor page size must be greater than zero".into(),
+            ));
+        }
+        let mut rows = Vec::with_capacity(max_rows);
+        while self.next < self.entries.len() && rows.len() < max_rows {
+            let key = &self.entries[self.next];
+            self.next += 1;
+            let rowid = crabka_pgkv::key::secondary_index_rowid_of(
+                self.request.table.id,
+                self.index_id,
+                key,
+            )?;
+            if !self.request.interval.contains(rowid) {
+                continue;
+            }
+            let end = rowid.checked_add(1).ok_or_else(|| {
+                ExecError::Unsupported("ordered index cursor cannot scan the maximum rowid".into())
+            })?;
+            let row = crate::exec::scan_live_interval_at_command(
+                self.request.local,
+                self.request.global,
+                self.request.global_snapshot,
+                self.request.snapshot,
+                self.request.own_xid,
+                self.request.command_id,
+                self.request.table,
+                RowInterval {
+                    start: Some(rowid),
+                    end: Some(end),
+                },
+            )?;
+            rows.extend(apply_executable_scan_pushdown(
+                row,
+                &self.request.predicate,
+                &self.request.projection,
+                None,
+                None,
+            )?);
+        }
+        Ok(ScanPage {
+            rows: rows.into_boxed_slice(),
+            is_last: self.next == self.entries.len(),
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl RangeCursor for LocalRangeCursor<'_> {
     async fn next_page(&mut self, max_rows: usize) -> Result<ScanPage, ExecError> {
@@ -1621,6 +1679,37 @@ impl RangeScanner for LocalRangeScanner {
             next_rowid,
             end_rowid,
             done: next_rowid >= end_rowid,
+        }))
+    }
+}
+
+impl LocalRangeScanner {
+    /// Open a native cursor over one local B-tree's ordered entry stream.
+    ///
+    /// The cursor keeps row visibility and predicate/projection checks on the
+    /// normal scanner path; only the physical row order comes from the index.
+    pub fn ordered_index_cursor<'a>(
+        &'a self,
+        request: ScanRequest<'a>,
+        index_id: u32,
+    ) -> Result<Box<dyn RangeCursor + 'a>, ExecError> {
+        if request.table.sharded || request.partial_aggregate.is_some() || request.top_k.is_some() {
+            return Err(ExecError::Unsupported(
+                "ordered index cursor requires a local non-aggregate scan".into(),
+            ));
+        }
+        let prefix = crabka_pgkv::key::secondary_index_ordered_prefix(request.table.id, index_id);
+        let entries = request
+            .local
+            .scan_prefix(&prefix)?
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        Ok(Box::new(LocalIndexCursor {
+            request,
+            index_id,
+            entries,
+            next: 0,
         }))
     }
 }

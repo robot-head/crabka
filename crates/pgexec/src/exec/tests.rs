@@ -4153,28 +4153,42 @@ async fn ordered_local_index_stream_returns_order_by_order() {
             .expect("index");
     let snapshot = engine.procarray.snapshot();
     let gsnap = settled_snapshot();
-    let values = super::lookup_local_index_ordered(
-        &super::MvccReadContext {
-            kv: engine.kv.as_ref(),
-            global: engine.kv.as_ref(),
-            global_snapshot: &gsnap,
-            snapshot: &snapshot,
-            own: None,
-            command_id: None,
-        },
-        &table,
-        &index,
-    )
-    .expect("ordered index scan")
-    .expect("supported index")
-    .into_iter()
-    .map(|row| row.row)
-    .map(|row| row[0].clone())
-    .map(|value| match value {
-        crabka_pgtypes::Datum::Int4(value) => value,
-        got => panic!("expected int4, got {got:?}"),
-    })
-    .collect::<Vec<_>>();
+    let scanner = crate::scanner::LocalRangeScanner;
+    let mut cursor = scanner
+        .ordered_index_cursor(
+            ScanRequest {
+                local: engine.kv.as_ref(),
+                global: engine.kv.as_ref(),
+                global_snapshot: &gsnap,
+                snapshot: &snapshot,
+                own_xid: None,
+                command_id: None,
+                read_ts: None,
+                own_start_ts: None,
+                table: &table,
+                interval: crate::RowInterval::ALL,
+                predicate: PredicatePushdown::FullScan,
+                projection: ProjectionPushdown::All,
+                partial_aggregate: None,
+                top_k: None,
+            },
+            index.id,
+        )
+        .expect("ordered index cursor");
+    let first = cursor.next_page(2).await.expect("first page");
+    let second = cursor.next_page(2).await.expect("second page");
+    assert!(!first.is_last);
+    assert!(second.is_last);
+    let values = first
+        .rows
+        .into_iter()
+        .chain(second.rows)
+        .map(|row| row.row[0].clone())
+        .map(|value| match value {
+            crabka_pgtypes::Datum::Int4(value) => value,
+            got => panic!("expected int4, got {got:?}"),
+        })
+        .collect::<Vec<_>>();
 
     assert_eq!(values, vec![3, 2, 1]);
 }
