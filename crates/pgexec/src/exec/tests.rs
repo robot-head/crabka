@@ -9615,6 +9615,39 @@ fn alter_foreign_table_uses_the_alter_table_path() {
 }
 
 #[test]
+fn renaming_a_foreign_column_keeps_its_options() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE t (id int4 OPTIONS (remote_name 'remote_id')) SERVER s",
+        "ALTER FOREIGN TABLE t RENAME COLUMN id TO local_id",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let (_result, ops) =
+            super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply DDL ops");
+    }
+    assert_eq!(
+        crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("t"))
+            .expect("foreign table")
+            .foreign
+            .expect("foreign metadata")
+            .column_options,
+        vec![(
+            "local_id".into(),
+            vec![("remote_name".into(), "remote_id".into())],
+        )]
+    );
+}
+
+#[test]
 fn drop_foreign_table_accepts_a_comma_list() {
     use crabka_pgkv::{Kv, MemKv};
 

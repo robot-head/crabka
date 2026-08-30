@@ -6773,6 +6773,14 @@ pub(crate) fn rename_column_dependencies(
     for check in &mut state.table.checks {
         check.expr = rewrite_identifier_tokens(&check.expr, old_name, new_name);
     }
+    if let Some(foreign) = &mut state.table.foreign
+        && let Some((name, _)) = foreign
+            .column_options
+            .iter_mut()
+            .find(|(name, _)| name == old_name)
+    {
+        *name = new_name.to_string();
+    }
     // A column grant follows its column. Leaving it under the old name would
     // strand the grant and hand it to the next column created with that name.
     let renamed: Vec<_> = crabka_pgcatalog::column_privileges_of(kv, &table_name)?
