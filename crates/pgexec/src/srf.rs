@@ -2569,11 +2569,22 @@ fn unnest_rows(vals: &[Datum]) -> Vec<Vec<Datum>> {
             .map(|range| vec![Datum::Range(range)])
             .collect();
     }
-    let columns: Vec<&[Datum]> = vals
+    let columns: Vec<Vec<Datum>> = vals
         .iter()
         .map(|v| match v {
-            Datum::Array(array) => array.elems.as_slice(),
-            _ => [].as_slice(),
+            Datum::Array(array) => array.elems.clone(),
+            // Vectors use an `int4` backing representation, but `oidvector`
+            // expands as oid values. `int2vector` keeps its signed elements.
+            Datum::OidVector(vector) if vector.elem == ElemType::Int4 => vector
+                .elems
+                .iter()
+                .map(|value| match value {
+                    Datum::Int4(oid) => Datum::Oid(*oid as u32),
+                    _ => value.clone(),
+                })
+                .collect(),
+            Datum::OidVector(vector) => vector.elems.clone(),
+            _ => Vec::new(),
         })
         .collect();
     let count = columns.iter().map(|c| c.len()).max().unwrap_or(0);
@@ -3648,6 +3659,26 @@ mod tests {
         )
         .expect("rows");
         assert!(rows == vec![vec![Datum::Null, Datum::Text("a".into())]]);
+    }
+
+    #[test]
+    fn unnest_expands_catalog_vectors_as_their_declared_elements() {
+        let oidvector = constant(
+            Datum::OidVector(ArrayValue::new(ElemType::Int4, ints(&[23, -1]))),
+            ColumnType::OidVector,
+        );
+        assert!(
+            call("unnest", &[oidvector]).expect("oidvector rows")
+                == vec![vec![Datum::Oid(23)], vec![Datum::Oid(u32::MAX)]]
+        );
+
+        let int2vector = constant(
+            Datum::OidVector(ArrayValue::new(ElemType::Int2, vec![Datum::Int2(-1)])),
+            ColumnType::Int2Vector,
+        );
+        assert!(
+            call("unnest", &[int2vector]).expect("int2vector rows") == vec![vec![Datum::Int2(-1)]]
+        );
     }
 
     #[test]

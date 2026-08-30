@@ -1488,7 +1488,7 @@ impl ColumnType {
     pub fn array_element(self) -> Option<ElemType> {
         match self {
             ColumnType::Array(elem) => Some(elem),
-            ColumnType::OidVector => Some(ElemType::Int4),
+            ColumnType::OidVector => ElemType::from_column_type(ColumnType::Oid),
             ColumnType::Int2Vector => Some(ElemType::Int2),
             _ => None,
         }

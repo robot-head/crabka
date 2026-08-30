@@ -1835,7 +1835,7 @@ async fn oidvector_compares_equal_to_its_oid_array_projection() {
     );
     let builtin = grid(
         &engine,
-        "SELECT proargtypes != ARRAY( \
+        "SELECT ARRAY(SELECT unnest(proargtypes)) != ARRAY( \
              SELECT proallargtypes[i] \
              FROM generate_series(1, array_length(proallargtypes, 1)) AS g(i) \
              WHERE proargmodes IS NULL OR proargmodes[i] IN ('i', 'b', 'v') \
@@ -1854,7 +1854,7 @@ async fn oidvector_compares_equal_to_its_oid_array_projection() {
         "SELECT count(*) \
          FROM pg_proc \
          WHERE proallargtypes IS NOT NULL \
-           AND proargtypes != ARRAY( \
+           AND ARRAY(SELECT unnest(proargtypes)) != ARRAY( \
                SELECT proallargtypes[i] \
                FROM generate_series(1, array_length(proallargtypes, 1)) AS g(i) \
                WHERE proargmodes IS NULL OR proargmodes[i] IN ('i', 'b', 'v') \
