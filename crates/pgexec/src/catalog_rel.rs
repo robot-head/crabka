@@ -2206,9 +2206,9 @@ fn pg_database_columns() -> Vec<Column> {
 }
 
 fn pg_proc_columns() -> Vec<Column> {
-    use ColumnType::{Bool, Float4, Int2, Int4, Text};
+    use ColumnType::{Bool, Float4, Int2, Int4, Oid, Text};
     let texts = ColumnType::Array(ElemType::Text);
-    let oids = ColumnType::Array(ElemType::Int4);
+    let oids = ColumnType::array_of(Oid).expect("oid has an array type");
     cols(&[
         ("oid", Int4),
         ("proname", Text),
@@ -2217,7 +2217,7 @@ fn pg_proc_columns() -> Vec<Column> {
         ("prolang", Int4),
         ("procost", Float4),
         ("prorows", Float4),
-        ("provariadic", Int4),
+        ("provariadic", Oid),
         ("prosupport", Int4),
         ("prokind", Text),
         ("prosecdef", Bool),
@@ -2228,7 +2228,7 @@ fn pg_proc_columns() -> Vec<Column> {
         ("proparallel", Text),
         ("pronargs", Int2),
         ("pronargdefaults", Int2),
-        ("prorettype", Int4),
+        ("prorettype", Oid),
         ("proargtypes", ColumnType::OidVector),
         ("proallargtypes", oids),
         ("proargmodes", ColumnType::Array(ElemType::Text)),

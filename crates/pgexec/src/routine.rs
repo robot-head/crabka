@@ -5735,6 +5735,8 @@ pub(crate) fn pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 pub(crate) fn user_pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     use crabka_pgtypes::{ArrayValue, ElemType};
 
+    let oid_array_element =
+        ElemType::from_column_type(ColumnType::Oid).expect("oid has an array type");
     let mut rows = Vec::new();
     for routine in list_routines(kv)? {
         let inputs: Vec<&RoutineParam> = routine.input_params().collect();
@@ -5770,7 +5772,7 @@ pub(crate) fn user_pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
             Datum::Int4(language_oid(&routine.language)),
             Datum::Float8(routine.cost),
             Datum::Float8(routine.rows),
-            Datum::Int4(0),
+            Datum::Oid(0),
             Datum::Int4(0),
             Datum::Text(routine.kind.catalog_code().to_string()),
             Datum::Bool(routine.security_definer),
@@ -5781,7 +5783,7 @@ pub(crate) fn user_pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
             Datum::Text(routine.parallel.to_string()),
             Datum::Int2(i16::try_from(inputs.len()).unwrap_or(0)),
             Datum::Int2(i16::try_from(routine.default_count()).unwrap_or(0)),
-            Datum::Int4(catalog_return_type_oid(kv, &routine)?),
+            Datum::Oid(catalog_return_type_oid(kv, &routine)?.cast_unsigned()),
             Datum::OidVector(ArrayValue::with_dims(
                 ElemType::Int4,
                 arg_type_oids,
@@ -5793,7 +5795,7 @@ pub(crate) fn user_pg_proc_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
             if all_default_modes {
                 Datum::Null
             } else {
-                Datum::Array(ArrayValue::new(ElemType::Int4, all_types))
+                Datum::Array(ArrayValue::new(oid_array_element, all_types))
             },
             if all_default_modes {
                 Datum::Null
@@ -5941,7 +5943,7 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Int4(int(language)?),
                 Datum::Float8(f64::from(int(cost)?)),
                 Datum::Float8(f64::from(int(result_rows)?)),
-                Datum::Int4(int(variadic)?),
+                Datum::Oid(int(variadic)?.cast_unsigned()),
                 Datum::Int4(if *support == "-" || *support == "0" {
                     0
                 } else {
@@ -5956,7 +5958,7 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Text(character(parallel)?.to_string()),
                 Datum::Int2(short(argument_count)?),
                 Datum::Int2(short(default_count)?),
-                Datum::Int4(int(result_type)?),
+                Datum::Oid(int(result_type)?.cast_unsigned()),
                 Datum::OidVector(crabka_pgtypes::ArrayValue::with_dims(
                     crabka_pgtypes::ElemType::Int4,
                     argument_types
@@ -5970,10 +5972,11 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 )),
                 match all_argument_types {
                     Some(types) => Datum::Array(crabka_pgtypes::ArrayValue::new(
-                        crabka_pgtypes::ElemType::Int4,
+                        crabka_pgtypes::ElemType::from_column_type(crabka_pgtypes::ColumnType::Oid)
+                            .ok_or_else(corrupt)?,
                         types
                             .into_iter()
-                            .map(|value| int(&value).map(Datum::Int4))
+                            .map(|value| int(&value).map(|oid| Datum::Oid(oid.cast_unsigned())))
                             .collect::<Result<Vec<_>, _>>()?,
                     )),
                     None => Datum::Null,
@@ -6151,13 +6154,13 @@ fn catalog_all_types(kv: &dyn Kv, routine: &Routine) -> Result<Vec<Datum>, ExecE
     let mut out: Vec<Datum> = routine
         .params
         .iter()
-        .map(|param| Ok(Datum::Int4(catalog_type_oid(kv, &param.ty)?)))
+        .map(|param| Ok(Datum::Oid(catalog_type_oid(kv, &param.ty)?.cast_unsigned())))
         .collect::<Result<_, ExecError>>()?;
     if let RoutineResult::Table(columns) = &routine.result {
         out.extend(
             columns
                 .iter()
-                .map(|(_, ty)| Ok(Datum::Int4(catalog_type_oid(kv, ty)?)))
+                .map(|(_, ty)| Ok(Datum::Oid(catalog_type_oid(kv, ty)?.cast_unsigned())))
                 .collect::<Result<Vec<_>, ExecError>>()?,
         );
     }

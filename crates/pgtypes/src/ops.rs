@@ -919,12 +919,18 @@ fn compare_vectors(
     a: &crate::datum::ArrayValue,
     b: &crate::datum::ArrayValue,
 ) -> Result<Ordering, TypeError> {
-    if a.elem != crate::ElemType::Int4 || b.elem != crate::ElemType::Int4 {
+    if a.elem != crate::ElemType::Int4
+        || !matches!(
+            b.elem.column_type(),
+            crate::ColumnType::Int4 | crate::ColumnType::Oid
+        )
+    {
         return compare_arrays(a, b);
     }
     for (x, y) in a.elems.iter().zip(b.elems.iter()) {
         let ord = match (x, y) {
             (Datum::Int4(x), Datum::Int4(y)) => x.cast_unsigned().cmp(&y.cast_unsigned()),
+            (Datum::Int4(x), Datum::Oid(y)) => x.cast_unsigned().cmp(y),
             _ => match (x.is_null(), y.is_null()) {
                 (true, true) => Ordering::Equal,
                 (true, false) => Ordering::Greater,

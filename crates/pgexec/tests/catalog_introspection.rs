@@ -1824,6 +1824,15 @@ async fn catalog_only_builtin_types_link_to_their_io_functions() {
 #[tokio::test]
 async fn oidvector_compares_equal_to_its_oid_array_projection() {
     let engine = fixture().await;
+    assert2::assert!(
+        grid(
+            &engine,
+            "SELECT pg_typeof(proallargtypes), pg_typeof(proallargtypes[1]), pg_typeof(provariadic) \
+             FROM pg_proc WHERE oid = 438",
+        )
+        .await
+            == vec![some(&["oid[]", "oid", "oid"])]
+    );
     let builtin = grid(
         &engine,
         "SELECT proargtypes != ARRAY( \
