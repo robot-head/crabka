@@ -1698,6 +1698,21 @@ pub(crate) fn execute_ddl(
             validator,
             options,
         } => {
+            if let Some(owner) = owner_to {
+                let owner = resolve_new_owner(kv, fctx, owner)?;
+                require_fdw_owner_superuser(kv, name, &owner)?;
+                require_fdw_alter_superuser(kv, name, fctx)?;
+                require_foreign_ownership(
+                    kv,
+                    crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                    std::slice::from_ref(name),
+                    fctx,
+                )?;
+                return Ok((
+                    command("ALTER FOREIGN DATA WRAPPER"),
+                    crabka_pgcatalog::set_fdw_owner_ops(kv, name, &owner)?,
+                ));
+            }
             require_fdw_alter_superuser(kv, name, fctx)?;
             require_foreign_ownership(
                 kv,
@@ -1707,10 +1722,6 @@ pub(crate) fn execute_ddl(
             )?;
             let ops = if let Some(rename_to) = rename_to {
                 crabka_pgcatalog::rename_fdw_ops(kv, name, rename_to)?
-            } else if let Some(owner) = owner_to {
-                let owner = resolve_new_owner(kv, fctx, owner)?;
-                require_fdw_owner_superuser(kv, name, &owner)?;
-                crabka_pgcatalog::set_fdw_owner_ops(kv, name, &owner)?
             } else {
                 if let Some(Some(handler)) = handler {
                     validate_fdw_routine(kv, handler, &[], "fdw_handler")?;
@@ -4242,7 +4253,7 @@ fn require_fdw_owner_superuser(kv: &dyn Kv, name: &str, owner: &str) -> Result<(
             "42501",
             format!("permission denied to change owner of foreign-data wrapper \"{name}\""),
         )
-        .with_hint("The owner of a foreign-data wrapper must be a superuser."),
+        .with_hint("Must be superuser to change owner of a foreign-data wrapper."),
     ))
 }
 

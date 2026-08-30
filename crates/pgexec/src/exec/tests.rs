@@ -8423,7 +8423,9 @@ fn foreign_owner_changes_enforce_fdw_and_server_rules() {
     .expect_err("FDW owners must be superusers");
     assert!(matches!(error, super::ExecError::Remote(ref error)
             if error.code == "42501"
-                && error.message == "permission denied to change owner of foreign-data wrapper \"w\""));
+                && error.message == "permission denied to change owner of foreign-data wrapper \"w\""
+                && error.diagnostics.as_ref().and_then(|diagnostics| diagnostics.hint.as_deref())
+                    == Some("Must be superuser to change owner of a foreign-data wrapper.")));
 
     let (_, ops) = super::execute_ddl(
         &kv,
