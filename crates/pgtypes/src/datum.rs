@@ -344,6 +344,8 @@ pub enum ElemType {
     Timestamp,
     Timestamptz,
     Interval,
+    /// `interval` with a declared field range on every element.
+    IntervalTypmod(IntervalTypmod),
     Bytea,
     Uuid,
     Json,
@@ -417,6 +419,7 @@ impl ElemType {
             ElemType::Timestamp => ColumnType::Timestamp,
             ElemType::Timestamptz => ColumnType::Timestamptz,
             ElemType::Interval => ColumnType::Interval,
+            ElemType::IntervalTypmod(typmod) => ColumnType::IntervalTypmod(typmod),
             ElemType::Bytea => ColumnType::Bytea,
             ElemType::Uuid => ColumnType::Uuid,
             ElemType::Json => ColumnType::Json,
@@ -464,6 +467,7 @@ impl ElemType {
             ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => {
                 ElemType::Interval
             }
+            ColumnType::IntervalTypmod(typmod) => ElemType::IntervalTypmod(typmod),
             ColumnType::Bytea => ElemType::Bytea,
             ColumnType::Uuid => ElemType::Uuid,
             ColumnType::Json => ElemType::Json,
@@ -514,6 +518,7 @@ impl ElemType {
             ElemType::Timestamp => oids::TIMESTAMPARRAY,
             ElemType::Timestamptz => oids::TIMESTAMPTZARRAY,
             ElemType::Interval => oids::INTERVALARRAY,
+            ElemType::IntervalTypmod(_) => oids::INTERVALARRAY,
             ElemType::Bytea => oids::BYTEAARRAY,
             ElemType::Uuid => oids::UUIDARRAY,
             ElemType::Json => oids::JSONARRAY,
@@ -570,6 +575,7 @@ impl ElemType {
             ElemType::Timestamp => "timestamp without time zone[]",
             ElemType::Timestamptz => "timestamp with time zone[]",
             ElemType::Interval => "interval[]",
+            ElemType::IntervalTypmod(_) => "interval[]",
             ElemType::Bytea => "bytea[]",
             ElemType::Uuid => "uuid[]",
             ElemType::Json => "json[]",
@@ -634,6 +640,7 @@ impl ElemType {
             ElemType::Timestamp => 8,
             ElemType::Timestamptz => 9,
             ElemType::Interval => 10,
+            ElemType::IntervalTypmod(_) => 28,
             ElemType::Bytea => 11,
             ElemType::Uuid => 12,
             ElemType::Jsonb => 13,
@@ -680,6 +687,8 @@ impl ElemType {
             out.extend_from_slice(&user.oid.to_be_bytes());
         } else if let ElemType::Builtin(builtin) = self {
             builtin.write_code(out);
+        } else if let ElemType::IntervalTypmod(typmod) = self {
+            out.extend_from_slice(&typmod.typmod().to_be_bytes());
         } else if matches!(self, ElemType::Varchar(_) | ElemType::Char(_)) {
             match self.typmod() {
                 None => out.push(0),
@@ -744,6 +753,12 @@ impl ElemType {
         }
         if *code == 27 {
             return BuiltinElem::read_code(cursor).map(ElemType::Builtin);
+        }
+        if *code == 28 {
+            let (bytes, rest) = cursor.split_at_checked(4)?;
+            *cursor = rest;
+            let typmod = i32::from_be_bytes(bytes.try_into().ok()?);
+            return IntervalTypmod::from_typmod(typmod).map(ElemType::IntervalTypmod);
         }
         let base = ElemType::from_code(*code)?;
         if !matches!(base, ElemType::Varchar(_) | ElemType::Char(_)) {
@@ -857,6 +872,138 @@ pub enum TemporalType {
     Interval,
 }
 
+/// The field range and optional fractional-second precision a qualified
+/// `interval` declaration carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IntervalTypmod {
+    start: crate::datetime::IntervalField,
+    end: crate::datetime::IntervalField,
+    precision: Option<u8>,
+}
+
+impl IntervalTypmod {
+    /// Construct a SQL interval field range. Precision is valid only when the
+    /// range ends in `SECOND`.
+    #[must_use]
+    pub fn new(
+        start: crate::datetime::IntervalField,
+        end: crate::datetime::IntervalField,
+        precision: Option<u8>,
+    ) -> Option<Self> {
+        use crate::datetime::IntervalField;
+
+        if !matches!(
+            start,
+            IntervalField::Year
+                | IntervalField::Month
+                | IntervalField::Day
+                | IntervalField::Hour
+                | IntervalField::Minute
+                | IntervalField::Second
+        ) || !matches!(
+            end,
+            IntervalField::Year
+                | IntervalField::Month
+                | IntervalField::Day
+                | IntervalField::Hour
+                | IntervalField::Minute
+                | IntervalField::Second
+        ) || start < end
+            || precision.is_some_and(|precision| precision > 6 || end != IntervalField::Second)
+        {
+            return None;
+        }
+        Some(Self {
+            start,
+            end,
+            precision,
+        })
+    }
+
+    /// The declared inclusive field range.
+    #[must_use]
+    pub const fn range(
+        self,
+    ) -> (
+        crate::datetime::IntervalField,
+        crate::datetime::IntervalField,
+    ) {
+        (self.start, self.end)
+    }
+
+    /// The declared fractional-seconds precision.
+    #[must_use]
+    pub const fn precision(self) -> Option<u8> {
+        self.precision
+    }
+
+    /// PostgreSQL's packed interval typmod.
+    #[must_use]
+    pub fn typmod(self) -> i32 {
+        (self.range_mask() << 16) | i32::from(self.precision.map_or(u16::MAX, u16::from))
+    }
+
+    /// Decode a non-default PostgreSQL interval typmod.
+    #[must_use]
+    pub fn from_typmod(typmod: i32) -> Option<Self> {
+        if typmod < 0 {
+            return None;
+        }
+        let precision = typmod & 0xffff;
+        let precision = if precision == i32::from(u16::MAX) {
+            None
+        } else {
+            Some(u8::try_from(precision).ok()?)
+        };
+        let mask = typmod >> 16;
+        let fields = [
+            crate::datetime::IntervalField::Second,
+            crate::datetime::IntervalField::Minute,
+            crate::datetime::IntervalField::Hour,
+            crate::datetime::IntervalField::Day,
+            crate::datetime::IntervalField::Month,
+            crate::datetime::IntervalField::Year,
+        ];
+        fields.into_iter().find_map(|end| {
+            fields.into_iter().rev().find_map(|start| {
+                let typmod = Self::new(start, end, precision)?;
+                (typmod.range_mask() == mask).then_some(typmod)
+            })
+        })
+    }
+
+    /// The SQL spelling following the `interval` type word.
+    #[must_use]
+    pub fn suffix(self) -> String {
+        let mut suffix = format!(" {}", self.start.name());
+        if self.start != self.end {
+            suffix.push_str(" to ");
+            suffix.push_str(self.end.name());
+        }
+        if let Some(precision) = self.precision {
+            suffix.push_str(&format!("({precision})"));
+        }
+        suffix
+    }
+
+    fn range_mask(self) -> i32 {
+        use crate::datetime::IntervalField;
+
+        [
+            (IntervalField::Second, 0x1000),
+            (IntervalField::Minute, 0x0800),
+            (IntervalField::Hour, 0x0400),
+            (IntervalField::Day, 0x0008),
+            (IntervalField::Month, 0x0002),
+            (IntervalField::Year, 0x0004),
+        ]
+        .into_iter()
+        .filter(|(field, _)| *field >= self.end && *field <= self.start)
+        .map(|(_, mask)| mask)
+        .sum()
+    }
+}
+
 static CARDINAL_NUMBER_BASE: ColumnType = ColumnType::Int4;
 static CHARACTER_DATA_BASE: ColumnType = ColumnType::Varchar(None);
 static SQL_IDENTIFIER_BASE: ColumnType = ColumnType::Name;
@@ -956,6 +1103,8 @@ pub enum ColumnType {
     Interval,
     /// One of PostgreSQL's temporal types with a fractional-seconds typmod.
     Temporal(TemporalType, u8),
+    /// PostgreSQL `interval` with an explicit field range.
+    IntervalTypmod(IntervalTypmod),
     /// SP40: PostgreSQL `bytea` (OID 17): variable-length binary string.
     Bytea,
     /// PostgreSQL `uuid` (OID 2950): 128-bit identifier.
@@ -1377,9 +1526,9 @@ impl ColumnType {
             ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => {
                 oids::TIMESTAMPTZ
             }
-            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => {
-                oids::INTERVAL
-            }
+            ColumnType::Interval
+            | ColumnType::Temporal(TemporalType::Interval, _)
+            | ColumnType::IntervalTypmod(_) => oids::INTERVAL,
             ColumnType::Bytea => oids::BYTEA,
             ColumnType::Uuid => oids::UUID,
             ColumnType::Regclass => oids::REGCLASS,
@@ -1466,7 +1615,9 @@ impl ColumnType {
             ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => {
                 "timestamp with time zone"
             }
-            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => "interval",
+            ColumnType::Interval
+            | ColumnType::Temporal(TemporalType::Interval, _)
+            | ColumnType::IntervalTypmod(_) => "interval",
             ColumnType::Bytea => "bytea",
             ColumnType::Uuid => "uuid",
             ColumnType::Regclass => "regclass",
@@ -1545,7 +1696,9 @@ impl ColumnType {
             ColumnType::Timetz | ColumnType::Temporal(TemporalType::Timetz, _) => 12,
             ColumnType::Timestamp | ColumnType::Temporal(TemporalType::Timestamp, _) => 8,
             ColumnType::Timestamptz | ColumnType::Temporal(TemporalType::Timestamptz, _) => 8,
-            ColumnType::Interval | ColumnType::Temporal(TemporalType::Interval, _) => 16,
+            ColumnType::Interval
+            | ColumnType::Temporal(TemporalType::Interval, _)
+            | ColumnType::IntervalTypmod(_) => 16,
             ColumnType::Bytea => -1,
             ColumnType::Uuid => 16,
             ColumnType::Regclass => 4,
@@ -1643,6 +1796,7 @@ impl ColumnType {
                 p,
             ) => i32::from(p),
             ColumnType::Temporal(TemporalType::Interval, p) => (0x7fff << 16) | i32::from(p),
+            ColumnType::IntervalTypmod(typmod) => typmod.typmod(),
             // A domain inherits its base type's length modifier.
             ColumnType::Domain(domain) => domain.base.typmod(),
             _ => -1,
@@ -1673,8 +1827,18 @@ impl ColumnType {
             ColumnType::Temporal(TemporalType::Interval, precision) => {
                 (ColumnType::Interval, Some(precision))
             }
+            ColumnType::IntervalTypmod(_) => (ColumnType::Interval, None),
             _ => return None,
         })
+    }
+
+    /// The field-range typmod of an `interval` declaration, if it has one.
+    #[must_use]
+    pub const fn interval_typmod(self) -> Option<IntervalTypmod> {
+        match self {
+            ColumnType::IntervalTypmod(typmod) => Some(typmod),
+            _ => None,
+        }
     }
 }
 

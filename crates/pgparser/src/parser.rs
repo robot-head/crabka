@@ -694,7 +694,7 @@ impl Parser {
         // the normalized type is known below.
         let temporal_precision = if matches!(
             type_word.to_ascii_lowercase().as_str(),
-            "timestamp" | "timestamptz" | "time" | "timetz" | "interval"
+            "timestamp" | "timestamptz" | "time" | "timetz"
         ) && *self.peek() == Token::LParen
         {
             self.bump();
@@ -760,39 +760,51 @@ impl Parser {
                 type_pos,
             )
         })?;
+        let (interval_typmod, interval_precision) = if ty == crabka_pgtypes::ColumnType::Interval {
+            self.parse_interval_type_modifier()?
+        } else {
+            (None, None)
+        };
         // SP32: `numeric`/`decimal` may carry a `(precision[, scale])` modifier.
-        let base = match (ty, temporal_precision) {
-            (crabka_pgtypes::ColumnType::Time, Some(precision)) => {
+        let base = match (
+            ty,
+            temporal_precision.or(interval_precision),
+            interval_typmod,
+        ) {
+            (crabka_pgtypes::ColumnType::Time, Some(precision), _) => {
                 crabka_pgtypes::ColumnType::Temporal(crabka_pgtypes::TemporalType::Time, precision)
             }
-            (crabka_pgtypes::ColumnType::Timetz, Some(precision)) => {
+            (crabka_pgtypes::ColumnType::Timetz, Some(precision), _) => {
                 crabka_pgtypes::ColumnType::Temporal(
                     crabka_pgtypes::TemporalType::Timetz,
                     precision,
                 )
             }
-            (crabka_pgtypes::ColumnType::Timestamp, Some(precision)) => {
+            (crabka_pgtypes::ColumnType::Timestamp, Some(precision), _) => {
                 crabka_pgtypes::ColumnType::Temporal(
                     crabka_pgtypes::TemporalType::Timestamp,
                     precision,
                 )
             }
-            (crabka_pgtypes::ColumnType::Timestamptz, Some(precision)) => {
+            (crabka_pgtypes::ColumnType::Timestamptz, Some(precision), _) => {
                 crabka_pgtypes::ColumnType::Temporal(
                     crabka_pgtypes::TemporalType::Timestamptz,
                     precision,
                 )
             }
-            (crabka_pgtypes::ColumnType::Interval, Some(precision)) => {
+            (crabka_pgtypes::ColumnType::Interval, Some(precision), None) => {
                 crabka_pgtypes::ColumnType::Temporal(
                     crabka_pgtypes::TemporalType::Interval,
                     precision,
                 )
             }
-            (ty, _) if ty.is_numeric() && *self.peek() == Token::LParen => {
+            (crabka_pgtypes::ColumnType::Interval, _, Some(typmod)) => {
+                crabka_pgtypes::ColumnType::IntervalTypmod(typmod)
+            }
+            (ty, _, _) if ty.is_numeric() && *self.peek() == Token::LParen => {
                 self.parse_numeric_typmod()?
             }
-            (ty, _)
+            (ty, _, _)
                 if matches!(
                     ty,
                     crabka_pgtypes::ColumnType::Varchar(_) | crabka_pgtypes::ColumnType::Char(_)
@@ -800,7 +812,7 @@ impl Parser {
             {
                 self.parse_string_typmod(ty)?
             }
-            (ty, _)
+            (ty, _, _)
                 if matches!(
                     ty,
                     crabka_pgtypes::ColumnType::Bit(_) | crabka_pgtypes::ColumnType::VarBit(_)
@@ -808,7 +820,7 @@ impl Parser {
             {
                 self.parse_bit_typmod(ty, type_pos)?
             }
-            (ty, _) => ty,
+            (ty, _, _) => ty,
         };
         self.parse_array_type_suffix(base, &lookup_name, type_pos)
     }
@@ -1926,6 +1938,7 @@ impl Parser {
             ty,
             crabka_pgtypes::ColumnType::Interval
                 | crabka_pgtypes::ColumnType::Temporal(crabka_pgtypes::TemporalType::Interval, _)
+                | crabka_pgtypes::ColumnType::IntervalTypmod(_)
         ) {
             return self.interval_literal(string, ty).map(Some);
         }
@@ -1990,6 +2003,48 @@ impl Parser {
         let value = crabka_pgtypes::datetime::parse_interval_ranged(&string, Some(range))
             .map_err(|e| ParseError::new_sqlstate(e.sqlstate(), e.to_string(), field_pos))?;
         Ok(interval(crabka_pgtypes::datetime::interval_to_text(value)))
+    }
+
+    /// The field range and fractional precision after an `interval` type name.
+    /// PostgreSQL writes the range before the precision: `interval day to
+    /// second(3)`.
+    fn parse_interval_type_modifier(
+        &mut self,
+    ) -> Result<(Option<crabka_pgtypes::IntervalTypmod>, Option<u8>), ParseError> {
+        use crabka_pgtypes::datetime::IntervalField;
+
+        let field_pos = self.peek_pos();
+        let range = if let Some(start) = self.interval_field() {
+            let start = IntervalField::parse(start).expect("known interval field");
+            self.bump();
+            let end = if *self.peek() == Token::Keyword(Keyword::To) {
+                self.bump();
+                let end = self.interval_field().ok_or_else(|| {
+                    ParseError::new("expected an interval field", self.peek_pos())
+                })?;
+                self.bump();
+                IntervalField::parse(end).expect("known interval field")
+            } else {
+                start
+            };
+            Some((start, end))
+        } else {
+            None
+        };
+        let precision = if *self.peek() == Token::LParen {
+            self.bump();
+            let precision = self.expect_u16("fractional seconds precision")?;
+            self.expect(&Token::RParen)?;
+            Some(precision.min(6) as u8)
+        } else {
+            None
+        };
+        let Some((start, end)) = range else {
+            return Ok((None, precision));
+        };
+        let typmod = crabka_pgtypes::IntervalTypmod::new(start, end, precision)
+            .ok_or_else(|| ParseError::new("invalid interval field range", field_pos))?;
+        Ok((Some(typmod), None))
     }
 
     /// The single-word interval field qualifier at the cursor, if any. Keyword-
@@ -20357,7 +20412,7 @@ mod tests {
 
     #[test]
     fn parses_temporal_fractional_second_typmods() {
-        use crabka_pgtypes::TemporalType;
+        use crabka_pgtypes::{IntervalTypmod, TemporalType, datetime::IntervalField};
 
         let ty = |sql: &str| match one(sql) {
             Statement::CreateTable { columns, .. } => columns[0].ty,
@@ -20371,6 +20426,20 @@ mod tests {
         assert_eq!(
             ty("CREATE TABLE t (x interval(9))"),
             ColumnType::Temporal(TemporalType::Interval, 6)
+        );
+        assert_eq!(
+            ty("CREATE TABLE t (x interval day to second(3))"),
+            ColumnType::IntervalTypmod(
+                IntervalTypmod::new(IntervalField::Day, IntervalField::Second, Some(3))
+                    .expect("valid interval typmod")
+            )
+        );
+        assert_eq!(
+            ty("CREATE TABLE t (x interval year to month[])"),
+            ColumnType::Array(crabka_pgtypes::ElemType::IntervalTypmod(
+                IntervalTypmod::new(IntervalField::Year, IntervalField::Month, None)
+                    .expect("valid interval typmod")
+            ))
         );
     }
 
@@ -22206,6 +22275,20 @@ mod tests {
             };
             assert2::assert!(expr(sql) == expected, "{sql}");
         }
+        assert2::assert!(
+            expr("interval day to minute '1 day 04:05:06'")
+                == Expr::Cast {
+                    expr: Box::new(Expr::StringLiteral("1 day 04:05:06".into())),
+                    ty: ColumnType::IntervalTypmod(
+                        crabka_pgtypes::IntervalTypmod::new(
+                            crabka_pgtypes::datetime::IntervalField::Day,
+                            crabka_pgtypes::datetime::IntervalField::Minute,
+                            None,
+                        )
+                        .expect("valid interval typmod"),
+                    ),
+                }
+        );
     }
 
     #[test]

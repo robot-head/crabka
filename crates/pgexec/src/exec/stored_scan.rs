@@ -134,10 +134,10 @@ pub(super) fn scan_stored_relation(
     // runs even for `WHERE false` — there is no skip path.
     if let Some(meta) = &t.foreign {
         let server = crabka_pgcatalog::get_server(catalog_kv, &meta.server)?;
-        crate::exec::foreign_scan::require_handler(catalog_kv, t)?;
         let scanner = read_ctx.fctx.scanner.ok_or_else(|| {
             ExecError::Unsupported("foreign tables require the `kafka` feature".into())
         })?;
+        crate::exec::foreign_scan::require_handler(catalog_kv, t)?;
         if !crate::catalog_fn::foreign_usage_is_held(
             catalog_kv,
             crabka_pgcatalog::ForeignPrivilegeTarget::Server,

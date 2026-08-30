@@ -49,7 +49,8 @@ fn table_version_count(kv: &dyn Kv, table_id: u32) -> usize {
         .len()
 }
 
-/// Number of physical entries stored in one local secondary index.
+/// Number of physical entries stored in one local secondary index. Each live
+/// key has an equality and an ordered B-tree representation.
 fn index_entry_count(kv: &dyn Kv, table_id: u32, index_id: u32) -> usize {
     kv.scan_prefix(&crabka_pgkv::key::secondary_index_prefix(
         table_id, index_id,
@@ -187,9 +188,9 @@ async fn vacuum_reclaims_aborted_insert_garbage_and_its_index_entries() {
     exec(&mut session, "INSERT INTO u VALUES (7,'k')").await;
     exec(&mut session, "ROLLBACK").await;
 
-    // The aborted insert left a dead version and a dead unique-index entry.
+    // The aborted insert left a dead version and both index representations.
     assert!(table_version_count(kv.as_ref(), table.id) == 1);
-    assert!(index_entry_count(kv.as_ref(), table.id, index.id) == 1);
+    assert!(index_entry_count(kv.as_ref(), table.id, index.id) == 2);
 
     let stats = engine.vacuum().await.expect("vacuum");
     assert!(stats.versions_pruned == 1);
@@ -227,9 +228,9 @@ async fn vacuum_reclaims_deleted_rows_the_write_path_never_revisits() {
     assert!(stats.versions_pruned == 1);
     assert!(stats.index_entries_pruned == 1);
     assert!(version_count(kv.as_ref(), table.id, 1) == 0);
-    // The surviving row keeps its version and index entry.
+    // The surviving row keeps its version and both index representations.
     assert!(version_count(kv.as_ref(), table.id, 2) == 1);
-    assert!(index_entry_count(kv.as_ref(), table.id, index.id) == 1);
+    assert!(index_entry_count(kv.as_ref(), table.id, index.id) == 2);
     let rows = select_rows(&mut session, "SELECT id, v FROM d ORDER BY id").await;
     assert!(rows == vec![vec![Some("2".to_owned()), Some("b".to_owned())]]);
 }

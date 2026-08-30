@@ -1653,6 +1653,7 @@ pub(crate) fn attribute_storage(ty: ColumnType) -> &'static str {
         | C::Timestamp
         | C::Timestamptz
         | C::Interval
+        | C::IntervalTypmod(_)
         | C::Temporal(_, _)
         | C::Uuid
         | C::Money
@@ -4554,7 +4555,7 @@ pub(crate) fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
         ElemType::Time => "_time",
         ElemType::Timestamp => "_timestamp",
         ElemType::Timestamptz => "_timestamptz",
-        ElemType::Interval => "_interval",
+        ElemType::Interval | ElemType::IntervalTypmod(_) => "_interval",
         ElemType::Bytea => "_bytea",
         ElemType::Uuid => "_uuid",
         ElemType::Jsonb => "_jsonb",

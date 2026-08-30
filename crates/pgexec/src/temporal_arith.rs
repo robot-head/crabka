@@ -120,6 +120,7 @@ enum Category {
 
 /// `TypeCategory()` restricted to the types these operators reach.
 fn category(ty: ColumnType) -> Category {
+    let ty = ty.temporal_base().map_or(ty, |(base, _)| base);
     match ty.storage_type() {
         ColumnType::Date
         | ColumnType::Time

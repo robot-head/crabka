@@ -995,6 +995,19 @@ pub fn apply_interval_typmod(
     Ok(Interval { micros, ..value })
 }
 
+/// Apply an `interval` field-range declaration, then its optional fractional
+/// seconds precision.
+pub fn apply_interval_range_typmod(
+    value: Interval,
+    range: (IntervalField, IntervalField),
+    precision: Option<u8>,
+) -> Result<Interval, TypeError> {
+    let value = truncate_to_range(value, Some(range));
+    precision.map_or(Ok(value), |precision| {
+        apply_interval_typmod(value, Some(precision))
+    })
+}
+
 impl PartialEq for Interval {
     fn eq(&self, other: &Self) -> bool {
         self.canonical_micros() == other.canonical_micros()
@@ -2167,7 +2180,7 @@ pub fn timestamptz_from_binary(b: &[u8]) -> Result<Timestamp, TypeError> {
 /// The interval field a bare quantity is measured in, used both as the unit an
 /// `INTERVAL '…' <field>` qualifier supplies and as the step in the coarsening
 /// chain a unit-less field list walks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IntervalField {
     Microsecond,
     Millisecond,
@@ -8546,12 +8559,13 @@ mod make_justify_tests {
 
     #[test]
     fn temporal_typmods_round_half_away_from_zero() {
+        use jiff::tz::TimeZone;
+
         use super::{
             Interval, apply_interval_typmod, apply_time_typmod, apply_timestamp_typmod,
             apply_timestamptz_typmod, parse_time, parse_timestamp, parse_timestamptz, time_to_text,
             timestamp_to_text, timestamptz_to_text,
         };
-        use jiff::tz::TimeZone;
 
         let time = parse_time("12:34:56.500001").expect("time");
         assert_eq!(

@@ -33,9 +33,9 @@ pub mod xml;
 
 pub use bitstring::{BitString, BitwiseOp};
 pub use datum::{
-    ArrayDim, ArrayValue, BuiltinElem, ColumnType, Datum, ElemType, EnumValue, MAX_ARRAY_DIM,
-    MultirangeValue, RangeValue, RecordValue, RegclassValue, TemporalType, canonicalize_for_key,
-    canonicalize_row_for_key, oids,
+    ArrayDim, ArrayValue, BuiltinElem, ColumnType, Datum, ElemType, EnumValue, IntervalTypmod,
+    MAX_ARRAY_DIM, MultirangeValue, RangeValue, RecordValue, RegclassValue, TemporalType,
+    canonicalize_for_key, canonicalize_row_for_key, oids,
 };
 pub use error::TypeError;
 pub use geometry::{Path, Point, Polygon};

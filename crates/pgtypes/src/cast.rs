@@ -546,6 +546,18 @@ pub fn cast_in(
     if value.is_null() {
         return Ok(Datum::Null);
     }
+    if let Some(typmod) = to.interval_typmod() {
+        let value = cast_in(value, ColumnType::Interval, style)?;
+        return match value {
+            Datum::Interval(value) => crate::datetime::apply_interval_range_typmod(
+                value,
+                typmod.range(),
+                typmod.precision(),
+            )
+            .map(Datum::Interval),
+            value => Ok(value),
+        };
+    }
     if let Some((base, Some(precision))) = to.temporal_base() {
         let value = cast_in(value, base, style)?;
         return apply_temporal_typmod(value, base, precision);
@@ -3711,8 +3723,9 @@ mod tests {
 
     #[test]
     fn temporal_typmod_casts_parse_and_round() {
-        use crate::TemporalType;
         use assert2::assert;
+
+        use crate::TemporalType;
 
         let value = cast(
             &Datum::Text("2000-01-01 00:00:00.500000".into()),

@@ -239,9 +239,8 @@ fn an_indexed_write_with_returning_reports_both() {
         .collect();
     assert!(let [write] = writes.as_slice());
     check!(attribute(write, "pg.returning") == Some(&Value::Bool(true)));
-    // One index entry per inserted row — the cost a wide index set adds to a
-    // write, which the op total alone does not separate out.
-    check!(number(write, "pg.index_ops") == Some(2));
+    // Equality and ordered B-tree entries are both physical writes per row.
+    check!(number(write, "pg.index_ops") == Some(4));
 }
 
 #[test]

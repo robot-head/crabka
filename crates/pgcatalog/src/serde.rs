@@ -47,7 +47,11 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 30;
+pub const SCHEMA_VERSION: u8 = 31;
+
+/// The `interval` type payload normally is one precision byte. This marker
+/// introduces the packed field-range typmod that follows it.
+const INTERVAL_RANGE_TYPMOD: u8 = u8::MAX - 1;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -399,6 +403,11 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
             });
             out.push(precision);
         }
+        ColumnType::IntervalTypmod(typmod) => {
+            out.push(type_tag::INTERVAL);
+            out.push(INTERVAL_RANGE_TYPMOD);
+            out.extend_from_slice(&typmod.typmod().to_be_bytes());
+        }
         ColumnType::Bytea => out.push(type_tag::BYTEA),
         ColumnType::Uuid => out.push(type_tag::UUID),
         ColumnType::Regclass => out.push(type_tag::REGCLASS),
@@ -559,6 +568,14 @@ fn read_type_with(
         }
         type_tag::INTERVAL => {
             let precision = take_u8(cur)?;
+            if precision == INTERVAL_RANGE_TYPMOD {
+                let packed = i32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4"));
+                let typmod =
+                    crabka_pgtypes::IntervalTypmod::from_typmod(packed).ok_or_else(|| {
+                        KvError::CorruptRow("unsupported interval field range".into())
+                    })?;
+                return Ok(ColumnType::IntervalTypmod(typmod));
+            }
             if precision != u8::MAX && precision > 6 {
                 return Err(KvError::CorruptRow("unsupported datetime precision".into()).into());
             }
@@ -4552,9 +4569,17 @@ mod tests {
     #[test]
     fn temporal_precision_round_trips_through_schema_encoding() {
         use assert2::assert;
-        use crabka_pgtypes::{ColumnType, TemporalType};
+        use crabka_pgtypes::{ColumnType, IntervalTypmod, TemporalType, datetime::IntervalField};
 
         let ty = ColumnType::Temporal(TemporalType::Timestamptz, 2);
+        let mut bytes = Vec::new();
+        super::write_type(&mut bytes, ty);
+        assert!(super::read_type(&mut bytes.as_slice()).expect("type") == ty);
+
+        let ty = ColumnType::IntervalTypmod(
+            IntervalTypmod::new(IntervalField::Day, IntervalField::Second, Some(3))
+                .expect("valid interval typmod"),
+        );
         let mut bytes = Vec::new();
         super::write_type(&mut bytes, ty);
         assert!(super::read_type(&mut bytes.as_slice()).expect("type") == ty);

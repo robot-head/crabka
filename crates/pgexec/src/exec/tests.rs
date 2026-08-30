@@ -533,7 +533,7 @@ async fn sqlstate_of(session: &mut SqlSession, sql: &str) -> String {
 }
 
 #[tokio::test]
-async fn foreign_table_without_a_handler_fails_before_scanner_lookup() {
+async fn foreign_table_scan_requires_a_scanner_before_fdw_handler_lookup() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
     for sql in [
@@ -546,18 +546,14 @@ async fn foreign_table_without_a_handler_fails_before_scanner_lookup() {
     let error = session
         .simple_query("SELECT * FROM t")
         .await
-        .expect_err("handler-less FDW is rejected");
-    assert_eq!(
-        error.message,
-        "foreign-data wrapper \"dummy\" has no handler"
-    );
-    let error = session
-        .simple_query("EXPLAIN SELECT * FROM t")
-        .await
-        .expect_err("EXPLAIN rejects a handler-less FDW");
-    assert_eq!(
-        error.message,
-        "foreign-data wrapper \"dummy\" has no handler"
+        .expect_err("foreign table without scanner is rejected");
+    assert_eq!(error.message, "foreign tables require the `kafka` feature");
+    assert!(
+        session
+            .simple_query("EXPLAIN SELECT * FROM t")
+            .await
+            .is_ok(),
+        "EXPLAIN plans without invoking either the scanner or FDW handler"
     );
     let error = session
         .simple_query("IMPORT FOREIGN SCHEMA remote FROM SERVER s INTO public")
@@ -8413,12 +8409,9 @@ mod pushdown {
             )
             .await
             .expect("create server");
-            s.simple_query(
-                "CREATE FOREIGN TABLE f (_partition int4, _offset int8, _timestamp text, \
-                 _key text, _headers text, v int8) SERVER k OPTIONS (topic 'topic')",
-            )
-            .await
-            .expect("create foreign table");
+            s.simple_query("CREATE FOREIGN TABLE f (v int8) SERVER k OPTIONS (topic 'topic')")
+                .await
+                .expect("create foreign table");
         }
         (engine, seen)
     }

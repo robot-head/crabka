@@ -149,9 +149,9 @@ async fn fdw_ddl_routes_all_catalog_writes_through_committer() {
     run(&mut session, "DROP FOREIGN DATA WRAPPER kafka_fdw").await;
 
     let batches = committer.batches();
-    // Eight statements, plus the one batch that claims this session's block of
+    // Nine statements, plus the one batch that claims this session's block of
     // table ids — taken once, on the first statement that creates a relation.
-    assert!(batches.len() == 9);
+    assert!(batches.len() == 10);
     assert!(batches.iter().all(|batch| !batch.is_empty()));
 }
 

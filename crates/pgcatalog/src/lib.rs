@@ -8531,7 +8531,8 @@ pub fn drop_user_mapping_ops(
 /// Create a foreign table linked to an existing server.
 ///
 /// The server must already exist. If it does not, this function returns
-/// `UndefinedObject`. Its columns are exactly the caller-provided schema.
+/// `UndefinedObject`. The Kafka envelope columns precede the caller-provided
+/// value schema.
 ///
 /// # Errors
 ///
@@ -8577,6 +8578,15 @@ pub fn create_foreign_table_ops(
     let _ = get_server(kv, server)?;
     ensure_unique_options(&options)?;
     ensure_foreign_column_options(&columns, &column_options)?;
+    let declared_columns = columns;
+    let mut columns = vec![
+        Column::new("_partition", ColumnType::Int4),
+        Column::new("_offset", ColumnType::Int8),
+        Column::new("_timestamp", ColumnType::Timestamptz),
+        Column::new("_key", ColumnType::Bytea),
+        Column::new("_headers", ColumnType::Text),
+    ];
+    columns.extend(declared_columns);
 
     if relation_exists(kv, name)? {
         return Err(CatalogError::DuplicateTable(name.to_string()));

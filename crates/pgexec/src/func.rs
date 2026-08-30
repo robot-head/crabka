@@ -1256,7 +1256,9 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
         ScalarFunc::UuidV7 => {
             require_arity(fc, n <= 1)?;
             if let Some(arg) = args.first()
-                && crate::eval::infer_type(arg, scope)? != ColumnType::Interval
+                && crate::eval::infer_type(arg, scope)?
+                    .temporal_base()
+                    .is_none_or(|(base, _)| base != ColumnType::Interval)
             {
                 return Err(no_matching_function());
             }
@@ -1446,7 +1448,9 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
         ScalarFunc::IntervalHash => {
             require_arity(fc, n == 1)?;
             if is_unknown_literal(&args[0])
-                || crate::eval::infer_type(&args[0], scope)? == ColumnType::Interval
+                || crate::eval::infer_type(&args[0], scope)?
+                    .temporal_base()
+                    .is_some_and(|(base, _)| base == ColumnType::Interval)
             {
                 Ok(ColumnType::Int4)
             } else {
@@ -3801,7 +3805,11 @@ fn type_modifier(kind: TypmodKind, typmod: i64) -> String {
             format!("({},{})", (packed >> 16) & 0xffff, packed & 0xffff)
         }
         TypmodKind::Seconds | TypmodKind::Bits | TypmodKind::Verbatim => format!("({typmod})"),
-        TypmodKind::Interval => format!("({})", typmod & 0xffff),
+        TypmodKind::Interval => crabka_pgtypes::IntervalTypmod::from_typmod(typmod as i32)
+            .map_or_else(
+                || format!("({})", typmod & 0xffff),
+                |typmod| typmod.suffix(),
+            ),
     }
 }
 

@@ -3647,8 +3647,38 @@ pub(crate) fn alter_descendant_action_ops(
         _ if named_column.is_some_and(|column| state.table.column_index(column).is_none()) => {
             Ok(())
         }
+        Action::DropNotNull(column) => drop_column_not_null(kv, state, column, false),
         _ => alter_table_action_ops(kv, state, action, fctx),
     }
+}
+
+/// Apply `DROP NOT NULL`, allowing a recursive parent operation to carry its
+/// new flag to descendants before that parent schema is committed.
+fn drop_column_not_null(
+    kv: &dyn Kv,
+    state: &mut AlterTableState,
+    column: &str,
+    check_parent: bool,
+) -> Result<(), ExecError> {
+    let index = state.column_index(column)?;
+    if replica_identity_index_uses_column(kv, &state.table, column)? {
+        return Err(ExecError::InvalidTableDefinition(format!(
+            "column \"{column}\" is in index used as replica identity"
+        )));
+    }
+    if check_parent && let Some((parent, _)) = crate::partition::parent_of(kv, &state.table.name)? {
+        let parent = crabka_pgcatalog::get_table(kv, &parent)?;
+        if parent
+            .column_index(column)
+            .is_some_and(|index| parent.columns[index].not_null)
+        {
+            return Err(ExecError::InvalidTableDefinition(format!(
+                "column \"{column}\" is marked NOT NULL in parent table"
+            )));
+        }
+    }
+    state.table.columns[index].not_null = false;
+    Ok(())
 }
 
 /// Give one descendant the column its ancestor just gained.
@@ -4714,27 +4744,7 @@ pub(crate) fn alter_table_action_ops(
             drop_table_column(kv, state, column, *cascade)
         }
         Action::SetNotNull(column) => set_column_not_null(kv, state, column, &ddl_ctx),
-        Action::DropNotNull(column) => {
-            let index = state.column_index(column)?;
-            if replica_identity_index_uses_column(kv, &state.table, column)? {
-                return Err(ExecError::InvalidTableDefinition(format!(
-                    "column \"{column}\" is in index used as replica identity"
-                )));
-            }
-            if let Some((parent, _)) = crate::partition::parent_of(kv, &state.table.name)? {
-                let parent = crabka_pgcatalog::get_table(kv, &parent)?;
-                if parent
-                    .column_index(column)
-                    .is_some_and(|index| parent.columns[index].not_null)
-                {
-                    return Err(ExecError::InvalidTableDefinition(format!(
-                        "column \"{column}\" is marked NOT NULL in parent table"
-                    )));
-                }
-            }
-            state.table.columns[index].not_null = false;
-            Ok(())
-        }
+        Action::DropNotNull(column) => drop_column_not_null(kv, state, column, true),
         Action::Inherit(reference) => {
             let parent_name =
                 resolve_relation(kv, resolution, reference, SchemaDisposition::Reference)?;

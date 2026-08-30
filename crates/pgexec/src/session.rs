@@ -15121,6 +15121,20 @@ pub(crate) fn decode_binary_value(
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
+        ColumnType::IntervalTypmod(typmod) => {
+            let _: [u8; 16] = binary_array(value)?;
+            let decoded = crabka_pgtypes::datetime::interval_from_binary(value)
+                .map(Datum::Interval)
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)?;
+            crabka_pgtypes::cast::cast_assign(
+                &decoded,
+                ColumnType::IntervalTypmod(typmod),
+                time_zone,
+            )
+            .map_err(ExecError::from)
+            .map_err(ExecError::into_pg)
+        }
         ColumnType::Temporal(kind, precision) => {
             let decoded = decode_binary_value(
                 value,
@@ -26121,8 +26135,8 @@ mod tests {
             "expected IMPORT FOREIGN SCHEMA command tag, got {res:?}"
         );
 
-        // `orders` exists as a foreign table with the scanner's declared `id`
-        // column; OPTIONS carries the topic name.
+        // `orders` has the fixed Kafka envelope before the scanner's declared
+        // `id` column; OPTIONS carries the topic name.
         let orders = crabka_pgcatalog::get_table(
             &*engine.kv,
             &crabka_pgcatalog::RelationName::public("orders"),
@@ -26134,7 +26148,17 @@ mod tests {
             meta.options
                 .contains(&("topic".to_string(), "orders".to_string()))
         );
-        assert!(orders.columns == vec![Column::new("id", ColumnType::Int8)]);
+        assert_eq!(
+            orders.columns,
+            vec![
+                Column::new("_partition", ColumnType::Int4),
+                Column::new("_offset", ColumnType::Int8),
+                Column::new("_timestamp", ColumnType::Timestamptz),
+                Column::new("_key", ColumnType::Bytea),
+                Column::new("_headers", ColumnType::Text),
+                Column::new("id", ColumnType::Int8),
+            ]
+        );
 
         // `payments` was excluded by LIMIT TO and must not exist.
         assert!(

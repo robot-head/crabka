@@ -398,7 +398,7 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
         AggFunc::Avg => {
             let arg = single_value_arg(fc)?;
             let t = crate::eval::infer_type(arg, scope)?;
-            match t {
+            match t.temporal_base().map_or(t, |(base, _)| base) {
                 // `avg(float4)` is `float8` in PostgreSQL — unlike `sum(float4)`,
                 // which stays `real`.
                 ColumnType::Float4 | ColumnType::Float8 => Ok(ColumnType::Float8),
@@ -2063,7 +2063,10 @@ impl AccState {
             AggFunc::Avg => {
                 if matches!(spec.arg_type, Some(ColumnType::Float4 | ColumnType::Float8)) {
                     AccState::Avg { sum: 0.0, n: 0 }
-                } else if spec.arg_type == Some(ColumnType::Interval) {
+                } else if spec.arg_type.is_some_and(|ty| {
+                    ty.temporal_base()
+                        .is_some_and(|(base, _)| base == ColumnType::Interval)
+                }) {
                     AccState::AvgInterval { sum: None, n: 0 }
                 } else {
                     AccState::AvgN { sum: None, n: 0 }

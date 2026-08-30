@@ -2628,7 +2628,10 @@ fn series_types(name: &str, given: &[ArgType]) -> Result<ColumnType, ExecError> 
             ColumnType::Timestamptz
         };
         let step = given[2].known();
-        if step.is_some_and(|t| t != ColumnType::Interval) {
+        if step.is_some_and(|t| {
+            t.temporal_base()
+                .is_none_or(|(base, _)| base != ColumnType::Interval)
+        }) {
             return Err(undefined_function(name, given));
         }
         if given.len() == 4

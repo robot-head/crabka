@@ -178,7 +178,7 @@ pub(crate) fn coerce(
     if matches!(&value, Datum::Regclass(_)) && target.is_reg() {
         return Ok(value);
     }
-    if matches!(target, ColumnType::Temporal(_, _)) {
+    if matches!(target, ColumnType::Temporal(_, _)) || target.interval_typmod().is_some() {
         return crate::eval::cast_assign_value_in_at(&value, target, ctx.output_style(), ctx.now);
     }
     if target == ColumnType::JsonPath {

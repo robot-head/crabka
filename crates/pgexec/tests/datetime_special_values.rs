@@ -176,6 +176,20 @@ async fn infinity_sorts_outside_every_finite_value() {
                 Some("f".to_string()),
             ]
     );
+    client
+        .simple_query(
+            "CREATE VIEW interval_range_view AS \
+             SELECT interval day to minute '1 day 04:05:06' AS value",
+        )
+        .await
+        .expect("create interval typmod view");
+    let viewdef = scalar(
+        &client,
+        "SELECT pg_get_viewdef('interval_range_view'::regclass)",
+    )
+    .await
+    .expect("view definition");
+    assert!(viewdef.contains("interval day to minute"), "{viewdef}");
 }
 
 /// The last civil date the calendar holds is an ordinary date, not the
@@ -616,6 +630,47 @@ async fn temporal_typmods_round_values_when_stored() {
                 Some("2000-01-01 00:00:01".into()),
                 Some("2000-01-01 00:00:01+00".into()),
                 Some("00:00:02".into()),
+            ]
+    );
+}
+
+#[tokio::test]
+async fn interval_field_typmods_round_store_and_render() {
+    let client = connect(spawn().await).await;
+    client
+        .simple_query(
+            "CREATE TABLE interval_range_store (\
+               dm interval day to minute, ds interval day to second(2), ym interval year to month); \
+             INSERT INTO interval_range_store VALUES (\
+               '1 year 2 mons 3 days 04:05:06.789', \
+               '1 year 2 mons 3 days 04:05:06.789', \
+               '1 year 2 mons 3 days 04:05:06.789')",
+        )
+        .await
+        .expect("store interval field typmods");
+    assert!(
+        row(
+            &client,
+            "SELECT dm::text, ds::text, ym::text FROM interval_range_store",
+        )
+        .await
+            == vec![
+                Some("1 year 2 mons 3 days 04:05:00".into()),
+                Some("1 year 2 mons 3 days 04:05:06.79".into()),
+                Some("1 year 2 mons".into()),
+            ]
+    );
+    assert!(
+        column(
+            &client,
+            "SELECT format_type(atttypid, atttypmod) FROM pg_attribute \
+             WHERE attrelid = 'interval_range_store'::regclass AND attnum > 0 ORDER BY attnum",
+        )
+        .await
+            == vec![
+                Some("interval day to minute".into()),
+                Some("interval day to second(2)".into()),
+                Some("interval year to month".into()),
             ]
     );
 }

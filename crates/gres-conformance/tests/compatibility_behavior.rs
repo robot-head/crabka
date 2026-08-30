@@ -81,14 +81,16 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
             "CREATE TABLE parser_commands_probe (id int4)",
             "CREATE ROLE parser_commands_role",
         ],
-        "CREATE SERVER" | "DROP FOREIGN DATA WRAPPER" => {
+        "ALTER FOREIGN DATA WRAPPER" | "CREATE SERVER" | "DROP FOREIGN DATA WRAPPER" => {
             &["CREATE FOREIGN DATA WRAPPER parser_commands_wrapper"]
         }
-        "CREATE FOREIGN TABLE"
-        | "CREATE USER MAPPING"
-        | "DROP SERVER"
-        | "IMPORT FOREIGN SCHEMA" => &[
+        "CREATE FOREIGN TABLE" | "CREATE USER MAPPING" | "ALTER SERVER" | "DROP SERVER" => &[
             "CREATE FOREIGN DATA WRAPPER parser_commands_wrapper",
+            "CREATE SERVER parser_commands_server FOREIGN DATA WRAPPER parser_commands_wrapper",
+        ],
+        "IMPORT FOREIGN SCHEMA" => &[
+            "CREATE FUNCTION parser_commands_fdw_handler() RETURNS fdw_handler LANGUAGE c AS 'regress', 'test_fdw_handler'",
+            "CREATE FOREIGN DATA WRAPPER parser_commands_wrapper HANDLER parser_commands_fdw_handler",
             "CREATE SERVER parser_commands_server FOREIGN DATA WRAPPER parser_commands_wrapper",
         ],
         "DROP FOREIGN TABLE" => &[
@@ -117,7 +119,7 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
         "EXECUTE" | "DEALLOCATE" => &["PREPARE parser_commands_prepared AS SELECT 1"],
         "DROP SEQUENCE" => &["CREATE SEQUENCE parser_commands_probe_sequence"],
         "DROP USER" => &["CREATE USER parser_commands_user"],
-        "DROP USER MAPPING" => &[
+        "ALTER USER MAPPING" | "DROP USER MAPPING" => &[
             "CREATE FOREIGN DATA WRAPPER parser_commands_wrapper",
             "CREATE SERVER parser_commands_server FOREIGN DATA WRAPPER parser_commands_wrapper",
             "CREATE USER MAPPING FOR PUBLIC SERVER parser_commands_server",
@@ -233,7 +235,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 173);
+    assert!(report.probes.len() == 174);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -269,8 +271,8 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 137);
-    assert!(refused == 36);
+    assert!(executed == 140);
+    assert!(refused == 34);
 }
 
 #[tokio::test]
