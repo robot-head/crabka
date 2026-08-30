@@ -5503,6 +5503,29 @@ pub(crate) fn attach_partition_ops(
     {
         return Err(ExecError::ChildMissingColumn(missing.name.clone()));
     }
+    for parent_column in &parent.columns {
+        let child_column = &candidate.columns[candidate
+            .column_index(&parent_column.name)
+            .expect("parent columns were checked above")];
+        if parent_column.not_null && !child_column.not_null {
+            return Err(ExecError::InvalidObjectDefinition(format!(
+                "column \"{}\" in child table \"{}\" must be marked NOT NULL",
+                parent_column.name, child.name
+            )));
+        }
+    }
+    for parent_check in &parent.checks {
+        if !candidate
+            .checks
+            .iter()
+            .any(|check| check.name == parent_check.name && check.expr == parent_check.expr)
+        {
+            return Err(ExecError::InvalidObjectDefinition(format!(
+                "child table is missing constraint \"{}\"",
+                parent_check.name
+            )));
+        }
+    }
     // A partition's columns have to be declared exactly as the parent declares
     // them, collation included: PostgreSQL compares the two declarations rather
     // than what they do, so `char(2) COLLATE "POSIX"` cannot join a parent whose
