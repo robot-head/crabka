@@ -350,7 +350,11 @@ fn xact_status(ctx: &EvalCtx, txn: &TxnRuntime, xid: u64) -> Result<Datum, ExecE
     let kv = ctx
         .data()
         .ok_or_else(|| ExecError::Unsupported("pg_xact_status requires a SQL session".into()))?;
-    if xid < oldest_recorded_xid(kv)? {
+    // A completed vacuum deletes every record below this floor, but recovery
+    // can retain one while advancing it. A real record is still authoritative:
+    // never turn a durable commit or abort into NULL merely because the
+    // watermark is ahead of it.
+    if xid < oldest_recorded_xid(kv)? && kv.get(&crabka_pgkv::key::clog_key(xid))?.is_none() {
         // The entry that would have answered was deleted, so the engine no
         // longer knows and says so. This is `TransactionIdInRecentPast`'s
         // `oldestClogXid` test, and the reason it must not be answered
@@ -442,4 +446,57 @@ fn wrong_arg(fc: &FuncCall, value: &Datum) -> ExecError {
         fc.name,
         value.column_type().map_or("unknown", ColumnType::name)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use assert2::assert;
+    use crabka_pgkv::{Kv, MemKv, WriteOp};
+
+    use super::*;
+
+    #[test]
+    fn status_keeps_a_retained_decision_below_the_clog_watermark() {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        let procarray = Arc::new(
+            crate::procarray::ProcArray::open(Arc::clone(&kv), crate::PersistMode::Durable)
+                .expect("procarray"),
+        );
+        let xid = procarray.begin_write().expect("xid");
+        kv.write_batch(&[
+            crabka_pgmvcc::clog::put_op(xid, XidStatus::Committed),
+            WriteOp::Put {
+                key: crabka_pgkv::key::clog_scan_lo_key(),
+                value: (xid + 1).to_be_bytes().to_vec(),
+            },
+        ])
+        .expect("recorded decision and watermark");
+        procarray.finish(xid);
+        let ctx = EvalCtx {
+            sequence: Some(Arc::new(crate::clock::SequenceRuntime {
+                kv: Arc::clone(&kv),
+                data: Arc::clone(&kv),
+                manager: Arc::new(crate::seq::SequenceManager::new(
+                    crate::PersistMode::Durable,
+                )),
+                currvals: Arc::new(Mutex::new(Default::default())),
+                pending: Arc::new(Mutex::new(Default::default())),
+            })),
+            txn: Some(Arc::new(TxnRuntime {
+                snapshot: None,
+                own_xid: None,
+                procarray,
+                assigned: Arc::new(Mutex::new(None)),
+                unsafe_enum_values: Arc::new(Default::default()),
+            })),
+            ..EvalCtx::test_default()
+        };
+
+        assert!(
+            xact_status(&ctx, ctx.txn("pg_xact_status").expect("txn"), xid).expect("status")
+                == Datum::Text("committed".into())
+        );
+    }
 }
