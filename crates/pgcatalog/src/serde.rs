@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 32;
+pub const SCHEMA_VERSION: u8 = 33;
 
 /// The `interval` type payload normally is one precision byte. This marker
 /// introduces the packed field-range typmod that follows it.

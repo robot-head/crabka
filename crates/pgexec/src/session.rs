@@ -6721,6 +6721,7 @@ impl SqlSession {
             return crabka_pgcatalog::statistics::ExpressionStats::default();
         }
         let mut values = BTreeSet::new();
+        let mut frequencies = BTreeMap::<Vec<u8>, usize>::new();
         let mut nulls = 0usize;
         let mut width = 0usize;
         for row in rows {
@@ -6730,12 +6731,40 @@ impl SqlSession {
             };
             width = width.saturating_add(value.text.len());
             values.insert(value.text.to_vec());
+            *frequencies.entry(value.text.to_vec()).or_default() += 1;
         }
         let non_null = rows.len().saturating_sub(nulls);
+        let mut common = frequencies.into_iter().collect::<Vec<_>>();
+        common.sort_by(|(left_value, left_count), (right_value, right_count)| {
+            right_count
+                .cmp(left_count)
+                .then_with(|| left_value.cmp(right_value))
+        });
+        common.truncate(100);
         crabka_pgcatalog::statistics::ExpressionStats {
             null_frac: Some((nulls as f32 / rows.len() as f32).to_string()),
             avg_width: (non_null > 0).then(|| i32::try_from(width / non_null).unwrap_or(i32::MAX)),
             n_distinct: Some((values.len() as f32).to_string()),
+            most_common_vals: (!common.is_empty()).then(|| {
+                format!(
+                    "{{{}}}",
+                    common
+                        .iter()
+                        .map(|(value, _)| Self::pg_stats_array_element(value))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }),
+            most_common_freqs: (!common.is_empty()).then(|| {
+                format!(
+                    "{{{}}}",
+                    common
+                        .iter()
+                        .map(|(_, count)| (*count as f32 / rows.len() as f32).to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }),
         }
     }
 

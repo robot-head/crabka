@@ -3684,8 +3684,14 @@ pub(crate) fn pg_stats_ext_exprs_rows(
                     .as_deref()
                     .and_then(|value| value.parse::<f32>().ok().map(Datum::Float4))
                     .unwrap_or(Datum::Null),
-                Datum::Null,
-                Datum::Null,
+                stats
+                    .most_common_vals
+                    .clone()
+                    .map_or(Datum::Null, Datum::Text),
+                stats
+                    .most_common_freqs
+                    .as_deref()
+                    .map_or(Ok(Datum::Null), float4_array)?,
                 Datum::Null,
                 Datum::Null,
                 Datum::Null,

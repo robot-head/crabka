@@ -12,7 +12,7 @@ use crate::{CatalogError, CommentObject, RelationName, TableId, set_comment_op};
 pub const STATISTICS_OID_BASE: u32 = 180_000;
 const PREFIX: &[u8] = b"\0\0\0\0catalog_statistics/";
 const NEXT_OID_KEY: &[u8] = b"\0\0\0\0meta/next_statistics_oid";
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 
 /// The derived `pg_statistic_ext_data` payload for one statistics object.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -34,6 +34,8 @@ pub struct ExpressionStats {
     pub null_frac: Option<String>,
     pub avg_width: Option<i32>,
     pub n_distinct: Option<String>,
+    pub most_common_vals: Option<String>,
+    pub most_common_freqs: Option<String>,
 }
 
 /// One item in PostgreSQL's multi-column most-common-values list.
@@ -361,6 +363,8 @@ fn push_expression_stats(out: &mut Vec<u8>, stats: &[ExpressionStats]) {
             }
         }
         push_optional_string(out, stat.n_distinct.as_deref());
+        push_optional_string(out, stat.most_common_vals.as_deref());
+        push_optional_string(out, stat.most_common_freqs.as_deref());
     }
 }
 
@@ -423,6 +427,8 @@ fn take_expression_stats(input: &mut &[u8]) -> Result<Vec<ExpressionStats>, Cata
                 null_frac,
                 avg_width,
                 n_distinct: take_optional_string(input)?,
+                most_common_vals: take_optional_string(input)?,
+                most_common_freqs: take_optional_string(input)?,
             })
         })
         .collect()
@@ -500,6 +506,8 @@ mod tests {
                 null_frac: Some("0.25".into()),
                 avg_width: Some(12),
                 n_distinct: Some("3".into()),
+                most_common_vals: Some("{x}".into()),
+                most_common_freqs: Some("{1}".into()),
             }],
         });
         kv.write_batch(&create_ops(&kv, &record).expect("create"))
