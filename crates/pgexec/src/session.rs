@@ -6245,6 +6245,13 @@ impl SqlSession {
                 statement,
             )
         })?;
+        crate::explain::apply_catalog_estimate(
+            &*self.catalog_kv,
+            &self.resolution_scope(),
+            &self.eval_ctx(),
+            statement,
+            &mut plan,
+        );
         if let Some(state) =
             explain_plan_state.and_then(|slot| slot.lock().expect("EXPLAIN plan state").take())
         {
@@ -23614,6 +23621,17 @@ mod tests {
             rows_or_sqlstate(&mut s, "EXPLAIN (COSTS OFF) SELECT * FROM t WHERE id = 1").await
                 == Ok(vec![
                     vec!["Seq Scan on t".into()],
+                    vec!["  Filter: (id = 1)".into()],
+                ])
+        );
+        s.simple_query("ANALYZE t").await.expect("analyze");
+        assert!(
+            rows_or_sqlstate(&mut s, "EXPLAIN (ANALYZE) SELECT * FROM t WHERE id = 1").await
+                == Ok(vec![
+                    vec![
+                        "Seq Scan on t (cost=0.00..0.00 rows=1 width=0) (actual rows=1.00 loops=1)"
+                            .into()
+                    ],
                     vec!["  Filter: (id = 1)".into()],
                 ])
         );

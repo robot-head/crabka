@@ -9,8 +9,9 @@
 //! planner decision, such as join order, index choice, or parallelism,
 //! deliberately does not, and the compatibility matrix says so.
 //!
-//! Estimates are the one thing that cannot be honest here, so `EXPLAIN` without
-//! `COSTS OFF` prints a fixed zero-cost estimate and does not invent numbers.
+//! Costs still use the conservative zero-cost placeholder until the cost model
+//! lands.  Row estimates, however, come from the persisted `ANALYZE` slots
+//! whenever this syntactic plan has one ordinary base relation.
 
 use std::fmt::Write as _;
 
@@ -42,6 +43,7 @@ pub(crate) struct PlanNode {
     pub(crate) children: Vec<PlanNode>,
     output: Vec<String>,
     actual: Option<PlanActual>,
+    estimated_rows: Option<u64>,
 }
 
 /// Measurements gathered by the executor for one node.
@@ -63,6 +65,7 @@ impl PlanNode {
             children: Vec::new(),
             output: Vec::new(),
             actual: None,
+            estimated_rows: None,
         }
     }
 
@@ -91,6 +94,196 @@ impl PlanNode {
         }
         line
     }
+}
+
+/// Apply the first statistics-backed row estimate to a rendered plan.  This
+/// deliberately owns only one base table and simple restriction expressions;
+/// a join estimate must wait for the cost planner's join and equivalence-class
+/// machinery instead of multiplying unrelated selectivities here.
+pub(crate) fn apply_catalog_estimate(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
+    ctx: &crate::clock::EvalCtx,
+    statement: &Statement,
+    plan: &mut PlanNode,
+) {
+    let Statement::Query(query) = statement else {
+        return;
+    };
+    let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
+        return;
+    };
+    let [TableExpr::Table { name, .. }] = select.from.as_slice() else {
+        return;
+    };
+    let Ok(relation) = crate::relname::resolve_relation(
+        catalog_kv,
+        resolution,
+        name,
+        crate::relname::SchemaDisposition::Reference,
+    ) else {
+        return;
+    };
+    let Ok(table) = crabka_pgcatalog::get_table(catalog_kv, &relation) else {
+        return;
+    };
+    let rows = crate::relstats::of(catalog_kv, &relation)
+        .ok()
+        .map(|stats| f64::from(stats.reltuples))
+        .filter(|rows| *rows >= 0.0)
+        .unwrap_or(1_000.0);
+    let selectivity = select.filter.as_ref().map_or(1.0, |filter| {
+        restriction_selectivity(catalog_kv, &table, rows, ctx, filter)
+    });
+    set_estimated_rows(plan, rows * selectivity);
+}
+
+fn set_estimated_rows(node: &mut PlanNode, rows: f64) {
+    node.estimated_rows = Some(rows.max(1.0).ceil() as u64);
+    for child in &mut node.children {
+        set_estimated_rows(child, rows);
+    }
+}
+
+fn restriction_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+) -> f64 {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            restriction_selectivity(catalog_kv, table, rows, ctx, left)
+                * restriction_selectivity(catalog_kv, table, rows, ctx, right)
+        }
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            let left = restriction_selectivity(catalog_kv, table, rows, ctx, left);
+            let right = restriction_selectivity(catalog_kv, table, rows, ctx, right);
+            left + right - left * right
+        }
+        Expr::Binary { op, left, right }
+            if matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+            ) =>
+        {
+            estimate_binary_restriction(catalog_kv, table, rows, ctx, *op, left, right)
+        }
+        Expr::IsNull { expr, negated } => column_statistics(catalog_kv, table, rows, expr, ctx)
+            .map_or(crate::plan::selfuncs::DEFAULT_EQ_SEL, |stats| {
+                crate::plan::selfuncs::nulltestsel(stats.as_stats(), !negated)
+            }),
+        Expr::Like { .. } => crate::plan::selfuncs::patternsel(),
+        _ => crate::plan::selfuncs::DEFAULT_INEQ_SEL,
+    }
+}
+
+fn estimate_binary_restriction(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+) -> f64 {
+    let (column, constant) = match (column_name(left), column_name(right)) {
+        (Some(column), None) => (column, right),
+        (None, Some(column)) => (column, left),
+        _ => return crate::plan::selfuncs::DEFAULT_INEQ_SEL,
+    };
+    let Some((position, definition)) = table
+        .columns
+        .iter()
+        .enumerate()
+        .find(|(_, definition)| definition.name == column)
+    else {
+        return crate::plan::selfuncs::DEFAULT_INEQ_SEL;
+    };
+    let constant = literal_for_type(constant, definition.ty, ctx);
+    let Some(stats) = crate::attrstats::get(
+        catalog_kv,
+        &crate::attrstats::AttributeStatsKey {
+            relation: table.name.clone(),
+            attnum: i16::try_from(position + 1).unwrap_or(i16::MAX),
+            inherited: false,
+        },
+    )
+    .ok()
+    .flatten()
+    .and_then(|stats| {
+        crate::plan::selfuncs::decode_catalog_stats(&stats, definition.ty, rows, ctx)
+    }) else {
+        return if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            crate::plan::selfuncs::DEFAULT_EQ_SEL
+        } else {
+            crate::plan::selfuncs::DEFAULT_INEQ_SEL
+        };
+    };
+    match op {
+        BinaryOp::Eq => crate::plan::selfuncs::eqsel(stats.as_stats(), constant.as_ref()),
+        BinaryOp::Ne => crate::plan::selfuncs::neqsel(stats.as_stats(), constant.as_ref()),
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            crate::plan::selfuncs::DEFAULT_INEQ_SEL
+        }
+        _ => unreachable!("binary restriction only receives comparison operators"),
+    }
+}
+
+fn column_statistics(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    expr: &Expr,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<crate::plan::selfuncs::DecodedColumnStats> {
+    let column = column_name(expr)?;
+    let (position, definition) = table
+        .columns
+        .iter()
+        .enumerate()
+        .find(|(_, definition)| definition.name == column)?;
+    let stats = crate::attrstats::get(
+        catalog_kv,
+        &crate::attrstats::AttributeStatsKey {
+            relation: table.name.clone(),
+            attnum: i16::try_from(position + 1).ok()?,
+            inherited: false,
+        },
+    )
+    .ok()??;
+    crate::plan::selfuncs::decode_catalog_stats(&stats, definition.ty, rows, ctx)
+}
+
+fn column_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Column { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+fn literal_for_type(
+    expr: &Expr,
+    ty: crabka_pgtypes::ColumnType,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<crabka_pgtypes::Datum> {
+    let value = crate::eval::eval(expr, &crate::scope::Scope::empty(), &[], ctx).ok()?;
+    (!matches!(value, crabka_pgtypes::Datum::Null))
+        .then(|| crate::eval::cast_value_in(&value, ty, ctx.output_style()).ok())?
 }
 
 /// Build a renderable tree from the plan the executor actually ran.
@@ -1190,7 +1383,12 @@ fn render_text_node(
         )
     };
     if options.costs {
-        headline.push_str(" (cost=0.00..0.00 rows=0 width=0)");
+        write!(
+            headline,
+            " (cost=0.00..0.00 rows={} width=0)",
+            node.estimated_rows.unwrap_or(0)
+        )
+        .expect("String write");
     }
     if let Some(actual) = explain_actual(node, options, actual_rows, root) {
         if actual.loops == 0 {
