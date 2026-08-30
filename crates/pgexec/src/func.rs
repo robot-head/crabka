@@ -176,6 +176,9 @@ enum ScalarFunc {
     PgLsnHash {
         extended: bool,
     },
+    EnumHash {
+        extended: bool,
+    },
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
     UuidV4,
@@ -552,6 +555,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "uuid_hash_extended" => ScalarFunc::UuidHash { extended: true },
         "pg_lsn_hash" => ScalarFunc::PgLsnHash { extended: false },
         "pg_lsn_hash_extended" => ScalarFunc::PgLsnHash { extended: true },
+        "hashenum" => ScalarFunc::EnumHash { extended: false },
+        "hashenumextended" => ScalarFunc::EnumHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1739,6 +1744,23 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::EnumHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if !matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Enum(_)
+            ) {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::FloatHash { ty, extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             let accepts = |input: ColumnType| {
@@ -2321,6 +2343,7 @@ fn coerce_unknown_args(
         ScalarFunc::BpcharHash { .. } => ColumnType::Text,
         ScalarFunc::UuidHash { .. } => ColumnType::Uuid,
         ScalarFunc::PgLsnHash { .. } => ColumnType::PgLsn,
+        ScalarFunc::EnumHash { .. } => return Ok(()),
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -3772,6 +3795,36 @@ fn eval_eager(
                 Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
             } else {
                 Datum::Int4(crate::partition::hash::hash_int64(value.cast_signed()))
+            })
+        }
+        ScalarFunc::EnumHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let Datum::Enum(value) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let label = value
+                .sort_order()
+                .ok_or_else(|| type_error(&fc.name, &vals[0]))?;
+            let oid = value
+                .ty
+                .oid
+                .checked_mul(128)
+                .and_then(|base| base.checked_add(u32::try_from(label + 1).ok()?))
+                .unwrap_or(u32::MAX);
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            Ok(if extended {
+                Datum::Int8(crate::partition::hash::hash_int32_extended(
+                    i32::from_ne_bytes(oid.to_ne_bytes()),
+                    seed,
+                ))
+            } else {
+                Datum::Int4(crate::partition::hash::hash_int32(i32::from_ne_bytes(
+                    oid.to_ne_bytes(),
+                )))
             })
         }
         ScalarFunc::PgTableIsVisible => {
