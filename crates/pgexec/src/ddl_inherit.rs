@@ -202,7 +202,7 @@ pub(crate) fn inherited_table_definition(
                 merged.push(column);
             }
         }
-        inherited_checks.extend(parent.checks);
+        inherited_checks.extend(parent.checks.into_iter().filter(|check| !check.no_inherit));
     }
     let (local_columns, mut checks, sequences, indexes, foreign_keys) =
         create_table_definition(kv, name, columns, constraints, like, &merged, ctx)?;

@@ -3172,8 +3172,6 @@ pub struct ForeignKeyRef {
 /// `INITIALLY { DEFERRED | IMMEDIATE }`, and `NOT VALID`.
 ///
 /// `PostgreSQL` also accepts `ENFORCED` / `NOT ENFORCED` and `NO INHERIT` here.
-/// `NO INHERIT` reaches [`TableConstraintKind::NotNull`], the one kind Crabka
-/// reads it on; the rest are consumed and dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ConstraintAttributes {
     /// `NOT VALID` was written. In `ALTER TABLE … ADD CONSTRAINT` this skips
@@ -3188,6 +3186,9 @@ pub struct ConstraintAttributes {
     /// Never true without [`ConstraintAttributes::deferrable`], because `NOT
     /// DEFERRABLE INITIALLY DEFERRED` is a `42601` refusal.
     pub initially_deferred: bool,
+    /// `NO INHERIT`: this `CHECK` stays local when another relation inherits
+    /// from its table.
+    pub no_inherit: bool,
 }
 
 /// Which properties an `ALTER TABLE … ALTER CONSTRAINT` writes, and their new

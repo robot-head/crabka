@@ -276,6 +276,8 @@ pub struct CheckConstraint {
     /// `ALTER TABLE … VALIDATE CONSTRAINT` runs that scan and sets the field to
     /// true.
     pub validated: bool,
+    /// `pg_constraint.connoinherit`: this `CHECK` is not copied into children.
+    pub no_inherit: bool,
 }
 
 /// Metadata stored alongside a foreign table that links it to its server.
@@ -8803,11 +8805,13 @@ mod tests {
                 name: "t_id_check".into(),
                 expr: "id > 0".into(),
                 validated: true,
+                no_inherit: false,
             },
             CheckConstraint {
                 name: "t_check".into(),
                 expr: "id < doubled".into(),
                 validated: false,
+                no_inherit: true,
             },
         ];
         let (_, ops) = create_table_with_options_ops(
@@ -8890,6 +8894,7 @@ mod tests {
             name: "t_check".into(),
             expr: "id > 0".into(),
             validated: true,
+            no_inherit: false,
         }];
         let ops = replace_table_schema_ops(
             &kv,

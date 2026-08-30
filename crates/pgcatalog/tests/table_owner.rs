@@ -27,6 +27,7 @@ fn checks() -> Vec<CheckConstraint> {
         name: "positive".into(),
         expr: "id > 0".into(),
         validated: true,
+        no_inherit: false,
     }]
 }
 
@@ -87,6 +88,7 @@ fn a_schema_record_round_trips_its_owner() {
                 name: "positive".into(),
                 expr: "id > 0".into(),
                 validated: false,
+                no_inherit: false,
             }],
         ),
         (
@@ -146,6 +148,7 @@ fn a_schema_record_round_trips_its_owner() {
                 name: "positive".into(),
                 expr: "id > 0".into(),
                 validated: true,
+                no_inherit: false,
             }],
         ),
         // A quoted-identifier owner: the encoding is length-prefixed bytes, so

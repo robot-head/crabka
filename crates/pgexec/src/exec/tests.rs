@@ -1762,9 +1762,27 @@ async fn altering_foreign_table_inheritance_checks_then_updates_catalog() {
     .await;
     run_s(
         &mut session,
-        "CREATE TABLE inherit_parent (id int4 CONSTRAINT inherit_parent_check CHECK (id > 0))",
+        "CREATE TABLE inherit_parent (id int4, \
+         CONSTRAINT inherit_parent_local CHECK (id <> 42) NO INHERIT, \
+         CONSTRAINT inherit_parent_check CHECK (id > 0))",
     )
     .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT connoinherit::text FROM pg_constraint WHERE conname = 'inherit_parent_local'",
+        )
+        .await
+            == vec![text_row(&["true"])]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'inherit_parent_local'",
+        )
+        .await
+            == vec![text_row(&["CHECK ((id <> 42)) NO INHERIT"])]
+    );
     run_s(
         &mut session,
         "CREATE FOREIGN TABLE inherit_child (id int4) SERVER inherit_server",

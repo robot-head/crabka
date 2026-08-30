@@ -3655,7 +3655,12 @@ fn check_constraint_def(kv: &dyn Kv, wanted: i32) -> Result<Datum, ExecError> {
         for check in &table.checks {
             let key = crate::catalog_rel::ConstraintKey::new(&table.name, &check.name);
             if check_oids.get(&key) == Some(&wanted) {
-                let suffix = if check.validated { "" } else { " NOT VALID" };
+                let suffix = match (check.no_inherit, check.validated) {
+                    (true, true) => " NO INHERIT",
+                    (true, false) => " NO INHERIT NOT VALID",
+                    (false, true) => "",
+                    (false, false) => " NOT VALID",
+                };
                 return Ok(Datum::Text(format!("CHECK (({})){suffix}", check.expr)));
             }
         }

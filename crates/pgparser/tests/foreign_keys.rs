@@ -367,6 +367,7 @@ fn every_deferrability_spelling_reaches_the_constraint_attributes() {
                 not_valid: false,
                 deferrable: false,
                 initially_deferred: false,
+                no_inherit: false,
             },
         },
         AttributeCase {
@@ -375,6 +376,7 @@ fn every_deferrability_spelling_reaches_the_constraint_attributes() {
                 not_valid: false,
                 deferrable: false,
                 initially_deferred: false,
+                no_inherit: false,
             },
         },
         AttributeCase {
@@ -383,6 +385,7 @@ fn every_deferrability_spelling_reaches_the_constraint_attributes() {
                 not_valid: false,
                 deferrable: true,
                 initially_deferred: false,
+                no_inherit: false,
             },
         },
         AttributeCase {
@@ -391,6 +394,7 @@ fn every_deferrability_spelling_reaches_the_constraint_attributes() {
                 not_valid: false,
                 deferrable: true,
                 initially_deferred: false,
+                no_inherit: false,
             },
         },
         AttributeCase {
@@ -399,6 +403,7 @@ fn every_deferrability_spelling_reaches_the_constraint_attributes() {
                 not_valid: false,
                 deferrable: true,
                 initially_deferred: true,
+                no_inherit: false,
             },
         },
         AttributeCase {
@@ -407,6 +412,7 @@ fn every_deferrability_spelling_reaches_the_constraint_attributes() {
                 not_valid: false,
                 deferrable: true,
                 initially_deferred: true,
+                no_inherit: false,
             },
         },
         AttributeCase {
@@ -415,6 +421,7 @@ fn every_deferrability_spelling_reaches_the_constraint_attributes() {
                 not_valid: false,
                 deferrable: true,
                 initially_deferred: true,
+                no_inherit: false,
             },
         },
         AttributeCase {
@@ -423,6 +430,7 @@ fn every_deferrability_spelling_reaches_the_constraint_attributes() {
                 not_valid: false,
                 deferrable: false,
                 initially_deferred: false,
+                no_inherit: false,
             },
         },
         AttributeCase {
@@ -431,6 +439,7 @@ fn every_deferrability_spelling_reaches_the_constraint_attributes() {
                 not_valid: false,
                 deferrable: false,
                 initially_deferred: false,
+                no_inherit: false,
             },
         },
     ];
@@ -460,6 +469,7 @@ fn not_valid_reaches_the_table_constraint_and_is_barred_from_a_column_one() {
                     not_valid: true,
                     deferrable: deferred,
                     initially_deferred: deferred,
+                    no_inherit: false,
                 },
             "{sql}"
         );
@@ -496,6 +506,7 @@ fn a_named_foreign_key_carries_its_name_and_its_whole_tail() {
                     not_valid: true,
                     deferrable: true,
                     initially_deferred: true,
+                    no_inherit: false,
                 },
             }
     );
@@ -534,6 +545,7 @@ fn alter_table_add_foreign_key_carries_the_whole_clause() {
                     not_valid: true,
                     deferrable: true,
                     initially_deferred: true,
+                    no_inherit: false,
                 },
             })]
     );

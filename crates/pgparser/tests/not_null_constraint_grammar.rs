@@ -49,7 +49,10 @@ fn not_null(name: Option<&str>, column: &str, no_inherit: bool) -> TableConstrai
             column: column.into(),
             no_inherit,
         },
-        attributes: crabka_pgparser::ast::ConstraintAttributes::default(),
+        attributes: crabka_pgparser::ast::ConstraintAttributes {
+            no_inherit,
+            ..Default::default()
+        },
     }
 }
 

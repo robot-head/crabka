@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 27;
+pub const SCHEMA_VERSION: u8 = 28;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -1326,7 +1326,7 @@ fn read_identity(cur: &mut &[u8]) -> Result<Option<IdentityKind>, KvError> {
 }
 
 /// A `CHECK` constraint list: a `u32` count, then each constraint's name,
-/// predicate source, and `pg_constraint.convalidated` flag.
+/// predicate source, `pg_constraint.convalidated`, and `connoinherit` flags.
 fn write_checks(out: &mut Vec<u8>, checks: &[CheckConstraint]) {
     out.extend_from_slice(
         &u32::try_from(checks.len())
@@ -1337,6 +1337,7 @@ fn write_checks(out: &mut Vec<u8>, checks: &[CheckConstraint]) {
         write_str(out, &check.name);
         write_str(out, &check.expr);
         out.push(u8::from(check.validated));
+        out.push(u8::from(check.no_inherit));
     }
 }
 
@@ -1356,10 +1357,20 @@ fn read_checks(cur: &mut &[u8]) -> Result<Vec<CheckConstraint>, KvError> {
                 )));
             }
         };
+        let no_inherit = match take_u8(cur)? {
+            0 => false,
+            1 => true,
+            flag => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown check-constraint no-inherit flag {flag}"
+                )));
+            }
+        };
         checks.push(CheckConstraint {
             name,
             expr,
             validated,
+            no_inherit,
         });
     }
     Ok(checks)

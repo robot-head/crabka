@@ -3356,6 +3356,7 @@ fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             conkey: Some(conkey),
             conbin: Datum::Null,
             validated: true,
+            no_inherit: false,
             deferral: index.deferral,
             conperiod: index.without_overlaps,
             referent: Referent::default(),
@@ -3400,6 +3401,7 @@ fn foreign_key_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError
             conkey: Some(attnums(&child, &foreign_key.columns)?),
             conbin: Datum::Null,
             validated: foreign_key.validated,
+            no_inherit: false,
             deferral: Deferral::of(foreign_key.deferrable, foreign_key.initially_deferred),
             conperiod: false,
             referent: Referent {
@@ -3478,6 +3480,7 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 conkey: None,
                 conbin: text(&check.expr),
                 validated: check.validated,
+                no_inherit: check.no_inherit,
                 deferral: Deferral::Immediate,
                 conperiod: false,
                 referent: Referent::default(),
@@ -3500,6 +3503,7 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 conkey: Some(vec![Datum::Int2(attnum)]),
                 conbin: Datum::Null,
                 validated: true,
+                no_inherit: false,
                 deferral: Deferral::Immediate,
                 conperiod: false,
                 referent: Referent::default(),
@@ -3534,6 +3538,8 @@ struct ConstraintRow<'a> {
     conkey: Option<Vec<Datum>>,
     conbin: Datum,
     validated: bool,
+    /// `connoinherit`: true only for `CHECK ... NO INHERIT`.
+    no_inherit: bool,
     /// When the constraint is checked, which fills `condeferrable` and
     /// `condeferred` together — the pair has only three meaningful shapes.
     deferral: Deferral,
@@ -3603,7 +3609,7 @@ fn constraint_row(row: ConstraintRow<'_>) -> Vec<Datum> {
         text(referent.confmatchtype),
         Datum::Bool(true),
         small(0),
-        Datum::Bool(false),
+        Datum::Bool(row.no_inherit),
         Datum::Bool(row.conperiod),
         attnum_array(row.conkey),
         attnum_array(referent.confkey),
@@ -6032,6 +6038,7 @@ mod tests {
                 name: "ck".to_string(),
                 expr: "c > 0".to_string(),
                 validated: true,
+                no_inherit: false,
             }],
             crabka_pgcatalog::TableCreation::bootstrap(),
         )

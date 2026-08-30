@@ -9094,6 +9094,7 @@ impl Parser {
             }
             break;
         }
+        attributes.no_inherit = saw_no_inherit;
         Ok(WrittenConstraintAttributes {
             values: attributes,
             saw_deferrability: saw_deferrability || saw_initially,

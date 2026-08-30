@@ -4572,6 +4572,7 @@ pub(crate) fn alter_table_action_ops(
                             constraint.name.clone(),
                             &predicate.text,
                             true,
+                            constraint.attributes.no_inherit,
                             kv,
                             &ddl_ctx,
                         )?;
@@ -4748,7 +4749,7 @@ pub(crate) fn alter_table_action_ops(
                     )));
                 }
             }
-            for parent_check in &parent.checks {
+            for parent_check in parent.checks.iter().filter(|check| !check.no_inherit) {
                 if !state
                     .table
                     .checks
@@ -5124,6 +5125,7 @@ pub(crate) fn alter_table_action_ops(
                 constraint.name.clone(),
                 &predicate.text,
                 !constraint.attributes.not_valid,
+                constraint.attributes.no_inherit,
                 kv,
                 &ddl_ctx,
             ),
@@ -6099,6 +6101,7 @@ pub(crate) fn add_check_constraint(
     name: Option<String>,
     predicate: &str,
     valid: bool,
+    no_inherit: bool,
     kv: &dyn Kv,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
@@ -6126,6 +6129,7 @@ pub(crate) fn add_check_constraint(
         name,
         expr: predicate.to_string(),
         validated: valid,
+        no_inherit,
     };
     let mut probe = state.table.clone();
     probe.checks = vec![check.clone()];

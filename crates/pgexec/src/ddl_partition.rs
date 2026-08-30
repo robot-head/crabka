@@ -681,6 +681,7 @@ pub(crate) fn create_table_definition(
                     name,
                     expr: check.expr.clone(),
                     validated: check.validated,
+                    no_inherit: check.no_inherit,
                 });
             }
         }
@@ -737,6 +738,7 @@ pub(crate) fn create_table_definition(
                         &predicate.text,
                         &column_names,
                         &taken,
+                        constraint.attributes.no_inherit,
                     )?;
                 }
                 crabka_pgparser::ast::ColumnConstraintKind::PrimaryKey => {
@@ -795,6 +797,7 @@ pub(crate) fn create_table_definition(
                     &predicate.text,
                     &column_names,
                     &taken,
+                    constraint.attributes.no_inherit,
                 )?;
             }
             crabka_pgparser::ast::TableConstraintKind::PrimaryKey {
@@ -1035,6 +1038,7 @@ pub(crate) fn push_table_check(
     predicate: &str,
     column_names: &[String],
     other_names: &[&str],
+    no_inherit: bool,
 ) -> Result<(), ExecError> {
     let name = match explicit {
         Some(name) => {
@@ -1063,6 +1067,7 @@ pub(crate) fn push_table_check(
         name,
         expr: predicate.to_string(),
         validated: true,
+        no_inherit,
     });
     Ok(())
 }
