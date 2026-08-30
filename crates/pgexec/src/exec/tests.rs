@@ -9604,6 +9604,31 @@ async fn altering_missing_foreign_table_with_if_exists_emits_notice() {
 }
 
 #[tokio::test]
+async fn altering_fdw_routines_emits_warnings() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    run_s(&mut session, "CREATE FOREIGN DATA WRAPPER w").await;
+    run_s(
+        &mut session,
+        "ALTER FOREIGN DATA WRAPPER w VALIDATOR postgresql_fdw_validator",
+    )
+    .await;
+    assert!(
+        notices.try_recv().expect("validator warning").message
+            == "changing the foreign-data wrapper validator can cause the options for dependent objects to become invalid"
+    );
+    run_s(&mut session, "ALTER FOREIGN DATA WRAPPER w NO VALIDATOR").await;
+    assert!(
+        notices
+            .try_recv()
+            .expect("validator removal warning")
+            .message
+            == "changing the foreign-data wrapper validator can cause the options for dependent objects to become invalid"
+    );
+}
+
+#[tokio::test]
 async fn dropping_a_missing_user_mapping_with_if_exists_skips_missing_role_and_server() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
