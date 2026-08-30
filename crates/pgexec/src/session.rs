@@ -6435,7 +6435,10 @@ impl SqlSession {
                     .map(|name| (name, true))
                     .collect();
             }
-            Box::pin(self.collect_relation_statistics(collect)).await?;
+            Box::pin(self.collect_relation_statistics(collect.clone())).await?;
+        }
+        if command == MaintenanceCommand::Vacuum && !collect.is_empty() {
+            self.collect_vacuum_visibility(&collect).await?;
         }
         Ok(QueryResult::Command {
             tag: command.tag().into(),
@@ -6588,6 +6591,31 @@ impl SqlSession {
             {
                 ops.push(crate::relstats::clear_has_subclass_op(&name));
             }
+        }
+        self.commit_catalog_ops(ops).await
+    }
+
+    /// A successful explicit `VACUUM` marks every page it inspected all-visible.
+    /// The engine has no independently retained dead tuples, so an ordinary
+    /// heap scan is the physical boundary that supplies both page counts.
+    async fn collect_vacuum_visibility(
+        &mut self,
+        relations: &[(crabka_pgcatalog::RelationName, bool)],
+    ) -> Result<(), ExecError> {
+        let mut ops = Vec::new();
+        let catalog_kv = Arc::clone(&self.catalog_kv);
+        for (name, _) in relations {
+            if crate::partition::is_partitioned(catalog_kv.as_ref(), name)? {
+                continue;
+            }
+            let Ok(table) = crabka_pgcatalog::get_table(catalog_kv.as_ref(), name) else {
+                continue;
+            };
+            let Some(relpages) = self.estimate_relation_pages(name, &table).await else {
+                continue;
+            };
+            ops.push(crate::relstats::set_relpages_op(name, relpages));
+            ops.push(crate::relstats::set_relallvisible_op(name, relpages));
         }
         self.commit_catalog_ops(ops).await
     }
@@ -31488,6 +31516,40 @@ mod session_conformance_tests {
             .await
             .expect("vacuum analyze");
         assert_class_stats(&mut s, "vpar", 2.0, "f", "VACUUM ANALYZE vpar").await;
+    }
+
+    #[tokio::test]
+    async fn vacuum_marks_heap_pages_all_visible() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE visibility_pages (value int4)",
+            "INSERT INTO visibility_pages SELECT generate_series(1, 1000)",
+            "ANALYZE visibility_pages",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT relpages::text || ',' || relallvisible::text || ',' || relallfrozen::text \
+                 FROM pg_class WHERE oid = 'visibility_pages'::regclass",
+            )
+            .await
+                == "5,0,0"
+        );
+        run(&mut session, "VACUUM visibility_pages")
+            .await
+            .expect("vacuum");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT relpages::text || ',' || relallvisible::text || ',' || relallfrozen::text \
+                 FROM pg_class WHERE oid = 'visibility_pages'::regclass",
+            )
+            .await
+                == "5,5,0"
+        );
     }
 
     /// A target-less `ANALYZE` visits every relation the session owns, which is
