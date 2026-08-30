@@ -191,6 +191,10 @@ enum ScalarFunc {
     JsonbHash {
         extended: bool,
     },
+    NetworkHash {
+        ty: ColumnType,
+        extended: bool,
+    },
     NumericHash {
         extended: bool,
     },
@@ -580,6 +584,30 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "hash_record_extended" => ScalarFunc::RecordHash { extended: true },
         "jsonb_hash" => ScalarFunc::JsonbHash { extended: false },
         "jsonb_hash_extended" => ScalarFunc::JsonbHash { extended: true },
+        "hashinet" => ScalarFunc::NetworkHash {
+            ty: ColumnType::Inet,
+            extended: false,
+        },
+        "hashinetextended" => ScalarFunc::NetworkHash {
+            ty: ColumnType::Inet,
+            extended: true,
+        },
+        "hashmacaddr" => ScalarFunc::NetworkHash {
+            ty: ColumnType::MacAddr,
+            extended: false,
+        },
+        "hashmacaddrextended" => ScalarFunc::NetworkHash {
+            ty: ColumnType::MacAddr,
+            extended: true,
+        },
+        "hashmacaddr8" => ScalarFunc::NetworkHash {
+            ty: ColumnType::MacAddr8,
+            extended: false,
+        },
+        "hashmacaddr8extended" => ScalarFunc::NetworkHash {
+            ty: ColumnType::MacAddr8,
+            extended: true,
+        },
         "hash_numeric" => ScalarFunc::NumericHash { extended: false },
         "hash_numeric_extended" => ScalarFunc::NumericHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
@@ -1851,6 +1879,24 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::NetworkHash { ty, extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            let arg_ty = crate::eval::infer_type(&args[0], scope)?;
+            if !is_unknown_literal(&args[0])
+                && arg_ty != ty
+                && !(ty == ColumnType::Inet && arg_ty == ColumnType::Cidr)
+            {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::NumericHash { extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             if !matches!(
@@ -2454,6 +2500,7 @@ fn coerce_unknown_args(
         ScalarFunc::RangeHash { .. } | ScalarFunc::MultirangeHash { .. } => return Ok(()),
         ScalarFunc::RecordHash { .. } => return Ok(()),
         ScalarFunc::JsonbHash { .. } => ColumnType::Jsonb,
+        ScalarFunc::NetworkHash { ty, .. } => ty,
         ScalarFunc::NumericHash { .. } => ColumnType::Numeric(None),
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
@@ -4006,6 +4053,30 @@ fn eval_eager(
                 jsonb_hash(value, seed, extended, true)?,
                 extended,
             ))
+        }
+        ScalarFunc::NetworkHash { ty, extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            let hash = match (&vals[0], ty) {
+                (Datum::Inet(value), ColumnType::Inet) => {
+                    let mut bytes = Vec::with_capacity(value.family.addr_len() + 2);
+                    bytes.extend([value.family.wire_code(), value.bits]);
+                    bytes.extend(&value.addr[..value.family.addr_len()]);
+                    crate::partition::hash::hash_bytes_extended(&bytes, seed)?
+                }
+                (Datum::MacAddr(value), ColumnType::MacAddr) => {
+                    crate::partition::hash::hash_bytes_extended(&value.0, seed)?
+                }
+                (Datum::MacAddr8(value), ColumnType::MacAddr8) => {
+                    crate::partition::hash::hash_bytes_extended(&value.0, seed)?
+                }
+                _ => return Err(type_error(&fc.name, &vals[0])),
+            };
+            Ok(hash_result(hash, extended))
         }
         ScalarFunc::NumericHash { extended } => {
             require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
@@ -6925,6 +6996,9 @@ mod tests {
         assert!(ty("pg_lsn_hash('16/B374D84'::pg_lsn)") == ColumnType::Int4);
         assert!(ty("hash_range(int4range(1, 2))") == ColumnType::Int4);
         assert!(ty("hash_multirange('{[1,2)}'::int4multirange)") == ColumnType::Int4);
+        assert!(ty("hashinet('192.168.100.128/25')") == ColumnType::Int4);
+        assert!(ty("hashmacaddrextended('08:00:2b:01:02:04', 1::int8)") == ColumnType::Int8);
+        assert!(ty("hashmacaddr8('08:00:2b:01:02:04:36:49')") == ColumnType::Int4);
         assert!(ty("hash_numeric(42.5)") == ColumnType::Int4);
         assert!(ty("hash_numeric_extended(42.5, 1::int8)") == ColumnType::Int8);
         assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
@@ -7008,6 +7082,32 @@ mod tests {
             ev("hash_multirange_extended('{[1,2)}'::int4multirange, 0)"),
             Datum::Int8(_)
         ));
+        let inet = crabka_pgtypes::Inet::parse("192.168.100.128/25", false).expect("inet");
+        let mut inet_bytes = vec![inet.family.wire_code(), inet.bits];
+        inet_bytes.extend(&inet.addr[..inet.family.addr_len()]);
+        assert!(
+            ev("hashinetextended('192.168.100.128/25', 1::int8)")
+                == hash_result(
+                    crate::partition::hash::hash_bytes_extended(&inet_bytes, 1).expect("hash"),
+                    true,
+                )
+        );
+        assert!(
+            ev("hashmacaddr('08:00:2b:01:02:04')")
+                == hash_result(
+                    crate::partition::hash::hash_bytes_extended(&[8, 0, 43, 1, 2, 4], 0)
+                        .expect("hash"),
+                    false,
+                )
+        );
+        assert!(
+            ev("hashmacaddr8extended('08:00:2b:01:02:04:36:49', 1::int8)")
+                == hash_result(
+                    crate::partition::hash::hash_bytes_extended(&[8, 0, 43, 1, 2, 4, 54, 73], 1)
+                        .expect("hash"),
+                    true,
+                )
+        );
         assert!(ev("hash_numeric(0)") == Datum::Int4(-1));
         assert!(ev("hash_numeric_extended(0, 1::int8)") == Datum::Int8(0));
         assert!(ev("hash_numeric('NaN'::numeric)") == Datum::Int4(0));
