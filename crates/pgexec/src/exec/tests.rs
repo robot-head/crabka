@@ -3915,7 +3915,7 @@ async fn create_index_resolves_and_validates_operator_classes() {
     assert!(
         text_rows_of(&mut session, "SELECT pg_get_indexdef('i6'::regclass)").await
             == vec![text_row(&[
-                "CREATE INDEX i6 ON public.t USING btree (b COLLATE \"C\" text_ops)"
+                "CREATE INDEX i6 ON public.t USING btree (b COLLATE \"C\")"
             ])]
     );
     assert!(

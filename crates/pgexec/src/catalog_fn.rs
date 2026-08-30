@@ -3408,7 +3408,7 @@ fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
             crabka_pgcatalog::IndexMethod::Gin => "gin",
             crabka_pgcatalog::IndexMethod::Spgist => "spgist",
         },
-        index_key_list(&index.columns, &index.key_options),
+        index_key_list(&index.columns, &index.key_options, table, index.method),
     );
     if !index.include.is_empty() {
         definition.push_str(" INCLUDE (");
@@ -3650,7 +3650,12 @@ fn quoted_column_list(columns: &[String]) -> String {
         .join(", ")
 }
 
-fn index_key_list(keys: &[String], options: &[crabka_pgcatalog::IndexKeyOptions]) -> String {
+fn index_key_list(
+    keys: &[String],
+    options: &[crabka_pgcatalog::IndexKeyOptions],
+    table: &Table,
+    method: crabka_pgcatalog::IndexMethod,
+) -> String {
     keys.iter()
         .zip(options)
         .map(|(key, option)| {
@@ -3662,7 +3667,10 @@ fn index_key_list(keys: &[String], options: &[crabka_pgcatalog::IndexKeyOptions]
                 definition.push_str(" COLLATE ");
                 definition.push_str(&quote_identifier(collation));
             }
-            if let Some(opclass) = &option.opclass {
+            if let Some(opclass) = &option.opclass
+                && (option.opclass_options.is_some()
+                    || !is_default_index_opclass(key, opclass, table, method))
+            {
                 definition.push(' ');
                 definition.push_str(opclass);
             }
@@ -3684,6 +3692,37 @@ fn index_key_list(keys: &[String], options: &[crabka_pgcatalog::IndexKeyOptions]
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn is_default_index_opclass(
+    key: &str,
+    opclass: &str,
+    table: &Table,
+    method: crabka_pgcatalog::IndexMethod,
+) -> bool {
+    let Some(column) = table.columns.iter().find(|column| column.name == key) else {
+        return false;
+    };
+    let method_oid = match method {
+        crabka_pgcatalog::IndexMethod::Btree => crate::catalog_rel::BTREE_AM_OID,
+        crabka_pgcatalog::IndexMethod::Hash => crate::catalog_rel::HASH_AM_OID,
+        crabka_pgcatalog::IndexMethod::Gist => crate::catalog_rel::GIST_AM_OID,
+        crabka_pgcatalog::IndexMethod::Gin => crate::catalog_rel::GIN_AM_OID,
+        crabka_pgcatalog::IndexMethod::Spgist => crate::catalog_rel::SPGIST_AM_OID,
+    };
+    let name = opclass.rsplit('.').next().unwrap_or(opclass);
+    crate::builtin_opclasses::BUILTIN_OPERATOR_CLASSES
+        .iter()
+        .any(
+            |(_, candidate_method, candidate_name, _, input_oid, default, _)| {
+                *default
+                    && *candidate_method == method_oid
+                    && *candidate_name == name
+                    && (*input_oid == column.ty.oid() as i32
+                        || (*input_oid == crabka_pgtypes::oids::TEXT as i32
+                            && matches!(column.ty, ColumnType::Text | ColumnType::Varchar(_))))
+            },
+        )
 }
 
 fn check_constraint_def(kv: &dyn Kv, wanted: i32) -> Result<Datum, ExecError> {
