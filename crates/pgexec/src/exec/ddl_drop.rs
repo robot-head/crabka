@@ -462,6 +462,8 @@ pub(crate) fn cascade_drop_notice(
 pub(crate) fn skipped_create_notice(
     kv: &dyn Kv,
     resolution: impl FnOnce() -> crate::relname::ResolutionScope,
+    current_user: &str,
+    session_user: &str,
     stmt: &Statement,
 ) -> Result<Option<crabka_pgwire::error::PgError>, ExecError> {
     /// The relation the skip names, spelled as `PostgreSQL` spells it: bare,
@@ -487,6 +489,43 @@ pub(crate) fn skipped_create_notice(
                     "schema \"{name}\" already exists, skipping"
                 ))
             }));
+        }
+        Statement::CreateServer {
+            name,
+            if_not_exists: true,
+            ..
+        } => {
+            return Ok(crabka_pgcatalog::get_server(kv, name).is_ok().then(|| {
+                crabka_pgwire::error::PgError::notice(format!(
+                    "server \"{name}\" already exists, skipping"
+                ))
+            }));
+        }
+        Statement::CreateUserMapping {
+            user,
+            server,
+            if_not_exists: true,
+            ..
+        } => {
+            use crabka_pgparser::ast::RoleSpec;
+            let user = match user {
+                RoleSpec::Name(name) => name.as_str(),
+                RoleSpec::CurrentUser | RoleSpec::CurrentRole => current_user,
+                RoleSpec::SessionUser => session_user,
+                RoleSpec::Public => crabka_pgcatalog::PUBLIC_ROLE,
+            };
+            if !crabka_pgcatalog::role_is_nameable(kv, user)?
+                || crabka_pgcatalog::get_server(kv, server).is_err()
+            {
+                return Ok(None);
+            }
+            return Ok(crabka_pgcatalog::get_user_mapping(kv, user, server)
+                .is_ok()
+                .then(|| {
+                    crabka_pgwire::error::PgError::notice(format!(
+                        "user mapping for \"{user}\" already exists for server \"{server}\", skipping"
+                    ))
+                }));
         }
         // `CREATE SEQUENCE` borrows the `CREATE INDEX` variant, tagging `table`
         // with the sentinel the executor splits the two arms on.

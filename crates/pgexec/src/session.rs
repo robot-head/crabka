@@ -8097,6 +8097,8 @@ impl SqlSession {
         let skip_notice = crate::exec::skipped_create_notice(
             &*self.catalog_kv,
             || self.resolution_scope(),
+            &self.current_role,
+            &self.session_user,
             stmt,
         )?;
         let drop_skip_notice = crate::exec::skipped_drop_notice(

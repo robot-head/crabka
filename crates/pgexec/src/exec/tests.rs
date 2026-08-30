@@ -9570,6 +9570,37 @@ async fn dropping_a_missing_user_mapping_with_if_exists_skips_missing_role_and_s
     );
 }
 
+#[tokio::test]
+async fn creating_existing_foreign_objects_with_if_not_exists_emits_notices() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    run_s(
+        &mut session,
+        "CREATE FOREIGN DATA WRAPPER w; CREATE SERVER s FOREIGN DATA WRAPPER w",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE SERVER IF NOT EXISTS s FOREIGN DATA WRAPPER w",
+    )
+    .await;
+    assert!(
+        notices.try_recv().expect("server notice").message
+            == "server \"s\" already exists, skipping"
+    );
+    run_s(&mut session, "CREATE USER MAPPING FOR public SERVER s").await;
+    run_s(
+        &mut session,
+        "CREATE USER MAPPING IF NOT EXISTS FOR public SERVER s",
+    )
+    .await;
+    assert!(
+        notices.try_recv().expect("mapping notice").message
+            == "user mapping for \"public\" already exists for server \"s\", skipping"
+    );
+}
+
 #[test]
 fn dropping_a_foreign_table_cascades_to_inheritance_children() {
     use crabka_pgkv::{Kv, MemKv};
