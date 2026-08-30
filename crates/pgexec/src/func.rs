@@ -185,6 +185,9 @@ enum ScalarFunc {
     MultirangeHash {
         extended: bool,
     },
+    RecordHash {
+        extended: bool,
+    },
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
     UuidV4,
@@ -567,6 +570,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "hash_range_extended" => ScalarFunc::RangeHash { extended: true },
         "hash_multirange" => ScalarFunc::MultirangeHash { extended: false },
         "hash_multirange_extended" => ScalarFunc::MultirangeHash { extended: true },
+        "hash_record" => ScalarFunc::RecordHash { extended: false },
+        "hash_record_extended" => ScalarFunc::RecordHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1805,6 +1810,23 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::RecordHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if !matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Record(_)
+            ) {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::FloatHash { ty, extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             let accepts = |input: ColumnType| {
@@ -2389,6 +2411,7 @@ fn coerce_unknown_args(
         ScalarFunc::PgLsnHash { .. } => ColumnType::PgLsn,
         ScalarFunc::EnumHash { .. } => return Ok(()),
         ScalarFunc::RangeHash { .. } | ScalarFunc::MultirangeHash { .. } => return Ok(()),
+        ScalarFunc::RecordHash { .. } => return Ok(()),
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -3898,6 +3921,31 @@ fn eval_eager(
             for range in &multirange.ranges {
                 let value = hash_range_value(range, seed, extended)?;
                 hash = hash.wrapping_mul(31).wrapping_add(value);
+            }
+            Ok(hash_result(hash, extended))
+        }
+        ScalarFunc::RecordHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let Datum::Record(record) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            let mut hash = 0_u64;
+            for value in &record.values {
+                let field_hash = crate::partition::hash::column_hash(value, seed)
+                    .map_err(|_| {
+                        ExecError::UndefinedFunction(format!(
+                            "could not identify {}hash function for type {}",
+                            if extended { "an extended " } else { "a " },
+                            value.column_type().map_or("record", ColumnType::name),
+                        ))
+                    })?
+                    .unwrap_or(0);
+                hash = hash.wrapping_mul(31).wrapping_add(field_hash);
             }
             Ok(hash_result(hash, extended))
         }
