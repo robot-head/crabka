@@ -9507,6 +9507,30 @@ fn drop_foreign_table_accepts_a_comma_list() {
     );
 }
 
+#[tokio::test]
+async fn dropping_missing_foreign_objects_with_if_exists_emits_notices() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    for (sql, expected) in [
+        (
+            "DROP FOREIGN DATA WRAPPER IF EXISTS missing_fdw",
+            "foreign-data wrapper \"missing_fdw\" does not exist, skipping",
+        ),
+        (
+            "DROP SERVER IF EXISTS missing_server",
+            "server \"missing_server\" does not exist, skipping",
+        ),
+        (
+            "DROP FOREIGN TABLE IF EXISTS missing_table",
+            "foreign table \"missing_table\" does not exist, skipping",
+        ),
+    ] {
+        run_s(&mut session, sql).await;
+        assert!(notices.try_recv().expect(sql).message == expected);
+    }
+}
+
 #[test]
 fn dropping_a_foreign_table_cascades_to_inheritance_children() {
     use crabka_pgkv::{Kv, MemKv};

@@ -8099,6 +8099,8 @@ impl SqlSession {
             || self.resolution_scope(),
             stmt,
         )?;
+        let drop_skip_notice =
+            crate::exec::skipped_drop_notice(&*self.catalog_kv, || self.resolution_scope(), stmt)?;
         let enum_skip_notice = self.skipped_enum_add_value_notice(stmt)?;
         let result = match stmt {
             Statement::CompatibilityRefusal(command) => {
@@ -8356,7 +8358,7 @@ impl SqlSession {
             Statement::Utility(utility) => self.utility(utility).await,
         };
         if result.is_ok()
-            && let Some(notice) = skip_notice.or(enum_skip_notice)
+            && let Some(notice) = skip_notice.or(enum_skip_notice).or(drop_skip_notice)
         {
             self.plpgsql_notice(notice)?;
         }

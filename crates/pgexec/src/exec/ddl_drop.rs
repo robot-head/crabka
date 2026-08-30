@@ -551,6 +551,53 @@ pub(crate) fn skipped_create_notice(
         .then(|| skipped(&name)))
 }
 
+/// The `NOTICE` an `IF EXISTS` foreign-object drop owes when it skips a missing
+/// object. This runs before DDL so the absence is still observable.
+pub(crate) fn skipped_drop_notice(
+    kv: &dyn Kv,
+    resolution: impl FnOnce() -> crate::relname::ResolutionScope,
+    stmt: &Statement,
+) -> Result<Option<crabka_pgwire::error::PgError>, ExecError> {
+    let missing = |kind: &str, name: &str| {
+        crabka_pgwire::error::PgError::notice(format!("{kind} \"{name}\" does not exist, skipping"))
+    };
+    match stmt {
+        Statement::DropFdw {
+            name,
+            if_exists: true,
+            ..
+        } => Ok(crabka_pgcatalog::get_fdw(kv, name)
+            .is_err()
+            .then(|| missing("foreign-data wrapper", name))),
+        Statement::DropServer {
+            name,
+            if_exists: true,
+            ..
+        } => Ok(crabka_pgcatalog::get_server(kv, name)
+            .is_err()
+            .then(|| missing("server", name))),
+        Statement::DropForeignTable {
+            names,
+            if_exists: true,
+            ..
+        } => {
+            let resolution = resolution();
+            for reference in names {
+                let Ok(name) =
+                    resolve_relation(kv, &resolution, reference, SchemaDisposition::Utility)
+                else {
+                    continue;
+                };
+                if relation_kind(kv, &name).is_none() {
+                    return Ok(Some(missing("foreign table", &name.name)));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// The most dependent objects a `CASCADE` names to the client before the rest
 /// become a count. `PostgreSQL`'s `MAX_REPORTED_DEPS`, which exists because
 /// "client software may not deal well with enormous error strings".
