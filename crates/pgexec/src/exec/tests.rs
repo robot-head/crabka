@@ -697,6 +697,14 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
                 "{\"(b + 1)\"}",
             ])]
     );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_describe_object('pg_statistic_ext'::regclass, oid, 0) FROM pg_statistic_ext",
+        )
+        .await
+            == vec![text_row(&["statistics object public.stat_ddl_s"])]
+    );
     run_s(
         &mut session,
         "COMMENT ON STATISTICS stat_ddl_s IS 'derived' ",

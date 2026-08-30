@@ -100,6 +100,7 @@ enum CatalogFunc {
     SizeBytes,
     ObjDescription,
     ColDescription,
+    DescribeObject,
     ShobjDescription,
     CurrentSchemas,
     BackendPid,
@@ -126,11 +127,11 @@ enum CatalogFunc {
 fn catalog_func(name: &str) -> Option<CatalogFunc> {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
-        EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef, IndexesSize,
-        IsPublishable, IsVisible, ObjDescription, RelationSize, RoutineDef, SerialSequence,
-        SettingsFlags, ShobjDescription, SizeBytes, SizePretty, StartTime, StatisticsDef,
-        TableSize, TablespaceLocation, TotalRelationSize, TriggerDef, TriggerDepth, UserById,
-        ViewDef,
+        DescribeObject, EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery,
+        IndexDef, IndexesSize, IsPublishable, IsVisible, ObjDescription, RelationSize, RoutineDef,
+        SerialSequence, SettingsFlags, ShobjDescription, SizeBytes, SizePretty, StartTime,
+        StatisticsDef, TableSize, TablespaceLocation, TotalRelationSize, TriggerDef, TriggerDepth,
+        UserById, ViewDef,
     };
     Some(match name {
         "pg_get_viewdef" => ViewDef,
@@ -173,6 +174,7 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_size_bytes" => SizeBytes,
         "obj_description" => ObjDescription,
         "col_description" => ColDescription,
+        "pg_describe_object" => DescribeObject,
         "shobj_description" => ShobjDescription,
         "current_schemas" => CurrentSchemas,
         "pg_backend_pid" => BackendPid,
@@ -334,6 +336,7 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
         CatalogFunc::RelationIsUpdatable => n == 2,
         CatalogFunc::ColumnIsUpdatable => n == 3,
         ObjDescription | RelationSize => n == 1 || n == 2,
+        CatalogFunc::DescribeObject => n == 3,
         ClusterSize | SettingsFlags => n == 1,
         BackendPid
         | StartTime
@@ -524,6 +527,7 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
         IndexesSize => indexes_size(kv, data_kv, scope, &vals[0]),
         TotalRelationSize => total_relation_size(kv, data_kv, scope, &vals[0]),
         ObjDescription => object_description(kv, scope, vals),
+        CatalogFunc::DescribeObject => describe_object(kv, scope, vals),
         ColDescription => {
             let subid = i32::try_from(int_arg(&vals[1])?)
                 .map_err(|_| ExecError::Unsupported("column number out of range".into()))?;
@@ -3236,6 +3240,38 @@ fn object_description(
     }
 }
 
+/// The statistics-object branch of `pg_describe_object(classid, objid, objsubid)`.
+fn describe_object(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    values: &[Datum],
+) -> Result<Datum, ExecError> {
+    if values.iter().any(|value| matches!(value, Datum::Null)) {
+        return Ok(Datum::Null);
+    }
+    let class_oid = resolve_relation_oid(kv, scope, &values[0])?;
+    if class_oid != crate::catalog_rel::relation_oid("pg_statistic_ext") {
+        return Ok(Datum::Null);
+    }
+    let oid = u32::try_from(int_arg(&values[1])?)
+        .map_err(|_| ExecError::Unsupported("statistics OID is out of range".into()))?;
+    let subid = int_arg(&values[2])?;
+    if subid != 0 {
+        return Ok(Datum::Null);
+    }
+    let Some(statistics) = crabka_pgcatalog::statistics::list(kv)?
+        .into_iter()
+        .find(|statistics| statistics.oid == oid)
+    else {
+        return Ok(Datum::Null);
+    };
+    Ok(Datum::Text(format!(
+        "statistics object {}.{}",
+        quote_identifier(&statistics.name.schema),
+        quote_identifier(&statistics.name.name),
+    )))
+}
+
 fn comment_datum(kv: &dyn Kv, kind: &str, object: CommentObject<'_>) -> Result<Datum, ExecError> {
     Ok(crabka_pgcatalog::get_comment(kv, kind, object)?.map_or(Datum::Null, Datum::Text))
 }
@@ -4238,6 +4274,7 @@ mod tests {
             "pg_size_bytes",
             "obj_description",
             "col_description",
+            "pg_describe_object",
             "shobj_description",
             "current_schemas",
             "pg_backend_pid",
