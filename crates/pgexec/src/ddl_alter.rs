@@ -1671,7 +1671,7 @@ pub(crate) fn execute_ddl(
                 options.iter().map(|(name, _)| name),
                 PostgresqlFdwOptionContext::Wrapper,
             )?;
-            let ops = ignore_duplicate(
+            let ops = ignore_foreign_duplicate(
                 crabka_pgcatalog::create_fdw_with_routines_owned_ops(
                     kv,
                     name,
@@ -1680,6 +1680,8 @@ pub(crate) fn execute_ddl(
                     options.clone(),
                     fctx.effective_role(),
                 ),
+                crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                name,
                 *if_not_exists,
             )?
             .unwrap_or_default();
@@ -1791,7 +1793,7 @@ pub(crate) fn execute_ddl(
                 options.iter().map(|(name, _)| name),
                 PostgresqlFdwOptionContext::Server,
             )?;
-            let ops = ignore_duplicate(
+            let ops = ignore_foreign_duplicate(
                 crabka_pgcatalog::create_server_with_identity_owned_ops(
                     kv,
                     name,
@@ -1801,6 +1803,8 @@ pub(crate) fn execute_ddl(
                     options.clone(),
                     fctx.effective_role(),
                 ),
+                crabka_pgcatalog::ForeignPrivilegeTarget::Server,
+                name,
                 *if_not_exists,
             )?
             .unwrap_or_default();
@@ -4267,6 +4271,29 @@ fn foreign_object_missing(
         "42704",
         format!("{kind} \"{name}\" does not exist"),
     ))
+}
+
+fn ignore_foreign_duplicate<T>(
+    result: Result<T, crabka_pgcatalog::CatalogError>,
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    name: &str,
+    if_not_exists: bool,
+) -> Result<Option<T>, ExecError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(crabka_pgcatalog::CatalogError::DuplicateObject(_)) if if_not_exists => Ok(None),
+        Err(crabka_pgcatalog::CatalogError::DuplicateObject(_)) => {
+            let kind = match target {
+                crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => "foreign-data wrapper",
+                crabka_pgcatalog::ForeignPrivilegeTarget::Server => "server",
+            };
+            Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42710",
+                format!("{kind} \"{name}\" already exists"),
+            )))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// The role an `OWNER TO` or `CREATE SCHEMA AUTHORIZATION` clause names,

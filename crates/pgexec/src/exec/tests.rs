@@ -8464,6 +8464,44 @@ fn foreign_usage_lookup_names_the_missing_object() {
 }
 
 #[test]
+fn duplicate_foreign_objects_name_their_kind() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for (sql, expected_error) in [
+        ("CREATE FOREIGN DATA WRAPPER w", None),
+        (
+            "CREATE FOREIGN DATA WRAPPER w",
+            Some("foreign-data wrapper \"w\" already exists"),
+        ),
+        ("CREATE SERVER s FOREIGN DATA WRAPPER w", None),
+        (
+            "CREATE SERVER s FOREIGN DATA WRAPPER w",
+            Some("server \"s\" already exists"),
+        ),
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        match expected_error {
+            Some(message) => {
+                let error = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+                    .expect_err("duplicate foreign object");
+                assert!(matches!(error, super::ExecError::Remote(ref error)
+                    if error.code == "42710" && error.message == message));
+            }
+            None => {
+                let (_, ops) =
+                    super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+                kv.write_batch(&ops).expect("apply foreign object");
+            }
+        }
+    }
+}
+
+#[test]
 fn foreign_object_usage_grants_follow_rename_and_require_the_owner() {
     use crabka_pgkv::{Kv, MemKv};
 
