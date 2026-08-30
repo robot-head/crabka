@@ -195,6 +195,9 @@ enum ScalarFunc {
         ty: ColumnType,
         extended: bool,
     },
+    AclItemHash {
+        extended: bool,
+    },
     NumericHash {
         extended: bool,
     },
@@ -608,6 +611,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
             ty: ColumnType::MacAddr8,
             extended: true,
         },
+        "hash_aclitem" => ScalarFunc::AclItemHash { extended: false },
+        "hash_aclitem_extended" => ScalarFunc::AclItemHash { extended: true },
         "hash_numeric" => ScalarFunc::NumericHash { extended: false },
         "hash_numeric_extended" => ScalarFunc::NumericHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
@@ -1897,6 +1902,22 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::AclItemHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if !is_unknown_literal(&args[0])
+                && crate::eval::infer_type(&args[0], scope)? != ColumnType::Aclitem
+            {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::NumericHash { extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             if !matches!(
@@ -2501,6 +2522,7 @@ fn coerce_unknown_args(
         ScalarFunc::RecordHash { .. } => return Ok(()),
         ScalarFunc::JsonbHash { .. } => ColumnType::Jsonb,
         ScalarFunc::NetworkHash { ty, .. } => ty,
+        ScalarFunc::AclItemHash { .. } => ColumnType::Text,
         ScalarFunc::NumericHash { .. } => ColumnType::Numeric(None),
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
@@ -4078,6 +4100,28 @@ fn eval_eager(
             };
             Ok(hash_result(hash, extended))
         }
+        ScalarFunc::AclItemHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let Datum::Text(value) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            let sum = aclitem_hash_sum(value, ctx)?;
+            let hash = if extended && seed != 0 {
+                crate::partition::hash::hash_int32_extended(
+                    i32::from_ne_bytes(sum.to_ne_bytes()),
+                    seed,
+                )
+                .cast_unsigned()
+            } else {
+                u64::from(sum)
+            };
+            Ok(hash_result(hash, extended))
+        }
         ScalarFunc::NumericHash { extended } => {
             require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
             let value =
@@ -4190,6 +4234,44 @@ fn undefined_hash_function(type_name: &str, extended: bool) -> ExecError {
         "could not identify {}hash function for type {type_name}",
         if extended { "an extended " } else { "a " },
     ))
+}
+
+fn aclitem_hash_sum(value: &str, ctx: &EvalCtx) -> Result<u32, ExecError> {
+    let (grantee, rights) = value
+        .split_once('=')
+        .ok_or_else(|| ExecError::TypeMismatch("invalid aclitem".into()))?;
+    let (rights, grantor) = rights
+        .rsplit_once('/')
+        .ok_or_else(|| ExecError::TypeMismatch("invalid aclitem".into()))?;
+    let role_oid = |role: &str| -> Result<u32, ExecError> {
+        if role.is_empty() {
+            return Ok(0);
+        }
+        if role == crabka_pgcatalog::BOOTSTRAP_ROLE {
+            return Ok(crate::catalog_fn::BOOTSTRAP_ROLE_OID.cast_unsigned());
+        }
+        if let Some(catalog) = &ctx.catalog {
+            return crate::catalog_rel::role_oids(catalog.as_ref())?
+                .get(role)
+                .copied()
+                .map(i32::cast_unsigned)
+                .ok_or_else(|| ExecError::TypeMismatch("invalid aclitem role".into()));
+        }
+        Err(ExecError::TypeMismatch("invalid aclitem role".into()))
+    };
+    let mut privileges = 0_u32;
+    for privilege in rights.chars().filter(|privilege| *privilege != '*') {
+        let Some(bit) = "arwdDxtXUCTcsAm"
+            .chars()
+            .position(|candidate| candidate == privilege)
+        else {
+            return Err(ExecError::TypeMismatch("invalid aclitem privilege".into()));
+        };
+        privileges |= 1 << bit;
+    }
+    Ok(privileges
+        .wrapping_add(role_oid(grantee)?)
+        .wrapping_add(role_oid(grantor)?))
 }
 
 fn numeric_hash(value: &crabka_pgtypes::numeric::NumericValue, seed: u64) -> u64 {
@@ -6999,6 +7081,7 @@ mod tests {
         assert!(ty("hashinet('192.168.100.128/25')") == ColumnType::Int4);
         assert!(ty("hashmacaddrextended('08:00:2b:01:02:04', 1::int8)") == ColumnType::Int8);
         assert!(ty("hashmacaddr8('08:00:2b:01:02:04:36:49')") == ColumnType::Int4);
+        assert!(ty("hash_aclitem('postgres=arwdDxt/postgres')") == ColumnType::Int4);
         assert!(ty("hash_numeric(42.5)") == ColumnType::Int4);
         assert!(ty("hash_numeric_extended(42.5, 1::int8)") == ColumnType::Int8);
         assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
@@ -7105,6 +7188,14 @@ mod tests {
                 == hash_result(
                     crate::partition::hash::hash_bytes_extended(&[8, 0, 43, 1, 2, 4, 54, 73], 1)
                         .expect("hash"),
+                    true,
+                )
+        );
+        assert!(ev("hash_aclitem('postgres=arwdDxt/postgres')") == Datum::Int4(147));
+        assert!(
+            ev("hash_aclitem_extended('postgres=arwdDxt/postgres', 1::int8)")
+                == hash_result(
+                    crate::partition::hash::hash_int32_extended(147, 1).cast_unsigned(),
                     true,
                 )
         );
