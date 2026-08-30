@@ -11,7 +11,7 @@ pub(crate) fn cols(defs: &[(&str, ColumnType)]) -> Vec<Column> {
 }
 
 pub(crate) fn pg_class_columns() -> Vec<Column> {
-    use ColumnType::{Array, Bool, Float4, Int2, Int4, Int8, Text};
+    use ColumnType::{Aclitem, Array, Bool, Float4, Int2, Int4, Int8, Text};
     cols(&[
         ("oid", Int4),
         ("relname", Text),
@@ -44,7 +44,13 @@ pub(crate) fn pg_class_columns() -> Vec<Column> {
         ("relrewrite", Int4),
         ("relfrozenxid", Int8),
         ("relminmxid", Int8),
-        ("relacl", Array(crabka_pgtypes::ElemType::Text)),
+        (
+            "relacl",
+            Array(
+                crabka_pgtypes::ElemType::from_column_type(Aclitem)
+                    .expect("aclitem has a builtin array element"),
+            ),
+        ),
         ("reloptions", Array(crabka_pgtypes::ElemType::Text)),
         ("relpartbound", Text),
     ])

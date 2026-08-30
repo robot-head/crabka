@@ -12,8 +12,9 @@
 //!    positional `SELECT *` and a named projection agree with the oracle. Types
 //!    are the nearest crabka [`ColumnType`]: `oid`/`xid` are integers, `name`,
 //!    `"char"`, `pg_node_tree`, `int2vector`, `oidvector` and `pg_lsn` are
-//!    `text`, and `aclitem[]` is a `text[]`. Object kinds without stored ACLs
-//!    return NULL; foreign objects project their explicit `USAGE` grants.
+//!    `text`; `aclitem[]` retains its element type while its compact value is
+//!    stored as text. Object kinds without stored ACLs return NULL; foreign
+//!    objects project their explicit `USAGE` grants.
 //!
 //! [`exec`](crate::exec) owns the relation seam. This module owns the extra
 //! names, their column lists and their rows.
