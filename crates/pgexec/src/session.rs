@@ -6961,6 +6961,16 @@ impl SqlSession {
             ));
         }
         let non_null = total.checked_sub(nulls)?;
+        let null_frac = nulls as f32 / total as f32;
+        let nmultiple = frequencies.values().filter(|count| **count > 1).count();
+        let mut n_distinct = if nmultiple == 0 {
+            -(1.0 - null_frac)
+        } else {
+            values.len() as f32
+        };
+        if n_distinct > total as f32 * 0.1 {
+            n_distinct = -n_distinct / total as f32;
+        }
         let mut common = frequencies
             .into_iter()
             .filter(|(_, count)| *count > 1)
@@ -7051,9 +7061,9 @@ impl SqlSession {
             })
         };
         Some(crate::attrstats::AttributeStats {
-            null_frac: Some(nulls as f32 / total as f32),
+            null_frac: Some(null_frac),
             avg_width: (non_null > 0).then(|| i32::try_from(width / non_null).unwrap_or(i32::MAX)),
-            n_distinct: Some(values.len() as f32),
+            n_distinct: Some(n_distinct),
             most_common_vals,
             most_common_freqs,
             histogram_bounds,
@@ -31026,7 +31036,7 @@ mod session_conformance_tests {
                  FROM pg_stats WHERE tablename = 'analyzed' AND attname = 'id'",
             )
             .await
-                == "0.33333334,1,2"
+                == "0.33333334,1,-0.6666666"
         );
         assert!(
             scalar(
