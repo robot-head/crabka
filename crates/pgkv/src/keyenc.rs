@@ -31,6 +31,20 @@ pub fn put_i32(out: &mut Vec<u8>, v: i32) {
     put_u32(out, (v as u32) ^ (1_u32 << 31));
 }
 
+/// Append bytes in lexicographic byte order, including embedded NULs.
+///
+/// A NUL byte is escaped as `00 ff`; `00 00` terminates the component.  Thus
+/// component boundaries do not disturb the order of a prefix and its extension.
+pub fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    for byte in bytes {
+        out.push(*byte);
+        if *byte == 0 {
+            out.push(u8::MAX);
+        }
+    }
+    out.extend_from_slice(&[0, 0]);
+}
+
 /// Decodes and consumes one big-endian `u32` key component.
 ///
 /// # Errors
@@ -132,6 +146,25 @@ mod tests {
         assert!(enc(i32::MIN) < enc(-1));
         assert!(enc(-1) < enc(0));
         assert!(enc(0) < enc(i32::MAX));
+    }
+
+    #[test]
+    fn byte_encoding_preserves_lexicographic_order_and_component_boundaries() {
+        let enc = |bytes: &[u8]| {
+            let mut out = Vec::new();
+            put_bytes(&mut out, bytes);
+            out
+        };
+        for pair in [
+            (&b""[..], &b"\0"[..]),
+            (&b"\0"[..], &b"\0\0"[..]),
+            (&b"a"[..], &b"a\0"[..]),
+            (&b"a\0"[..], &b"b"[..]),
+            (&b"\xff"[..], &b"\xff\0"[..]),
+        ] {
+            assert!(pair.0 < pair.1);
+            assert!(enc(pair.0) < enc(pair.1));
+        }
     }
 
     proptest! {
