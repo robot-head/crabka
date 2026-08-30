@@ -1748,6 +1748,74 @@ async fn foreign_tables_record_inheritance_and_partition_parents() {
     );
 }
 
+#[tokio::test]
+async fn altering_foreign_table_inheritance_checks_then_updates_catalog() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE FOREIGN DATA WRAPPER inherit_fdw").await;
+    run_s(
+        &mut session,
+        "CREATE SERVER inherit_server FOREIGN DATA WRAPPER inherit_fdw",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE TABLE inherit_parent (id int4 CONSTRAINT inherit_parent_check CHECK (id > 0))",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE FOREIGN TABLE inherit_child (id int4) SERVER inherit_server",
+    )
+    .await;
+    let error = session
+        .simple_query("ALTER FOREIGN TABLE inherit_child INHERIT inherit_parent")
+        .await
+        .expect_err("missing inherited check must fail");
+    assert!(error.message == "child table is missing constraint \"inherit_parent_check\"");
+
+    run_s(
+        &mut session,
+        "ALTER FOREIGN TABLE inherit_child ADD CONSTRAINT inherit_parent_check CHECK (id > 0)",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "ALTER FOREIGN TABLE inherit_child INHERIT inherit_parent",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT parent.relname FROM pg_inherits link \
+             JOIN pg_class child ON child.oid = link.inhrelid \
+             JOIN pg_class parent ON parent.oid = link.inhparent \
+             WHERE child.relname = 'inherit_child'",
+        )
+        .await
+            == vec![text_row(&["inherit_parent"])]
+    );
+
+    run_s(
+        &mut session,
+        "ALTER FOREIGN TABLE inherit_child NO INHERIT inherit_parent",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT parent.relname FROM pg_inherits link \
+             JOIN pg_class child ON child.oid = link.inhrelid \
+             JOIN pg_class parent ON parent.oid = link.inhparent \
+             WHERE child.relname = 'inherit_child'",
+        )
+        .await
+        .is_empty()
+    );
+}
+
 /// A row-security policy that reads a column depends on it. `PostgreSQL`
 /// refuses the drop and names the policy, and `CASCADE` takes the whole
 /// policy — never a policy left reading a column that is gone.

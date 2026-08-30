@@ -4596,9 +4596,15 @@ impl Parser {
         if self.eat_ident_eq("of") {
             return Ok(AlterTableAction::OfType(self.relation_ref()?));
         }
-        if self.eat_keyword(Keyword::Not) || self.eat_ident_eq("not") {
-            self.expect_ident_eq("of")?;
-            return Ok(AlterTableAction::NotOfType);
+        if self.eat_keyword(Keyword::Not) || self.eat_ident_eq("not") || self.eat_ident_eq("no") {
+            if self.eat_ident_eq("of") {
+                return Ok(AlterTableAction::NotOfType);
+            }
+            self.expect_ident_eq("inherit")?;
+            return Ok(AlterTableAction::NoInherit(self.relation_ref()?));
+        }
+        if self.eat_ident_eq("inherit") {
+            return Ok(AlterTableAction::Inherit(self.relation_ref()?));
         }
         if self.peek_ident_eq("attach")
             && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("partition"))

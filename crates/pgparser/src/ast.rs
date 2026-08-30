@@ -2603,6 +2603,10 @@ pub enum AlterTableAction {
     OfType(RelationRef),
     /// `NOT OF` — remove a table's row-type association.
     NotOfType,
+    /// `INHERIT parent` — add a regular inheritance parent.
+    Inherit(RelationRef),
+    /// `NO INHERIT parent` — remove a regular inheritance parent.
+    NoInherit(RelationRef),
     /// `SET ACCESS METHOD <name|DEFAULT>`.
     SetAccessMethod(Option<String>),
     OwnerTo(RoleSpec),

@@ -2655,6 +2655,8 @@ pub(crate) struct AlterTableState {
     /// Columns already retyped by this statement; `PostgreSQL` refuses a second
     /// type change for the same column in one `ALTER TABLE`.
     pub(crate) retyped_columns: Vec<String>,
+    /// The regular inheritance parents after this statement's subcommands.
+    pub(crate) inheritance_parents: Option<Vec<crabka_pgcatalog::RelationName>>,
     /// Foreign keys this statement added. They are not in the catalog yet, so a
     /// later subcommand can only find them here: a name collision check, a
     /// `VALIDATE`, or a `DROP`.
@@ -2809,6 +2811,7 @@ impl AlterTableState {
             dropped_indexes: Vec::new(),
             created_indexes: Vec::new(),
             retyped_columns: Vec::new(),
+            inheritance_parents: None,
             created_foreign_keys: Vec::new(),
             dropped_foreign_keys: Vec::new(),
             foreign_key_ids: crabka_pgcatalog::ForeignKeyIds::default(),
@@ -3336,9 +3339,7 @@ fn reject_typed_table_alter(
             Action::DropColumn { .. } => "cannot drop column from typed table",
             Action::RenameColumn { .. } => "cannot rename column of typed table",
             Action::SetType { .. } => "cannot alter column type of typed table",
-            Action::Unsupported(label) if label.contains("INHERIT ") => {
-                "cannot change inheritance of typed table"
-            }
+            Action::Inherit(_) | Action::NoInherit(_) => "cannot change inheritance of typed table",
             _ => continue,
         };
         return Err(ExecError::WrongObjectType(message.into()));
@@ -3364,6 +3365,11 @@ pub(crate) fn alter_table_state_ops(
                 value: encode_table_tuple(&state.table, xmin, xmax, cmin, cmax, &row),
             });
         }
+    }
+    if let Some(parents) = state.inheritance_parents.take() {
+        ops.extend(crate::inheritance::replace_parents_ops(
+            kv, table_name, &parents,
+        )?);
     }
     ops.append(&mut state.ops);
     Ok(ops)
@@ -3718,6 +3724,7 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         Action::OfType(_) | Action::NotOfType => {
             unreachable!("OF and NOT OF are handled before ALTER TABLE passes")
         }
+        Action::Inherit(_) | Action::NoInherit(_) => 6,
         Action::RenameTable { .. }
         | Action::RenameColumn { .. }
         | Action::RenameConstraint { .. }
@@ -3778,6 +3785,8 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::OfType(_) | Action::NotOfType => {
             unreachable!("OF and NOT OF are handled before ALTER TABLE passes")
         }
+        Action::Inherit(_) => "INHERIT",
+        Action::NoInherit(_) => "NO INHERIT",
         Action::SetAccessMethod(_) => "SET ACCESS METHOD",
         Action::OwnerTo(_) => "OWNER TO",
         // `PostgreSQL` spells the exact form back, so the selector and the mode
@@ -4690,6 +4699,93 @@ pub(crate) fn alter_table_action_ops(
                 }
             }
             state.table.columns[index].not_null = false;
+            Ok(())
+        }
+        Action::Inherit(reference) => {
+            let parent_name =
+                resolve_relation(kv, resolution, reference, SchemaDisposition::Reference)?;
+            let fetched = crabka_pgcatalog::get_table(kv, &parent_name);
+            let kind = match &fetched {
+                Ok(table) => Some(stored_relation_kind(table)),
+                Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+                    relation_kind(kv, &parent_name)
+                }
+                Err(_) => None,
+            };
+            if let Some(kind) = kind
+                && kind != "table"
+                && kind != "foreign table"
+            {
+                return Err(inherit_wrong_kind(&parent_name, kind));
+            }
+            let parent = fetched?;
+            if parent_name == table_name
+                || crate::inheritance::descendants(kv, &table_name)?.contains(&parent_name)
+            {
+                return Err(ExecError::CircularInheritance);
+            }
+            for parent_column in &parent.columns {
+                let Some(index) = state.table.column_index(&parent_column.name) else {
+                    return Err(ExecError::ChildMissingColumn(parent_column.name.clone()));
+                };
+                let child_column = &state.table.columns[index];
+                if child_column.ty != parent_column.ty {
+                    return Err(ExecError::InvalidTableDefinition(format!(
+                        "child table \"{}\" has different type for column \"{}\"",
+                        table_name.name, parent_column.name
+                    )));
+                }
+                if child_column.collation != parent_column.collation {
+                    return Err(ExecError::ChildColumnCollationMismatch {
+                        child: table_name.name.clone(),
+                        column: parent_column.name.clone(),
+                    });
+                }
+                if parent_column.not_null && !child_column.not_null {
+                    return Err(ExecError::InvalidTableDefinition(format!(
+                        "column \"{}\" in child table must be marked NOT NULL",
+                        parent_column.name
+                    )));
+                }
+            }
+            for parent_check in &parent.checks {
+                if !state
+                    .table
+                    .checks
+                    .iter()
+                    .any(|check| check.name == parent_check.name && check.expr == parent_check.expr)
+                {
+                    return Err(ExecError::InvalidObjectDefinition(format!(
+                        "child table is missing constraint \"{}\"",
+                        parent_check.name
+                    )));
+                }
+            }
+            let parents = state
+                .inheritance_parents
+                .get_or_insert(crate::inheritance::parents_of(kv, &table_name)?);
+            if parents.contains(&parent_name) {
+                return Err(ExecError::InvalidObjectDefinition(format!(
+                    "relation \"{}\" would be inherited from more than once",
+                    parent_name.name
+                )));
+            }
+            parents.push(parent_name);
+            Ok(())
+        }
+        Action::NoInherit(reference) => {
+            let parent_name =
+                resolve_relation(kv, resolution, reference, SchemaDisposition::Reference)?;
+            let parents = state
+                .inheritance_parents
+                .get_or_insert(crate::inheritance::parents_of(kv, &table_name)?);
+            let Some(index) = parents.iter().position(|parent| parent == &parent_name) else {
+                return Err(ExecError::InvalidObjectDefinition(format!(
+                    "relation \"{}\" is not a parent of relation \"{}\"",
+                    parent_name.name, table_name.name
+                )));
+            };
+            parents.remove(index);
             Ok(())
         }
         Action::SetDefault { column, expr } => {

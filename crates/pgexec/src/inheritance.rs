@@ -60,6 +60,31 @@ pub(crate) fn attach_ops(child: &RelationName, parents: &[RelationName]) -> Vec<
     ops
 }
 
+/// Replace `child`'s regular inheritance parents, repairing both directions of
+/// every link as one batch.
+pub(crate) fn replace_parents_ops(
+    kv: &dyn Kv,
+    child: &RelationName,
+    parents: &[RelationName],
+) -> Result<Vec<WriteOp>, ExecError> {
+    let previous = parents_of(kv, child)?;
+    let mut ops = previous
+        .iter()
+        .filter(|parent| !parents.contains(parent))
+        .map(|parent| WriteOp::Delete {
+            key: child_index_key(parent, child),
+        })
+        .collect::<Vec<_>>();
+    if parents.is_empty() {
+        ops.push(WriteOp::Delete {
+            key: relation_key(PARENTS_PREFIX, child),
+        });
+    } else {
+        ops.extend(attach_ops(child, parents));
+    }
+    Ok(ops)
+}
+
 pub(crate) fn parents_of(
     kv: &dyn Kv,
     child: &RelationName,
