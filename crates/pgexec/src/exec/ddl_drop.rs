@@ -556,6 +556,8 @@ pub(crate) fn skipped_create_notice(
 pub(crate) fn skipped_drop_notice(
     kv: &dyn Kv,
     resolution: impl FnOnce() -> crate::relname::ResolutionScope,
+    current_user: &str,
+    session_user: &str,
     stmt: &Statement,
 ) -> Result<Option<crabka_pgwire::error::PgError>, ExecError> {
     let missing = |kind: &str, name: &str| {
@@ -593,6 +595,33 @@ pub(crate) fn skipped_drop_notice(
                 }
             }
             Ok(None)
+        }
+        Statement::DropUserMapping {
+            user,
+            server,
+            if_exists: true,
+            ..
+        } => {
+            use crabka_pgparser::ast::RoleSpec;
+            let user = match user {
+                RoleSpec::Name(name) => name.as_str(),
+                RoleSpec::CurrentUser | RoleSpec::CurrentRole => current_user,
+                RoleSpec::SessionUser => session_user,
+                RoleSpec::Public => crabka_pgcatalog::PUBLIC_ROLE,
+            };
+            if !crabka_pgcatalog::role_is_nameable(kv, user)? {
+                return Ok(Some(missing("role", user)));
+            }
+            if crabka_pgcatalog::get_server(kv, server).is_err() {
+                return Ok(Some(missing("server", server)));
+            }
+            Ok(crabka_pgcatalog::get_user_mapping(kv, user, server)
+                .is_err()
+                .then(|| {
+                    crabka_pgwire::error::PgError::notice(format!(
+                        "user mapping for \"{user}\" does not exist for server \"{server}\", skipping"
+                    ))
+                }))
         }
         _ => Ok(None),
     }

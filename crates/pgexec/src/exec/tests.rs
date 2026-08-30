@@ -9535,11 +9535,39 @@ async fn dropping_missing_foreign_objects_with_if_exists_emits_notices() {
 async fn dropping_a_missing_user_mapping_with_if_exists_skips_missing_role_and_server() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
     run_s(
         &mut session,
         "DROP USER MAPPING IF EXISTS FOR missing_role SERVER missing_server",
     )
     .await;
+    assert!(
+        notices.try_recv().expect("missing role").message
+            == "role \"missing_role\" does not exist, skipping"
+    );
+    run_s(
+        &mut session,
+        "DROP USER MAPPING IF EXISTS FOR public SERVER missing_server",
+    )
+    .await;
+    assert!(
+        notices.try_recv().expect("missing server").message
+            == "server \"missing_server\" does not exist, skipping"
+    );
+    run_s(
+        &mut session,
+        "CREATE FOREIGN DATA WRAPPER w; CREATE SERVER s FOREIGN DATA WRAPPER w",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "DROP USER MAPPING IF EXISTS FOR public SERVER s",
+    )
+    .await;
+    assert!(
+        notices.try_recv().expect("missing mapping").message
+            == "user mapping for \"public\" does not exist for server \"s\", skipping"
+    );
 }
 
 #[test]

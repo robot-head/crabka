@@ -8099,8 +8099,13 @@ impl SqlSession {
             || self.resolution_scope(),
             stmt,
         )?;
-        let drop_skip_notice =
-            crate::exec::skipped_drop_notice(&*self.catalog_kv, || self.resolution_scope(), stmt)?;
+        let drop_skip_notice = crate::exec::skipped_drop_notice(
+            &*self.catalog_kv,
+            || self.resolution_scope(),
+            &self.current_role,
+            &self.session_user,
+            stmt,
+        )?;
         let enum_skip_notice = self.skipped_enum_add_value_notice(stmt)?;
         let result = match stmt {
             Statement::CompatibilityRefusal(command) => {
