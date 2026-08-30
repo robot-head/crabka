@@ -245,6 +245,12 @@ pub(crate) fn hash_float64_extended(value: f64, seed: u64) -> u64 {
         .expect("an eight-byte floating-point value always fits PostgreSQL's hash input")
 }
 
+/// PostgreSQL's `hash_any` over a varlena payload.
+pub(crate) fn hash_bytes(value: &[u8]) -> Result<i32, ExecError> {
+    let [b0, b1, b2, b3, _, _, _, _] = hash_bytes_extended(value, 0)?.to_ne_bytes();
+    Ok(i32::from_ne_bytes([b0, b1, b2, b3]))
+}
+
 /// `hashint8extended`: fold the high half into the low half so an int8 and an
 /// int4 of equal value hash alike, then hash the folded word.
 pub(crate) fn hash_int64_extended(value: i64, seed: u64) -> u64 {
@@ -277,7 +283,7 @@ fn hash_uint32_extended(key: u32, seed: u64) -> u64 {
 /// `PostgreSQL` has an aligned word-at-a-time path and an unaligned
 /// byte-at-a-time path. On little-endian hardware the two agree by
 /// construction, and this is that shared result.
-fn hash_bytes_extended(key: &[u8], seed: u64) -> Result<u64, ExecError> {
+pub(crate) fn hash_bytes_extended(key: &[u8], seed: u64) -> Result<u64, ExecError> {
     let (mut a, mut b, mut c) = seeded_state(hash_key_len(key.len() as u64)?, seed);
 
     let mut chunks = key.chunks_exact(CHUNK_LEN);
