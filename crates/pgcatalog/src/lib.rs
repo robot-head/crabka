@@ -5653,6 +5653,7 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, 
     // an unrelated later one.
     ops.extend(policy::drop_policies_for_table_ops(kv, table.id)?);
     ops.extend(rule::drop_rules_for_table_ops(kv, table.id)?);
+    ops.extend(statistics::drop_for_table_ops(kv, table.id)?);
     ops.extend(drop_table_privilege_ops(kv, name)?);
     ops.extend(drop_owner_table_privilege_revoke_ops(kv, name)?);
     ops.extend(drop_relation_column_privilege_ops(kv, name)?);

@@ -14,6 +14,16 @@ pub(crate) fn execute_ddl(
             let (tag, ops) = crate::text_search_catalog::execute(kv, ddl)?;
             Ok((command(tag), ops))
         }
+        Statement::CreateStatistics(stats) => crate::statistics_ddl::create(kv, stats, fctx),
+        Statement::AlterStatistics { name, action } => crate::statistics_ddl::alter(
+            kv,
+            resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?,
+            action,
+            fctx,
+        ),
+        Statement::DropStatistics { names, if_exists } => {
+            crate::statistics_ddl::drop(kv, names, *if_exists, fctx)
+        }
         Statement::CreateRule(rule) => crate::rewrite_rules::create(
             kv,
             rule,

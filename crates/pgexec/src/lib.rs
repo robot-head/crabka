@@ -120,6 +120,7 @@ mod setops;
 mod snapshot_fn;
 mod sql92;
 mod srf;
+mod statistics_ddl;
 mod stats_fn;
 mod string_fn;
 mod subquery;

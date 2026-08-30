@@ -8119,19 +8119,6 @@ impl SqlSession {
             Statement::CompatibilityRefusal(command) => {
                 Err(ExecError::CompatibilityRefusal(*command))
             }
-            // The parser retains extended-statistics syntax so the catalog
-            // executor can take over without another grammar change. Until
-            // that durable catalog path is installed, preserve the existing
-            // compatibility refusal at the session boundary.
-            Statement::CreateStatistics(_) => Err(ExecError::CompatibilityRefusal(
-                crabka_pgparser::ast::RefusalCommand::CreateStatistics,
-            )),
-            Statement::AlterStatistics { .. } => Err(ExecError::CompatibilityRefusal(
-                crabka_pgparser::ast::RefusalCommand::AlterStatistics,
-            )),
-            Statement::DropStatistics { .. } => Err(ExecError::CompatibilityRefusal(
-                crabka_pgparser::ast::RefusalCommand::DropStatistics,
-            )),
             Statement::Begin {
                 isolation,
                 read_only,
@@ -8238,10 +8225,13 @@ impl SqlSession {
         | Statement::CreateCast { .. }
         | Statement::DropCast { .. }
         | Statement::CreateAccessMethod { .. }
-        | Statement::CreateDomain { .. }
-        | Statement::AlterDomain { .. }
-        | Statement::DropDomain { .. }
-        | Statement::Utility(UtilityStatement::TextSearch(_)) => self.run_ddl(stmt).await,
+            | Statement::CreateDomain { .. }
+            | Statement::AlterDomain { .. }
+            | Statement::DropDomain { .. }
+            | Statement::CreateStatistics(_)
+            | Statement::AlterStatistics { .. }
+            | Statement::DropStatistics { .. }
+            | Statement::Utility(UtilityStatement::TextSearch(_)) => self.run_ddl(stmt).await,
         // `DROP TABLE` takes that same path, once the cursors this session
         // still holds have had their say. The internal drops reach `run_ddl`
         // directly and are deliberately exempt: a failed `CREATE TABLE AS`

@@ -1116,6 +1116,7 @@ pub(crate) fn rows(
         "pg_rewrite" => pg_rewrite_rows(kv),
         "pg_rules" => pg_rules_rows(kv),
         "pg_sequence" => pg_sequence_rows(kv),
+        "pg_statistic_ext" => pg_statistic_ext_rows(kv),
         "pg_shmem_allocations_numa" => Err(ExecError::Unsupported(
             "libnuma initialization failed or NUMA is not supported on this platform".into(),
         )),
@@ -2386,6 +2387,39 @@ fn pg_language_rows() -> Vec<Vec<Datum>> {
         ]
     })
     .collect()
+}
+
+/// The durable definitions behind `CREATE STATISTICS`.
+fn pg_statistic_ext_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let role_oids = role_oids(kv)?;
+    crabka_pgcatalog::statistics::list(kv)?
+        .into_iter()
+        .map(|object| {
+            Ok(vec![
+                int(i32::try_from(object.oid)
+                    .map_err(|_| ExecError::Unsupported("statistics oid exceeds int4".into()))?),
+                int(table_relation_oid(object.table_id)?),
+                text(&object.name.name),
+                int(namespace_oid(&object.name.schema)),
+                int(*role_oids
+                    .get(&object.owner)
+                    .unwrap_or(&crate::catalog_fn::BOOTSTRAP_ROLE_OID)),
+                Datum::Int2(object.target),
+                text(
+                    &object
+                        .keys
+                        .iter()
+                        .map(i16::to_string)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
+                Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    ElemType::Text,
+                    object.kinds.into_iter().map(Datum::Text).collect(),
+                )),
+            ])
+        })
+        .collect()
 }
 
 /// The physical pages of every large object. The access check belongs at the

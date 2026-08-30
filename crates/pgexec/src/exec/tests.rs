@@ -667,6 +667,49 @@ async fn statistics_import_resolves_the_pg_temp_alias() {
 }
 
 #[tokio::test]
+async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE stat_ddl (a int, b int)").await;
+    run_s(
+        &mut session,
+        "CREATE STATISTICS stat_ddl_s (ndistinct, mcv) ON a, (b + 1) FROM stat_ddl",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT stxname, stxstattarget::text, stxkeys FROM pg_statistic_ext",
+        )
+        .await
+            == vec![text_row(&["stat_ddl_s", "-1", "1 0"])]
+    );
+    run_s(
+        &mut session,
+        "ALTER STATISTICS stat_ddl_s SET STATISTICS 100",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT stxstattarget::text FROM pg_statistic_ext WHERE stxname = 'stat_ddl_s'",
+        )
+        .await
+            == vec![text_row(&["100"])]
+    );
+    run_s(
+        &mut session,
+        "ALTER STATISTICS stat_ddl_s RENAME TO stat_ddl_s_renamed",
+    )
+    .await;
+    run_s(&mut session, "DROP TABLE stat_ddl").await;
+    assert!(
+        text_rows_of(&mut session, "SELECT count(*)::text FROM pg_statistic_ext").await
+            == vec![text_row(&["0"])]
+    );
+}
+
+#[tokio::test]
 async fn restored_attribute_statistics_are_visible_through_both_catalogs() {
     use assert2::assert;
 
