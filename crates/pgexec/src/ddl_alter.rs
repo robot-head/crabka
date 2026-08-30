@@ -1955,6 +1955,11 @@ pub(crate) fn execute_ddl(
                 .as_ref()
                 .map(|spec| partition_attachment(kv, &name, spec, &cols, &ddl_ctx))
                 .transpose()?;
+            if let Some((parent, _)) = &attachment {
+                crate::exec::ddl_partition::reject_foreign_partition_with_unique_index(
+                    kv, parent, &name, false,
+                )?;
+            }
             let mut ops = ignore_duplicate(
                 crabka_pgcatalog::create_foreign_table_ops(
                     kv,
@@ -5483,6 +5488,14 @@ pub(crate) fn attach_partition_ops(
     let scheme = crate::partition::scheme_of(kv, &parent.name)?
         .ok_or_else(|| ExecError::NotPartitioned(parent.name.to_string()))?;
     let candidate = crabka_pgcatalog::get_table(kv, child)?;
+    if candidate.foreign.is_some() {
+        crate::exec::ddl_partition::reject_foreign_partition_with_unique_index(
+            kv,
+            &parent.name,
+            child,
+            true,
+        )?;
+    }
     if let Some(missing) = parent
         .columns
         .iter()

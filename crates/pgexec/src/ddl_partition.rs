@@ -384,6 +384,48 @@ pub(crate) fn reject_unique_index_with_foreign_partition(
     Ok(())
 }
 
+/// Foreign tables cannot carry the local unique indexes an existing partitioned
+/// parent needs to enforce its key.
+pub(crate) fn reject_foreign_partition_with_unique_index(
+    kv: &dyn Kv,
+    parent: &crabka_pgcatalog::RelationName,
+    child: &crabka_pgcatalog::RelationName,
+    attaching: bool,
+) -> Result<(), ExecError> {
+    if !crabka_pgcatalog::list_table_indexes(kv, parent)?
+        .into_iter()
+        .any(|index| index.unique)
+    {
+        return Ok(());
+    }
+    let (message, detail) = if attaching {
+        (
+            format!(
+                "cannot attach foreign table \"{}\" as partition of partitioned table \"{}\"",
+                child.name, parent.name
+            ),
+            format!(
+                "Partitioned table \"{}\" contains unique indexes.",
+                parent.name
+            ),
+        )
+    } else {
+        (
+            format!(
+                "cannot create foreign partition of partitioned table \"{}\"",
+                parent.name
+            ),
+            format!(
+                "Table \"{}\" contains indexes that are unique.",
+                parent.name
+            ),
+        )
+    };
+    Err(ExecError::Remote(
+        crabka_pgwire::error::PgError::error("0A000", message).with_detail(detail),
+    ))
+}
+
 /// Validate a written partition bound against its parent and resolve it into
 /// the stored form, returning `(parent, bound)`.
 pub(crate) fn partition_attachment(

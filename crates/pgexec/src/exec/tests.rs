@@ -9396,6 +9396,62 @@ async fn partitioned_unique_keys_reject_foreign_partitions() {
     }
 }
 
+#[tokio::test]
+async fn foreign_partition_creation_and_attachment_reject_parent_unique_indexes() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE TABLE parent (id int4) PARTITION BY RANGE (id)",
+        "CREATE UNIQUE INDEX parent_id_idx ON parent (id)",
+    ] {
+        run_s(&mut session, sql).await;
+    }
+    let error = session
+        .simple_query(
+            "CREATE FOREIGN TABLE foreign_leaf PARTITION OF parent \
+             FOR VALUES FROM (0) TO (10) SERVER s",
+        )
+        .await
+        .expect_err("foreign partition creation");
+    assert_eq!(
+        error.message,
+        "cannot create foreign partition of partitioned table \"parent\""
+    );
+    assert_eq!(
+        error
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.detail.as_deref()),
+        Some("Table \"parent\" contains indexes that are unique.")
+    );
+
+    run_s(
+        &mut session,
+        "CREATE FOREIGN TABLE foreign_leaf (id int4) SERVER s",
+    )
+    .await;
+    let error = session
+        .simple_query(
+            "ALTER TABLE parent ATTACH PARTITION foreign_leaf \
+             FOR VALUES FROM (0) TO (10)",
+        )
+        .await
+        .expect_err("foreign partition attachment");
+    assert_eq!(
+        error.message,
+        "cannot attach foreign table \"foreign_leaf\" as partition of partitioned table \"parent\""
+    );
+    assert_eq!(
+        error
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.detail.as_deref()),
+        Some("Partitioned table \"parent\" contains unique indexes.")
+    );
+}
+
 #[test]
 fn comments_on_foreign_objects_are_persisted() {
     use crabka_pgcatalog::CommentObject;
