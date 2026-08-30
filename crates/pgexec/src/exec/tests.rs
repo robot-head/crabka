@@ -1071,6 +1071,30 @@ async fn a_dropped_column_takes_its_comment_with_it() {
 }
 
 #[tokio::test]
+async fn foreign_table_comments_are_visible_in_pg_description() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER described_fdw",
+        "CREATE SERVER described_server FOREIGN DATA WRAPPER described_fdw",
+        "CREATE FOREIGN TABLE described_foreign (id int) SERVER described_server",
+        "COMMENT ON FOREIGN TABLE described_foreign IS 'the foreign table'",
+    ] {
+        run_s(&mut session, sql).await;
+    }
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT obj_description('described_foreign'::regclass, 'pg_class')",
+        )
+        .await
+            == vec![text_row(&["the foreign table"])]
+    );
+}
+
+#[tokio::test]
 async fn user_type_and_domain_comments_are_visible_in_pg_description() {
     use assert2::assert;
     let engine = SqlEngine::new();

@@ -3200,8 +3200,15 @@ fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     );
     for table in crabka_pgcatalog::list_tables(kv)? {
         let relid = table_relation_oid(table.id)?;
+        let kind = if table.foreign.is_some() {
+            "foreign table"
+        } else if table.materialized.is_some() {
+            "materialized view"
+        } else {
+            "table"
+        };
         if let Some(comment) =
-            crabka_pgcatalog::get_comment(kv, "table", CommentObject::Relation(&table.name))?
+            crabka_pgcatalog::get_comment(kv, kind, CommentObject::Relation(&table.name))?
         {
             rows.push(description_row(relid, 0, &comment));
         }
