@@ -6404,7 +6404,7 @@ impl SqlSession {
             // statistics for. A synthesised catalog relation has no stored rows
             // to count, so it is accepted and then has nothing done to it.
             if table.is_some() {
-                collect.push(name.clone());
+                collect.push((name.clone(), target.columns.is_none()));
             }
             let (Some(columns), Some(table)) = (target.columns.as_ref(), table) else {
                 continue;
@@ -6428,7 +6428,11 @@ impl SqlSession {
         }
         if stmt.analyze {
             if stmt.targets.is_empty() {
-                collect = self.database_wide_analyze_targets()?;
+                collect = self
+                    .database_wide_analyze_targets()?
+                    .into_iter()
+                    .map(|name| (name, true))
+                    .collect();
             }
             Box::pin(self.collect_relation_statistics(collect)).await?;
         }
@@ -6504,10 +6508,10 @@ impl SqlSession {
     /// the heap directly and has no equivalent failure to report.
     async fn collect_relation_statistics(
         &mut self,
-        relations: Vec<crabka_pgcatalog::RelationName>,
+        relations: Vec<(crabka_pgcatalog::RelationName, bool)>,
     ) -> Result<(), ExecError> {
         let mut ops = Vec::new();
-        for name in relations {
+        for (name, collect_extended) in relations {
             if let Ok(table) = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name) {
                 for (index, column) in table.columns.iter().enumerate() {
                     if let Some(stats) = self
@@ -6555,6 +6559,9 @@ impl SqlSession {
                         }
                     }
                 }
+                if collect_extended {
+                    ops.extend(self.collect_extended_statistics(&name, &table).await);
+                }
             }
             if let Some(reltuples) = self.count_relation_rows(&name).await {
                 ops.push(crate::relstats::set_reltuples_op(&name, reltuples));
@@ -6571,6 +6578,118 @@ impl SqlSession {
             }
         }
         self.commit_catalog_ops(ops).await
+    }
+
+    /// Compute the part of extended statistics that needs only the relation's
+    /// already-visible values. `pg_ndistinct` is a count for every key subset,
+    /// so a single ordered result set is enough for all of them.
+    async fn collect_extended_statistics(
+        &mut self,
+        relation: &crabka_pgcatalog::RelationName,
+        table: &crabka_pgcatalog::Table,
+    ) -> Vec<crabka_pgkv::WriteOp> {
+        let Ok(objects) = crabka_pgcatalog::statistics::list(self.catalog_kv.as_ref()) else {
+            return Vec::new();
+        };
+        let mut ops = Vec::new();
+        for mut object in objects
+            .into_iter()
+            .filter(|object| object.table_id == table.id)
+        {
+            object.data = if object.target == 0 {
+                None
+            } else {
+                self.collect_statistics_data(relation, table, &object).await
+            };
+            ops.push(crabka_pgcatalog::statistics::put_op(&object));
+        }
+        ops
+    }
+
+    async fn collect_statistics_data(
+        &mut self,
+        relation: &crabka_pgcatalog::RelationName,
+        table: &crabka_pgcatalog::Table,
+        object: &crabka_pgcatalog::statistics::Statistics,
+    ) -> Option<crabka_pgcatalog::statistics::StatisticsData> {
+        let mut expressions = object.expressions.iter();
+        let selected = object
+            .keys
+            .iter()
+            .map(|key| {
+                if *key == 0 {
+                    expressions.next().cloned()
+                } else {
+                    table
+                        .columns
+                        .get(usize::try_from(*key - 1).ok()?)
+                        .map(|column| crate::catalog_fn::quote_identifier(&column.name))
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if expressions.next().is_some() {
+            return None;
+        }
+        let sql = format!(
+            "SELECT {} FROM ONLY {}.{}",
+            selected.join(", "),
+            crate::catalog_fn::quote_identifier(&relation.schema),
+            crate::catalog_fn::quote_identifier(&relation.name),
+        );
+        let parsed = crabka_pgparser::parse(&sql).ok()?;
+        let [statement] = parsed.as_slice() else {
+            return None;
+        };
+        let QueryResult::Rows { rows, .. } = Box::pin(self.run_select(statement)).await.ok()?
+        else {
+            return None;
+        };
+        let positions = object
+            .keys
+            .iter()
+            .scan(0_i16, |expression, key| {
+                if *key == 0 {
+                    *expression -= 1;
+                    Some(*expression)
+                } else {
+                    Some(*key)
+                }
+            })
+            .collect::<Vec<_>>();
+        let ndistinct = object.kinds.iter().any(|kind| kind == "d").then(|| {
+            let mut pieces = Vec::new();
+            for mask in 1_usize..(1_usize << selected.len()) {
+                if mask.count_ones() < 2 {
+                    continue;
+                }
+                let distinct = rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .enumerate()
+                            .filter(|(index, _)| mask & (1 << index) != 0)
+                            .map(|(_, value)| value.as_ref().map(|value| value.text.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .len();
+                let key = positions
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| mask & (1 << index) != 0)
+                    .map(|(_, position)| position.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                pieces.push(format!("\"{key}\": {distinct}"));
+            }
+            format!("{{{}}}", pieces.join(", "))
+        });
+        Some(crabka_pgcatalog::statistics::StatisticsData {
+            inherited: false,
+            ndistinct,
+            dependencies: None,
+            mcv: None,
+        })
     }
 
     /// The fixed statistics `ANALYZE` can derive from one ordinary scan.

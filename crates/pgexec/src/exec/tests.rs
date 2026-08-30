@@ -686,6 +686,19 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
     );
     run_s(
         &mut session,
+        "INSERT INTO stat_ddl VALUES (1, 1), (1, 1), (2, 1); ANALYZE stat_ddl",
+    )
+    .await;
+    assert_eq!(
+        text_rows_of(
+            &mut session,
+            "SELECT stxdndistinct FROM pg_statistic_ext_data",
+        )
+        .await,
+        vec![text_row(&[r#"{"1, -1": 2}"#])],
+    );
+    run_s(
+        &mut session,
         "ALTER STATISTICS stat_ddl_s SET STATISTICS 100",
     )
     .await;
@@ -697,6 +710,24 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
         .await
             == vec![text_row(&["100"])]
     );
+    run_s(
+        &mut session,
+        "ALTER STATISTICS stat_ddl_s SET STATISTICS 0; ANALYZE stat_ddl",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT count(*)::text FROM pg_statistic_ext_data",
+        )
+        .await
+            == vec![text_row(&["0"])]
+    );
+    run_s(
+        &mut session,
+        "ALTER STATISTICS stat_ddl_s SET STATISTICS -1",
+    )
+    .await;
     run_s(
         &mut session,
         "ALTER STATISTICS stat_ddl_s RENAME TO stat_ddl_s_renamed",

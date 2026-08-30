@@ -1,9 +1,8 @@
 //! Durable extended-statistics object metadata.
 //!
-//! This is the catalog half of `CREATE STATISTICS`: it deliberately stores the
-//! object definition rather than an optimizer-specific derived representation.
-//! `ANALYZE` owns derived data, while DDL and catalog views need this stable
-//! identity even before a table has been analyzed.
+//! This is the catalog half of `CREATE STATISTICS`. The object definition and
+//! its `ANALYZE`-derived payload share one lifecycle: renames preserve both,
+//! while dropping the object or its table removes both atomically.
 
 use crabka_pgkv::{Kv, KvError, WriteOp, key::push_key_part};
 
@@ -13,7 +12,20 @@ use crate::{CatalogError, RelationName, TableId};
 pub const STATISTICS_OID_BASE: u32 = 180_000;
 const PREFIX: &[u8] = b"\0\0\0\0catalog_statistics/";
 const NEXT_OID_KEY: &[u8] = b"\0\0\0\0meta/next_statistics_oid";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
+const PREVIOUS_VERSION: u8 = 1;
+
+/// The derived `pg_statistic_ext_data` payload for one statistics object.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatisticsData {
+    pub inherited: bool,
+    /// PostgreSQL's serialized `pg_ndistinct` map.
+    pub ndistinct: Option<String>,
+    /// PostgreSQL's serialized functional-dependency data.
+    pub dependencies: Option<String>,
+    /// PostgreSQL's serialized multi-column MCV list.
+    pub mcv: Option<String>,
+}
 
 /// One `pg_statistic_ext` object.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +43,8 @@ pub struct Statistics {
     pub kinds: Vec<String>,
     /// Deparsed expressions in definition order.
     pub expressions: Vec<String>,
+    /// Absent until `ANALYZE` has derived the payload, or when its target is zero.
+    pub data: Option<StatisticsData>,
 }
 
 fn key(name: &RelationName) -> Vec<u8> {
@@ -148,12 +162,23 @@ fn encode(object: &Statistics) -> Vec<u8> {
     }
     push_strings(&mut out, &object.kinds);
     push_strings(&mut out, &object.expressions);
+    match &object.data {
+        None => out.push(0),
+        Some(data) => {
+            out.push(1);
+            out.push(u8::from(data.inherited));
+            push_optional_string(&mut out, data.ndistinct.as_deref());
+            push_optional_string(&mut out, data.dependencies.as_deref());
+            push_optional_string(&mut out, data.mcv.as_deref());
+        }
+    }
     out
 }
 
 fn decode(value: &[u8]) -> Result<Statistics, CatalogError> {
     let mut input = value;
-    if take_u8(&mut input)? != VERSION {
+    let version = take_u8(&mut input)?;
+    if version != PREVIOUS_VERSION && version != VERSION {
         return Err(corrupt("unknown statistics record version"));
     }
     let oid = take_u32(&mut input)?;
@@ -168,6 +193,20 @@ fn decode(value: &[u8]) -> Result<Statistics, CatalogError> {
     }
     let kinds = take_strings(&mut input)?;
     let expressions = take_strings(&mut input)?;
+    let data = if version == PREVIOUS_VERSION {
+        None
+    } else {
+        match take_u8(&mut input)? {
+            0 => None,
+            1 => Some(StatisticsData {
+                inherited: take_u8(&mut input)? != 0,
+                ndistinct: take_optional_string(&mut input)?,
+                dependencies: take_optional_string(&mut input)?,
+                mcv: take_optional_string(&mut input)?,
+            }),
+            _ => return Err(corrupt("invalid statistics data presence")),
+        }
+    };
     if !input.is_empty() {
         return Err(corrupt("trailing statistics record bytes"));
     }
@@ -180,6 +219,7 @@ fn decode(value: &[u8]) -> Result<Statistics, CatalogError> {
         keys,
         kinds,
         expressions,
+        data,
     })
 }
 
@@ -193,6 +233,13 @@ fn push_strings(out: &mut Vec<u8>, values: &[String]) {
     let len = u16::try_from(values.len()).expect("statistics list exceeds u16");
     out.extend_from_slice(&len.to_be_bytes());
     for value in values {
+        push_string(out, value);
+    }
+}
+
+fn push_optional_string(out: &mut Vec<u8>, value: Option<&str>) {
+    out.push(u8::from(value.is_some()));
+    if let Some(value) = value {
         push_string(out, value);
     }
 }
@@ -234,6 +281,14 @@ fn take_string(input: &mut &[u8]) -> Result<String, CatalogError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| corrupt("statistics string is not UTF-8"))
 }
 
+fn take_optional_string(input: &mut &[u8]) -> Result<Option<String>, CatalogError> {
+    match take_u8(input)? {
+        0 => Ok(None),
+        1 => take_string(input).map(Some),
+        _ => Err(corrupt("invalid optional statistics string presence")),
+    }
+}
+
 fn take_strings(input: &mut &[u8]) -> Result<Vec<String>, CatalogError> {
     let count = usize::from(take_u16(input)?);
     (0..count).map(|_| take_string(input)).collect()
@@ -249,8 +304,8 @@ mod tests {
     use crabka_pgkv::{Kv, MemKv};
 
     use super::{
-        STATISTICS_OID_BASE, Statistics, create_ops, drop_for_table_ops, get, list, next_oid,
-        rename_ops,
+        STATISTICS_OID_BASE, Statistics, StatisticsData, create_ops, drop_for_table_ops, get, list,
+        next_oid, rename_ops,
     };
     use crate::RelationName;
 
@@ -264,6 +319,7 @@ mod tests {
             keys: vec![1, 0, 2],
             kinds: vec!["d".into(), "m".into()],
             expressions: vec!["(b + 1)".into()],
+            data: None,
         }
     }
 
@@ -289,5 +345,26 @@ mod tests {
         kv.write_batch(&drop_for_table_ops(&kv, 42).expect("drop table"))
             .expect("write");
         assert!(list(&kv).expect("list").is_empty());
+    }
+
+    #[test]
+    fn derived_data_round_trips_with_the_definition() {
+        let kv = MemKv::new();
+        let mut record = object("s", 42);
+        record.data = Some(StatisticsData {
+            inherited: false,
+            ndistinct: Some(r#"{"1, 2": 3}"#.into()),
+            dependencies: None,
+            mcv: Some("mcv".into()),
+        });
+        kv.write_batch(&create_ops(&kv, &record).expect("create"))
+            .expect("write");
+        assert!(
+            get(&kv, &RelationName::public("s"))
+                .expect("get")
+                .expect("present")
+                .data
+                == record.data
+        );
     }
 }

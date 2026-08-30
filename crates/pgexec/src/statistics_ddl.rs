@@ -176,6 +176,7 @@ pub(crate) fn create(
         keys,
         kinds: kinds(&stats.kinds)?,
         expressions,
+        data: None,
     };
     Ok((
         command("CREATE STATISTICS"),

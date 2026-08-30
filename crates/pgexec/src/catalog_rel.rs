@@ -169,6 +169,7 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_shdepend",
     "pg_shmem_allocations_numa",
     "pg_statistic_ext",
+    "pg_statistic_ext_data",
     "pg_stat_activity",
     "pg_tables",
     "pg_tablespace",
@@ -248,6 +249,7 @@ static RELATION_NAMES: &[&str] = &[
     "pg_shdepend",
     "pg_shmem_allocations_numa",
     "pg_statistic_ext",
+    "pg_statistic_ext_data",
     "pg_stat_activity",
     "pg_tables",
     "pg_tablespace",
@@ -324,6 +326,7 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
         "pg_shdescription" => 2396,
         "pg_shdepend" => 1214,
         "pg_statistic_ext" => 3381,
+        "pg_statistic_ext_data" => 3429,
         "pg_tablespace" => 1213,
         "pg_trigger" => 2620,
         "pg_user_mapping" => 1418,
@@ -1117,6 +1120,7 @@ pub(crate) fn rows(
         "pg_rules" => pg_rules_rows(kv),
         "pg_sequence" => pg_sequence_rows(kv),
         "pg_statistic_ext" => pg_statistic_ext_rows(kv),
+        "pg_statistic_ext_data" => pg_statistic_ext_data_rows(kv),
         "pg_shmem_allocations_numa" => Err(ExecError::Unsupported(
             "libnuma initialization failed or NUMA is not supported on this platform".into(),
         )),
@@ -2065,6 +2069,14 @@ fn pg_catalog_columns_rest(name: &str) -> Vec<Column> {
             ("stxkeys", Text),
             ("stxkind", ColumnType::Array(ElemType::Text)),
         ]),
+        "pg_statistic_ext_data" => cols(&[
+            ("stxoid", Int4),
+            ("stxdinherit", Bool),
+            ("stxdndistinct", Text),
+            ("stxddependencies", Text),
+            ("stxdmcv", Text),
+            ("stxdexpr", Text),
+        ]),
         "pg_publication" => cols(&[
             ("oid", Int4),
             ("pubname", Text),
@@ -2417,6 +2429,25 @@ fn pg_statistic_ext_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                     ElemType::Text,
                     object.kinds.into_iter().map(Datum::Text).collect(),
                 )),
+            ])
+        })
+        .collect()
+}
+
+/// The data `ANALYZE` derived for the durable statistics definitions.
+fn pg_statistic_ext_data_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    crabka_pgcatalog::statistics::list(kv)?
+        .into_iter()
+        .filter_map(|object| object.data.map(|data| (object.oid, data)))
+        .map(|(oid, data)| {
+            Ok(vec![
+                int(i32::try_from(oid)
+                    .map_err(|_| ExecError::Unsupported("statistics oid exceeds int4".into()))?),
+                Datum::Bool(data.inherited),
+                data.ndistinct.map_or(Datum::Null, |value| text(&value)),
+                data.dependencies.map_or(Datum::Null, |value| text(&value)),
+                data.mcv.map_or(Datum::Null, |value| text(&value)),
+                Datum::Null,
             ])
         })
         .collect()
