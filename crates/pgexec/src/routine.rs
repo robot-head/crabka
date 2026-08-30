@@ -6020,7 +6020,6 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 },
                 Datum::Null,
                 Datum::Null,
-                Datum::Null,
             ])
         })
         .collect()
@@ -6555,6 +6554,7 @@ mod tests {
             .iter()
             .find(|row| row[0] == Datum::Int4(879))
             .expect("lpad row");
+        assert!(lpad.len() == 30);
         assert!(lpad[25] == Datum::Text(String::new()));
         assert!(matches!(&lpad[27], Datum::Text(body) if !body.is_empty()));
     }
