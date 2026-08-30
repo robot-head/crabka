@@ -4190,7 +4190,9 @@ fn require_foreign_usage(
     name: &str,
     fctx: ForeignCtx<'_>,
 ) -> Result<(), ExecError> {
-    if crate::catalog_fn::foreign_usage_is_held(kv, target, name, fctx.effective_role())? {
+    if crate::catalog_fn::foreign_usage_is_held(kv, target, name, fctx.effective_role())
+        .map_err(|error| foreign_usage_object_error(target, name, error))?
+    {
         return Ok(());
     }
     let kind = match target {
@@ -4201,6 +4203,27 @@ fn require_foreign_usage(
         "42501",
         format!("permission denied for {kind} {name}"),
     )))
+}
+
+fn foreign_usage_object_error(
+    target: crabka_pgcatalog::ForeignPrivilegeTarget,
+    name: &str,
+    error: ExecError,
+) -> ExecError {
+    if matches!(
+        error,
+        ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedObject(_))
+    ) {
+        let kind = match target {
+            crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper => "foreign-data wrapper",
+            crabka_pgcatalog::ForeignPrivilegeTarget::Server => "server",
+        };
+        return ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "42704",
+            format!("{kind} \"{name}\" does not exist"),
+        ));
+    }
+    error
 }
 
 /// The role an `OWNER TO` or `CREATE SCHEMA AUTHORIZATION` clause names,

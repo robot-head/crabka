@@ -8425,6 +8425,33 @@ fn foreign_usage_is_required_to_create_servers_and_foreign_tables() {
 }
 
 #[test]
+fn foreign_usage_lookup_names_the_missing_object() {
+    use crabka_pgkv::MemKv;
+
+    let kv = MemKv::new();
+    for (sql, message) in [
+        (
+            "CREATE SERVER s FOREIGN DATA WRAPPER missing_wrapper",
+            "foreign-data wrapper \"missing_wrapper\" does not exist",
+        ),
+        (
+            "CREATE FOREIGN TABLE t (id int4) SERVER missing_server",
+            "server \"missing_server\" does not exist",
+        ),
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        let error = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+            .expect_err("missing foreign object");
+        assert!(matches!(error, super::ExecError::Remote(ref error)
+            if error.code == "42704" && error.message == message));
+    }
+}
+
+#[test]
 fn foreign_object_usage_grants_follow_rename_and_require_the_owner() {
     use crabka_pgkv::{Kv, MemKv};
 
