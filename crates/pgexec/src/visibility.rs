@@ -266,9 +266,17 @@ fn locate(catalog: Catalog, kv: &dyn Kv, oid: i32) -> Result<Option<Located>, Ex
             .iter()
             .find(|conversion| conversion.0 == oid)
             .map(|conversion| catalog_object(conversion.1)),
-        // crabka records no extended statistics and no text-search parsers or
-        // templates, so no oid names one and the answer is always NULL.
-        Catalog::StatisticsObject | Catalog::TsParser | Catalog::TsTemplate => None,
+        Catalog::StatisticsObject => match u32::try_from(oid) {
+            Ok(oid) => crabka_pgcatalog::statistics::list(kv)?
+                .into_iter()
+                .find(|object| object.oid == oid)
+                .map(|object| Located {
+                    schema: object.name.schema,
+                    key: ShadowKey::Name(object.name.name),
+                }),
+            Err(_) => None,
+        },
+        Catalog::TsParser | Catalog::TsTemplate => None,
         Catalog::TsConfig => locate_text_search(
             kv,
             oid,
@@ -324,10 +332,13 @@ fn occupied(
             && crate::builtin_conversions::BUILTIN_CONVERSIONS
                 .iter()
                 .any(|conversion| conversion.1 == key.name())),
+        Catalog::StatisticsObject => Ok(crabka_pgcatalog::statistics::list(kv)?
+            .into_iter()
+            .any(|object| object.name.schema == schema && object.name.name == key.name())),
         // Nothing crabka stores can occupy these names outside `pg_catalog`,
         // and an object already located there is answered before the walk
         // reaches this probe.
-        Catalog::StatisticsObject | Catalog::TsParser | Catalog::TsTemplate => Ok(false),
+        Catalog::TsParser | Catalog::TsTemplate => Ok(false),
         Catalog::TsConfig => text_search_occupied(
             kv,
             schema,
@@ -650,6 +661,41 @@ mod tests {
             crabka_pgcatalog::get_table(kv, &crabka_pgcatalog::RelationName::new(schema, name))
                 .expect("table");
         Datum::Int4(crate::catalog_rel::table_relation_oid(table.id).expect("oid"))
+    }
+
+    #[test]
+    fn statistics_objects_follow_search_path_shadowing() {
+        let kv = catalog(&[("s1", "t"), ("s2", "t")]);
+        for schema in ["s1", "s2"] {
+            let table = crabka_pgcatalog::get_table(
+                kv.as_ref(),
+                &crabka_pgcatalog::RelationName::new(schema, "t"),
+            )
+            .expect("table");
+            let object = crabka_pgcatalog::statistics::Statistics {
+                oid: 0,
+                name: crabka_pgcatalog::RelationName::new(schema, "s"),
+                table_id: table.id,
+                owner: crate::catalog_fn::OBJECT_OWNER.into(),
+                target: -1,
+                keys: vec![1, 2],
+                kinds: vec!["d".into(), "f".into(), "m".into()],
+                expressions: Vec::new(),
+                data: None,
+            };
+            let ops =
+                crabka_pgcatalog::statistics::create_ops(kv.as_ref(), &object).expect("statistics");
+            kv.write_batch(&ops).expect("write statistics");
+        }
+        let first = Datum::Int4(crabka_pgcatalog::statistics::STATISTICS_OID_BASE as i32);
+        let second = Datum::Int4(crabka_pgcatalog::statistics::STATISTICS_OID_BASE as i32 + 1);
+        let ctx = ctx(&kv, &["s1", "s2"]);
+        assert!(
+            is_visible(Catalog::StatisticsObject, &first, &ctx).expect("s1") == Datum::Bool(true)
+        );
+        assert!(
+            is_visible(Catalog::StatisticsObject, &second, &ctx).expect("s2") == Datum::Bool(false)
+        );
     }
 
     #[test]

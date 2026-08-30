@@ -63,6 +63,14 @@ enum RoutineDefKind {
     Result,
 }
 
+/// Which `pg_get_statisticsobjdef*` form a call names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatisticsDefKind {
+    Definition,
+    Columns,
+    Expressions,
+}
+
 /// The catalog functions, and how their result type is decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CatalogFunc {
@@ -74,14 +82,12 @@ enum CatalogFunc {
     Expr,
     UserById,
     SerialSequence,
-    /// A definition-reconstruction function for an object kind crabka has none
-    /// of. It is always NULL, like PostgreSQL's answer for a missing oid.
-    NullDef,
     /// `pg_get_partkeydef(oid)` — the `PARTITION BY` clause that rebuilds a
     /// partitioned relation's key, and NULL for a relation without one.
     PartKeyDef,
     /// P2: the `pg_get_function*` family over the routine catalog.
     RoutineDef(RoutineDefKind),
+    StatisticsDef(StatisticsDefKind),
     IsVisible,
     RelationSize,
     TableSize,
@@ -121,8 +127,8 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
         EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef, IndexesSize,
-        IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize, RoutineDef,
-        SerialSequence, SettingsFlags, ShobjDescription, SizeBytes, SizePretty, StartTime,
+        IsPublishable, IsVisible, ObjDescription, RelationSize, RoutineDef, SerialSequence,
+        SettingsFlags, ShobjDescription, SizeBytes, SizePretty, StartTime, StatisticsDef,
         TableSize, TablespaceLocation, TotalRelationSize, TriggerDef, TriggerDepth, UserById,
         ViewDef,
     };
@@ -140,7 +146,9 @@ fn catalog_func(name: &str) -> Option<CatalogFunc> {
         "pg_get_triggerdef" => TriggerDef,
         "pg_get_ruledef" => CatalogFunc::RuleDef,
         "pg_get_partkeydef" => CatalogFunc::PartKeyDef,
-        "pg_get_statisticsobjdef" | "pg_get_statisticsobjdef_columns" => NullDef,
+        "pg_get_statisticsobjdef" => StatisticsDef(StatisticsDefKind::Definition),
+        "pg_get_statisticsobjdef_columns" => StatisticsDef(StatisticsDefKind::Columns),
+        "pg_get_statisticsobjdef_expressions" => StatisticsDef(StatisticsDefKind::Expressions),
         // `pg_table_is_visible` belongs to the same family but is dispatched
         // through [`crate::func`]; every other member lands here. Both routes
         // evaluate through [`crate::visibility`].
@@ -268,6 +276,9 @@ pub(crate) fn catalog_func_result_type(
         }
     }
     Ok(match f {
+        CatalogFunc::StatisticsDef(StatisticsDefKind::Expressions) => {
+            ColumnType::Array(ElemType::Text)
+        }
         IsVisible
         | HasPrivilege
         | HasRole
@@ -295,15 +306,15 @@ fn arity_ok(f: CatalogFunc, n: usize) -> bool {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, ColDescription, ConstraintDef, CurrentSchemas,
         EncodingToChar, Expr as ExprDef, HasPrivilege, HasRole, InRecovery, IndexDef, IndexesSize,
-        IsPublishable, IsVisible, NullDef, ObjDescription, RelationSize, SerialSequence,
-        SettingsFlags, ShobjDescription, SizeBytes, SizePretty, StartTime, TableSize,
-        TablespaceLocation, TotalRelationSize, UserById, ViewDef,
+        IsPublishable, IsVisible, ObjDescription, RelationSize, SerialSequence, SettingsFlags,
+        ShobjDescription, SizeBytes, SizePretty, StartTime, TableSize, TablespaceLocation,
+        TotalRelationSize, UserById, ViewDef,
     };
     match f {
-        ViewDef | ConstraintDef | CatalogFunc::TriggerDef | CatalogFunc::RuleDef | NullDef => {
+        ViewDef | ConstraintDef | CatalogFunc::TriggerDef | CatalogFunc::RuleDef => {
             n == 1 || n == 2
         }
-        CatalogFunc::RoutineDef(_) => n == 1,
+        CatalogFunc::RoutineDef(_) | CatalogFunc::StatisticsDef(_) => n == 1,
         IndexDef => n == 1 || n == 3,
         ExprDef => n == 2 || n == 3,
         UserById
@@ -362,11 +373,10 @@ fn eval_resolved(
 ) -> Result<Datum, ExecError> {
     use CatalogFunc::{
         BackendPid, CharToEncoding, ClusterSize, CurrentSchemas, EncodingToChar, HasPrivilege,
-        HasRole, InRecovery, IsPublishable, IsVisible, NullDef, SettingsFlags, SizeBytes,
-        SizePretty, StartTime, TablespaceLocation,
+        HasRole, InRecovery, IsPublishable, IsVisible, SettingsFlags, SizeBytes, SizePretty,
+        StartTime, TablespaceLocation,
     };
     match f {
-        NullDef => Ok(Datum::Null),
         TablespaceLocation => tablespace_location(&vals[0], ctx),
         IsVisible => crate::visibility::is_visible(
             crate::visibility::Catalog::for_function(name)
@@ -479,6 +489,7 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
     let scope = ctx.resolution();
     match f {
         ViewDef => view_def(kv, scope, vals, ctx.output_style()),
+        CatalogFunc::StatisticsDef(kind) => statistics_object_def(kv, kind, &vals[0]),
         // `pg_get_indexdef(oid, colno, pretty)` — the column number selects one
         // key expression and is not supported, but `pretty` changes the
         // relation's spelling and psql's `\d` passes it.
@@ -3413,6 +3424,77 @@ fn index_def(
     Ok(Datum::Null)
 }
 
+/// The `pg_get_statisticsobjdef*` family over durable extended statistics.
+fn statistics_object_def(
+    kv: &dyn Kv,
+    kind: StatisticsDefKind,
+    reference: &Datum,
+) -> Result<Datum, ExecError> {
+    if matches!(reference, Datum::Null) {
+        return Ok(Datum::Null);
+    }
+    let wanted = i32::try_from(int_arg(reference)?)
+        .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;
+    let Some(wanted) = u32::try_from(wanted).ok() else {
+        return Ok(Datum::Null);
+    };
+    let Some(object) = crabka_pgcatalog::statistics::list(kv)?
+        .into_iter()
+        .find(|object| object.oid == wanted)
+    else {
+        return Ok(Datum::Null);
+    };
+    let table = crabka_pgcatalog::table_by_id(kv, object.table_id)?;
+    let ncolumns = object.keys.iter().filter(|key| **key != 0).count() + object.expressions.len();
+    let Some(mut columns) = object
+        .keys
+        .iter()
+        .filter(|key| **key != 0)
+        .map(|key| {
+            table
+                .columns
+                .get(usize::try_from(*key - 1).ok()?)
+                .map(|column| quote_identifier(&column.name))
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(Datum::Null);
+    };
+    columns.extend(object.expressions.iter().cloned());
+    let columns = columns.join(", ");
+    match kind {
+        StatisticsDefKind::Columns => Ok(Datum::Text(columns)),
+        StatisticsDefKind::Expressions => Ok((!object.expressions.is_empty())
+            .then(|| {
+                Datum::Array(ArrayValue::new(
+                    ElemType::Text,
+                    object.expressions.into_iter().map(Datum::Text).collect(),
+                ))
+            })
+            .unwrap_or(Datum::Null)),
+        StatisticsDefKind::Definition => {
+            let enabled = [("d", "ndistinct"), ("f", "dependencies"), ("m", "mcv")]
+                .into_iter()
+                .filter_map(|(kind, name)| {
+                    object
+                        .kinds
+                        .iter()
+                        .any(|stored| stored == kind)
+                        .then_some(name)
+                })
+                .collect::<Vec<_>>();
+            let kinds = (enabled.len() != 3 && ncolumns > 1).then(|| enabled.join(", "));
+            Ok(Datum::Text(format!(
+                "CREATE STATISTICS {}.{}{} ON {columns} FROM {}",
+                quote_identifier(crabka_pgcatalog::displayed_schema(&object.name.schema)),
+                quote_identifier(&object.name.name),
+                kinds.map_or_else(String::new, |kinds| format!(" ({kinds})")),
+                quote_identifier(&table.name.name),
+            )))
+        }
+    }
+}
+
 /// The `CREATE INDEX` text for one index, schema-qualified like PostgreSQL's.
 ///
 /// `pg_get_indexdef` genuinely qualifies the table it indexes, even in
@@ -3880,14 +3962,15 @@ mod tests {
     };
     use crabka_pgkv::{Kv, MemKv};
     use crabka_pgparser::parser::{parse, parse_expr_for_test as pexpr};
-    use crabka_pgtypes::{ColumnType, Datum};
+    use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
 
     use super::{
-        catalog_func, char_to_encoding, coerce_rule_unknown_literals, coerce_rule_values_literals,
-        constraint_def, encoding_to_char, foreign_key_definition, foreign_privilege_target,
-        foreign_usage_is_held, has_privilege, indexes_size, is_catalog_func, is_simple_rule_action,
-        quote_identifier, relation_size, relation_size_with_fork, size_bytes, size_pretty,
-        table_size, total_relation_size, view_def,
+        StatisticsDefKind, catalog_func, char_to_encoding, coerce_rule_unknown_literals,
+        coerce_rule_values_literals, constraint_def, encoding_to_char, foreign_key_definition,
+        foreign_privilege_target, foreign_usage_is_held, has_privilege, indexes_size,
+        is_catalog_func, is_simple_rule_action, quote_identifier, relation_size,
+        relation_size_with_fork, size_bytes, size_pretty, statistics_object_def, table_size,
+        total_relation_size, view_def,
     };
     use crate::error::ExecError;
 
@@ -3907,6 +3990,51 @@ mod tests {
             )
             .expect("view definition")
                 == Datum::Null
+        );
+    }
+
+    #[test]
+    fn statistics_object_def_reconstructs_columns_and_expressions() {
+        let kv = MemKv::new();
+        let table_name = RelationName::public("t");
+        let (table_id, ops) = crabka_pgcatalog::create_table_ops(
+            &kv,
+            &table_name,
+            vec![
+                Column::new("a", ColumnType::Int4),
+                Column::new("b", ColumnType::Int4),
+            ],
+        )
+        .expect("table");
+        kv.write_batch(&ops).expect("write table");
+        let object = crabka_pgcatalog::statistics::Statistics {
+            oid: 0,
+            name: RelationName::public("ab_stats"),
+            table_id,
+            owner: "postgres".into(),
+            target: -1,
+            keys: vec![1, 0],
+            kinds: vec!["d".into(), "f".into(), "m".into(), "e".into()],
+            expressions: vec!["(b + 1)".into()],
+            data: None,
+        };
+        let ops = crabka_pgcatalog::statistics::create_ops(&kv, &object).expect("statistics");
+        kv.write_batch(&ops).expect("write statistics");
+        let oid = Datum::Int4(crabka_pgcatalog::statistics::STATISTICS_OID_BASE as i32);
+        assert!(
+            statistics_object_def(&kv, StatisticsDefKind::Definition, &oid).expect("definition")
+                == Datum::Text("CREATE STATISTICS public.ab_stats ON a, (b + 1) FROM t".into())
+        );
+        assert!(
+            statistics_object_def(&kv, StatisticsDefKind::Columns, &oid).expect("columns")
+                == Datum::Text("a, (b + 1)".into())
+        );
+        assert!(
+            statistics_object_def(&kv, StatisticsDefKind::Expressions, &oid).expect("expressions")
+                == Datum::Array(ArrayValue::new(
+                    ElemType::Text,
+                    vec![Datum::Text("(b + 1)".into())],
+                ))
         );
     }
 

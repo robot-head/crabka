@@ -684,6 +684,19 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
         .await
             == vec![text_row(&["stat_ddl_s", "-1", "1 0"])]
     );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_get_statisticsobjdef(oid), pg_get_statisticsobjdef_columns(oid), \
+                    pg_get_statisticsobjdef_expressions(oid) FROM pg_statistic_ext",
+        )
+        .await
+            == vec![text_row(&[
+                "CREATE STATISTICS public.stat_ddl_s (ndistinct, mcv) ON a, (b + 1) FROM stat_ddl",
+                "a, (b + 1)",
+                "{\"(b + 1)\"}",
+            ])]
+    );
     run_s(
         &mut session,
         "INSERT INTO stat_ddl VALUES (1, 1), (1, 1), (2, 1); ANALYZE stat_ddl",
