@@ -4,6 +4,8 @@
 //! supplies decoded MCV and histogram values; keeping the arithmetic here makes
 //! it usable for ordinary columns and expression statistics alike.
 
+use crabka_pgtypes::{ColumnType, Datum};
+
 /// PostgreSQL's fallback for equality predicates without usable statistics.
 pub(crate) const DEFAULT_EQ_SEL: f64 = 0.005;
 /// PostgreSQL's fallback for scalar inequality predicates.
@@ -26,6 +28,64 @@ pub(crate) struct ColumnStats<'a, T> {
     pub(crate) mcv: &'a [(T, f64)],
     /// Sorted scalar histogram bounds, when the type has an ordering.
     pub(crate) histogram: &'a [T],
+}
+
+/// Decoded catalog statistics. `pg_statistic` stores its value slots as array
+/// text, while selectivity code must compare real datums; this bridge performs
+/// the same element input step as PostgreSQL's statistic slot reader.
+#[derive(Debug, Clone)]
+pub(crate) struct DecodedColumnStats {
+    rows: f64,
+    null_frac: f64,
+    n_distinct: Option<f64>,
+    mcv: Vec<(Datum, f64)>,
+    histogram: Vec<Datum>,
+}
+
+impl DecodedColumnStats {
+    /// Borrow the decoded values through the generic equality/join estimator.
+    pub(crate) fn as_stats(&self) -> ColumnStats<'_, Datum> {
+        ColumnStats {
+            rows: self.rows,
+            null_frac: self.null_frac,
+            n_distinct: self.n_distinct,
+            mcv: &self.mcv,
+            histogram: &self.histogram,
+        }
+    }
+}
+
+/// Decode the statistic slots belonging to one typed attribute. Corrupt or
+/// obsolete slots are ignored by returning `None`: planning must fall back to
+/// default selectivity rather than make `EXPLAIN` fail on old metadata.
+pub(crate) fn decode_catalog_stats(
+    stats: &crate::attrstats::AttributeStats,
+    ty: ColumnType,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<DecodedColumnStats> {
+    let mcv_values = match stats.most_common_vals.as_deref() {
+        Some(text) => decode_stat_array(text, ty, ctx)?,
+        None => Vec::new(),
+    };
+    let mcv_frequencies = match stats.most_common_freqs.as_deref() {
+        Some(text) => decode_frequency_array(text)?,
+        None => Vec::new(),
+    };
+    if mcv_values.len() != mcv_frequencies.len() {
+        return None;
+    }
+    let histogram = match stats.histogram_bounds.as_deref() {
+        Some(text) => decode_stat_array(text, ty, ctx)?,
+        None => Vec::new(),
+    };
+    Some(DecodedColumnStats {
+        rows,
+        null_frac: f64::from(stats.null_frac.unwrap_or_default()),
+        n_distinct: stats.n_distinct.map(f64::from),
+        mcv: mcv_values.into_iter().zip(mcv_frequencies).collect(),
+        histogram,
+    })
 }
 
 impl<T> ColumnStats<'_, T> {
@@ -255,6 +315,36 @@ fn probability(value: f64) -> f64 {
     value.clamp(0.0, 1.0)
 }
 
+fn decode_stat_array(
+    text: &str,
+    ty: ColumnType,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<Vec<Datum>> {
+    crabka_pgtypes::array::parse_literal(text)
+        .ok()?
+        .elements
+        .into_iter()
+        .map(|element| {
+            let text = element?;
+            crate::eval::cast_value_in(&Datum::Text(text), ty, ctx.output_style()).ok()
+        })
+        .collect()
+}
+
+fn decode_frequency_array(text: &str) -> Option<Vec<f64>> {
+    crabka_pgtypes::array::parse_literal(text)
+        .ok()?
+        .elements
+        .into_iter()
+        .map(|element| {
+            element?
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +425,44 @@ mod tests {
         assert!((buckets.average_bucket_rows - 9.0).abs() < f64::EPSILON);
         assert!((buckets.mcv_frequency - 0.6).abs() < f64::EPSILON);
         assert!((patternsel() - DEFAULT_MATCH_SEL).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn catalog_slots_decode_through_the_attribute_type() {
+        let stats = crate::attrstats::AttributeStats {
+            null_frac: Some(0.1),
+            n_distinct: Some(4.0),
+            most_common_vals: Some("{1,2}".into()),
+            most_common_freqs: Some("{0.4,0.2}".into()),
+            histogram_bounds: Some("{1,5,9}".into()),
+            ..crate::attrstats::AttributeStats::default()
+        };
+        let decoded = decode_catalog_stats(
+            &stats,
+            ColumnType::Int4,
+            10.0,
+            &crate::clock::EvalCtx::test_default(),
+        )
+        .expect("valid statistics decode");
+        assert!((eqsel(decoded.as_stats(), Some(&Datum::Int4(1))) - 0.4).abs() < f64::EPSILON);
+        assert!(decoded.as_stats().histogram == [Datum::Int4(1), Datum::Int4(5), Datum::Int4(9)]);
+    }
+
+    #[test]
+    fn malformed_or_mismatched_slots_fall_back_cleanly() {
+        let mismatched = crate::attrstats::AttributeStats {
+            most_common_vals: Some("{1,2}".into()),
+            most_common_freqs: Some("{0.5}".into()),
+            ..crate::attrstats::AttributeStats::default()
+        };
+        assert!(
+            decode_catalog_stats(
+                &mismatched,
+                ColumnType::Int4,
+                1.0,
+                &crate::clock::EvalCtx::test_default(),
+            )
+            .is_none()
+        );
     }
 }
