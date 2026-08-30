@@ -30,7 +30,7 @@ use crabka_pgparser::ast::{
     QueryExpr, ResetTarget, SelectItem, SetExpr, Statement, TableExpr, TableLockMode, UnaryOp,
     UnlistenTarget, UtilityStatement,
 };
-use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
+use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, RangeValue};
 use crabka_pgwire::{
     engine::{
         BoundParam, Cell, CloseTarget, CopyInResponse, CopyOutResponse, CopyOutStream,
@@ -6998,9 +6998,17 @@ impl SqlSession {
         let [field] = fields.as_slice() else {
             return None;
         };
+        let column_type = crate::exec::column_type_from_oid(field.type_oid).ok()?;
+        let range_type = matches!(
+            column_type,
+            ColumnType::Range(_) | ColumnType::Multirange(_)
+        );
         let scalar_type = !matches!(
-            crate::exec::column_type_from_oid(field.type_oid).ok()?,
-            ColumnType::Array(_) | ColumnType::Record(_)
+            column_type,
+            ColumnType::Array(_)
+                | ColumnType::Record(_)
+                | ColumnType::Range(_)
+                | ColumnType::Multirange(_)
         );
         if rows.is_empty() {
             return None;
@@ -7010,6 +7018,7 @@ impl SqlSession {
         let mut frequencies = BTreeMap::<Vec<u8>, usize>::new();
         let mut ordered_values = Vec::new();
         let mut arrays = Vec::new();
+        let mut ranges = Vec::new();
         let mut nulls = 0usize;
         let mut width = 0usize;
         for (position, row) in rows.into_iter().enumerate() {
@@ -7027,6 +7036,9 @@ impl SqlSession {
             if let Datum::Array(array) = &decoded {
                 arrays.push(array.clone());
             }
+            if let Datum::Range(range) = &decoded {
+                ranges.push(range.clone());
+            }
             ordered_values.push((position, decoded, value.text.to_vec()));
         }
         let non_null = total.checked_sub(nulls)?;
@@ -7039,6 +7051,9 @@ impl SqlSession {
         };
         if n_distinct > total as f32 * 0.1 {
             n_distinct = -n_distinct / total as f32;
+        }
+        if range_type {
+            n_distinct = -(1.0 - null_frac);
         }
         let mut comparison_failed = false;
         ordered_values.sort_by(|(_, left, _), (_, right, _)| {
@@ -7158,6 +7173,8 @@ impl SqlSession {
         };
         let (most_common_elems, most_common_elem_freqs, elem_count_histogram) =
             self.array_statistics(&arrays, statistics_target);
+        let (range_length_histogram, range_empty_frac, range_bounds_histogram) =
+            self.range_statistics(&ranges, statistics_target);
         Some(crate::attrstats::AttributeStats {
             null_frac: Some(null_frac),
             avg_width: (non_null > 0).then(|| i32::try_from(width / non_null).unwrap_or(i32::MAX)),
@@ -7169,6 +7186,9 @@ impl SqlSession {
             most_common_elems,
             most_common_elem_freqs,
             elem_count_histogram,
+            range_length_histogram,
+            range_empty_frac,
+            range_bounds_histogram,
             ..Default::default()
         })
     }
@@ -7269,6 +7289,122 @@ impl SqlSession {
                 .join(",")
         );
         (most_common_elems, most_common_elem_freqs, Some(histogram))
+    }
+
+    /// Range typanalyze stores independent lower and upper bound samples, plus
+    /// a histogram of subtype distances. The ordinary collector sees all rows,
+    /// so evenly spaced population positions are the same rule PostgreSQL uses
+    /// after sampling.
+    fn range_statistics(
+        &self,
+        ranges: &[RangeValue],
+        statistics_target: usize,
+    ) -> (Option<String>, Option<f32>, Option<String>) {
+        if ranges.is_empty() {
+            return (None, None, None);
+        }
+        let non_empty = ranges
+            .iter()
+            .filter(|range| !range.empty)
+            .cloned()
+            .collect::<Vec<_>>();
+        let empty_fraction =
+            Some(ranges.iter().filter(|range| range.empty).count() as f32 / ranges.len() as f32);
+        if non_empty.len() < 2 || statistics_target == 0 {
+            return (Some("{}".into()), empty_fraction, None);
+        }
+        let mut lowers = non_empty.clone();
+        lowers.sort_by(Self::compare_range_lowers);
+        let mut uppers = non_empty.clone();
+        uppers.sort_by(Self::compare_range_uppers);
+        let count = non_empty.len().min(statistics_target.saturating_add(1));
+        let time_zone = self.effective_time_zone();
+        let bounds = format!(
+            "{{{}}}",
+            (0..count)
+                .map(|index| {
+                    let offset = index * (non_empty.len() - 1) / (count - 1);
+                    let range = RangeValue {
+                        ty: non_empty[0].ty,
+                        lower: lowers[offset].lower.clone(),
+                        upper: uppers[offset].upper.clone(),
+                        lower_inclusive: lowers[offset].lower_inclusive,
+                        upper_inclusive: uppers[offset].upper_inclusive,
+                        empty: false,
+                    };
+                    Self::pg_stats_array_element(&crabka_pgtypes::encoding::encode_text(
+                        &Datum::Range(range),
+                        &time_zone,
+                    ))
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let mut lengths = non_empty.iter().map(Self::range_length).collect::<Vec<_>>();
+        lengths.sort_by(f64::total_cmp);
+        let length_histogram = format!(
+            "{{{}}}",
+            (0..count)
+                .map(|index| {
+                    let offset = index * (lengths.len() - 1) / (count - 1);
+                    lengths[offset].to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        (Some(length_histogram), empty_fraction, Some(bounds))
+    }
+
+    fn compare_range_lowers(left: &RangeValue, right: &RangeValue) -> CmpOrdering {
+        match (left.lower.as_deref(), right.lower.as_deref()) {
+            (None, None) => CmpOrdering::Equal,
+            (None, Some(_)) => CmpOrdering::Less,
+            (Some(_), None) => CmpOrdering::Greater,
+            (Some(left_bound), Some(right_bound)) => {
+                crabka_pgtypes::ops::compare(left_bound, right_bound)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(CmpOrdering::Equal)
+                    .then_with(|| match (left.lower_inclusive, right.lower_inclusive) {
+                        (true, false) => CmpOrdering::Less,
+                        (false, true) => CmpOrdering::Greater,
+                        _ => CmpOrdering::Equal,
+                    })
+            }
+        }
+    }
+
+    fn compare_range_uppers(left: &RangeValue, right: &RangeValue) -> CmpOrdering {
+        match (left.upper.as_deref(), right.upper.as_deref()) {
+            (None, None) => CmpOrdering::Equal,
+            (None, Some(_)) => CmpOrdering::Greater,
+            (Some(_), None) => CmpOrdering::Less,
+            (Some(left_bound), Some(right_bound)) => {
+                crabka_pgtypes::ops::compare(left_bound, right_bound)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(CmpOrdering::Equal)
+                    .then_with(|| match (left.upper_inclusive, right.upper_inclusive) {
+                        (false, true) => CmpOrdering::Less,
+                        (true, false) => CmpOrdering::Greater,
+                        _ => CmpOrdering::Equal,
+                    })
+            }
+        }
+    }
+
+    fn range_length(range: &RangeValue) -> f64 {
+        let (Some(lower), Some(upper)) = (range.lower.as_deref(), range.upper.as_deref()) else {
+            return f64::INFINITY;
+        };
+        match (lower, upper) {
+            (Datum::Int2(lower), Datum::Int2(upper)) => f64::from(*upper - *lower),
+            (Datum::Int4(lower), Datum::Int4(upper)) => f64::from(*upper - *lower),
+            (Datum::Int8(lower), Datum::Int8(upper)) => (*upper - *lower) as f64,
+            (Datum::Float4(lower), Datum::Float4(upper)) => f64::from(*upper - *lower),
+            (Datum::Float8(lower), Datum::Float8(upper)) => upper - lower,
+            _ => 1.0,
+        }
     }
 
     /// PostgreSQL uses a column's explicit target when present, otherwise the
@@ -31421,6 +31557,30 @@ mod session_conformance_tests {
             )
             .await
                 == "{1,2,3},{0.5,0.5,0.25,0.25,0.5,0.25},{0,2,1.25}"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_derives_range_histograms() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "SET default_statistics_target = 1",
+            "CREATE TABLE analyzed_range (value int4range)",
+            "INSERT INTO analyzed_range VALUES ('[1,3)'), ('[2,5)'), ('empty'), (NULL)",
+            "ANALYZE analyzed_range",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT range_length_histogram::text || ',' || range_empty_frac::text || ',' || \
+                 range_bounds_histogram::text FROM pg_stats \
+                 WHERE tablename = 'analyzed_range' AND attname = 'value'",
+            )
+            .await
+                == "{2,3},0.33333334,{\"[1,3)\",\"[2,5)\"}"
         );
     }
 
