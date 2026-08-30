@@ -6519,6 +6519,7 @@ impl SqlSession {
                         .collect_attribute_statistics(
                             &name,
                             &crate::catalog_fn::quote_identifier(&column.name),
+                            self.statistics_target(column.statistics_target),
                         )
                         .await
                     {
@@ -6543,8 +6544,13 @@ impl SqlSession {
                         let Some(expression) = crabka_pgcatalog::index_key_expression(key) else {
                             continue;
                         };
-                        if let Some(stats) =
-                            self.collect_attribute_statistics(&name, expression).await
+                        if let Some(stats) = self
+                            .collect_attribute_statistics(
+                                &name,
+                                expression,
+                                self.statistics_target(-1),
+                            )
+                            .await
                         {
                             let Ok(attnum) = i16::try_from(position + 1) else {
                                 continue;
@@ -6907,6 +6913,7 @@ impl SqlSession {
         &mut self,
         relation: &crabka_pgcatalog::RelationName,
         expression: &str,
+        statistics_target: usize,
     ) -> Option<crate::attrstats::AttributeStats> {
         let only = match crate::partition::is_partitioned(self.catalog_kv.as_ref(), relation) {
             Ok(partitioned) => !partitioned,
@@ -6971,16 +6978,51 @@ impl SqlSession {
         if n_distinct > total as f32 * 0.1 {
             n_distinct = -n_distinct / total as f32;
         }
-        let mut common = frequencies
-            .into_iter()
-            .filter(|(_, count)| *count > 1)
-            .collect::<Vec<_>>();
-        common.sort_by(|(left_value, left_count), (right_value, right_count)| {
-            right_count
-                .cmp(left_count)
-                .then_with(|| left_value.cmp(right_value))
+        let mut comparison_failed = false;
+        ordered_values.sort_by(|(_, left, _), (_, right, _)| {
+            crabka_pgtypes::ops::compare(left, right)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    comparison_failed = true;
+                    CmpOrdering::Equal
+                })
         });
-        common.truncate(100);
+        let mut common = if scalar_type && !comparison_failed {
+            let mut common = Vec::new();
+            let mut start = 0;
+            while start < ordered_values.len() {
+                let mut end = start + 1;
+                while end < ordered_values.len()
+                    && crabka_pgtypes::ops::compare(
+                        &ordered_values[start].1,
+                        &ordered_values[end].1,
+                    )
+                    .ok()
+                        == Some(Some(CmpOrdering::Equal))
+                {
+                    end += 1;
+                }
+                if end - start > 1 {
+                    common.push((ordered_values[start].2.clone(), end - start));
+                }
+                start = end;
+            }
+            common.sort_by(|(_, left_count), (_, right_count)| right_count.cmp(left_count));
+            common
+        } else {
+            let mut common = frequencies
+                .into_iter()
+                .filter(|(_, count)| *count > 1)
+                .collect::<Vec<_>>();
+            common.sort_by(|(left_value, left_count), (right_value, right_count)| {
+                right_count
+                    .cmp(left_count)
+                    .then_with(|| left_value.cmp(right_value))
+            });
+            common
+        };
+        common.truncate(statistics_target);
         let most_common_vals = (!common.is_empty()).then(|| {
             format!(
                 "{{{}}}",
@@ -7005,16 +7047,6 @@ impl SqlSession {
             .iter()
             .map(|(value, _)| value.clone())
             .collect::<BTreeSet<_>>();
-        let mut comparison_failed = false;
-        ordered_values.sort_by(|(_, left, _), (_, right, _)| {
-            crabka_pgtypes::ops::compare(left, right)
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| {
-                    comparison_failed = true;
-                    CmpOrdering::Equal
-                })
-        });
         let correlation = (scalar_type && !comparison_failed && ordered_values.len() >= 2)
             .then(|| {
                 let count = ordered_values.len() as f64;
@@ -7040,14 +7072,16 @@ impl SqlSession {
             })
             .flatten();
         ordered_values.retain(|(_, _, value)| !common_values.contains(value));
-        let histogram_bounds = if !scalar_type || comparison_failed {
+        let histogram_bounds = if !scalar_type || comparison_failed || statistics_target == 0 {
             None
         } else {
             ordered_values.dedup_by(|(_, left, _), (_, right, _)| {
                 crabka_pgtypes::ops::compare(left, right).ok() == Some(Some(CmpOrdering::Equal))
             });
             (ordered_values.len() >= 2).then(|| {
-                let count = ordered_values.len().min(101);
+                let count = ordered_values
+                    .len()
+                    .min(statistics_target.saturating_add(1));
                 format!(
                     "{{{}}}",
                     (0..count)
@@ -7070,6 +7104,20 @@ impl SqlSession {
             correlation,
             ..Default::default()
         })
+    }
+
+    /// PostgreSQL uses a column's explicit target when present, otherwise the
+    /// effective session default. The registry constrains the GUC to this
+    /// range, so the fallback is only defensive against a corrupted session.
+    fn statistics_target(&self, column_target: i16) -> usize {
+        if column_target >= 0 {
+            return column_target as usize;
+        }
+        self.guc
+            .effective("default_statistics_target")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(100)
     }
 
     fn pg_stats_array_element(value: &[u8]) -> String {
@@ -31118,6 +31166,45 @@ mod session_conformance_tests {
             )
             .await
                 == "{2,3}"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_honors_statistics_targets_for_mcv_and_histogram_slots() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "SET default_statistics_target = 1",
+            "CREATE TABLE analyzed_target (value int4)",
+            "INSERT INTO analyzed_target VALUES (10), (10), (2), (2), (3), (4)",
+            "ANALYZE analyzed_target",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT most_common_vals || ',' || histogram_bounds \
+                 FROM pg_stats WHERE tablename = 'analyzed_target' AND attname = 'value'",
+            )
+            .await
+                == "{2},{3,10}"
+        );
+
+        for sql in [
+            "ALTER TABLE analyzed_target ALTER COLUMN value SET STATISTICS 2",
+            "ANALYZE analyzed_target",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT most_common_vals || ',' || histogram_bounds \
+                 FROM pg_stats WHERE tablename = 'analyzed_target' AND attname = 'value'",
+            )
+            .await
+                == "{2,10},{3,4}"
         );
     }
 
