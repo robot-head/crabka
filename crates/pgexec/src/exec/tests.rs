@@ -895,6 +895,7 @@ async fn pg_stats_ext_hides_data_from_nonowners() {
     run_s(
         &mut session,
         "RESET SESSION AUTHORIZATION; ALTER TABLE stat_visibility OWNER TO stats_reader; \
+         ALTER TABLE stat_visibility ENABLE ROW LEVEL SECURITY; \
          SET SESSION AUTHORIZATION stats_reader",
     )
     .await;

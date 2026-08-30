@@ -690,6 +690,20 @@ fn bypass_applies(ctx: &RlsCtx<'_>, table: &Table) -> Result<bool, ExecError> {
     Ok(false)
 }
 
+/// Whether PostgreSQL would apply row-security filtering for this role.
+/// Catalog views use this to avoid exposing statistics that a table policy
+/// would conceal, while preserving the owner and superuser bypasses.
+pub(crate) fn row_security_active(
+    catalog_kv: &dyn Kv,
+    role: &str,
+    table: &Table,
+) -> Result<bool, ExecError> {
+    Ok(!bypass_applies(
+        &RlsCtx::new(catalog_kv, role, true),
+        table,
+    )?)
+}
+
 /// Whether the role itself is exempt from every relation's row security:
 /// `SUPERUSER` or `BYPASSRLS`.
 fn role_is_exempt(ctx: &RlsCtx<'_>) -> Result<bool, ExecError> {

@@ -3526,7 +3526,7 @@ pub(crate) fn pg_stats_ext_rows(
         let Some(table) = tables.iter().find(|table| table.id == object.table_id) else {
             continue;
         };
-        if table.row_security
+        if crate::rls::row_security_active(catalog_kv, role, table)?
             || (!superuser && !crabka_pgcatalog::role_has_privs_of(catalog_kv, role, &table.owner)?)
         {
             continue;
