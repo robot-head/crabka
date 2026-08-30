@@ -5503,17 +5503,6 @@ pub(crate) fn attach_partition_ops(
     {
         return Err(ExecError::ChildMissingColumn(missing.name.clone()));
     }
-    for parent_column in &parent.columns {
-        let child_column = &candidate.columns[candidate
-            .column_index(&parent_column.name)
-            .expect("parent columns were checked above")];
-        if parent_column.not_null && !child_column.not_null {
-            return Err(ExecError::InvalidObjectDefinition(format!(
-                "column \"{}\" in child table \"{}\" must be marked NOT NULL",
-                parent_column.name, child.name
-            )));
-        }
-    }
     for parent_check in &parent.checks {
         if !candidate
             .checks
