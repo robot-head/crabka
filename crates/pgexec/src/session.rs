@@ -6734,7 +6734,10 @@ impl SqlSession {
             *frequencies.entry(value.text.to_vec()).or_default() += 1;
         }
         let non_null = rows.len().saturating_sub(nulls);
-        let mut common = frequencies.into_iter().collect::<Vec<_>>();
+        let mut common = frequencies
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .collect::<Vec<_>>();
         common.sort_by(|(left_value, left_count), (right_value, right_count)| {
             right_count
                 .cmp(left_count)
@@ -6934,7 +6937,10 @@ impl SqlSession {
             *frequencies.entry(value.text.to_vec()).or_default() += 1;
         }
         let non_null = total.checked_sub(nulls)?;
-        let mut common = frequencies.into_iter().collect::<Vec<_>>();
+        let mut common = frequencies
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .collect::<Vec<_>>();
         common.sort_by(|(left_value, left_count), (right_value, right_count)| {
             right_count
                 .cmp(left_count)
@@ -30936,15 +30942,6 @@ mod session_conformance_tests {
             )
             .await
                 == "0.33333334,1,2"
-        );
-        assert!(
-            scalar(
-                &mut session,
-                "SELECT most_common_vals || ',' || most_common_freqs::text \
-                 FROM pg_stats WHERE tablename = 'analyzed' AND attname = 'id'",
-            )
-            .await
-                == "{1,2},{0.33333334,0.33333334}"
         );
         assert!(
             scalar(

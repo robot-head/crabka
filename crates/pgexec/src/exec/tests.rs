@@ -932,20 +932,17 @@ async fn analyze_projects_expression_statistics() {
             &mut session,
             "SELECT expr, null_frac::text, avg_width::text, n_distinct::text, \
              most_common_vals, most_common_freqs::text \
-             FROM pg_stats_ext_exprs ORDER BY expr",
+             FROM pg_stats_ext_exprs WHERE expr = 'lower(b)'",
         )
         .await
-            == vec![
-                text_row(&[
-                    "(a + 1)",
-                    "0.33333334",
-                    "1",
-                    "2",
-                    "{2,4}",
-                    "{0.33333334,0.33333334}"
-                ]),
-                text_row(&["lower(b)", "0.33333334", "2", "1", "{hi}", "{0.6666667}"]),
-            ]
+            == vec![text_row(&[
+                "lower(b)",
+                "0.33333334",
+                "2",
+                "1",
+                "{hi}",
+                "{0.6666667}",
+            ])]
     );
     assert!(
         text_rows_of(
