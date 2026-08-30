@@ -3845,6 +3845,17 @@ async fn unique_indexes_can_treat_nulls_as_not_distinct() {
 
     run_s(&mut session, "INSERT INTO t VALUES (NULL)").await;
     assert!(sqlstate_of(&mut session, "INSERT INTO t VALUES (NULL)").await == "23505");
+
+    run_s(&mut session, "CREATE TABLE backfill (a int4)").await;
+    run_s(&mut session, "INSERT INTO backfill VALUES (NULL), (NULL)").await;
+    assert!(
+        sqlstate_of(
+            &mut session,
+            "CREATE UNIQUE INDEX backfill_a_key ON backfill (a) NULLS NOT DISTINCT",
+        )
+        .await
+            == "23505"
+    );
 }
 
 #[tokio::test]
