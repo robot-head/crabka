@@ -141,6 +141,11 @@ enum ScalarFunc {
     PgNumaAvailable,
     /// `interval_hash(interval)`: hash the canonical 30-day-month span.
     IntervalHash,
+    /// PostgreSQL's integer hash support functions, including seeded variants.
+    IntegerHash {
+        ty: ColumnType,
+        extended: bool,
+    },
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
     UuidV4,
@@ -396,6 +401,30 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "binary_coercible" => ScalarFunc::BinaryCoercible,
         "pg_numa_available" => ScalarFunc::PgNumaAvailable,
         "interval_hash" => ScalarFunc::IntervalHash,
+        "hashint2" => ScalarFunc::IntegerHash {
+            ty: ColumnType::Int2,
+            extended: false,
+        },
+        "hashint2extended" => ScalarFunc::IntegerHash {
+            ty: ColumnType::Int2,
+            extended: true,
+        },
+        "hashint4" => ScalarFunc::IntegerHash {
+            ty: ColumnType::Int4,
+            extended: false,
+        },
+        "hashint4extended" => ScalarFunc::IntegerHash {
+            ty: ColumnType::Int4,
+            extended: true,
+        },
+        "hashint8" => ScalarFunc::IntegerHash {
+            ty: ColumnType::Int8,
+            extended: false,
+        },
+        "hashint8extended" => ScalarFunc::IntegerHash {
+            ty: ColumnType::Int8,
+            extended: true,
+        },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1457,6 +1486,30 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 Err(no_matching_function())
             }
         }
+        ScalarFunc::IntegerHash { ty, extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            let widens_to = |from: ColumnType, to: ColumnType| {
+                matches!(
+                    (from, to),
+                    (
+                        ColumnType::Int2,
+                        ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8
+                    ) | (ColumnType::Int4, ColumnType::Int4 | ColumnType::Int8)
+                        | (ColumnType::Int8, ColumnType::Int8)
+                )
+            };
+            if !widens_to(crate::eval::infer_type(&args[0], scope)?, ty)
+                || (extended
+                    && !widens_to(crate::eval::infer_type(&args[1], scope)?, ColumnType::Int8))
+            {
+                return Err(undefined_function_spelled(&fc.name, args, scope));
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::RangeConstructor(range) => {
             require_arity(fc, (1..=3).contains(&n))?;
             Ok(ColumnType::Range(range))
@@ -1997,6 +2050,7 @@ fn coerce_unknown_args(
     let target = match f {
         ScalarFunc::BoolCompare { .. } => ColumnType::Bool,
         ScalarFunc::IntervalHash => ColumnType::Interval,
+        ScalarFunc::IntegerHash { ty, .. } => ty,
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -3232,6 +3286,35 @@ fn eval_eager(
             Ok(Datum::Int4(crate::partition::hash::hash_int64(
                 interval.canonical_micros() as i64,
             )))
+        }
+        ScalarFunc::IntegerHash { ty, extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            let value = int_arg(&vals[0])?;
+            match (ty, extended) {
+                (ColumnType::Int2 | ColumnType::Int4, false) => {
+                    Ok(Datum::Int4(crate::partition::hash::hash_int32(
+                        i32::try_from(value).map_err(|_| type_error(&fc.name, &vals[0]))?,
+                    )))
+                }
+                (ColumnType::Int8, false) => {
+                    Ok(Datum::Int4(crate::partition::hash::hash_int64(value)))
+                }
+                (ColumnType::Int2 | ColumnType::Int4, true) => {
+                    Ok(Datum::Int8(crate::partition::hash::hash_int32_extended(
+                        i32::try_from(value).map_err(|_| type_error(&fc.name, &vals[0]))?,
+                        seed,
+                    )))
+                }
+                (ColumnType::Int8, true) => Ok(Datum::Int8(i64::from_ne_bytes(
+                    crate::partition::hash::hash_int64_extended(value, seed).to_ne_bytes(),
+                ))),
+                _ => Err(type_error(&fc.name, &vals[0])),
+            }
         }
         ScalarFunc::PgTableIsVisible => {
             require_arity(fc, vals.len() == 1)?;
@@ -5906,6 +5989,31 @@ mod tests {
             assert!(ev(sql) == Datum::Int4(expected), "{sql}");
         }
         assert!(err_code("interval_hash(1)", None) == "42883");
+    }
+
+    #[test]
+    fn integer_hashes_share_the_partition_hash_primitives() {
+        let scope = Scope::empty();
+        let ty =
+            |sql: &str| crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type");
+
+        assert!(ty("hashint2(42::int2)") == ColumnType::Int4);
+        assert!(ty("hashint4extended(42, 1::int8)") == ColumnType::Int8);
+        assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
+        assert!(
+            ev("hashint4extended(42, 1::int8)")
+                == Datum::Int8(crate::partition::hash::hash_int32_extended(42, 1))
+        );
+        assert!(ev("hashint8(-42::int8)") == Datum::Int4(crate::partition::hash::hash_int64(-42)));
+        assert!(
+            ev("hashint8extended(-42::int8, 1::int8)")
+                == Datum::Int8(i64::from_ne_bytes(
+                    crate::partition::hash::hash_int64_extended(-42, 1).to_ne_bytes(),
+                ))
+        );
+        assert!(ev("hashint4(null::int4)") == Datum::Null);
+        assert!(err_code("hashint4(42::int8)", None) == "42883");
+        assert!(err_code("hashint2(42)", None) == "42883");
     }
 
     #[test]

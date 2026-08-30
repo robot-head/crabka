@@ -215,9 +215,21 @@ fn hash_combine64(a: u64, b: u64) -> u64 {
         .wrapping_add(a >> 7)
 }
 
+/// PostgreSQL's unseeded `hashint2` and `hashint4`.
+pub(crate) fn hash_int32(value: i32) -> i32 {
+    let (a, b, c) = seeded_state(U32_KEY_LEN, 0);
+    let (_, _, hash) = final_mix(a.wrapping_add(value.cast_unsigned()), b, c);
+    i32::from_ne_bytes(hash.to_ne_bytes())
+}
+
+/// PostgreSQL's `hashint2extended` and `hashint4extended`.
+pub(crate) fn hash_int32_extended(value: i32, seed: u64) -> i64 {
+    i64::from_ne_bytes(hash_uint32_extended(value.cast_unsigned(), seed).to_ne_bytes())
+}
+
 /// `hashint8extended`: fold the high half into the low half so an int8 and an
 /// int4 of equal value hash alike, then hash the folded word.
-fn hash_int64_extended(value: i64, seed: u64) -> u64 {
+pub(crate) fn hash_int64_extended(value: i64, seed: u64) -> u64 {
     let (lohalf, hihalf) = halves(value.cast_unsigned());
     let folded = lohalf ^ if value >= 0 { hihalf } else { !hihalf };
     hash_uint32_extended(folded, seed)
@@ -232,7 +244,7 @@ pub(crate) fn hash_int64(value: i64) -> i32 {
     let folded = lohalf ^ if value >= 0 { hihalf } else { !hihalf };
     let (a, b, c) = seeded_state(U32_KEY_LEN, 0);
     let (_, _, hash) = final_mix(a.wrapping_add(folded), b, c);
-    hash.cast_signed()
+    i32::from_ne_bytes(hash.to_ne_bytes())
 }
 
 /// `hash_uint32_extended` from `src/common/hashfn.c`.
