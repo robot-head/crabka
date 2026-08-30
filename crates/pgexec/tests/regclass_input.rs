@@ -102,6 +102,10 @@ async fn regprocedure_resolves_and_renders_identity_arguments() {
             "SELECT 'rp(int4,text)'::regprocedure::text",
             "rp(integer,text)",
         ),
+        (
+            "SELECT 1370::regprocedure::text",
+            "\"interval\"(time without time zone)",
+        ),
         ("SELECT 1242 = 'boolin(cstring)'::regprocedure", "t"),
     ] {
         assert!(client.scalar(sql).await == Some(expected.into()), "{sql}");

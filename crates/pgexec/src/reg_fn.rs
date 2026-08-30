@@ -594,7 +594,7 @@ fn procedure_name(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
         .map(|arg| crate::exec::regtype_name(*arg))
         .collect::<Vec<_>>()
         .join(",");
-    Ok(Some(format!("{name}({rendered})")))
+    Ok(Some(format!("{}({rendered})", quote(name))))
 }
 
 // ---------------------------------------------------------------- regoper ---
