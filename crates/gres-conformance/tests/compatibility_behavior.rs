@@ -104,9 +104,14 @@ fn probe_setup(command: &str) -> &'static [&'static str] {
         // ANALYZE and VACUUM resolve the relations they name, so their probes
         // need one. They did not while the whole target list was parsed for
         // shape and thrown away.
-        "ANALYZE" | "VACUUM" | "REINDEX" | "EXPLAIN" | "CREATE STATISTICS" => {
+        "ANALYZE" | "VACUUM" | "REINDEX" | "EXPLAIN" => {
             &["CREATE TABLE parser_commands_probe (id int4)"]
         }
+        "CREATE STATISTICS" => &["CREATE TABLE parser_commands_probe (id int4, value int4)"],
+        "ALTER STATISTICS" | "DROP STATISTICS" => &[
+            "CREATE TABLE parser_commands_probe (id int4, value int4)",
+            "CREATE STATISTICS parser_commands_stats ON id, value FROM parser_commands_probe",
+        ],
         "LOCK" | "DECLARE" => &["CREATE TABLE parser_commands_probe (id int4)", "BEGIN"],
         "ROLLBACK TO SAVEPOINT" | "RELEASE SAVEPOINT" => {
             &["BEGIN", "SAVEPOINT parser_commands_savepoint"]
@@ -271,8 +276,8 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 140);
-    assert!(refused == 34);
+    assert!(executed == 143);
+    assert!(refused == 31);
 }
 
 #[tokio::test]
