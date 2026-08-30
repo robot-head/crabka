@@ -5896,6 +5896,7 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 result_type,
                 argument_types,
                 source,
+                sql_body,
                 argument_modes,
                 all_argument_types,
                 argument_names,
@@ -6011,6 +6012,11 @@ fn decode_builtin_pg_proc_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                     Datum::Text((*name).to_string())
                 } else {
                     Datum::Null
+                },
+                if *sql_body == "-" {
+                    Datum::Null
+                } else {
+                    Datum::Text((*sql_body).to_string())
                 },
                 Datum::Null,
                 Datum::Null,
@@ -6540,6 +6546,17 @@ mod tests {
                 .expect("catalog routine");
             assert!(row[25] == Datum::Text(source.to_string()));
         }
+    }
+
+    #[test]
+    fn builtin_sql_routines_keep_their_sql_body() {
+        let rows = builtin_pg_proc_rows().expect("built-in pg_proc rows");
+        let lpad = rows
+            .iter()
+            .find(|row| row[0] == Datum::Int4(879))
+            .expect("lpad row");
+        assert!(lpad[25] == Datum::Text(String::new()));
+        assert!(matches!(&lpad[27], Datum::Text(body) if !body.is_empty()));
     }
 
     #[test]

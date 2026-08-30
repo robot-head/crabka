@@ -34,7 +34,7 @@ SELECT oid, proname, prolang, procost::int, prorows::int, provariadic,
        (CASE WHEN proisstrict THEN '1' ELSE '0' END) ||
        (CASE WHEN proretset THEN '1' ELSE '0' END),
        ascii(provolatile), ascii(proparallel), pronargs, pronargdefaults,
-       prorettype, proargtypes::text, prosrc,
+       prorettype, proargtypes::text, prosrc, coalesce(prosqlbody::text, '-'),
        coalesce(proargmodes::text, '-'), coalesce(proallargtypes::text, '-'),
        coalesce(proargnames::text, '-'), coalesce(pg_get_expr(proargdefaults, 0), '-')
 FROM pg_proc
@@ -48,8 +48,8 @@ SQL
     {
         chomp $line;
         my @fields = split /\t/, $line, -1;
-        die "live pg_proc row has " . scalar(@fields) . " fields, expected 20\n"
-          unless @fields == 20;
+        die "live pg_proc row has " . scalar(@fields) . " fields, expected 21\n"
+          unless @fields == 21;
         die "live pg_proc row has unsafe field\n"
           if grep { /[\t\n]/ } @fields;
         push @rows, join("\t", @fields) . "\n";
