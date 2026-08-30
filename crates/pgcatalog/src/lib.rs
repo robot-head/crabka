@@ -418,7 +418,10 @@ pub struct Index {
     pub name: String,
     pub table: RelationName,
     pub table_id: TableId,
+    /// Key columns, including NUL-prefixed expression source entries.
     pub columns: Vec<String>,
+    /// Non-key payload columns from `CREATE INDEX … INCLUDE`.
+    pub include: Vec<String>,
     /// Source text of a partial-index predicate, without the `WHERE` keyword.
     pub predicate: Option<String>,
     pub unique: bool,
@@ -490,6 +493,7 @@ impl Index {
 pub struct NewIndex {
     pub name: String,
     pub columns: Vec<String>,
+    pub include: Vec<String>,
     /// See [`Index::predicate`]. Constraint indexes are never partial.
     pub predicate: Option<String>,
     pub unique: bool,
@@ -4527,7 +4531,15 @@ pub fn create_index_with_method_ops(
     method: IndexMethod,
 ) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
     create_index_with_method_and_predicate_ops(
-        kv, name, table, columns, unique, placement, method, None,
+        kv,
+        name,
+        table,
+        columns,
+        unique,
+        placement,
+        method,
+        None,
+        Vec::new(),
     )
 }
 
@@ -4545,12 +4557,14 @@ pub fn create_index_with_method_and_predicate_ops(
     placement: IndexPlacement,
     method: IndexMethod,
     predicate: Option<String>,
+    include: Vec<String>,
 ) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
     if kv.get(&catalog_index_key(&table.sibling(name)))?.is_some() {
         return Err(CatalogError::DuplicateIndex(name.to_string()));
     }
     let table_meta = get_table(kv, table)?;
     validate_index_columns(&table_meta, &columns)?;
+    validate_index_include_columns(&table_meta, &columns, &include)?;
     let id = read_next_index_id(kv)?;
     let index = Index {
         id,
@@ -4558,6 +4572,7 @@ pub fn create_index_with_method_and_predicate_ops(
         table: table.clone(),
         table_id: table_meta.id,
         columns,
+        include,
         predicate,
         unique,
         placement,
@@ -4614,6 +4629,7 @@ pub fn create_index_on_table_ops(
         table: table.name.clone(),
         table_id: table.id,
         columns,
+        include: Vec::new(),
         predicate: None,
         unique,
         placement,
@@ -4674,6 +4690,7 @@ pub fn create_constraint_index_ops(
         table: table.name.clone(),
         table_id: table.id,
         columns: new_index.columns.clone(),
+        include: new_index.include.clone(),
         predicate: new_index.predicate.clone(),
         unique: new_index.unique,
         placement: new_index.placement,
@@ -4784,6 +4801,7 @@ pub fn create_indexes_on_table_ops(
             table: table.name.clone(),
             table_id: table.id,
             columns: new_index.columns.clone(),
+            include: new_index.include.clone(),
             predicate: new_index.predicate.clone(),
             unique: new_index.unique,
             placement: new_index.placement,
@@ -5453,6 +5471,19 @@ fn validate_index_columns(table: &Table, columns: &[String]) -> Result<(), Catal
             continue;
         }
         if table.column_index(column).is_none() {
+            return Err(CatalogError::UndefinedColumn(column.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_index_include_columns(
+    table: &Table,
+    keys: &[String],
+    include: &[String],
+) -> Result<(), CatalogError> {
+    for column in include {
+        if table.column_index(column).is_none() || keys.iter().any(|key| key == column) {
             return Err(CatalogError::UndefinedColumn(column.clone()));
         }
     }
@@ -9306,6 +9337,7 @@ mod tests {
             &NewIndex {
                 name: "t_pkey".into(),
                 columns: vec!["id".into()],
+                include: Vec::new(),
                 predicate: None,
                 unique: true,
                 placement: IndexPlacement::Local,
@@ -10798,6 +10830,7 @@ mod tests {
             table: rel("users"),
             table_id,
             columns: vec!["name".into()],
+            include: Vec::new(),
             predicate: None,
             unique: true,
             placement: IndexPlacement::Global,

@@ -41,6 +41,7 @@ pub(super) fn create_table_constraint_index(
     crabka_pgcatalog::NewIndex {
         name,
         columns: columns.to_vec(),
+        include: Vec::new(),
         predicate: None,
         unique: true,
         placement: crabka_pgcatalog::IndexPlacement::Local,

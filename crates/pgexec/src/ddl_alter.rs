@@ -1141,13 +1141,6 @@ pub(crate) fn execute_ddl(
                 }
             };
             let columns = index_key_columns(keys, predicate.as_deref())?;
-            if !include.is_empty() {
-                return Err(ExecError::Unsupported(
-                    "CREATE INDEX … INCLUDE is not supported: index entries carry only key \
-                     columns"
-                        .into(),
-                ));
-            }
             if *if_not_exists && crabka_pgcatalog::get_index(kv, &name).is_ok() {
                 return Ok((command("CREATE INDEX"), Vec::new()));
             }
@@ -1186,6 +1179,7 @@ pub(crate) fn execute_ddl(
                 placement,
                 index_method,
                 predicate.clone(),
+                include.clone(),
             )?;
             if let Some(tablespace) = tablespace {
                 let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
@@ -1199,6 +1193,7 @@ pub(crate) fn execute_ddl(
                     table: table.clone(),
                     table_id: table_meta.id,
                     columns: columns.clone(),
+                    include: include.clone(),
                     predicate: predicate.clone(),
                     unique: *unique,
                     placement,
@@ -6663,6 +6658,7 @@ pub(crate) fn drop_table_column(
             .columns
             .iter()
             .any(|key| index_key_reads_column(&state.table, key, column))
+            || index_meta.include.iter().any(|name| name == column)
         {
             drop_index_by_name(
                 kv,
@@ -6861,6 +6857,7 @@ pub(crate) fn rename_column_dependencies(
             .columns
             .iter()
             .any(|key| index_key_reads_column(&state.table, key, old_name))
+            && !index.include.iter().any(|column| column == old_name)
         {
             continue;
         }
@@ -6871,6 +6868,11 @@ pub(crate) fn rename_column_dependencies(
                 *key = crabka_pgcatalog::expression_index_key(&rewrite_identifier_tokens(
                     source, old_name, new_name,
                 ));
+            }
+        }
+        for column in &mut index.include {
+            if column == old_name {
+                *column = new_name.to_string();
             }
         }
         state.ops.extend(crabka_pgcatalog::put_index_ops(&index));

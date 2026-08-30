@@ -3410,6 +3410,11 @@ fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
         },
         index_key_list(&index.columns),
     );
+    if !index.include.is_empty() {
+        definition.push_str(" INCLUDE (");
+        definition.push_str(&quoted_column_list(&index.include));
+        definition.push(')');
+    }
     if let Some(predicate) = &index.predicate {
         definition.push_str(" WHERE (");
         definition.push_str(predicate);

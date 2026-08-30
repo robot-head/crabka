@@ -3577,7 +3577,6 @@ async fn unsupported_index_options_are_refused_not_silently_built() {
     for sql in [
         "CREATE INDEX i ON t (a DESC)",
         "CREATE INDEX i ON t (a NULLS FIRST)",
-        "CREATE INDEX i ON t (a) INCLUDE (b)",
     ] {
         assert!(sqlstate_of(&mut session, sql).await == "0A000", "{sql}");
     }
@@ -3625,6 +3624,56 @@ async fn unsupported_index_options_are_refused_not_silently_built() {
     run_s(&mut session, "ALTER TABLE t DROP COLUMN n").await;
     assert!(
         crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_expr_idx"))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn index_include_columns_are_catalogued_but_not_keyed() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE t (a int4, b text)").await;
+    run_s(
+        &mut session,
+        "CREATE UNIQUE INDEX t_a_include_b ON t (a) INCLUDE (b)",
+    )
+    .await;
+
+    let index =
+        crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_a_include_b"))
+            .expect("index");
+    assert!(index.columns == ["a"]);
+    assert!(index.include == ["b"]);
+    assert!(text_rows_of(
+        &mut session,
+        "SELECT indnatts, indnkeyatts FROM pg_index WHERE indexrelid = 't_a_include_b'::regclass",
+    )
+    .await == vec![text_row(&["2", "1"])]);
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_get_indexdef('t_a_include_b'::regclass)",
+        )
+        .await
+            == vec![text_row(&[
+                "CREATE UNIQUE INDEX t_a_include_b ON public.t USING btree (a) INCLUDE (b)"
+            ])]
+    );
+
+    run_s(&mut session, "INSERT INTO t VALUES (1, 'first')").await;
+    assert!(sqlstate_of(&mut session, "INSERT INTO t VALUES (1, 'second')").await == "23505");
+    run_s(&mut session, "ALTER TABLE t RENAME COLUMN b TO c").await;
+    assert!(
+        crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_a_include_b"),)
+            .expect("renamed index")
+            .include
+            == ["c"]
+    );
+    run_s(&mut session, "ALTER TABLE t DROP COLUMN c").await;
+    assert!(
+        crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_a_include_b"),)
             .is_err()
     );
 }
@@ -11034,6 +11083,7 @@ fn arbiter_fixture(
                 table: RelationName::public("t"),
                 table_id: 1,
                 columns: cols.iter().map(|c| (*c).to_string()).collect(),
+                include: Vec::new(),
                 predicate: None,
                 unique: *unique,
                 placement: crabka_pgcatalog::IndexPlacement::Local,

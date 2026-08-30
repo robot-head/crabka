@@ -491,7 +491,7 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             relkind,
             crate::catalog_rel::namespace_oid(&index.table.schema),
         );
-        row.relnatts = index.columns.len();
+        row.relnatts = index.columns.len() + index.include.len();
         row.relam = match index.method {
             crabka_pgcatalog::IndexMethod::Btree => crate::catalog_rel::BTREE_AM_OID,
             crabka_pgcatalog::IndexMethod::Hash => crate::catalog_rel::HASH_AM_OID,
@@ -1581,6 +1581,7 @@ pub(crate) fn index_attribute_table(
     let columns = index
         .columns
         .iter()
+        .chain(index.include.iter())
         .map(|key| {
             if let Some(expression) = crabka_pgcatalog::index_key_expression(key) {
                 return Ok(crabka_pgcatalog::Column::new(
@@ -2838,13 +2839,20 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             // fails every read of the whole catalog, because one unreadable
             // index poisons the projection for every other.
             let mut expressions = Vec::new();
-            let mut indkey = Vec::with_capacity(index.columns.len());
+            let mut indkey = Vec::with_capacity(index.columns.len() + index.include.len());
             for column in &index.columns {
                 if let Some(source) = crabka_pgcatalog::index_key_expression(column) {
                     expressions.push(source);
                     indkey.push(Datum::Int4(0));
                     continue;
                 }
+                let attnum = table
+                    .column_index(column)
+                    .and_then(|idx| i32::try_from(idx + 1).ok())
+                    .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+                indkey.push(Datum::Int4(attnum));
+            }
+            for column in &index.include {
                 let attnum = table
                     .column_index(column)
                     .and_then(|idx| i32::try_from(idx + 1).ok())
@@ -2860,13 +2868,15 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
             } else {
                 text(&expressions.join(", "))
             };
-            let natts = i16::try_from(index.columns.len())
+            let nkeyatts = i16::try_from(index.columns.len())
+                .map_err(|_| ExecError::Unsupported("indnkeyatts exceeds int2 range".into()))?;
+            let natts = i16::try_from(index.columns.len() + index.include.len())
                 .map_err(|_| ExecError::Unsupported("indnatts exceeds int2 range".into()))?;
             Ok(vec![
                 int(catalog_index_oid(index.id)?),
                 int(crate::catalog_rel::table_relation_oid(index.table_id)?),
                 Datum::Int2(natts),
-                Datum::Int2(natts),
+                Datum::Int2(nkeyatts),
                 Datum::Bool(index.unique),
                 Datum::Bool(false),
                 // The catalog knows which index backs the primary key; ORMs

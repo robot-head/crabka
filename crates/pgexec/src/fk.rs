@@ -2388,6 +2388,7 @@ mod tests {
         NewIndex {
             name: name.to_string(),
             columns: cols.iter().map(|c| (*c).to_string()).collect(),
+            include: Vec::new(),
             predicate: None,
             unique: true,
             method: IndexMethod::Btree,
@@ -2679,6 +2680,7 @@ mod tests {
             table: self_name.clone(),
             table_id: 9,
             columns: names(&["id"]),
+            include: Vec::new(),
             predicate: None,
             unique: true,
             method: IndexMethod::Btree,

@@ -60,7 +60,8 @@ const TABLE_OPTION_KNOWN: u8 =
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 8;
+const INDEX_VERSION: u8 = 9;
+const INDEX_VERSION_PREDICATE: u8 = 8;
 const INDEX_VERSION_LEGACY: u8 = 7;
 const SEQUENCE_VERSION: u8 = 1;
 const INDEX_PLACEMENT_LOCAL: u8 = 0;
@@ -1594,6 +1595,14 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
         }
         None => out.push(0),
     }
+    out.extend_from_slice(
+        &u32::try_from(index.include.len())
+            .expect("index include count must fit in u32")
+            .to_be_bytes(),
+    );
+    for column in &index.include {
+        write_str(&mut out, column);
+    }
     out
 }
 
@@ -1610,7 +1619,10 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
 pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
-    if version != INDEX_VERSION && version != INDEX_VERSION_LEGACY {
+    if version != INDEX_VERSION
+        && version != INDEX_VERSION_PREDICATE
+        && version != INDEX_VERSION_LEGACY
+    {
         return Err(KvError::CorruptRow(format!(
             "unknown index version {version}"
         )));
@@ -1732,6 +1744,19 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
             }
         }
     };
+    let include = if version == INDEX_VERSION {
+        let count = usize::try_from(u32::from_be_bytes(
+            take_n(&mut cur, 4)?.try_into().expect("4"),
+        ))
+        .expect("u32 fits in usize on supported targets");
+        let mut include = Vec::with_capacity(count.min(16));
+        for _ in 0..count {
+            include.push(read_string(&mut cur)?);
+        }
+        include
+    } else {
+        Vec::new()
+    };
     if let Some(IndexConstraint::Exclusion(operators)) = &constraint
         && operators.len() != columns.len()
     {
@@ -1745,6 +1770,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         table,
         table_id,
         columns,
+        include,
         predicate,
         unique,
         placement,
@@ -3856,6 +3882,7 @@ mod tests {
                 table: RelationName::public("orders"),
                 table_id: 3,
                 columns: vec!["email".into()],
+                include: vec!["name".into()],
                 predicate: Some("email IS NOT NULL".into()),
                 unique: true,
                 placement: IndexPlacement::Global,
@@ -3877,6 +3904,7 @@ mod tests {
             table: RelationName::public("booking"),
             table_id: 4,
             columns: vec!["room".into(), "during".into()],
+            include: Vec::new(),
             predicate: None,
             unique: false,
             placement: IndexPlacement::Local,
@@ -3904,6 +3932,7 @@ mod tests {
             table: RelationName::public("temporal_rng"),
             table_id: 5,
             columns: vec!["id".into(), "valid_at".into()],
+            include: Vec::new(),
             predicate: None,
             unique: true,
             placement: IndexPlacement::Local,
@@ -3934,6 +3963,7 @@ mod tests {
                     table: RelationName::public("orders"),
                     table_id: 3,
                     columns: vec!["placed".into()],
+                    include: Vec::new(),
                     predicate: None,
                     unique: false,
                     placement: IndexPlacement::Local,
@@ -3968,6 +3998,7 @@ mod tests {
                 table: RelationName::public("unique_tbl"),
                 table_id: 6,
                 columns: vec!["i".into()],
+                include: Vec::new(),
                 predicate: None,
                 unique: true,
                 placement: IndexPlacement::Local,

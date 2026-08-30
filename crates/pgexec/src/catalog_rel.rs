@@ -5469,6 +5469,7 @@ mod tests {
             &NewIndex {
                 name: name.to_string(),
                 columns: index_columns.iter().map(|c| (*c).to_string()).collect(),
+                include: Vec::new(),
                 predicate: None,
                 unique: true,
                 method: IndexMethod::Btree,
