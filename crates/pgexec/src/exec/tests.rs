@@ -9531,6 +9531,17 @@ async fn dropping_missing_foreign_objects_with_if_exists_emits_notices() {
     }
 }
 
+#[tokio::test]
+async fn dropping_a_missing_user_mapping_with_if_exists_skips_missing_role_and_server() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(
+        &mut session,
+        "DROP USER MAPPING IF EXISTS FOR missing_role SERVER missing_server",
+    )
+    .await;
+}
+
 #[test]
 fn dropping_a_foreign_table_cascades_to_inheritance_children() {
     use crabka_pgkv::{Kv, MemKv};

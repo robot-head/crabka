@@ -1883,6 +1883,12 @@ pub(crate) fn execute_ddl(
             // RESTRICT are indistinguishable; both are accepted.
 
             let resolved_user = role_spec_name(user, fctx);
+            if *if_exists
+                && (!crabka_pgcatalog::role_is_nameable(kv, resolved_user)?
+                    || crabka_pgcatalog::get_server(kv, server).is_err())
+            {
+                return Ok((command("DROP USER MAPPING"), Vec::new()));
+            }
             require_mapping_role(kv, resolved_user)?;
             require_user_mapping_authority(kv, resolved_user, server, fctx)?;
             let ops = match crabka_pgcatalog::drop_user_mapping_ops(kv, resolved_user, server) {
