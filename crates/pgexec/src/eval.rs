@@ -5622,6 +5622,9 @@ pub(crate) fn unify_types(a: ColumnType, b: ColumnType) -> Result<ColumnType, Ex
         |t: ColumnType| matches!(t, Int2 | Int4 | Int8 | Float4 | Float8) || t.is_numeric();
     Ok(match (a, b) {
         (x, y) if x == y => x,
+        // Every reg* type is binary-compatible with oid. Oid is preferred for
+        // a mixed expression, as PostgreSQL selects for CASE and UNION.
+        (x, ColumnType::Oid) | (ColumnType::Oid, x) if x.is_reg() => ColumnType::Oid,
         // Mirror the arithmetic int2->int4->int8 promotion rule.
         (Int2, Int4) | (Int4, Int2) => Int4,
         (Int2 | Int4, Int8) | (Int8, Int2 | Int4) => Int8,
@@ -7030,6 +7033,14 @@ mod tests {
         assert_eq!(
             err_code("case when false then 1 else 'x' end", None, &[]),
             "22P02"
+        );
+        assert_eq!(
+            infer_type(
+                &pexpr("case when true then 'int4'::regtype else 26::oid end").expect("parse"),
+                &scope
+            )
+            .expect("infer"),
+            ColumnType::Oid
         );
     }
 
