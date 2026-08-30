@@ -13,6 +13,7 @@
 
 use std::{
     cell::RefCell,
+    cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry},
     sync::{
         Arc, LazyLock, Mutex,
@@ -6912,8 +6913,12 @@ impl SqlSession {
         let [statement] = parsed.as_slice() else {
             return None;
         };
-        let QueryResult::Rows { rows, .. } = Box::pin(self.run_select(statement)).await.ok()?
+        let QueryResult::Rows { fields, rows, .. } =
+            Box::pin(self.run_select(statement)).await.ok()?
         else {
+            return None;
+        };
+        let [field] = fields.as_slice() else {
             return None;
         };
         if rows.is_empty() {
@@ -6922,9 +6927,10 @@ impl SqlSession {
         let total = rows.len();
         let mut values = BTreeSet::new();
         let mut frequencies = BTreeMap::<Vec<u8>, usize>::new();
+        let mut ordered_values = Vec::new();
         let mut nulls = 0usize;
         let mut width = 0usize;
-        for row in rows {
+        for (position, row) in rows.into_iter().enumerate() {
             let [value] = row.as_slice() else {
                 return None;
             };
@@ -6935,6 +6941,11 @@ impl SqlSession {
             width = width.saturating_add(value.text.len());
             values.insert(value.text.to_vec());
             *frequencies.entry(value.text.to_vec()).or_default() += 1;
+            ordered_values.push((
+                position,
+                self.plpgsql_decode_cell(field, Some(value)).ok()?,
+                value.text.to_vec(),
+            ));
         }
         let non_null = total.checked_sub(nulls)?;
         let mut common = frequencies
@@ -6967,12 +6978,73 @@ impl SqlSession {
                     .join(",")
             )
         });
+        let common_values = common
+            .iter()
+            .map(|(value, _)| value.clone())
+            .collect::<BTreeSet<_>>();
+        let mut comparison_failed = false;
+        ordered_values.sort_by(|(_, left, _), (_, right, _)| {
+            crabka_pgtypes::ops::compare(left, right)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    comparison_failed = true;
+                    CmpOrdering::Equal
+                })
+        });
+        let correlation = (!comparison_failed && ordered_values.len() >= 2)
+            .then(|| {
+                let count = ordered_values.len() as f64;
+                let sum_x = count * (count - 1.0) / 2.0;
+                let sum_x_squared = count * (count - 1.0) * (2.0 * count - 1.0) / 6.0;
+                let sum_y = ordered_values
+                    .iter()
+                    .map(|(position, _, _)| *position as f64)
+                    .sum::<f64>();
+                let sum_y_squared = ordered_values
+                    .iter()
+                    .map(|(position, _, _)| (*position as f64).powi(2))
+                    .sum::<f64>();
+                let sum_xy = ordered_values
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, (position, _, _))| rank as f64 * *position as f64)
+                    .sum::<f64>();
+                let divisor = ((count * sum_x_squared - sum_x.powi(2))
+                    * (count * sum_y_squared - sum_y.powi(2)))
+                .sqrt();
+                (divisor > 0.0).then(|| ((count * sum_xy - sum_x * sum_y) / divisor) as f32)
+            })
+            .flatten();
+        ordered_values.retain(|(_, _, value)| !common_values.contains(value));
+        let histogram_bounds = if comparison_failed {
+            None
+        } else {
+            ordered_values.dedup_by(|(_, left, _), (_, right, _)| {
+                crabka_pgtypes::ops::compare(left, right).ok() == Some(Some(CmpOrdering::Equal))
+            });
+            (ordered_values.len() >= 2).then(|| {
+                let count = ordered_values.len().min(101);
+                format!(
+                    "{{{}}}",
+                    (0..count)
+                        .map(|index| {
+                            let offset = index * (ordered_values.len() - 1) / (count - 1);
+                            Self::pg_stats_array_element(&ordered_values[offset].2)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+        };
         Some(crate::attrstats::AttributeStats {
             null_frac: Some(nulls as f32 / total as f32),
             avg_width: (non_null > 0).then(|| i32::try_from(width / non_null).unwrap_or(i32::MAX)),
             n_distinct: Some(values.len() as f32),
             most_common_vals,
             most_common_freqs,
+            histogram_bounds,
+            correlation,
             ..Default::default()
         })
     }
@@ -31001,6 +31073,50 @@ mod session_conformance_tests {
             )
             .await
                 == "2"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_uses_type_order_for_histogram_bounds() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE analyzed_histogram (value int4)",
+            "INSERT INTO analyzed_histogram VALUES (10), (2), (10), (3)",
+            "ANALYZE analyzed_histogram",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT histogram_bounds FROM pg_stats \
+                 WHERE tablename = 'analyzed_histogram' AND attname = 'value'",
+            )
+            .await
+                == "{2,3}"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_derives_scalar_correlation_from_row_order() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE analyzed_correlation (value int4)",
+            "INSERT INTO analyzed_correlation VALUES (4), (3), (2), (1)",
+            "ANALYZE analyzed_correlation",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT histogram_bounds || ',' || correlation::text FROM pg_stats \
+                 WHERE tablename = 'analyzed_correlation' AND attname = 'value'",
+            )
+            .await
+                == "{1,2,3,4},-1"
         );
     }
 
