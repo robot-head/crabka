@@ -4678,6 +4678,17 @@ pub(crate) fn alter_table_action_ops(
                     "column \"{column}\" is in index used as replica identity"
                 )));
             }
+            if let Some((parent, _)) = crate::partition::parent_of(kv, &state.table.name)? {
+                let parent = crabka_pgcatalog::get_table(kv, &parent)?;
+                if parent
+                    .column_index(column)
+                    .is_some_and(|index| parent.columns[index].not_null)
+                {
+                    return Err(ExecError::InvalidTableDefinition(format!(
+                        "column \"{column}\" is marked NOT NULL in parent table"
+                    )));
+                }
+            }
             state.table.columns[index].not_null = false;
             Ok(())
         }
