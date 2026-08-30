@@ -6573,9 +6573,14 @@ impl SqlSession {
             if let Some(reltuples) = self.count_relation_rows(&name).await {
                 ops.push(crate::relstats::set_reltuples_op(&name, reltuples));
             }
-            let kv = self.catalog_kv.as_ref();
+            let catalog_kv = Arc::clone(&self.catalog_kv);
+            let kv = catalog_kv.as_ref();
             if crate::partition::is_partitioned(kv, &name)? {
                 ops.push(crate::relstats::set_relpages_op(&name, -1));
+            } else if let Ok(table) = crabka_pgcatalog::get_table(kv, &name)
+                && let Some(relpages) = self.estimate_relation_pages(&name, &table).await
+            {
+                ops.push(crate::relstats::set_relpages_op(&name, relpages));
             }
             if crate::relstats::of(kv, &name)?.has_subclass
                 && !crate::inheritance::has_children(kv, &name)?
@@ -7522,6 +7527,93 @@ impl SqlSession {
         // `reltuples` is a float4 in PostgreSQL too, so a count past the
         // 24-bit mantissa loses the same precision there.
         Some(count as f32)
+    }
+
+    /// Estimate heap pages from PostgreSQL's 8k page, tuple-header, alignment,
+    /// and line-pointer layout. The executor has no physical heap files, so
+    /// this is the storage boundary planner statistics can observe.
+    async fn estimate_relation_pages(
+        &mut self,
+        name: &crabka_pgcatalog::RelationName,
+        table: &crabka_pgcatalog::Table,
+    ) -> Option<i32> {
+        let sql = format!(
+            "SELECT * FROM ONLY {}.{}",
+            crate::catalog_fn::quote_identifier(&name.schema),
+            crate::catalog_fn::quote_identifier(&name.name),
+        );
+        let parsed = crabka_pgparser::parse(&sql).ok()?;
+        let [statement] = parsed.as_slice() else {
+            return None;
+        };
+        let QueryResult::Rows { fields, rows, .. } =
+            Box::pin(self.run_select(statement)).await.ok()?
+        else {
+            return None;
+        };
+        let mut pages = 0usize;
+        let mut free = 0usize;
+        for row in rows {
+            let mut nulls = 0usize;
+            let mut size = 23usize;
+            for (index, value) in row.iter().enumerate() {
+                if table
+                    .columns
+                    .get(index)
+                    .is_some_and(crabka_pgcatalog::Column::is_virtual_generated)
+                {
+                    continue;
+                }
+                if value.is_none() {
+                    nulls += 1;
+                }
+            }
+            if nulls > 0 {
+                size += table.columns.len().div_ceil(8);
+            }
+            size = Self::align_heap(size, 8);
+            for (index, value) in row.iter().enumerate() {
+                if table
+                    .columns
+                    .get(index)
+                    .is_some_and(crabka_pgcatalog::Column::is_virtual_generated)
+                {
+                    continue;
+                }
+                let Some(value) = value else { continue };
+                let field = fields.get(index)?;
+                let datum = self.plpgsql_decode_cell(field, Some(value)).ok()?;
+                size = Self::align_heap(size, Self::datum_alignment(&datum));
+                size += Self::statistics_width(&datum);
+            }
+            size = Self::align_heap(size, 8) + 4;
+            if pages == 0 || size > free {
+                pages += 1;
+                free = 8192 - 24;
+            }
+            free = free.checked_sub(size)?;
+        }
+        i32::try_from(pages).ok()
+    }
+
+    const fn align_heap(value: usize, alignment: usize) -> usize {
+        (value + alignment - 1) & !(alignment - 1)
+    }
+
+    const fn datum_alignment(value: &Datum) -> usize {
+        match value {
+            Datum::Bool(_) | Datum::InternalChar(_) => 1,
+            Datum::Int2(_) => 2,
+            Datum::Int8(_)
+            | Datum::Float8(_)
+            | Datum::Time(_)
+            | Datum::Timestamp(_)
+            | Datum::Timestamptz(_)
+            | Datum::Money(_)
+            | Datum::Xid8(_)
+            | Datum::PgLsn(_) => 8,
+            _ => 4,
+        }
     }
 
     /// `REINDEX`, which rebuilds nothing here and still has to resolve
@@ -31416,6 +31508,27 @@ mod session_conformance_tests {
         run(&mut s, "ANALYZE").await.expect("analyze");
         assert_class_stats(&mut s, "dw1", 1.0, "f", "bare ANALYZE").await;
         assert_class_stats(&mut s, "dw2", 2.0, "f", "bare ANALYZE").await;
+    }
+
+    #[tokio::test]
+    async fn analyze_estimates_heap_pages_from_tuple_layout() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "CREATE TABLE analyzed_pages (value int4)",
+            "INSERT INTO analyzed_pages SELECT generate_series(1, 1000)",
+            "ANALYZE analyzed_pages",
+        ] {
+            run(&mut session, sql).await.expect(sql);
+        }
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT relpages::text FROM pg_class WHERE oid = 'analyzed_pages'::regclass",
+            )
+            .await
+                == "5"
+        );
     }
 
     #[tokio::test]
