@@ -1854,10 +1854,108 @@ pub(crate) fn pg_type_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecE
             &proc_oids,
         ),
     ]);
+    rows.extend(catalog_only_builtin_type_rows(&proc_oids));
     rows.extend(user_type_rows(catalog_kv, &proc_oids)?);
     rows.extend(relation_type_rows(catalog_kv, &proc_oids)?);
     rows.extend(information_schema_domain_rows(&proc_oids));
     Ok(rows)
+}
+
+/// Built-ins which exist to describe catalog values but have no executable
+/// [`ColumnType`]. Their I/O links still need matching `pg_proc` rows: the
+/// upstream catalog sanity checks use those links as foreign keys.
+fn catalog_only_builtin_type_rows(proc_oids: &BTreeMap<String, i32>) -> Vec<Vec<Datum>> {
+    [
+        (32, "pg_ddl_command", 8, "P", "p", 0, [None; 6]),
+        (269, "table_am_handler", 4, "P", "p", 0, [None; 6]),
+        (325, "index_am_handler", 4, "P", "p", 0, [None; 6]),
+        (705, "unknown", -2, "X", "p", 0, [None; 6]),
+        (2276, "any", 4, "P", "p", 0, [None; 6]),
+        (2277, "anyarray", -1, "P", "p", 0, [None; 6]),
+        (2278, "void", 4, "P", "p", 0, [None; 6]),
+        (2279, "trigger", 4, "P", "p", 0, [None; 6]),
+        (2280, "language_handler", 4, "P", "p", 0, [None; 6]),
+        (2281, "internal", 8, "P", "p", 0, [None; 6]),
+        (2283, "anyelement", 4, "P", "p", 0, [None; 6]),
+        (2776, "anynonarray", 4, "P", "p", 0, [None; 6]),
+        (3115, "fdw_handler", 4, "P", "p", 0, [None; 6]),
+        (3310, "tsm_handler", 4, "P", "p", 0, [None; 6]),
+        (3500, "anyenum", 4, "P", "p", 0, [None; 6]),
+        (3831, "anyrange", -1, "P", "p", 0, [None; 6]),
+        (3838, "event_trigger", 4, "P", "p", 0, [None; 6]),
+        (4537, "anymultirange", -1, "P", "p", 0, [None; 6]),
+        (4538, "anycompatiblemultirange", -1, "P", "p", 0, [None; 6]),
+        (5077, "anycompatible", 4, "P", "p", 0, [None; 6]),
+        (5078, "anycompatiblearray", -1, "P", "p", 0, [None; 6]),
+        (5079, "anycompatiblenonarray", 4, "P", "p", 0, [None; 6]),
+        (5080, "anycompatiblerange", -1, "P", "p", 0, [None; 6]),
+        (194, "pg_node_tree", -1, "Z", "b", 100, [None; 6]),
+        (3361, "pg_ndistinct", -1, "Z", "b", 100, [None; 6]),
+        (3402, "pg_dependencies", -1, "Z", "b", 100, [None; 6]),
+        (3642, "gtsvector", -1, "U", "b", 0, [None; 6]),
+        (
+            4600,
+            "pg_brin_bloom_summary",
+            -1,
+            "Z",
+            "b",
+            100,
+            [
+                Some("brin_bloom_summary_in"),
+                Some("brin_bloom_summary_out"),
+                Some("brin_bloom_summary_recv"),
+                Some("brin_bloom_summary_send"),
+                None,
+                None,
+            ],
+        ),
+        (
+            4601,
+            "pg_brin_minmax_multi_summary",
+            -1,
+            "Z",
+            "b",
+            100,
+            [
+                Some("brin_minmax_multi_summary_in"),
+                Some("brin_minmax_multi_summary_out"),
+                Some("brin_minmax_multi_summary_recv"),
+                Some("brin_minmax_multi_summary_send"),
+                None,
+                None,
+            ],
+        ),
+        (5017, "pg_mcv_list", -1, "Z", "b", 100, [None; 6]),
+    ]
+    .into_iter()
+    .map(
+        |(oid, name, len, category, typtype, collation, routine_overrides)| {
+            pg_type_row_with_metadata(
+                PgTypeRow {
+                    oid,
+                    name,
+                    namespace: PG_CATALOG_NAMESPACE_OID,
+                    len,
+                    category,
+                    typtype,
+                    typrelid: 0,
+                    typelem: 0,
+                    typarray: 0,
+                    typbasetype: 0,
+                    typcollation: collation,
+                    domain_base: None,
+                    range_align: None,
+                },
+                proc_oids,
+                true,
+                None,
+                routine_overrides,
+                None,
+                None,
+            )
+        },
+    )
+    .collect()
 }
 
 /// The composite type and array row each ordinary relation owns.

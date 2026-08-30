@@ -1804,6 +1804,23 @@ async fn constant_btree_index_stays_below_parallel_vacuum_threshold() {
     assert2::assert!(rows == vec![some(&["t"])]);
 }
 
+#[tokio::test]
+async fn catalog_only_builtin_types_link_to_their_io_functions() {
+    let engine = fixture().await;
+    let rows = grid(
+        &engine,
+        "SELECT count(*) \
+         FROM pg_type t \
+         JOIN pg_proc input ON input.oid = t.typinput \
+         JOIN pg_proc output ON output.oid = t.typoutput \
+         WHERE t.oid IN (32, 194, 269, 325, 705, 2276, 2277, 2278, 2279, 2280, 2281, 2283, \
+                         2776, 3115, 3310, 3361, 3402, 3500, 3642, 3831, 3838, 4537, 4538, \
+                         4600, 4601, 5017, 5077, 5078, 5079, 5080)",
+    )
+    .await;
+    assert2::assert!(rows == vec![some(&["30"])]);
+}
+
 /// `pg_attribute.attstorage` is the column type's own storage class, which is
 /// what `\d+` prints in its Storage column.
 ///
