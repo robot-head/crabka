@@ -170,6 +170,12 @@ enum ScalarFunc {
     BpcharHash {
         extended: bool,
     },
+    UuidHash {
+        extended: bool,
+    },
+    PgLsnHash {
+        extended: bool,
+    },
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
     UuidV4,
@@ -542,6 +548,10 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "hash_array_extended" => ScalarFunc::ArrayHash { extended: true },
         "hashbpchar" => ScalarFunc::BpcharHash { extended: false },
         "hashbpcharextended" => ScalarFunc::BpcharHash { extended: true },
+        "uuid_hash" => ScalarFunc::UuidHash { extended: false },
+        "uuid_hash_extended" => ScalarFunc::UuidHash { extended: true },
+        "pg_lsn_hash" => ScalarFunc::PgLsnHash { extended: false },
+        "pg_lsn_hash_extended" => ScalarFunc::PgLsnHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1697,6 +1707,38 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::UuidHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if !is_unknown_literal(&args[0])
+                && crate::eval::infer_type(&args[0], scope)? != ColumnType::Uuid
+            {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
+        ScalarFunc::PgLsnHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if !is_unknown_literal(&args[0])
+                && crate::eval::infer_type(&args[0], scope)? != ColumnType::PgLsn
+            {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::FloatHash { ty, extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             let accepts = |input: ColumnType| {
@@ -2277,6 +2319,8 @@ fn coerce_unknown_args(
         ScalarFunc::OidVectorHash { .. } => ColumnType::OidVector,
         ScalarFunc::ArrayHash { .. } => return Ok(()),
         ScalarFunc::BpcharHash { .. } => ColumnType::Text,
+        ScalarFunc::UuidHash { .. } => ColumnType::Uuid,
+        ScalarFunc::PgLsnHash { .. } => ColumnType::PgLsn,
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -3696,6 +3740,38 @@ fn eval_eager(
                 Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
             } else {
                 Datum::Int4(crate::partition::hash::hash_bytes(value.as_bytes())?)
+            })
+        }
+        ScalarFunc::UuidHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            let uuid = crabka_pgtypes::uuid::UuidBytes::parse(text_arg(&vals[0])?)?;
+            let hash = crate::partition::hash::hash_bytes_extended(&uuid.0, seed)?;
+            Ok(if extended {
+                Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
+            } else {
+                Datum::Int4(crate::partition::hash::hash_bytes(&uuid.0)?)
+            })
+        }
+        ScalarFunc::PgLsnHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let Datum::PgLsn(value) = vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            let hash = crate::partition::hash::hash_int64_extended(value.cast_signed(), seed);
+            Ok(if extended {
+                Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
+            } else {
+                Datum::Int4(crate::partition::hash::hash_int64(value.cast_signed()))
             })
         }
         ScalarFunc::PgTableIsVisible => {
@@ -6408,7 +6484,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_hashes_share_the_partition_hash_primitives() {
+    fn hash_functions_share_the_partition_hash_primitives() {
         let scope = Scope::empty();
         let ty =
             |sql: &str| crate::eval::infer_type(&pexpr(sql).expect("parse"), &scope).expect("type");
@@ -6425,6 +6501,8 @@ mod tests {
         assert!(ty("hashbpchar('gres'::char(8))") == ColumnType::Int4);
         assert!(ty("hashfloat4(42)") == ColumnType::Int4);
         assert!(ty("hashfloat8extended(42, 1::int8)") == ColumnType::Int8);
+        assert!(ty("uuid_hash('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')") == ColumnType::Int4);
+        assert!(ty("pg_lsn_hash('16/B374D84'::pg_lsn)") == ColumnType::Int4);
         assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
         assert!(
             ev("hashchar('x'::\"char\")")
@@ -6474,6 +6552,23 @@ mod tests {
             ev("hashint8extended(-42::int8, 1::int8)")
                 == Datum::Int8(i64::from_ne_bytes(
                     crate::partition::hash::hash_int64_extended(-42, 1).to_ne_bytes(),
+                ))
+        );
+        let uuid = crabka_pgtypes::uuid::UuidBytes::parse("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
+            .expect("uuid");
+        assert!(
+            ev("uuid_hash_extended('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 1::int8)")
+                == Datum::Int8(i64::from_ne_bytes(
+                    crate::partition::hash::hash_bytes_extended(&uuid.0, 1)
+                        .expect("hash")
+                        .to_ne_bytes(),
+                ))
+        );
+        let lsn = 0x16_0b37_4d84_u64;
+        assert!(
+            ev("pg_lsn_hash_extended('16/B374D84'::pg_lsn, 1::int8)")
+                == Datum::Int8(i64::from_ne_bytes(
+                    crate::partition::hash::hash_int64_extended(lsn.cast_signed(), 1).to_ne_bytes(),
                 ))
         );
         assert!(ev("hashint4(null::int4)") == Datum::Null);
