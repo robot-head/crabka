@@ -2720,6 +2720,47 @@ fn indexes_size_bytes(catalog_kv: &dyn Kv, data_kv: &dyn Kv, oid: i32) -> Result
 }
 
 fn secondary_index_size(kv: &dyn Kv, index: &crabka_pgcatalog::Index) -> Result<i64, ExecError> {
+    if index.method == crabka_pgcatalog::IndexMethod::Btree {
+        let entries = kv.scan_prefix(&crabka_pgkv::key::secondary_index_ordered_prefix(
+            index.table_id,
+            index.id,
+        ))?;
+        if !entries.is_empty() {
+            // The equality stream is an executor lookup aid, not a second B-tree.
+            // Ordered entries with the same key share one B-tree tuple and retain
+            // their rowids as six-byte posting-list items.
+            let mut previous = Vec::new();
+            let bytes = entries.into_iter().try_fold(0_i64, |total, (key, value)| {
+                let key_without_rowid = key
+                    .get(
+                        ..key.len().checked_sub(8).ok_or_else(|| {
+                            ExecError::Unsupported("invalid ordered index key".into())
+                        })?,
+                    )
+                    .ok_or_else(|| ExecError::Unsupported("invalid ordered index key".into()))?;
+                let entry_bytes = if previous == key_without_rowid {
+                    value.len().checked_add(6)
+                } else {
+                    previous.clear();
+                    previous.extend_from_slice(key_without_rowid);
+                    key_without_rowid
+                        .len()
+                        .checked_add(value.len())
+                        .and_then(|bytes| bytes.checked_add(6))
+                }
+                .and_then(|bytes| i64::try_from(bytes).ok())
+                .ok_or_else(|| ExecError::Unsupported("relation size exceeds int8".into()))?;
+                total
+                    .checked_add(entry_bytes)
+                    .ok_or_else(|| ExecError::Unsupported("relation size exceeds int8".into()))
+            })?;
+            return bytes
+                .checked_add(8191)
+                .and_then(|bytes| bytes.checked_div(8192))
+                .and_then(|pages| pages.checked_mul(8192))
+                .ok_or_else(|| ExecError::Unsupported("relation size exceeds int8".into()));
+        }
+    }
     let prefix = crabka_pgkv::key::secondary_index_prefix(index.table_id, index.id);
     kv.scan_prefix(&prefix)?
         .into_iter()

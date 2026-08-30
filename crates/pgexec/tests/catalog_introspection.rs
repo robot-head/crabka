@@ -1785,6 +1785,25 @@ async fn relation_sizes_resolve_their_argument_and_report_zero() {
     assert2::assert!(missing.code == "42P01", "{missing:?}");
 }
 
+#[tokio::test]
+async fn constant_btree_index_stays_below_parallel_vacuum_threshold() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE TABLE t (a int); \
+         INSERT INTO t SELECT generate_series(1, 10000); \
+         CREATE INDEX t_constant_idx ON t ((1))",
+    )
+    .await;
+
+    let rows = grid(
+        &engine,
+        "SELECT pg_relation_size('t_constant_idx') < pg_size_bytes('128kB')",
+    )
+    .await;
+    assert2::assert!(rows == vec![some(&["t"])]);
+}
+
 /// `pg_attribute.attstorage` is the column type's own storage class, which is
 /// what `\d+` prints in its Storage column.
 ///
