@@ -4,6 +4,11 @@
 //! supplies decoded MCV and histogram values; keeping the arithmetic here makes
 //! it usable for ordinary columns and expression statistics alike.
 
+#![allow(
+    dead_code,
+    reason = "P2 exposes the complete estimator surface before P4 attaches every path type"
+)]
+
 use crabka_pgtypes::{ColumnType, Datum};
 
 /// PostgreSQL's fallback for equality predicates without usable statistics.

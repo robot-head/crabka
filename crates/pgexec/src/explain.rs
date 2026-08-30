@@ -135,14 +135,118 @@ pub(crate) fn apply_catalog_estimate(
     let selectivity = select.filter.as_ref().map_or(1.0, |filter| {
         restriction_selectivity(catalog_kv, &table, rows, ctx, filter)
     });
-    set_estimated_rows(plan, rows * selectivity);
+    let input_rows = rows * selectivity;
+    let output_rows =
+        estimate_group_rows(catalog_kv, &table, input_rows, select).unwrap_or(input_rows);
+    set_estimated_rows(plan, output_rows, input_rows);
 }
 
-fn set_estimated_rows(node: &mut PlanNode, rows: f64) {
-    node.estimated_rows = Some(rows.max(1.0).ceil() as u64);
+fn set_estimated_rows(node: &mut PlanNode, rows: f64, child_rows: f64) {
+    node.estimated_rows = Some(row_estimate(rows));
     for child in &mut node.children {
-        set_estimated_rows(child, rows);
+        set_estimated_rows(child, child_rows, child_rows);
     }
+}
+
+fn row_estimate(rows: f64) -> u64 {
+    rows.max(1.0).ceil() as u64
+}
+
+fn estimate_group_rows(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    input_rows: f64,
+    select: &crabka_pgparser::ast::SelectStmt,
+) -> Option<f64> {
+    if select.group_by.is_empty() {
+        return None;
+    }
+    let keys = select
+        .group_by
+        .iter()
+        .map(|expr| group_key_attnum(expr, &select.projection, table))
+        .collect::<Option<Vec<_>>>()?;
+    let mut normalized = keys.clone();
+    normalized.sort_unstable();
+    normalized.dedup();
+    if let Some(rows) = crabka_pgcatalog::statistics::list(catalog_kv)
+        .ok()?
+        .into_iter()
+        .filter(|object| object.table_id == table.id)
+        .filter_map(|object| object.data.and_then(|data| data.ndistinct))
+        .find_map(|data| ndistinct_for_keys(&data, &normalized))
+    {
+        return Some(rows.min(input_rows.max(1.0)));
+    }
+    let distincts = normalized
+        .iter()
+        .filter_map(|attnum| {
+            let stats = crate::attrstats::get(
+                catalog_kv,
+                &crate::attrstats::AttributeStatsKey {
+                    relation: table.name.clone(),
+                    attnum: *attnum,
+                    inherited: false,
+                },
+            )
+            .ok()??;
+            let n_distinct = f64::from(stats.n_distinct?);
+            let relation_rows = crate::relstats::of(catalog_kv, &table.name)
+                .ok()
+                .map(|stats| f64::from(stats.reltuples))
+                .filter(|rows| *rows > 0.0)
+                .unwrap_or(input_rows);
+            Some(if n_distinct < 0.0 {
+                -n_distinct * relation_rows
+            } else {
+                n_distinct
+            })
+        })
+        .collect::<Vec<_>>();
+    (distincts.len() == normalized.len())
+        .then(|| crate::plan::selfuncs::estimate_num_groups(input_rows, &distincts))
+}
+
+fn group_key_attnum(
+    expr: &Expr,
+    projection: &[SelectItem],
+    table: &crabka_pgcatalog::Table,
+) -> Option<i16> {
+    match expr {
+        Expr::IntLiteral(position) => {
+            match projection.get(position.parse::<usize>().ok()?.checked_sub(1)?)? {
+                SelectItem::Expr { expr, .. } => column_attnum(expr, table),
+                SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => None,
+            }
+        }
+        expr => column_attnum(expr, table),
+    }
+}
+
+fn column_attnum(expr: &Expr, table: &crabka_pgcatalog::Table) -> Option<i16> {
+    let column = column_name(expr)?;
+    table
+        .columns
+        .iter()
+        .position(|definition| definition.name == column)
+        .and_then(|position| i16::try_from(position + 1).ok())
+}
+
+fn ndistinct_for_keys(data: &str, keys: &[i16]) -> Option<f64> {
+    let key = keys
+        .iter()
+        .map(i16::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (_, value) = data.split_once(&format!("\"{key}\":"))?;
+    value
+        .trim_start()
+        .split([',', '}'])
+        .next()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 1.0)
 }
 
 fn restriction_selectivity(

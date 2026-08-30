@@ -23663,6 +23663,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_extended_ndistinct_for_group_rows() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE group_estimate (a int4, b int4); \
+             INSERT INTO group_estimate VALUES (1, 1), (1, 1), (2, 2); \
+             CREATE STATISTICS group_estimate_ab (ndistinct) ON a, b FROM group_estimate; \
+             ANALYZE group_estimate",
+        )
+        .await
+        .expect("statistics setup");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT a, b FROM group_estimate GROUP BY a, b",
+            )
+            .await
+                == Ok(vec![
+                    vec!["HashAggregate (cost=0.00..0.00 rows=2 width=0)".into()],
+                    vec!["  Group Key: a, b".into()],
+                    vec![
+                        "  ->  Seq Scan on group_estimate (cost=0.00..0.00 rows=3 width=0)".into()
+                    ],
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_the_target_and_conflict_clause_of_an_instead_rule() {
         use assert2::assert;
 
