@@ -2587,7 +2587,10 @@ fn statement_has_effects(stmt: &Statement) -> bool {
         | Statement::Deallocate { .. }
         | Statement::LockTable { .. }
         | Statement::Utility(_)
-        | Statement::CompatibilityRefusal(_) => false,
+        | Statement::CompatibilityRefusal(_)
+        | Statement::CreateStatistics(_)
+        | Statement::AlterStatistics { .. }
+        | Statement::DropStatistics { .. } => false,
         // EXPLAIN ANALYZE and EXECUTE run another statement, which counts itself.
         Statement::Explain { .. } | Statement::ExecuteStatement { .. } => false,
         _ => true,
@@ -2721,7 +2724,10 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Deallocate { .. }
         | Statement::LockTable { .. }
         | Statement::Utility(_)
-        | Statement::CompatibilityRefusal(_) => false,
+        | Statement::CompatibilityRefusal(_)
+        | Statement::CreateStatistics(_)
+        | Statement::AlterStatistics { .. }
+        | Statement::DropStatistics { .. } => false,
         // These read or run something, so they do establish transaction
         // semantics exactly as the statement they wrap would.
         Statement::DeclareCursor { .. }
@@ -8113,6 +8119,19 @@ impl SqlSession {
             Statement::CompatibilityRefusal(command) => {
                 Err(ExecError::CompatibilityRefusal(*command))
             }
+            // The parser retains extended-statistics syntax so the catalog
+            // executor can take over without another grammar change. Until
+            // that durable catalog path is installed, preserve the existing
+            // compatibility refusal at the session boundary.
+            Statement::CreateStatistics(_) => Err(ExecError::CompatibilityRefusal(
+                crabka_pgparser::ast::RefusalCommand::CreateStatistics,
+            )),
+            Statement::AlterStatistics { .. } => Err(ExecError::CompatibilityRefusal(
+                crabka_pgparser::ast::RefusalCommand::AlterStatistics,
+            )),
+            Statement::DropStatistics { .. } => Err(ExecError::CompatibilityRefusal(
+                crabka_pgparser::ast::RefusalCommand::DropStatistics,
+            )),
             Statement::Begin {
                 isolation,
                 read_only,

@@ -30,6 +30,30 @@ pub struct RelationRef {
     pub name: String,
 }
 
+/// `CREATE STATISTICS [IF NOT EXISTS] name [(kind, ...)] ON expr, ... FROM item`.
+///
+/// Extended statistics are tied to one relation, but retaining the written
+/// FROM item lets the executor issue PostgreSQL's semantic rejection for a
+/// join, function, derived table, or sampled relation instead of a parser
+/// error.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateStatistics {
+    pub name: RelationRef,
+    pub if_not_exists: bool,
+    pub kinds: Vec<String>,
+    pub expressions: Vec<Expr>,
+    pub from: TableExpr,
+}
+
+/// The catalog mutations `ALTER STATISTICS` permits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterStatisticsAction {
+    OwnerTo(String),
+    RenameTo(String),
+    SetSchema(String),
+    SetStatistics(Option<i64>),
+}
+
 impl RelationRef {
     /// An unqualified reference: `t`.
     #[must_use]
@@ -571,6 +595,15 @@ pub enum Statement {
     /// executed by the Gres architecture. Metadata lives on [`RefusalCommand`]
     /// so parser, session, and compatibility tooling share one contract.
     CompatibilityRefusal(RefusalCommand),
+    CreateStatistics(CreateStatistics),
+    AlterStatistics {
+        name: RelationRef,
+        action: AlterStatisticsAction,
+    },
+    DropStatistics {
+        names: Vec<RelationRef>,
+        if_exists: bool,
+    },
     CreateRule(CreateRule),
     AlterRule {
         name: String,

@@ -151,6 +151,9 @@ pub fn truncate(text: &str, max: usize) -> &str {
 pub fn statement_operation(stmt: &Statement) -> &'static str {
     match stmt {
         Statement::CompatibilityRefusal(command) => command.command_name(),
+        Statement::CreateStatistics(_) => "CREATE STATISTICS",
+        Statement::AlterStatistics { .. } => "ALTER STATISTICS",
+        Statement::DropStatistics { .. } => "DROP STATISTICS",
         Statement::CreateRule(_) => "CREATE RULE",
         Statement::AlterRule { .. } => "ALTER RULE",
         Statement::DropRule { .. } => "DROP RULE",

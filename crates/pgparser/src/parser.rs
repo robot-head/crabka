@@ -7178,54 +7178,68 @@ impl Parser {
         ))
     }
 
-    /// P5: `CREATE STATISTICS [IF NOT EXISTS] <name> [ ( <kind>, … ) ] ON <expr>, …
+    /// `CREATE STATISTICS [IF NOT EXISTS] <name> [ ( <kind>, … ) ] ON <expr>, …
     /// FROM <table>`.
     fn create_statistics_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect_ident_eq("statistics")?;
-        if self.eat_keyword(Keyword::If) {
+        let if_not_exists = if self.eat_keyword(Keyword::If) {
             self.expect(&Token::Keyword(Keyword::Not))?;
             self.expect(&Token::Keyword(Keyword::Exists))?;
-        }
-        if matches!(self.peek(), Token::Ident(_)) {
-            self.expect_col_id()?;
-        }
-        if *self.peek() == Token::LParen {
-            self.parse_ident_list()?;
-        }
+            true
+        } else {
+            false
+        };
+        let name = self.relation_ref()?;
+        let kinds = if *self.peek() == Token::LParen {
+            self.parse_ident_list()?
+        } else {
+            Vec::new()
+        };
         self.expect(&Token::Keyword(Keyword::On))?;
+        let mut expressions = Vec::new();
         loop {
-            self.expr(0)?;
+            expressions.push(self.expr(0)?);
             if self.eat_comma() {
                 continue;
             }
             break;
         }
         self.expect(&Token::Keyword(Keyword::From))?;
-        self.expect_col_id()?;
-        Ok(crate::ast::Statement::CompatibilityRefusal(
-            crate::ast::RefusalCommand::CreateStatistics,
+        Ok(crate::ast::Statement::CreateStatistics(
+            crate::ast::CreateStatistics {
+                name,
+                if_not_exists,
+                kinds,
+                expressions,
+                from: self.join_tree()?,
+            },
         ))
     }
 
-    /// P5: `ALTER STATISTICS <name> { OWNER TO … | RENAME TO … | SET SCHEMA … |
+    /// `ALTER STATISTICS <name> { OWNER TO … | RENAME TO … | SET SCHEMA … |
     /// SET STATISTICS … }`.
     fn alter_statistics_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("alter")?;
         self.expect_ident_eq("statistics")?;
-        self.expect_col_id()?;
+        let name = self.relation_ref()?;
         let pos = self.peek_pos();
-        if self.eat_ident_eq("owner") || self.eat_ident_eq("rename") {
+        let action = if self.eat_ident_eq("owner") {
             self.expect_keyword_or_ident(Keyword::To, "to")?;
-            self.expect_object_name()?;
+            crate::ast::AlterStatisticsAction::OwnerTo(self.expect_object_name()?)
+        } else if self.eat_ident_eq("rename") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            crate::ast::AlterStatisticsAction::RenameTo(self.expect_object_name()?)
         } else if self.eat_keyword(Keyword::Set) {
             if self.eat_keyword(Keyword::Schema) {
-                self.expect_col_id()?;
+                crate::ast::AlterStatisticsAction::SetSchema(self.expect_col_id()?)
             } else {
                 self.expect_ident_eq("statistics")?;
-                if !self.eat_ident_eq("default") {
-                    self.signed_fetch_count()?;
-                }
+                crate::ast::AlterStatisticsAction::SetStatistics(
+                    (!self.eat_ident_eq("default"))
+                        .then(|| self.signed_fetch_count())
+                        .transpose()?,
+                )
             }
         } else {
             return Err(ParseError::new(
@@ -7235,21 +7249,19 @@ impl Parser {
                 ),
                 pos,
             ));
-        }
-        Ok(crate::ast::Statement::CompatibilityRefusal(
-            crate::ast::RefusalCommand::AlterStatistics,
-        ))
+        };
+        Ok(crate::ast::Statement::AlterStatistics { name, action })
     }
 
-    /// P5: `DROP STATISTICS [IF EXISTS] <name> [, …]`.
+    /// `DROP STATISTICS [IF EXISTS] <name> [, …]`.
     fn drop_statistics_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect_ident_eq("statistics")?;
-        self.eat_if_exists();
-        self.object_name_list()?;
-        Ok(crate::ast::Statement::CompatibilityRefusal(
-            crate::ast::RefusalCommand::DropStatistics,
-        ))
+        let if_exists = self.eat_if_exists();
+        Ok(crate::ast::Statement::DropStatistics {
+            names: self.relation_ref_list()?,
+            if_exists,
+        })
     }
 
     /// The parenthesised `( <name> [<value>] [, …] )` list `CLUSTER` and
@@ -20769,6 +20781,48 @@ mod tests {
             };
             assert!(*action == expected, "{sql}");
         }
+    }
+
+    #[test]
+    fn statistics_statements_retain_their_catalog_inputs() {
+        use assert2::assert;
+
+        use crate::ast::{AlterStatisticsAction, Expr, RelationRef, Statement, TableExpr};
+
+        let statements = crate::parse(
+            "CREATE STATISTICS IF NOT EXISTS audit.s (mcv, ndistinct) ON a, (b + 1) FROM public.t",
+        )
+        .expect("create statistics");
+        let [Statement::CreateStatistics(stats)] = statements.as_slice() else {
+            panic!("expected CREATE STATISTICS");
+        };
+        assert!(stats.name == RelationRef::qualified("audit", "s"));
+        assert!(stats.if_not_exists);
+        assert!(stats.kinds == ["mcv", "ndistinct"]);
+        assert!(
+            matches!(stats.expressions.as_slice(), [Expr::Column { table: None, name }, Expr::Binary { .. }] if name == "a")
+        );
+        assert!(
+            matches!(&stats.from, TableExpr::Table { name, .. } if *name == RelationRef::qualified("public", "t"))
+        );
+
+        let statements = crate::parse("ALTER STATISTICS audit.s SET STATISTICS DEFAULT")
+            .expect("alter statistics");
+        assert!(matches!(
+            statements.as_slice(),
+            [Statement::AlterStatistics {
+                name,
+                action: AlterStatisticsAction::SetStatistics(None),
+            }] if *name == RelationRef::qualified("audit", "s")
+        ));
+
+        let statements =
+            crate::parse("DROP STATISTICS IF EXISTS audit.s, other").expect("drop statistics");
+        assert!(matches!(
+            statements.as_slice(),
+            [Statement::DropStatistics { names, if_exists: true }]
+                if *names == [RelationRef::qualified("audit", "s"), RelationRef::bare("other")]
+        ));
     }
 
     #[test]
