@@ -4758,6 +4758,12 @@ impl Parser {
             });
         }
         if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
+            if *self.peek() == Token::LParen {
+                let options = self.checked_storage_parameter_list(
+                    crate::reloptions::RelOptionTarget::Attribute,
+                )?;
+                return Ok(AlterTableAction::SetAttributeOptions { column, options });
+            }
             if self.eat_ident_eq("statistics") {
                 let negative = *self.peek() == Token::Minus;
                 if negative {
@@ -4799,8 +4805,7 @@ impl Parser {
             if self.eat_keyword(Keyword::Data) || self.eat_ident_eq("data") {
                 return self.alter_column_type(column);
             }
-            // SET STATISTICS / STORAGE / COMPRESSION / (attoptions) tune
-            // planner and TOAST knobs Crabka has no counterpart for.
+            // SET COMPRESSION tunes a TOAST knob Crabka has no counterpart for.
             let label = self.consume_unsupported_subcommand("ALTER COLUMN … SET");
             return Ok(AlterTableAction::Unsupported(label));
         }

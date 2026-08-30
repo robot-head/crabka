@@ -474,6 +474,8 @@ pub enum RelOptionTarget {
     /// method. Any index option is admitted, so a btree option on a GIN index
     /// gets through here where `CREATE INDEX` would have caught it.
     AnyIndex,
+    /// `ALTER TABLE … ALTER COLUMN … SET (…)`: attribute options.
+    Attribute,
 }
 
 impl RelOptionTarget {
@@ -506,7 +508,7 @@ fn valid_namespaces(target: RelOptionTarget) -> &'static [(&'static str, RelOptK
         RelOptionTarget::Table | RelOptionTarget::PartitionedTable => {
             &[("toast", RelOptKind::Toast)]
         }
-        RelOptionTarget::Index(_) | RelOptionTarget::AnyIndex => &[],
+        RelOptionTarget::Index(_) | RelOptionTarget::AnyIndex | RelOptionTarget::Attribute => &[],
     }
 }
 
@@ -517,6 +519,7 @@ fn bare_kinds(target: RelOptionTarget) -> &'static [RelOptKind] {
         RelOptionTarget::PartitionedTable => &[],
         RelOptionTarget::AnyIndex => &INDEX_KINDS,
         RelOptionTarget::Index(kind) => one_index_kind(kind),
+        RelOptionTarget::Attribute => ATTRIBUTE,
     }
 }
 

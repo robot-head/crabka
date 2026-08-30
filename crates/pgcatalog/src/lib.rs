@@ -192,6 +192,8 @@ pub struct Column {
     pub statistics_target: i16,
     /// Explicit `ALTER COLUMN ... SET STORAGE` setting, if any.
     pub storage: Option<u8>,
+    /// `pg_attribute.attoptions`, set by `ALTER COLUMN ... SET (...)`.
+    pub attribute_options: Vec<(String, String)>,
 }
 
 impl Column {
@@ -207,6 +209,7 @@ impl Column {
             collation: None,
             statistics_target: -1,
             storage: None,
+            attribute_options: Vec::new(),
         }
     }
 

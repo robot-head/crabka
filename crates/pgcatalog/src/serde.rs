@@ -47,7 +47,7 @@ pub type DecodedSchema = (
 /// foreign, or materialized view — is written with this version byte; a flag
 /// byte after the owner distinguishes ordinary (`0`) from foreign (`1`), and a
 /// `CHECK` constraint list and a materialized-view flag byte close the record.
-pub const SCHEMA_VERSION: u8 = 26;
+pub const SCHEMA_VERSION: u8 = 27;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const TABLE_OPTION_ROW_SECURITY: u8 = 0b0000_0010;
@@ -1203,6 +1203,7 @@ pub fn serialize_schema(
                 out.push(storage);
             }
         }
+        write_options(&mut out, &c.attribute_options);
     }
     out.push(table_option_flags(options));
     write_str(&mut out, owner);
@@ -2039,6 +2040,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
                 )));
             }
         };
+        let attribute_options = read_options(&mut cur)?;
         columns.push(Column {
             name,
             ty,
@@ -2049,6 +2051,7 @@ pub fn deserialize_schema(bytes: &[u8]) -> Result<DecodedSchema, KvError> {
             collation,
             statistics_target,
             storage,
+            attribute_options,
         });
     }
     let options = read_table_options(take_u8(&mut cur)?)?;
@@ -2714,6 +2717,7 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
             collation: None,
             statistics_target: -1,
             storage: None,
+            attribute_options: Vec::new(),
         });
     }
     let options = ViewOptions {

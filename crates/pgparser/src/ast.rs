@@ -2532,6 +2532,11 @@ pub enum AlterTableAction {
         column: String,
         storage: String,
     },
+    /// `ALTER [COLUMN] name SET (n_distinct = value, …)`.
+    SetAttributeOptions {
+        column: String,
+        options: Vec<(String, Option<String>)>,
+    },
     /// `ALTER [COLUMN] c OPTIONS (ADD | SET | DROP …)` on a foreign table.
     AlterForeignColumnOptions {
         column: String,

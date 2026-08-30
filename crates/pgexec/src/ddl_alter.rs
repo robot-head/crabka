@@ -3621,6 +3621,7 @@ pub(crate) fn alter_table_action_pass(action: &crabka_pgparser::ast::AlterTableA
         | Action::SetDefault { .. }
         | Action::SetStatistics { .. }
         | Action::SetStorage { .. }
+        | Action::SetAttributeOptions { .. }
         | Action::AlterForeignColumnOptions { .. }
         | Action::AlterForeignTableOptions { .. }
         | Action::SetExpression { .. } => 5,
@@ -3668,6 +3669,7 @@ pub(crate) fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction
         Action::SetDefault { .. } => "ALTER COLUMN ... SET DEFAULT",
         Action::SetStatistics { .. } => "ALTER COLUMN ... SET STATISTICS",
         Action::SetStorage { .. } => "ALTER COLUMN ... SET STORAGE",
+        Action::SetAttributeOptions { .. } => "ALTER COLUMN ... SET",
         Action::DropDefault(_) => "ALTER COLUMN ... DROP DEFAULT",
         Action::AlterForeignColumnOptions { .. } => "ALTER COLUMN ... OPTIONS",
         Action::AlterForeignTableOptions { .. } => "OPTIONS",
@@ -4625,6 +4627,28 @@ pub(crate) fn alter_table_action_ops(
             };
             let index = state.column_index(column)?;
             state.table.columns[index].storage = Some(storage);
+            Ok(())
+        }
+        Action::SetAttributeOptions { column, options } => {
+            let index = state.column_index(column)?;
+            for (name, value) in options {
+                let value = value.as_ref().ok_or_else(|| {
+                    ExecError::InvalidParameterValueMessage(format!(
+                        "option \"{name}\" requires a value"
+                    ))
+                })?;
+                if let Some((_, stored)) = state.table.columns[index]
+                    .attribute_options
+                    .iter_mut()
+                    .find(|(stored, _)| stored == name)
+                {
+                    *stored = value.clone();
+                } else {
+                    state.table.columns[index]
+                        .attribute_options
+                        .push((name.clone(), value.clone()));
+                }
+            }
             Ok(())
         }
         Action::DropDefault(column) => {

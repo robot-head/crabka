@@ -9078,6 +9078,16 @@ fn foreign_table_columns_keep_normal_qualifiers() {
     let (_result, ops) =
         super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect("set storage");
     kv.write_batch(&ops).expect("apply storage setting");
+    let stmt = crabka_pgparser::parser::parse(
+        "ALTER FOREIGN TABLE t ALTER COLUMN id SET (n_distinct = 100)",
+    )
+    .expect("set attribute options")
+    .into_iter()
+    .next()
+    .expect("one statement");
+    let (_result, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+        .expect("set attribute options");
+    kv.write_batch(&ops).expect("apply attribute options");
     let table = crabka_pgcatalog::get_table(&kv, &crabka_pgcatalog::RelationName::public("t"))
         .expect("foreign table");
     assert!(
@@ -9094,6 +9104,15 @@ fn foreign_table_columns_keep_normal_qualifiers() {
             .expect("id column")
             .statistics_target,
         10_000
+    );
+    assert_eq!(
+        table
+            .columns
+            .iter()
+            .find(|column| column.name == "id")
+            .expect("id column")
+            .attribute_options,
+        vec![("n_distinct".into(), "100".into())]
     );
     assert_eq!(table.checks.len(), 1);
     assert_eq!(

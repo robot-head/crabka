@@ -1552,7 +1552,9 @@ pub(crate) fn attribute_rows_for_table(
                 int(column_collation_oid(column)),
                 Datum::Int2(column.statistics_target),
                 acl.of(&table.name, &column.name),
-                Datum::Null,
+                (!column.attribute_options.is_empty())
+                    .then(|| foreign_option_array(&column.attribute_options))
+                    .unwrap_or(Datum::Null),
                 table
                     .foreign
                     .as_ref()
