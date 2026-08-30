@@ -559,6 +559,14 @@ async fn foreign_table_without_a_handler_fails_before_scanner_lookup() {
         error.message,
         "foreign-data wrapper \"dummy\" has no handler"
     );
+    let error = session
+        .simple_query("IMPORT FOREIGN SCHEMA remote FROM SERVER s INTO public")
+        .await
+        .expect_err("IMPORT rejects a handler-less FDW");
+    assert_eq!(
+        error.message,
+        "foreign-data wrapper \"dummy\" has no handler"
+    );
 }
 
 fn text_row(values: &[&str]) -> Vec<Option<String>> {

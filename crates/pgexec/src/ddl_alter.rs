@@ -2107,6 +2107,7 @@ pub(crate) fn execute_ddl(
             // Resolve the server (42704 if undefined) and the current user's
             // optional mapping (falling back to PUBLIC, then no credentials).
             let srv = crabka_pgcatalog::get_server(kv, server)?;
+            crate::exec::foreign_scan::require_server_handler(kv, &srv)?;
             let mapping =
                 crabka_pgcatalog::get_user_mapping_or_public(kv, fctx.current_user, server)?;
             // A scanner must be registered (the `kafka` feature is built in).

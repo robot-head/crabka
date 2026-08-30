@@ -7,6 +7,13 @@ pub(super) fn require_handler(catalog_kv: &dyn Kv, table: &Table) -> Result<(), 
         return Ok(());
     };
     let server = crabka_pgcatalog::get_server(catalog_kv, &foreign.server)?;
+    require_server_handler(catalog_kv, &server)
+}
+
+pub(super) fn require_server_handler(
+    catalog_kv: &dyn Kv,
+    server: &crabka_pgcatalog::ForeignServer,
+) -> Result<(), ExecError> {
     let fdw = crabka_pgcatalog::get_fdw(catalog_kv, &server.wrapper)?;
     if fdw.handler.is_none() {
         return Err(ExecError::Unsupported(format!(
