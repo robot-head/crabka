@@ -3153,6 +3153,16 @@ pub(crate) fn alter_table_ops(
             "foreign table",
         ));
     }
+    if kind == Some("foreign table")
+        && actions
+            .iter()
+            .any(|action| matches!(action, Action::SetType { using: Some(_), .. }))
+    {
+        return Err(ExecError::WrongObjectType(format!(
+            "\"{}\" is not a table",
+            table_name.name
+        )));
+    }
     let table = match fetched {
         Ok(table) => table,
         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if if_exists => {

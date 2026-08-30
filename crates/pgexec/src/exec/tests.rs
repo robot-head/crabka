@@ -9215,6 +9215,31 @@ fn create_index_on_a_foreign_table_is_rejected() {
 }
 
 #[test]
+fn foreign_table_type_change_with_using_is_rejected() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "CREATE SERVER s FOREIGN DATA WRAPPER w",
+        "CREATE FOREIGN TABLE t (id int4) SERVER s",
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
+        let (_, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true).expect(sql);
+        kv.write_batch(&ops).expect("apply setup DDL");
+    }
+    let stmt = crabka_pgparser::parser::parse(
+        "ALTER FOREIGN TABLE t ALTER COLUMN id TYPE text USING 'id'",
+    )
+    .expect("parse")
+    .remove(0);
+    assert!(matches!(
+        super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true),
+        Err(super::ExecError::WrongObjectType(message)) if message == "\"t\" is not a table"
+    ));
+}
+
+#[test]
 fn comments_on_foreign_objects_are_persisted() {
     use crabka_pgcatalog::CommentObject;
     use crabka_pgkv::{Kv, MemKv};
