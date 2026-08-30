@@ -2342,7 +2342,7 @@ fn reject_foreign_table_index_constraints(
     columns: &[crabka_pgparser::ast::ColumnDef],
     constraints: &[crabka_pgparser::ast::TableConstraint],
 ) -> Result<(), ExecError> {
-    use crabka_pgparser::ast::{ColumnConstraintKind, TableConstraintKind};
+    use crabka_pgparser::ast::ColumnConstraintKind;
 
     let column_kind = columns
         .iter()
@@ -2355,19 +2355,27 @@ fn reject_foreign_table_index_constraints(
         });
     let table_kind = constraints
         .iter()
-        .find_map(|constraint| match constraint.kind {
-            TableConstraintKind::PrimaryKey { .. } => Some("primary key"),
-            TableConstraintKind::Unique { .. } => Some("unique"),
-            TableConstraintKind::ForeignKey { .. } => Some("foreign key"),
-            TableConstraintKind::Exclude { .. } => Some("exclusion"),
-            TableConstraintKind::NotNull { .. } | TableConstraintKind::Check(_) => None,
-        });
+        .find_map(|constraint| foreign_table_index_constraint_kind(&constraint.kind));
     let Some(kind) = column_kind.or(table_kind) else {
         return Ok(());
     };
     Err(ExecError::Unsupported(format!(
         "{kind} constraints are not supported on foreign tables"
     )))
+}
+
+fn foreign_table_index_constraint_kind(
+    kind: &crabka_pgparser::ast::TableConstraintKind,
+) -> Option<&'static str> {
+    use crabka_pgparser::ast::TableConstraintKind;
+
+    match kind {
+        TableConstraintKind::PrimaryKey { .. } => Some("primary key"),
+        TableConstraintKind::Unique { .. } => Some("unique"),
+        TableConstraintKind::ForeignKey { .. } => Some("foreign key"),
+        TableConstraintKind::Exclude { .. } => Some("exclusion"),
+        TableConstraintKind::NotNull { .. } | TableConstraintKind::Check(_) => None,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3153,6 +3161,18 @@ pub(crate) fn alter_table_ops(
             ),
             "foreign table",
         ));
+    }
+    if kind == Some("foreign table")
+        && let Some(kind) = actions.iter().find_map(|action| {
+            let Action::AddConstraint(constraint) = action else {
+                return None;
+            };
+            foreign_table_index_constraint_kind(&constraint.kind)
+        })
+    {
+        return Err(ExecError::Unsupported(format!(
+            "{kind} constraints are not supported on foreign tables"
+        )));
     }
     if kind == Some("foreign table")
         && actions

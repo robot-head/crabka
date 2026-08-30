@@ -9266,6 +9266,30 @@ fn foreign_tables_reject_index_backed_constraints() {
                     if message == format!("{kind} constraints are not supported on foreign tables"))
         );
     }
+    let stmt = crabka_pgparser::parser::parse("CREATE FOREIGN TABLE altered (id int4) SERVER s")
+        .expect("parse")
+        .remove(0);
+    let (_, ops) = super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true)
+        .expect("create foreign table for ALTER");
+    kv.write_batch(&ops).expect("apply foreign table DDL");
+    for (sql, kind) in [
+        (
+            "ALTER FOREIGN TABLE altered ADD PRIMARY KEY (id)",
+            "primary key",
+        ),
+        ("ALTER FOREIGN TABLE altered ADD UNIQUE (id)", "unique"),
+        (
+            "ALTER FOREIGN TABLE altered ADD FOREIGN KEY (id) REFERENCES parent (id)",
+            "foreign key",
+        ),
+    ] {
+        let stmt = crabka_pgparser::parser::parse(sql).expect(sql).remove(0);
+        assert!(
+            matches!(super::execute_ddl(&kv, &stmt, super::ForeignCtx::none(), true),
+                Err(super::ExecError::Unsupported(message))
+                    if message == format!("{kind} constraints are not supported on foreign tables"))
+        );
+    }
 }
 
 #[test]
