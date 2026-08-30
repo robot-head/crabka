@@ -347,6 +347,26 @@ pub(crate) fn cascade_drop_notice(
             [only] => only,
             _ => return Ok(None),
         },
+        Statement::DropFdw {
+            name,
+            cascade: true,
+            ..
+        } => {
+            let mut lines = Vec::new();
+            for server in crabka_pgcatalog::list_servers(kv)?
+                .into_iter()
+                .filter(|server| server.wrapper == *name)
+            {
+                lines.push(format!("drop cascades to server {}", server.name));
+                lines.extend(foreign_server_cascade_lines(kv, &server.name)?);
+            }
+            return Ok(cascade_notice(lines));
+        }
+        Statement::DropServer {
+            name,
+            cascade: true,
+            ..
+        } => return Ok(cascade_notice(foreign_server_cascade_lines(kv, name)?)),
         Statement::DropView {
             name,
             cascade: true,
@@ -446,6 +466,33 @@ pub(crate) fn cascade_drop_notice(
             .map(|(view, _)| cascade_line(kv, resolution, view)),
     );
     Ok(cascade_notice(lines))
+}
+
+/// The foreign objects a cascading server drop takes with it, in the same order
+/// its catalog operation removes them.
+fn foreign_server_cascade_lines(kv: &dyn Kv, server: &str) -> Result<Vec<String>, ExecError> {
+    let mut lines = crabka_pgcatalog::list_user_mappings(kv)?
+        .into_iter()
+        .filter(|mapping| mapping.server == server)
+        .map(|mapping| {
+            format!(
+                "drop cascades to user mapping for {} on server {server}",
+                mapping.user
+            )
+        })
+        .collect::<Vec<_>>();
+    lines.extend(
+        crabka_pgcatalog::list_tables(kv)?
+            .into_iter()
+            .filter(|table| {
+                table
+                    .foreign
+                    .as_ref()
+                    .is_some_and(|foreign| foreign.server == server)
+            })
+            .map(|table| format!("drop cascades to foreign table {}", table.name)),
+    );
+    Ok(lines)
 }
 
 /// The `NOTICE` an `IF NOT EXISTS` create owes when the object is already there.

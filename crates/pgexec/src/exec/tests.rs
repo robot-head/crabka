@@ -9601,6 +9601,44 @@ async fn creating_existing_foreign_objects_with_if_not_exists_emits_notices() {
     );
 }
 
+#[tokio::test]
+async fn dropping_foreign_objects_with_cascade_reports_dependents() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    run_s(
+        &mut session,
+        "CREATE FOREIGN DATA WRAPPER w; CREATE SERVER s FOREIGN DATA WRAPPER w; \
+         CREATE USER MAPPING FOR public SERVER s",
+    )
+    .await;
+    run_s(&mut session, "DROP FOREIGN DATA WRAPPER w CASCADE").await;
+    let notice = notices.try_recv().expect("fdw cascade notice");
+    assert!(notice.message == "drop cascades to 2 other objects");
+    assert!(
+        notice
+            .diagnostics
+            .as_ref()
+            .and_then(|fields| fields.detail.as_deref())
+            == Some(
+                "drop cascades to server s\n\
+                 drop cascades to user mapping for public on server s"
+            )
+    );
+
+    run_s(
+        &mut session,
+        "CREATE FOREIGN DATA WRAPPER w; CREATE SERVER s FOREIGN DATA WRAPPER w; \
+         CREATE USER MAPPING FOR public SERVER s",
+    )
+    .await;
+    run_s(&mut session, "DROP SERVER s CASCADE").await;
+    assert!(
+        notices.try_recv().expect("server cascade notice").message
+            == "drop cascades to user mapping for public on server s"
+    );
+}
+
 #[test]
 fn dropping_a_foreign_table_cascades_to_inheritance_children() {
     use crabka_pgkv::{Kv, MemKv};
