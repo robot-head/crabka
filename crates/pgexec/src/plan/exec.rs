@@ -309,15 +309,17 @@ fn execute_nested_loop_window_with_state(
         let PlanNode::Filter { input } = &filter_state.plan.node else {
             unreachable!()
         };
-        let relation = filter_state.execute_child((**input).clone(), |loop_state| {
-            execute_nested_loop_plan(
-                loop_state,
-                read_ctx,
-                &mut sources.iter(),
-                select.filter.as_ref(),
-                None,
-            )
-        })?;
+        let relation = filter_state
+            .execute_child((**input).clone(), |loop_state| {
+                execute_nested_loop_plan(
+                    loop_state,
+                    read_ctx,
+                    &mut sources.iter(),
+                    select.filter.as_ref(),
+                    None,
+                )
+            })?
+            .relation;
         filter_state.begin_loop();
         filter_relation_rows(filter_state, relation, read_ctx.eval_ctx)
     })?;
@@ -358,15 +360,17 @@ impl NestedLoopTail<'_, '_> {
         crate::session::check_query_canceled()?;
         match &state.plan.node {
             PlanNode::Filter { input } => {
-                let relation = state.execute_child((**input).clone(), |child| {
-                    execute_nested_loop_plan(
-                        child,
-                        self.read_ctx,
-                        &mut self.sources.iter(),
-                        self.select.filter.as_ref(),
-                        self.pruned_columns,
-                    )
-                })?;
+                let relation = state
+                    .execute_child((**input).clone(), |child| {
+                        execute_nested_loop_plan(
+                            child,
+                            self.read_ctx,
+                            &mut self.sources.iter(),
+                            self.select.filter.as_ref(),
+                            self.pruned_columns,
+                        )
+                    })?
+                    .relation;
                 state.begin_loop();
                 let relation = filter_relation_rows(state, relation, self.read_ctx.eval_ctx)?;
                 if state.plan.target_list.is_empty() {
@@ -748,13 +752,18 @@ fn prune_nested_loop_relation(
     relation
 }
 
+struct NestedLoopRelation {
+    relation: Relation,
+    security_free: bool,
+}
+
 fn execute_nested_loop_plan(
     state: &mut PlanState,
     read_ctx: &crate::subquery::SubCtx<'_>,
     sources: &mut std::slice::Iter<'_, TableExpr>,
     filter: Option<&Expr>,
     pruned_columns: Option<&[ColumnBinding]>,
-) -> Result<Relation, ExecError> {
+) -> Result<NestedLoopRelation, ExecError> {
     match &state.plan.node {
         PlanNode::SeqScan { .. }
         | PlanNode::FunctionScan
@@ -765,6 +774,7 @@ fn execute_nested_loop_plan(
             let source = sources.next().ok_or_else(|| {
                 ExecError::Unsupported("NestedLoop had an unknown range-table entry".into())
             })?;
+            let security_free = exec::security_free_from_item(read_ctx, source);
             let materialization = pruned_columns.map(|_| read_ctx.statement_memory.reserve());
             let relation = match &state.plan.node {
                 PlanNode::SeqScan { .. } => SeqScanExecutor {
@@ -805,7 +815,10 @@ fn execute_nested_loop_plan(
                     .sum();
                 materialization.replace_with(bytes)?;
             }
-            Ok(relation)
+            Ok(NestedLoopRelation {
+                relation,
+                security_free,
+            })
         }
         PlanNode::NestedLoop {
             outer,
@@ -818,13 +831,30 @@ fn execute_nested_loop_plan(
             let outer = (**outer).clone();
             let inner = (**inner).clone();
             let materialization = read_ctx.statement_memory.reserve();
-            let outer_relation = state.execute_child(outer, |child| {
+            let NestedLoopRelation {
+                relation: mut outer_relation,
+                security_free: outer_security_free,
+            } = state.execute_child(outer, |child| {
                 execute_nested_loop_plan(child, read_ctx, sources, filter, pruned_columns)
             })?;
-            let inner_relation = state.execute_child(inner, |child| {
+            let NestedLoopRelation {
+                relation: mut inner_relation,
+                security_free: inner_security_free,
+            } = state.execute_child(inner, |child| {
                 execute_nested_loop_plan(child, read_ctx, sources, filter, pruned_columns)
             })?;
             state.begin_loop();
+            if let Some(filter) = filter {
+                exec::push_local_where(
+                    &mut outer_relation,
+                    &mut inner_relation,
+                    kind,
+                    filter,
+                    read_ctx.eval_ctx,
+                    outer_security_free,
+                    inner_security_free,
+                )?;
+            }
             let constraint = if matches!(kind, crabka_pgparser::ast::JoinKind::Cross)
                 && matches!(constraint, crabka_pgparser::ast::JoinConstraint::None)
             {
@@ -856,7 +886,10 @@ fn execute_nested_loop_plan(
             for _ in &relation.rows {
                 state.emit_row();
             }
-            Ok(relation)
+            Ok(NestedLoopRelation {
+                relation,
+                security_free: outer_security_free && inner_security_free,
+            })
         }
         _ => Err(ExecError::Unsupported(
             "NestedLoopExecutor received a non-NestedLoop plan".into(),
@@ -3730,6 +3763,44 @@ mod tests {
             panic!("expected one count cell");
         };
         assert!(cell.text.as_ref() == b"128");
+    }
+
+    #[tokio::test]
+    async fn comma_join_pushes_local_predicates_before_each_nested_loop() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{Engine, QueryResult, Session};
+
+        let engine = crate::SqlEngine::new_with_policy(crate::RuntimePolicy {
+            blocking_query_memory: crabka_units::bytes(256 * 1024),
+            ..Default::default()
+        })
+        .expect("policy");
+        let padding = "x".repeat(512);
+        let values = (1..=128)
+            .map(|id| format!("({id},'{padding}')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut session = engine.connect();
+        session
+            .simple_query(&format!(
+                "CREATE TABLE a (id int4, padding text); CREATE TABLE b (id int4, padding text); \
+                 CREATE TABLE c (id int4, padding text); INSERT INTO a VALUES {values}; \
+                 INSERT INTO b VALUES {values}; INSERT INTO c VALUES {values}"
+            ))
+            .await
+            .expect("fixture");
+
+        let result = session
+            .simple_query(
+                "SELECT a.padding, b.padding, c.padding FROM a, b, c \
+                 WHERE a.id = 1 AND b.id = 1 AND c.id = 1",
+            )
+            .await
+            .expect("local predicates must shrink every nested-loop input");
+        let [QueryResult::Rows { rows, .. }] = result.as_slice() else {
+            panic!("expected rows");
+        };
+        assert!(rows.len() == 1);
     }
 
     #[tokio::test]
