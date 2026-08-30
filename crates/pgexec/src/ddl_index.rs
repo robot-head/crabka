@@ -88,20 +88,22 @@ pub(crate) fn validate_index_expressions(
     if expressions.is_empty() {
         return Ok(());
     }
-    // Expression indexes are exact-scan metadata today, so they need no
-    // physical entry evaluator. Hash/GIN remain physical-only methods.
-    if unique
-        || placement != crabka_pgcatalog::IndexPlacement::Local
-        || !matches!(
-            method,
-            crabka_pgcatalog::IndexMethod::Btree
-                | crabka_pgcatalog::IndexMethod::Gist
-                | crabka_pgcatalog::IndexMethod::Spgist
-        )
+    // B-tree expression keys use the same immutable evaluator as ordinary
+    // keys. The remaining access methods are catalog-only for expressions.
+    if (unique
+        && (placement != crabka_pgcatalog::IndexPlacement::Local
+            || method != crabka_pgcatalog::IndexMethod::Btree))
+        || (!unique
+            && (placement != crabka_pgcatalog::IndexPlacement::Local
+                || !matches!(
+                    method,
+                    crabka_pgcatalog::IndexMethod::Btree
+                        | crabka_pgcatalog::IndexMethod::Gist
+                        | crabka_pgcatalog::IndexMethod::Spgist
+                )))
     {
         return Err(ExecError::Unsupported(
-            "expression indexes currently require a non-unique local B-tree, GiST, or SP-GiST index"
-                .into(),
+            "expression indexes currently require a local B-tree, GiST, or SP-GiST index".into(),
         ));
     }
     let scope = Scope::single(table, &table.name.name);

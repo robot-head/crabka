@@ -3672,7 +3672,7 @@ async fn partial_unique_indexes_store_and_enforce_only_matching_rows() {
 }
 
 #[tokio::test]
-async fn btree_expression_indexes_are_catalog_only_and_never_probed() {
+async fn btree_expression_indexes_store_physical_entries() {
     use assert2::assert;
     let engine = SqlEngine::new();
     let mut session = engine.connect();
@@ -3693,7 +3693,7 @@ async fn btree_expression_indexes_are_catalog_only_and_never_probed() {
         text_rows_of(&mut session, "SELECT a FROM t WHERE a = 20").await == vec![text_row(&["20"])]
     );
     assert!(
-        engine
+        !engine
             .kv
             .scan_prefix(&crabka_pgkv::key::secondary_index_prefix(
                 index.table_id,
@@ -3707,6 +3707,23 @@ async fn btree_expression_indexes_are_catalog_only_and_never_probed() {
             .expect("persisted expression index")
             == index
     );
+}
+
+#[tokio::test]
+async fn unique_btree_expression_indexes_enforce_the_expression_value() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE t (a text)").await;
+    run_s(
+        &mut session,
+        "CREATE UNIQUE INDEX t_lower_unique ON t (lower(a))",
+    )
+    .await;
+    run_s(&mut session, "INSERT INTO t VALUES ('A')").await;
+
+    assert!(sqlstate_of(&mut session, "INSERT INTO t VALUES ('a')").await == "23505");
 }
 
 #[tokio::test]

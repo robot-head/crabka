@@ -418,13 +418,6 @@ pub(super) fn index_entries(
     if !index_applies(table, index, row)? {
         return Ok(Vec::new());
     }
-    if index
-        .columns
-        .iter()
-        .any(|key| crabka_pgcatalog::index_key_expression(key).is_some())
-    {
-        return Ok(Vec::new());
-    }
     if index.method == crabka_pgcatalog::IndexMethod::Btree {
         return indexed_values(table, index, row).map(|values| vec![values]);
     }
@@ -471,6 +464,15 @@ pub(super) fn indexed_values(
         .columns
         .iter()
         .map(|column| {
+            if let Some(expression) = crabka_pgcatalog::index_key_expression(column) {
+                let expression = crabka_pgparser::parser::parse_expression(expression)?;
+                return crate::eval::eval(
+                    &expression,
+                    &Scope::single(table, &table.name.name),
+                    row,
+                    &crate::clock::EvalCtx::test_default(),
+                );
+            }
             let column_index = table
                 .column_index(column)
                 .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
