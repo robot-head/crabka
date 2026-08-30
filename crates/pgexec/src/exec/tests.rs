@@ -3569,17 +3569,28 @@ async fn identity_and_generated_columns_are_computed_on_write() {
 /// Index options whose semantics the scanner cannot honor are refused;
 /// non-btree access methods remain catalog metadata while scans stay exact.
 #[tokio::test]
-async fn unsupported_index_options_are_refused_not_silently_built() {
+async fn index_key_ordering_options_are_persisted() {
     use assert2::assert;
     let engine = SqlEngine::new();
     let mut session = engine.connect();
     run_s(&mut session, "CREATE TABLE t (a int4, b text)").await;
-    for sql in [
-        "CREATE INDEX i ON t (a DESC)",
-        "CREATE INDEX i ON t (a NULLS FIRST)",
-    ] {
-        assert!(sqlstate_of(&mut session, sql).await == "0A000", "{sql}");
-    }
+    run_s(&mut session, "CREATE INDEX i_desc ON t (a DESC NULLS LAST)").await;
+    run_s(
+        &mut session,
+        "CREATE INDEX i_nulls_first ON t (a NULLS FIRST)",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_get_indexdef('i_desc'::regclass), pg_get_indexdef('i_nulls_first'::regclass)"
+        )
+        .await
+            == vec![vec![
+                Some("CREATE INDEX i_desc ON public.t USING btree (a DESC NULLS LAST)".into()),
+                Some("CREATE INDEX i_nulls_first ON public.t USING btree (a NULLS FIRST)".into()),
+            ]]
+    );
     for method in ["hash", "gist", "spgist"] {
         run_s(
             &mut session,

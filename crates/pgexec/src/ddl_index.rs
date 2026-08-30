@@ -29,13 +29,6 @@ pub(crate) fn index_key_columns(
 ) -> Result<Vec<String>, ExecError> {
     keys.iter()
         .map(|key| {
-            if key.descending || key.nulls_first == Some(true) {
-                return Err(ExecError::Unsupported(
-                    "DESC and NULLS FIRST index keys are not supported: index entries are \
-                     stored in ascending, NULLS-LAST order"
-                        .into(),
-                ));
-            }
             Ok(key
                 .column
                 .clone()
