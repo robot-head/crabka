@@ -418,7 +418,10 @@ pub(super) fn index_entries(
     if !index_applies(table, index, row)? {
         return Ok(Vec::new());
     }
-    if index.method == crabka_pgcatalog::IndexMethod::Btree {
+    if matches!(
+        index.method,
+        crabka_pgcatalog::IndexMethod::Btree | crabka_pgcatalog::IndexMethod::Hash
+    ) {
         return indexed_values(table, index, row).map(|values| vec![values]);
     }
     if index.method != crabka_pgcatalog::IndexMethod::Gin {

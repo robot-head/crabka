@@ -3759,6 +3759,43 @@ async fn btree_expression_indexes_store_physical_entries() {
 }
 
 #[tokio::test]
+async fn hash_indexes_backfill_and_maintain_equality_entries() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE t (a int4)").await;
+    run_s(&mut session, "INSERT INTO t VALUES (1), (2)").await;
+    run_s(&mut session, "CREATE INDEX t_a_hash ON t USING hash (a)").await;
+
+    let index = crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_a_hash"))
+        .expect("hash index");
+    assert!(index.method == crabka_pgcatalog::IndexMethod::Hash);
+    let prefix = crabka_pgkv::key::secondary_index_prefix(index.table_id, index.id);
+    assert!(
+        engine
+            .kv
+            .scan_prefix(&prefix)
+            .expect("backfilled hash entries")
+            .len()
+            == 2
+    );
+
+    run_s(&mut session, "UPDATE t SET a = 3 WHERE a = 2").await;
+    assert!(
+        text_rows_of(&mut session, "SELECT a FROM t WHERE a = 3").await == vec![text_row(&["3"])]
+    );
+    assert!(
+        engine
+            .kv
+            .scan_prefix(&prefix)
+            .expect("maintained hash entries")
+            .len()
+            == 3
+    );
+}
+
+#[tokio::test]
 async fn unique_btree_expression_indexes_enforce_the_expression_value() {
     use assert2::assert;
 

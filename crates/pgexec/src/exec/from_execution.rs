@@ -643,7 +643,10 @@ pub(super) fn choose_local_index_equality(
     {
         let Some(index) = indexes.iter().find(|index| {
             index.placement == crabka_pgcatalog::IndexPlacement::Local
-                && index.method == crabka_pgcatalog::IndexMethod::Btree
+                && matches!(
+                    index.method,
+                    crabka_pgcatalog::IndexMethod::Btree | crabka_pgcatalog::IndexMethod::Hash
+                )
                 // A partial index cannot prove the query's row set without
                 // predicate implication, which the planner does not have yet.
                 && index.predicate.is_none()
