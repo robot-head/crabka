@@ -6684,12 +6684,82 @@ impl SqlSession {
             }
             format!("{{{}}}", pieces.join(", "))
         });
+        let dependencies = object
+            .kinds
+            .iter()
+            .any(|kind| kind == "f")
+            .then(|| Self::statistics_dependencies(&rows, &positions))
+            .flatten();
         Some(crabka_pgcatalog::statistics::StatisticsData {
             inherited: false,
             ndistinct,
-            dependencies: None,
+            dependencies,
             mcv: None,
         })
+    }
+
+    /// Build PostgreSQL's functional-dependency display data.  A dependency's
+    /// degree is the fraction of rows in groups whose determining values have
+    /// exactly one implied value.
+    fn statistics_dependencies(rows: &[Vec<Option<Cell>>], positions: &[i16]) -> Option<String> {
+        if rows.is_empty() || positions.len() < 2 {
+            return None;
+        }
+        let mut pieces = Vec::new();
+        for width in 1..positions.len() {
+            for mask in 1_usize..(1_usize << positions.len()) {
+                if mask.count_ones() != u32::try_from(width).expect("width fits u32") {
+                    continue;
+                }
+                for implied in 0..positions.len() {
+                    if mask & (1 << implied) != 0 {
+                        continue;
+                    }
+                    let mut groups =
+                        BTreeMap::<Vec<Option<String>>, (Option<String>, bool, usize)>::new();
+                    for row in rows {
+                        let key = row
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| mask & (1 << index) != 0)
+                            .map(|(_, value)| {
+                                value.as_ref().map(|value| {
+                                    String::from_utf8(value.text.to_vec())
+                                        .expect("cell text is utf8")
+                                })
+                            })
+                            .collect();
+                        let value = row[implied].as_ref().map(|value| {
+                            String::from_utf8(value.text.to_vec()).expect("cell text is utf8")
+                        });
+                        let entry = groups.entry(key).or_insert((value.clone(), false, 0));
+                        entry.1 |= entry.0 != value;
+                        entry.2 += 1;
+                    }
+                    let supported = groups
+                        .values()
+                        .filter(|(_, conflicting, _)| !*conflicting)
+                        .map(|(_, _, count)| count)
+                        .sum::<usize>();
+                    if supported == 0 {
+                        continue;
+                    }
+                    let determining = positions
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1 << index) != 0)
+                        .map(|(_, position)| position.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    pieces.push(format!(
+                        "\"{determining} => {}\": {:.6}",
+                        positions[implied],
+                        supported as f64 / rows.len() as f64,
+                    ));
+                }
+            }
+        }
+        (!pieces.is_empty()).then(|| format!("{{{}}}", pieces.join(", ")))
     }
 
     /// The fixed statistics `ANALYZE` can derive from one ordinary scan.

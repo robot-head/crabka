@@ -814,6 +814,50 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
 }
 
 #[tokio::test]
+async fn analyze_derives_functional_dependencies_for_statistics_objects() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(
+        &mut session,
+        "CREATE TABLE stat_dependencies (a int, b int)",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE STATISTICS stat_dependencies_s (dependencies) ON a, b FROM stat_dependencies",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "INSERT INTO stat_dependencies VALUES (1, 1), (1, 1), (2, 2); ANALYZE stat_dependencies",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT stxddependencies FROM pg_statistic_ext_data",
+        )
+        .await
+            == vec![text_row(&[r#"{"1 => 2": 1.000000, "2 => 1": 1.000000}"#])]
+    );
+    run_s(
+        &mut session,
+        "TRUNCATE stat_dependencies; INSERT INTO stat_dependencies VALUES (1, 1), (1, 1), (2, 1); ANALYZE stat_dependencies",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT stxddependencies FROM pg_statistic_ext_data",
+        )
+        .await
+            == vec![text_row(&[r#"{"1 => 2": 1.000000}"#])]
+    );
+}
+
+#[tokio::test]
 async fn dropping_a_column_removes_only_its_statistics_objects() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
