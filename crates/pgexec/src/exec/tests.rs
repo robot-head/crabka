@@ -730,6 +730,19 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
     .await;
     run_s(
         &mut session,
+        "CREATE STATISTICS stat_ddl_expr ON (a + 1) FROM stat_ddl",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT stxkind FROM pg_statistic_ext WHERE stxname = 'stat_ddl_expr'",
+        )
+        .await
+            == vec![text_row(&["{e}"])]
+    );
+    run_s(
+        &mut session,
         "ALTER STATISTICS stat_ddl_s RENAME TO stat_ddl_s_renamed",
     )
     .await;

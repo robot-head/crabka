@@ -40,9 +40,16 @@ fn source_table(stats: &ast::CreateStatistics) -> Result<&ast::RelationRef, Exec
     }
 }
 
-fn kinds(kinds: &[String]) -> Result<Vec<String>, ExecError> {
+fn kinds(kinds: &[String], keys: &[i16]) -> Result<Vec<String>, ExecError> {
     let kinds = if kinds.is_empty() {
-        vec!["d".into(), "f".into(), "m".into()]
+        if keys == [0] {
+            return Ok(vec!["e".into()]);
+        }
+        let mut defaults = vec!["d".into(), "f".into(), "m".into()];
+        if keys.contains(&0) {
+            defaults.push("e".into());
+        }
+        defaults
     } else {
         kinds
             .iter()
@@ -77,11 +84,6 @@ fn definition(
     stats: &ast::CreateStatistics,
     table: &crabka_pgcatalog::Table,
 ) -> Result<(Vec<i16>, Vec<String>), ExecError> {
-    if stats.expressions.len() < 2 {
-        return Err(ExecError::Unsupported(
-            "extended statistics require at least 2 columns".into(),
-        ));
-    }
     if stats.expressions.len() > MAX_KEYS {
         return Err(ExecError::Unsupported(format!(
             "cannot have more than {MAX_KEYS} columns in statistics"
@@ -135,6 +137,11 @@ fn definition(
             }
         }
     }
+    if keys.len() < 2 && keys.first().copied() != Some(0) {
+        return Err(ExecError::Unsupported(
+            "extended statistics require at least 2 columns".into(),
+        ));
+    }
     Ok((keys, expressions))
 }
 
@@ -167,6 +174,7 @@ pub(crate) fn create(
         return Ok((command("CREATE STATISTICS"), Vec::new()));
     }
     let (keys, expressions) = definition(stats, &table)?;
+    let kinds = kinds(&stats.kinds, &keys)?;
     let record = Statistics {
         oid: 0,
         name,
@@ -174,7 +182,7 @@ pub(crate) fn create(
         owner: fctx.effective_role().to_string(),
         target: -1,
         keys,
-        kinds: kinds(&stats.kinds)?,
+        kinds,
         expressions,
         data: None,
     };
@@ -317,7 +325,9 @@ mod tests {
             panic!("stats");
         };
         assert!(definition(parsed_stats, &table()) == Ok((vec![1, 0], vec!["(b + 1)".into()])));
-        assert!(kinds(&[]).expect("default kinds") == ["d", "f", "m"]);
+        assert!(kinds(&[], &[1, 2]).expect("default kinds") == ["d", "f", "m"]);
+        assert!(kinds(&[], &[0]).expect("one expression kind") == ["e"]);
+        assert!(kinds(&[], &[1, 0]).expect("mixed expression kinds") == ["d", "f", "m", "e"]);
         assert!(
             definition(
                 &stats(vec![Expr::Column {
