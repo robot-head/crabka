@@ -425,6 +425,14 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
             ty: ColumnType::Int8,
             extended: true,
         },
+        "hashoid" => ScalarFunc::IntegerHash {
+            ty: ColumnType::Oid,
+            extended: false,
+        },
+        "hashoidextended" => ScalarFunc::IntegerHash {
+            ty: ColumnType::Oid,
+            extended: true,
+        },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1493,9 +1501,12 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                     (from, to),
                     (
                         ColumnType::Int2,
-                        ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8
-                    ) | (ColumnType::Int4, ColumnType::Int4 | ColumnType::Int8)
-                        | (ColumnType::Int8, ColumnType::Int8)
+                        ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 | ColumnType::Oid
+                    ) | (
+                        ColumnType::Int4,
+                        ColumnType::Int4 | ColumnType::Int8 | ColumnType::Oid
+                    ) | (ColumnType::Int8, ColumnType::Int8 | ColumnType::Oid)
+                        | (ColumnType::Oid, ColumnType::Oid)
                 )
             };
             if !widens_to(crate::eval::infer_type(&args[0], scope)?, ty)
@@ -3301,12 +3312,29 @@ fn eval_eager(
                         i32::try_from(value).map_err(|_| type_error(&fc.name, &vals[0]))?,
                     )))
                 }
+                (ColumnType::Oid, false) => Ok(Datum::Int4(crate::partition::hash::hash_int32(
+                    i32::from_ne_bytes(
+                        u32::try_from(value)
+                            .map_err(|_| type_error(&fc.name, &vals[0]))?
+                            .to_ne_bytes(),
+                    ),
+                ))),
                 (ColumnType::Int8, false) => {
                     Ok(Datum::Int4(crate::partition::hash::hash_int64(value)))
                 }
                 (ColumnType::Int2 | ColumnType::Int4, true) => {
                     Ok(Datum::Int8(crate::partition::hash::hash_int32_extended(
                         i32::try_from(value).map_err(|_| type_error(&fc.name, &vals[0]))?,
+                        seed,
+                    )))
+                }
+                (ColumnType::Oid, true) => {
+                    Ok(Datum::Int8(crate::partition::hash::hash_int32_extended(
+                        i32::from_ne_bytes(
+                            u32::try_from(value)
+                                .map_err(|_| type_error(&fc.name, &vals[0]))?
+                                .to_ne_bytes(),
+                        ),
                         seed,
                     )))
                 }
@@ -5999,12 +6027,14 @@ mod tests {
 
         assert!(ty("hashint2(42::int2)") == ColumnType::Int4);
         assert!(ty("hashint4extended(42, 1::int8)") == ColumnType::Int8);
+        assert!(ty("hashoid(42)") == ColumnType::Int4);
         assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
         assert!(
             ev("hashint4extended(42, 1::int8)")
                 == Datum::Int8(crate::partition::hash::hash_int32_extended(42, 1))
         );
         assert!(ev("hashint8(-42::int8)") == Datum::Int4(crate::partition::hash::hash_int64(-42)));
+        assert!(ev("hashoid(42)") == Datum::Int4(crate::partition::hash::hash_int32(42)));
         assert!(
             ev("hashint8extended(-42::int8, 1::int8)")
                 == Datum::Int8(i64::from_ne_bytes(
