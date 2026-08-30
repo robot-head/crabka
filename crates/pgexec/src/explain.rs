@@ -256,6 +256,9 @@ fn restriction_selectivity(
     ctx: &crate::clock::EvalCtx,
     expr: &Expr,
 ) -> f64 {
+    if let Some(selectivity) = extended_mcv_selectivity(catalog_kv, table, rows, ctx, expr) {
+        return selectivity;
+    }
     match expr {
         Expr::Binary {
             op: BinaryOp::And,
@@ -293,6 +296,173 @@ fn restriction_selectivity(
             }),
         Expr::Like { .. } => crate::plan::selfuncs::patternsel(),
         _ => crate::plan::selfuncs::DEFAULT_INEQ_SEL,
+    }
+}
+
+#[derive(Debug)]
+struct McvClause {
+    attnum: i16,
+    value: crabka_pgtypes::Datum,
+    text: String,
+}
+
+/// Estimate a complete equality conjunction from a matching extended MCV
+/// list. The MCV portion gives its observed frequency; the remainder retains
+/// the scalar estimate after removing the MCV population from both sides.
+fn extended_mcv_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+) -> Option<f64> {
+    let mut pairs = Vec::new();
+    if !collect_equality_pairs(expr, &mut pairs) || pairs.len() < 2 {
+        return None;
+    }
+    let clauses = pairs
+        .into_iter()
+        .map(|(column, literal)| {
+            let (position, definition) = table
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, definition)| definition.name == column)?;
+            let value = literal_for_type(literal, definition.ty, ctx)?;
+            let text = String::from_utf8(crabka_pgtypes::encoding::encode_text_in(
+                &value,
+                ctx.output_style(),
+            ))
+            .ok()?;
+            Some(McvClause {
+                attnum: i16::try_from(position + 1).ok()?,
+                value,
+                text,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let scalar = clauses.iter().fold(1.0, |selectivity, clause| {
+        selectivity
+            * crate::attrstats::get(
+                catalog_kv,
+                &crate::attrstats::AttributeStatsKey {
+                    relation: table.name.clone(),
+                    attnum: clause.attnum,
+                    inherited: false,
+                },
+            )
+            .ok()
+            .flatten()
+            .and_then(|stats| {
+                table
+                    .columns
+                    .get(usize::try_from(clause.attnum - 1).ok()?)
+                    .and_then(|definition| {
+                        crate::plan::selfuncs::decode_catalog_stats(
+                            &stats,
+                            definition.ty,
+                            rows,
+                            ctx,
+                        )
+                    })
+            })
+            .map_or(crate::plan::selfuncs::DEFAULT_EQ_SEL, |stats| {
+                crate::plan::selfuncs::eqsel(stats.as_stats(), Some(&clause.value))
+            })
+    });
+    for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
+        if object.table_id != table.id {
+            continue;
+        }
+        let Some(items) = object
+            .data
+            .and_then(|data| data.mcv)
+            .and_then(|data| crabka_pgcatalog::statistics::decode_mcv(&data))
+        else {
+            continue;
+        };
+        let Some(positions) = clauses
+            .iter()
+            .map(|clause| object.keys.iter().position(|key| *key == clause.attnum))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let mut unique_positions = positions.clone();
+        unique_positions.sort_unstable();
+        unique_positions.dedup();
+        if unique_positions.len() != positions.len() {
+            continue;
+        }
+        let Some(frequencies) = items
+            .iter()
+            .map(|item| {
+                Some((
+                    item.frequency.parse::<f64>().ok()?,
+                    item.base_frequency.parse::<f64>().ok()?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let (mut mcv_selectivity, mut mcv_base_selectivity, mut mcv_total, mut mcv_base_total) =
+            (0.0, 0.0, 0.0, 0.0);
+        for (item, (frequency, base_frequency)) in items.iter().zip(frequencies) {
+            if !frequency.is_finite()
+                || !base_frequency.is_finite()
+                || !(0.0..=1.0).contains(&frequency)
+                || !(0.0..=1.0).contains(&base_frequency)
+            {
+                mcv_total = f64::NAN;
+                break;
+            }
+            mcv_total += frequency;
+            mcv_base_total += base_frequency;
+            if positions.iter().zip(&clauses).all(|(position, clause)| {
+                item.values.get(*position).and_then(Option::as_deref) == Some(&clause.text)
+            }) {
+                mcv_selectivity += frequency;
+                mcv_base_selectivity += base_frequency;
+            }
+        }
+        if !mcv_total.is_finite() || mcv_total > 1.0 || mcv_base_total > 1.0 {
+            continue;
+        }
+        let remaining_base = (1.0 - mcv_base_total).max(0.0);
+        let remainder = if remaining_base > f64::EPSILON {
+            ((scalar - mcv_base_selectivity) / remaining_base).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        return Some((mcv_selectivity + (1.0 - mcv_total).max(0.0) * remainder).clamp(0.0, 1.0));
+    }
+    None
+}
+
+fn collect_equality_pairs<'a>(expr: &'a Expr, pairs: &mut Vec<(&'a str, &'a Expr)>) -> bool {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => collect_equality_pairs(left, pairs) && collect_equality_pairs(right, pairs),
+        Expr::Binary {
+            op: BinaryOp::Eq,
+            left,
+            right,
+        } => match (column_name(left), column_name(right)) {
+            (Some(column), None) => {
+                pairs.push((column, right));
+                true
+            }
+            (None, Some(column)) => {
+                pairs.push((column, left));
+                true
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 

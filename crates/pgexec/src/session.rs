@@ -23693,6 +23693,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_extended_mcv_for_equality_conjunctions() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE mcv_estimate (a int4, b int4); \
+             INSERT INTO mcv_estimate \
+             SELECT 1, 1 FROM generate_series(1, 40); \
+             INSERT INTO mcv_estimate \
+             SELECT 1, 2 FROM generate_series(1, 10); \
+             INSERT INTO mcv_estimate \
+             SELECT 2, 1 FROM generate_series(1, 10); \
+             INSERT INTO mcv_estimate \
+             SELECT 2, 2 FROM generate_series(1, 40); \
+             CREATE STATISTICS mcv_estimate_ab (mcv) ON a, b FROM mcv_estimate; \
+             ANALYZE mcv_estimate",
+        )
+        .await
+        .expect("statistics setup");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT * FROM mcv_estimate WHERE a = 1 AND b = 1",
+            )
+            .await
+                == Ok(vec![
+                    vec!["Seq Scan on mcv_estimate (cost=0.00..0.00 rows=40 width=0)".into()],
+                    vec!["  Filter: ((a = 1) AND (b = 1))".into()],
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_the_target_and_conflict_clause_of_an_instead_rule() {
         use assert2::assert;
 
