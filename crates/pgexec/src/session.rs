@@ -6889,6 +6889,7 @@ impl SqlSession {
         }
         let total = rows.len();
         let mut values = BTreeSet::new();
+        let mut frequencies = BTreeMap::<Vec<u8>, usize>::new();
         let mut nulls = 0usize;
         let mut width = 0usize;
         for row in rows {
@@ -6901,14 +6902,61 @@ impl SqlSession {
             };
             width = width.saturating_add(value.text.len());
             values.insert(value.text.to_vec());
+            *frequencies.entry(value.text.to_vec()).or_default() += 1;
         }
         let non_null = total.checked_sub(nulls)?;
+        let mut common = frequencies.into_iter().collect::<Vec<_>>();
+        common.sort_by(|(left_value, left_count), (right_value, right_count)| {
+            right_count
+                .cmp(left_count)
+                .then_with(|| left_value.cmp(right_value))
+        });
+        common.truncate(100);
+        let most_common_vals = (!common.is_empty()).then(|| {
+            format!(
+                "{{{}}}",
+                common
+                    .iter()
+                    .map(|(value, _)| Self::pg_stats_array_element(value))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        });
+        let most_common_freqs = (!common.is_empty()).then(|| {
+            format!(
+                "{{{}}}",
+                common
+                    .iter()
+                    .map(|(_, count)| (*count as f32 / total as f32).to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        });
         Some(crate::attrstats::AttributeStats {
             null_frac: Some(nulls as f32 / total as f32),
             avg_width: (non_null > 0).then(|| i32::try_from(width / non_null).unwrap_or(i32::MAX)),
             n_distinct: Some(values.len() as f32),
+            most_common_vals,
+            most_common_freqs,
             ..Default::default()
         })
+    }
+
+    fn pg_stats_array_element(value: &[u8]) -> String {
+        let value = std::str::from_utf8(value).expect("cell text is utf8");
+        if value.is_empty()
+            || value.eq_ignore_ascii_case("null")
+            || value.bytes().any(|byte| {
+                matches!(
+                    byte,
+                    b'"' | b'\\' | b'{' | b'}' | b',' | b' ' | b'\t' | b'\n' | b'\r'
+                )
+            })
+        {
+            format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        } else {
+            value.into()
+        }
     }
 
     /// The live-row count `ANALYZE` records for one relation, or `None` when
@@ -30859,6 +30907,15 @@ mod session_conformance_tests {
             )
             .await
                 == "0.33333334,1,2"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT most_common_vals || ',' || most_common_freqs::text \
+                 FROM pg_stats WHERE tablename = 'analyzed' AND attname = 'id'",
+            )
+            .await
+                == "{1,2},{0.33333334,0.33333334}"
         );
         assert!(
             scalar(
