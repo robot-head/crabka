@@ -1563,12 +1563,13 @@ pub(crate) fn execute_ddl(
             require_foreign_grant_authority(kv, target, names, fctx)?;
             let grantees = resolve_grantees(kv, fctx, grantees)?;
             let privileges = foreign_privilege_names(privileges)?;
-            let ops = crabka_pgcatalog::grant_foreign_privileges_with_option_ops(
+            let ops = crabka_pgcatalog::grant_foreign_privileges_with_option_as_ops(
                 kv,
                 target,
                 names,
                 &grantees,
                 &privileges,
+                fctx.effective_role(),
                 *grant_option,
             )?;
             Ok((command("GRANT"), ops))
@@ -1608,19 +1609,31 @@ pub(crate) fn execute_ddl(
             names,
             grantees,
             grant_option_only,
+            cascade,
         } => {
             let target = foreign_privilege_target(*target);
             require_foreign_ownership(kv, target, names, fctx)?;
             let grantees = resolve_grantees(kv, fctx, grantees)?;
             let privileges = foreign_privilege_names(privileges)?;
-            let ops = crabka_pgcatalog::revoke_foreign_privileges_with_option_ops(
+            let ops = match crabka_pgcatalog::revoke_foreign_privileges_with_option_as_ops(
                 kv,
                 target,
                 names,
                 &grantees,
                 &privileges,
+                fctx.effective_role(),
                 *grant_option_only,
-            )?;
+                *cascade,
+            ) {
+                Ok(ops) => ops,
+                Err(crabka_pgcatalog::CatalogError::DependentPrivileges) => {
+                    return Err(ExecError::Remote(
+                        crabka_pgwire::error::PgError::error("2BP01", "dependent privileges exist")
+                            .with_hint("Use CASCADE to revoke them too."),
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
             Ok((command("REVOKE"), ops))
         }
         Statement::AlterDefaultTablePrivileges {

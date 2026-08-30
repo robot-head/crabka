@@ -8605,6 +8605,80 @@ fn foreign_usage_is_required_to_create_servers_and_foreign_tables() {
 }
 
 #[test]
+fn foreign_privilege_revoke_reports_and_cascades_delegated_grants() {
+    use crabka_pgkv::{Kv, MemKv};
+
+    let kv = MemKv::new();
+    let mut attributes = crabka_pgcatalog::RoleAttributes::default();
+    attributes.set(crabka_pgcatalog::RoleAttribute::Superuser, true);
+    kv.write_batch(
+        &crabka_pgcatalog::create_role_ops(&kv, "owner", true, attributes).expect("create owner"),
+    )
+    .expect("store owner");
+    for role in ["delegate", "reader"] {
+        crabka_pgcatalog::create_role(&kv, role, true).expect("create role");
+    }
+    let owner = super::ForeignCtx {
+        current_user: "owner",
+        session_user: "owner",
+        ..super::ForeignCtx::none()
+    };
+    let delegate = super::ForeignCtx {
+        current_user: "delegate",
+        session_user: "delegate",
+        ..super::ForeignCtx::none()
+    };
+    let execute = |sql: &str, fctx| {
+        let stmt = crabka_pgparser::parser::parse(sql)
+            .expect(sql)
+            .into_iter()
+            .next()
+            .expect("one statement");
+        super::execute_ddl(&kv, &stmt, fctx, true)
+    };
+    for sql in [
+        "CREATE FOREIGN DATA WRAPPER w",
+        "GRANT USAGE ON FOREIGN DATA WRAPPER w TO delegate WITH GRANT OPTION",
+    ] {
+        let (_, ops) = execute(sql, owner).expect(sql);
+        kv.write_batch(&ops).expect("apply owner DDL");
+    }
+    let (_, ops) = execute("GRANT USAGE ON FOREIGN DATA WRAPPER w TO reader", delegate)
+        .expect("delegated grant");
+    kv.write_batch(&ops).expect("apply delegated grant");
+
+    let error = execute(
+        "REVOKE USAGE ON FOREIGN DATA WRAPPER w FROM delegate",
+        owner,
+    )
+    .expect_err("dependent privileges block REVOKE");
+    assert!(matches!(error, super::ExecError::Remote(ref error)
+        if error.code == "2BP01"
+            && error.message == "dependent privileges exist"
+            && error.diagnostics.as_ref().and_then(|diagnostics| diagnostics.hint.as_deref())
+                == Some("Use CASCADE to revoke them too.")));
+
+    let (_, ops) = execute(
+        "REVOKE USAGE ON FOREIGN DATA WRAPPER w FROM delegate CASCADE",
+        owner,
+    )
+    .expect("cascade revoke");
+    kv.write_batch(&ops).expect("apply cascade revoke");
+    for grantee in ["delegate", "reader"] {
+        assert!(
+            !crabka_pgcatalog::foreign_privilege_is_granted(
+                &kv,
+                crabka_pgcatalog::ForeignPrivilegeTarget::DataWrapper,
+                "w",
+                grantee,
+                "USAGE",
+            )
+            .expect("grant removed")
+        );
+    }
+}
+
+#[test]
 fn foreign_usage_lookup_names_the_missing_object() {
     use crabka_pgkv::MemKv;
 

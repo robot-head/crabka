@@ -621,6 +621,49 @@ pub fn foreign_privilege_prefix(kind: &str, name: &str) -> Vec<u8> {
     key
 }
 
+/// Key for the grantor edge behind one foreign-object ACL entry.
+///
+/// The effective ACL stores the union of every grant. These edges preserve
+/// provenance so `REVOKE ... CASCADE` can remove only grants that depended on
+/// the revoked grant option.
+#[must_use]
+pub fn foreign_privilege_grant_key(
+    kind: &str,
+    name: &str,
+    grantee: &str,
+    privilege: &str,
+    grantor: &str,
+) -> Vec<u8> {
+    let mut key = foreign_privilege_grant_prefix(kind, name, grantee, privilege);
+    push_key_part(&mut key, grantor);
+    key
+}
+
+/// Prefix for every grantor edge behind one foreign-object ACL entry.
+#[must_use]
+pub fn foreign_privilege_grant_prefix(
+    kind: &str,
+    name: &str,
+    grantee: &str,
+    privilege: &str,
+) -> Vec<u8> {
+    let mut key = system_prefix("facl_grant");
+    push_key_part(&mut key, kind);
+    push_key_part(&mut key, name);
+    push_key_part(&mut key, grantee);
+    push_key_part(&mut key, privilege);
+    key
+}
+
+/// Prefix for every grantor edge on one foreign object.
+#[must_use]
+pub fn foreign_privilege_grant_object_prefix(kind: &str, name: &str) -> Vec<u8> {
+    let mut key = system_prefix("facl_grant");
+    push_key_part(&mut key, kind);
+    push_key_part(&mut key, name);
+    key
+}
+
 /// Key for the replicated range-descriptor blob: `/0/meta/range_map`.
 #[must_use]
 pub fn meta_range_map_key() -> Vec<u8> {

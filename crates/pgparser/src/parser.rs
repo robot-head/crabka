@@ -5256,12 +5256,17 @@ impl Parser {
             let names = self.object_name_list()?;
             self.expect(&Token::Keyword(Keyword::From))?;
             let grantees = self.grantee_list()?;
+            let cascade = self.eat_ident_eq("cascade");
+            if !cascade {
+                self.eat_ident_eq("restrict");
+            }
             return Ok(crate::ast::Statement::RevokeForeignPrivileges {
                 target,
                 privileges,
                 names,
                 grantees,
                 grant_option_only,
+                cascade,
             });
         }
         self.eat_keyword(Keyword::Table);
@@ -18601,6 +18606,14 @@ mod tests {
                 grant_option_only: true,
                 ..
             } if names == ["s"]
+        ));
+        assert!(matches!(
+            one("REVOKE USAGE ON FOREIGN DATA WRAPPER w FROM reader CASCADE"),
+            Statement::RevokeForeignPrivileges {
+                target: ForeignPrivilegeTarget::DataWrapper,
+                cascade: true,
+                ..
+            }
         ));
     }
 

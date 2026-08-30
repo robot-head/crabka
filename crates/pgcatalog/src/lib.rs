@@ -973,6 +973,8 @@ pub enum CatalogError {
     UndefinedIndex(String),
     #[error("cannot drop index \"{0}\" because it is required by a table constraint")]
     DependentObjectsStillExist(String),
+    #[error("dependent privileges exist")]
+    DependentPrivileges,
     #[error("cannot drop {kind} \"{name}\" because other objects depend on it")]
     ForeignObjectHasDependents { kind: &'static str, name: String },
     #[error("tablespace \"{0}\" is not empty")]
@@ -1100,6 +1102,7 @@ impl CatalogError {
             | CatalogError::UndefinedConstraint(_)
             | CatalogError::UndefinedPolicy { .. } => "42704",
             CatalogError::DependentObjectsStillExist(_)
+            | CatalogError::DependentPrivileges
             | CatalogError::ForeignObjectHasDependents { .. }
             | CatalogError::TablespaceNotEmpty(_)
             | CatalogError::OperatorFamilyNotEmpty(_)
@@ -6010,7 +6013,15 @@ pub fn grant_foreign_privileges_ops(
     grantees: &[String],
     privileges: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    grant_foreign_privileges_with_option_ops(kv, target, names, grantees, privileges, false)
+    grant_foreign_privileges_with_option_as_ops(
+        kv,
+        target,
+        names,
+        grantees,
+        privileges,
+        BOOTSTRAP_ROLE,
+        false,
+    )
 }
 
 /// Build write operations for `GRANT ... WITH GRANT OPTION` on foreign objects.
@@ -6027,7 +6038,43 @@ pub fn grant_foreign_privileges_with_option_ops(
     privileges: &[String],
     grant_option: bool,
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    foreign_privilege_ops(kv, target, names, grantees, privileges, true, grant_option)
+    grant_foreign_privileges_with_option_as_ops(
+        kv,
+        target,
+        names,
+        grantees,
+        privileges,
+        BOOTSTRAP_ROLE,
+        grant_option,
+    )
+}
+
+/// Build write operations for a foreign-object grant issued by `grantor`.
+///
+/// # Errors
+///
+/// Returns undefined-object for a missing foreign object or grantee, invalid
+/// parameter value for an unsupported privilege, or catalog storage failures.
+pub fn grant_foreign_privileges_with_option_as_ops(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    names: &[String],
+    grantees: &[String],
+    privileges: &[String],
+    grantor: &str,
+    grant_option: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    foreign_privilege_edges_ops(
+        kv,
+        target,
+        names,
+        grantees,
+        privileges,
+        grantor,
+        true,
+        grant_option,
+        false,
+    )
 }
 
 /// Build write operations for `REVOKE ... ON FOREIGN DATA WRAPPER|SERVER`.
@@ -6043,7 +6090,16 @@ pub fn revoke_foreign_privileges_ops(
     grantees: &[String],
     privileges: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    revoke_foreign_privileges_with_option_ops(kv, target, names, grantees, privileges, false)
+    revoke_foreign_privileges_with_option_as_ops(
+        kv,
+        target,
+        names,
+        grantees,
+        privileges,
+        BOOTSTRAP_ROLE,
+        false,
+        false,
+    )
 }
 
 /// Build write operations for `REVOKE [GRANT OPTION FOR]` on foreign objects.
@@ -6060,14 +6116,48 @@ pub fn revoke_foreign_privileges_with_option_ops(
     privileges: &[String],
     grant_option_only: bool,
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    foreign_privilege_ops(
+    revoke_foreign_privileges_with_option_as_ops(
         kv,
         target,
         names,
         grantees,
         privileges,
+        BOOTSTRAP_ROLE,
+        grant_option_only,
+        false,
+    )
+}
+
+/// Build write operations for a foreign-object revoke issued by `grantor`.
+///
+/// With `cascade = false`, returns [`CatalogError::DependentPrivileges`] when
+/// the removed grant option supported grants issued by one of its grantees.
+///
+/// # Errors
+///
+/// Returns undefined-object for a missing foreign object or grantee, invalid
+/// parameter value for an unsupported privilege, dependent privileges, or
+/// catalog storage failures.
+pub fn revoke_foreign_privileges_with_option_as_ops(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    names: &[String],
+    grantees: &[String],
+    privileges: &[String],
+    grantor: &str,
+    grant_option_only: bool,
+    cascade: bool,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    foreign_privilege_edges_ops(
+        kv,
+        target,
+        names,
+        grantees,
+        privileges,
+        grantor,
         false,
         grant_option_only,
+        cascade,
     )
 }
 
@@ -6159,11 +6249,20 @@ pub fn drop_foreign_privileges_ops(
     target: ForeignPrivilegeTarget,
     name: &str,
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    Ok(kv
+    let mut ops = kv
         .scan_prefix(&key::foreign_privilege_prefix(target.key_name(), name))?
         .into_iter()
         .map(|(key, _)| WriteOp::Delete { key })
-        .collect())
+        .collect::<Vec<_>>();
+    ops.extend(
+        kv.scan_prefix(&key::foreign_privilege_grant_object_prefix(
+            target.key_name(),
+            name,
+        ))?
+        .into_iter()
+        .map(|(key, _)| WriteOp::Delete { key }),
+    );
+    Ok(ops)
 }
 
 /// Move every ACL row while a foreign object is renamed.
@@ -6189,17 +6288,38 @@ pub fn rename_foreign_privileges_ops(
         });
         ops.push(WriteOp::Delete { key });
     }
+    let grants_prefix = key::foreign_privilege_grant_object_prefix(target.key_name(), name);
+    for (key, value) in kv.scan_prefix(&grants_prefix)? {
+        let Some(parts) = key::key_parts(&key[grants_prefix.len()..], 3) else {
+            return Err(
+                KvError::CorruptRow("foreign privilege grant key is incomplete".into()).into(),
+            );
+        };
+        ops.push(WriteOp::Put {
+            key: key::foreign_privilege_grant_key(
+                target.key_name(),
+                new_name,
+                parts[0],
+                parts[1],
+                parts[2],
+            ),
+            value,
+        });
+        ops.push(WriteOp::Delete { key });
+    }
     Ok(ops)
 }
 
-fn foreign_privilege_ops(
+fn foreign_privilege_edges_ops(
     kv: &dyn Kv,
     target: ForeignPrivilegeTarget,
     names: &[String],
     grantees: &[String],
     privileges: &[String],
+    grantor: &str,
     grant: bool,
     grant_option_only: bool,
+    cascade: bool,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     for name in names {
         match target {
@@ -6212,35 +6332,200 @@ fn foreign_privilege_ops(
         }
     }
     let privileges = expand_foreign_privileges(target, privileges)?;
-    let mut ops = Vec::new();
     for grantee in grantees {
         if !role_is_nameable(kv, grantee)? {
             return Err(CatalogError::UndefinedObject(grantee.clone()));
         }
-        for name in names {
+    }
+    let mut ops = Vec::new();
+    for name in names {
+        let mut edges = foreign_privilege_edges(kv, target, name)?;
+        let original = edges.clone();
+        for grantee in grantees {
             for privilege in &privileges {
-                let key = key::foreign_privilege_key(target.key_name(), name, grantee, privilege);
-                let op = if grant {
-                    let retained_option = kv
-                        .get(&key)?
-                        .map_or(Ok(false), |value| foreign_privilege_grant_option(&value))?;
-                    WriteOp::Put {
-                        key,
-                        value: Vec::from([u8::from(grant_option_only || retained_option)]),
-                    }
-                } else if grant_option_only && kv.get(&key)?.is_some() {
-                    WriteOp::Put {
-                        key,
-                        value: Vec::new(),
+                let edge = (grantee.clone(), privilege.clone(), grantor.to_string());
+                if grant {
+                    let retained_option = edges.get(&edge).copied().unwrap_or(false);
+                    edges.insert(edge, grant_option_only || retained_option);
+                } else if grant_option_only {
+                    if let Some(option) = edges.get_mut(&edge) {
+                        *option = false;
                     }
                 } else {
-                    WriteOp::Delete { key }
-                };
-                ops.push(op);
+                    edges.remove(&edge);
+                }
             }
         }
+        let dependents = foreign_privilege_dependent_edges(kv, target, name, &edges)?;
+        if !dependents.is_empty() && !cascade {
+            return Err(CatalogError::DependentPrivileges);
+        }
+        for edge in dependents {
+            edges.remove(&edge);
+        }
+        ops.extend(foreign_privilege_edge_write_ops(
+            target, name, &original, &edges,
+        ));
     }
     Ok(ops)
+}
+
+type ForeignPrivilegeEdge = (String, String, String);
+
+fn foreign_privilege_edges(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    name: &str,
+) -> Result<BTreeMap<ForeignPrivilegeEdge, bool>, CatalogError> {
+    let prefix = key::foreign_privilege_grant_object_prefix(target.key_name(), name);
+    kv.scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(key, value)| {
+            let parts = key::key_parts(&key[prefix.len()..], 3).ok_or_else(|| {
+                KvError::CorruptRow("foreign privilege grant key is incomplete".into())
+            })?;
+            Ok((
+                (parts[0].into(), parts[1].into(), parts[2].into()),
+                foreign_privilege_grant_option(&value)?,
+            ))
+        })
+        .collect()
+}
+
+fn foreign_privilege_dependent_edges(
+    kv: &dyn Kv,
+    target: ForeignPrivilegeTarget,
+    name: &str,
+    edges: &BTreeMap<ForeignPrivilegeEdge, bool>,
+) -> Result<HashSet<ForeignPrivilegeEdge>, CatalogError> {
+    let owner = match target {
+        ForeignPrivilegeTarget::DataWrapper => get_fdw(kv, name)?.owner,
+        ForeignPrivilegeTarget::Server => get_server(kv, name)?.owner,
+    };
+    let mut remaining = edges.clone();
+    let mut dependents = HashSet::new();
+    loop {
+        let mut unauthorised = HashSet::new();
+        for grantor in remaining
+            .keys()
+            .map(|(_, _, grantor)| grantor)
+            .collect::<HashSet<_>>()
+        {
+            if !foreign_privilege_grantor_has_option(kv, &owner, grantor, &remaining)? {
+                unauthorised.insert(grantor.to_owned());
+            }
+        }
+        let newly_dependent = remaining
+            .keys()
+            .filter(|(_, _, grantor)| unauthorised.contains(grantor))
+            .cloned()
+            .collect::<Vec<_>>();
+        if newly_dependent.is_empty() {
+            break;
+        }
+        for edge in newly_dependent {
+            remaining.remove(&edge);
+            dependents.insert(edge);
+        }
+    }
+    Ok(dependents)
+}
+
+fn foreign_privilege_grantor_has_option(
+    kv: &dyn Kv,
+    owner: &str,
+    grantor: &str,
+    edges: &BTreeMap<ForeignPrivilegeEdge, bool>,
+) -> Result<bool, CatalogError> {
+    let superuser = if grantor == BOOTSTRAP_ROLE {
+        true
+    } else {
+        match get_role(kv, grantor) {
+            Ok(role) => role.attributes.has(RoleAttribute::Superuser),
+            Err(CatalogError::UndefinedObject(_)) => false,
+            Err(error) => return Err(error),
+        }
+    };
+    if superuser || role_has_privs_of(kv, grantor, owner)? {
+        return Ok(true);
+    }
+    for ((grantee, _, _), option) in edges {
+        if *option && role_has_privs_of(kv, grantor, grantee)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn foreign_privilege_edge_write_ops(
+    target: ForeignPrivilegeTarget,
+    name: &str,
+    original: &BTreeMap<ForeignPrivilegeEdge, bool>,
+    edges: &BTreeMap<ForeignPrivilegeEdge, bool>,
+) -> Vec<WriteOp> {
+    let mut ops = Vec::new();
+    for (edge, option) in edges {
+        if original.get(edge) != Some(option) {
+            ops.push(WriteOp::Put {
+                key: key::foreign_privilege_grant_key(
+                    target.key_name(),
+                    name,
+                    &edge.0,
+                    &edge.1,
+                    &edge.2,
+                ),
+                value: Vec::from([u8::from(*option)]),
+            });
+        }
+    }
+    for edge in original.keys().filter(|edge| !edges.contains_key(*edge)) {
+        ops.push(WriteOp::Delete {
+            key: key::foreign_privilege_grant_key(
+                target.key_name(),
+                name,
+                &edge.0,
+                &edge.1,
+                &edge.2,
+            ),
+        });
+    }
+    let mut grants = BTreeMap::<(String, String), bool>::new();
+    for ((grantee, privilege, _), option) in edges {
+        grants
+            .entry((grantee.clone(), privilege.clone()))
+            .and_modify(|current| *current |= *option)
+            .or_insert(*option);
+    }
+    let mut original_grants = HashSet::new();
+    for (grantee, privilege, _) in original.keys() {
+        original_grants.insert((grantee.clone(), privilege.clone()));
+    }
+    for ((grantee, privilege), option) in &grants {
+        let key = key::foreign_privilege_key(target.key_name(), name, grantee, privilege);
+        let original_option = original
+            .iter()
+            .filter(|((old_grantee, old_privilege, _), _)| {
+                old_grantee == grantee && old_privilege == privilege
+            })
+            .any(|(_, option)| *option);
+        if !original_grants.contains(&(grantee.clone(), privilege.clone()))
+            || original_option != *option
+        {
+            ops.push(WriteOp::Put {
+                key,
+                value: Vec::from([u8::from(*option)]),
+            });
+        }
+    }
+    for (grantee, privilege) in original_grants
+        .into_iter()
+        .filter(|grant| !grants.contains_key(grant))
+    {
+        ops.push(WriteOp::Delete {
+            key: key::foreign_privilege_key(target.key_name(), name, &grantee, &privilege),
+        });
+    }
+    ops
 }
 
 fn foreign_privilege_grant_option(value: &[u8]) -> Result<bool, CatalogError> {
@@ -10188,6 +10473,79 @@ mod tests {
         assert!(
             !foreign_privilege_has_grant_option(&kv, target, "w", "reader", "USAGE")
                 .expect("grant option removed")
+        );
+    }
+
+    #[test]
+    fn foreign_privilege_revoke_cascades_only_dependent_grants() {
+        let kv = MemKv::new();
+        create_role(&kv, "delegate", true).expect("delegate");
+        create_role(&kv, "reader", true).expect("reader");
+        create_fdw(&kv, "w", vec![]).expect("fdw");
+        let target = ForeignPrivilegeTarget::DataWrapper;
+        let names = ["w".into()];
+        let usage = ["USAGE".into()];
+        kv.write_batch(
+            &grant_foreign_privileges_with_option_as_ops(
+                &kv,
+                target,
+                &names,
+                &["delegate".into()],
+                &usage,
+                BOOTSTRAP_ROLE,
+                true,
+            )
+            .expect("grant option"),
+        )
+        .expect("apply grant option");
+        kv.write_batch(
+            &grant_foreign_privileges_with_option_as_ops(
+                &kv,
+                target,
+                &names,
+                &["reader".into()],
+                &usage,
+                "delegate",
+                false,
+            )
+            .expect("delegated grant"),
+        )
+        .expect("apply delegated grant");
+
+        assert!(matches!(
+            revoke_foreign_privileges_with_option_as_ops(
+                &kv,
+                target,
+                &names,
+                &["delegate".into()],
+                &usage,
+                BOOTSTRAP_ROLE,
+                false,
+                false,
+            ),
+            Err(CatalogError::DependentPrivileges)
+        ));
+        kv.write_batch(
+            &revoke_foreign_privileges_with_option_as_ops(
+                &kv,
+                target,
+                &names,
+                &["delegate".into()],
+                &usage,
+                BOOTSTRAP_ROLE,
+                false,
+                true,
+            )
+            .expect("cascade revoke"),
+        )
+        .expect("apply cascade revoke");
+        assert!(
+            !foreign_privilege_is_granted(&kv, target, "w", "delegate", "USAGE")
+                .expect("delegate revoked")
+        );
+        assert!(
+            !foreign_privilege_is_granted(&kv, target, "w", "reader", "USAGE")
+                .expect("dependent grant revoked")
         );
     }
 

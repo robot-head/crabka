@@ -1033,13 +1033,14 @@ pub enum Statement {
         schemas: Vec<String>,
         grantees: Vec<RoleSpec>,
     },
-    /// `REVOKE [GRANT OPTION FOR] ... ON FOREIGN DATA WRAPPER|SERVER ... FROM ...`.
+    /// `REVOKE [GRANT OPTION FOR] ... ON FOREIGN DATA WRAPPER|SERVER ... FROM ... [CASCADE]`.
     RevokeForeignPrivileges {
         target: ForeignPrivilegeTarget,
         privileges: Vec<PrivilegeSpec>,
         names: Vec<String>,
         grantees: Vec<RoleSpec>,
         grant_option_only: bool,
+        cascade: bool,
     },
     /// `REVOKE [GRANT OPTION FOR] … ON LARGE OBJECT oid [, …] FROM role [, …]`.
     RevokeLargeObjectPrivileges {
