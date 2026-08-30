@@ -160,6 +160,10 @@ enum ScalarFunc {
     OidVectorHash {
         extended: bool,
     },
+    /// PostgreSQL's polymorphic array hash support functions.
+    ArrayHash {
+        extended: bool,
+    },
     /// `pg_sleep(float8)`: cancellable wait, modeled as the engine's void text.
     PgSleep,
     UuidV4,
@@ -489,6 +493,8 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         },
         "hashoidvector" => ScalarFunc::OidVectorHash { extended: false },
         "hashoidvectorextended" => ScalarFunc::OidVectorHash { extended: true },
+        "hash_array" => ScalarFunc::ArrayHash { extended: false },
+        "hash_array_extended" => ScalarFunc::ArrayHash { extended: true },
         "pg_sleep" => ScalarFunc::PgSleep,
         "gen_random_uuid" | "uuid_generate_v4" | "uuidv4" => ScalarFunc::UuidV4,
         "uuidv7" => ScalarFunc::UuidV7,
@@ -1610,6 +1616,23 @@ fn builtin_scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType
                 ColumnType::Int4
             })
         }
+        ScalarFunc::ArrayHash { extended } => {
+            require_arity(fc, n == if extended { 2 } else { 1 })?;
+            if !matches!(
+                crate::eval::infer_type(&args[0], scope)?,
+                ColumnType::Array(_)
+            ) {
+                return Err(no_matching_function());
+            }
+            if extended {
+                require_int(&args[1], scope)?;
+            }
+            Ok(if extended {
+                ColumnType::Int8
+            } else {
+                ColumnType::Int4
+            })
+        }
         ScalarFunc::FloatHash { ty, extended } => {
             require_arity(fc, n == if extended { 2 } else { 1 })?;
             let accepts = |input: ColumnType| {
@@ -2188,6 +2211,7 @@ fn coerce_unknown_args(
         ScalarFunc::FloatHash { ty, .. } => ty,
         ScalarFunc::TextHash { ty, .. } => ty,
         ScalarFunc::OidVectorHash { .. } => ColumnType::OidVector,
+        ScalarFunc::ArrayHash { .. } => return Ok(()),
         // The rounding pair's two-argument form is `numeric(value, int)`; its
         // one-argument form has a preferred `float8` candidate like the rest.
         ScalarFunc::Round | ScalarFunc::Trunc if args.len() == 2 => ColumnType::Numeric(None),
@@ -3529,6 +3553,25 @@ fn eval_eager(
                 Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
             } else {
                 Datum::Int4(crate::partition::hash::hash_bytes(&bytes)?)
+            })
+        }
+        ScalarFunc::ArrayHash { extended } => {
+            require_arity(fc, vals.len() == if extended { 2 } else { 1 })?;
+            let seed = if extended {
+                int_arg(&vals[1])?.cast_unsigned()
+            } else {
+                0
+            };
+            let Datum::Array(array) = &vals[0] else {
+                return Err(type_error(&fc.name, &vals[0]));
+            };
+            let hash = crate::partition::hash::hash_array_extended(array, seed)?;
+            Ok(if extended {
+                Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
+            } else {
+                Datum::Int4(i32::from_ne_bytes(
+                    hash.to_ne_bytes()[..4].try_into().expect("u64"),
+                ))
             })
         }
         ScalarFunc::PgTableIsVisible => {
@@ -6220,6 +6263,7 @@ mod tests {
         assert!(ty("hashname('gres'::text)") == ColumnType::Int4);
         assert!(ty("hashtextextended('gres', 1::int8)") == ColumnType::Int8);
         assert!(ty("hashoidvector('1 2'::oidvector)") == ColumnType::Int4);
+        assert!(ty("hash_array('{1,2}'::int4[])") == ColumnType::Int4);
         assert!(ty("hashfloat4(42)") == ColumnType::Int4);
         assert!(ty("hashfloat8extended(42, 1::int8)") == ColumnType::Int8);
         assert!(ev("hashint2(42::int2)") == Datum::Int4(crate::partition::hash::hash_int32(42)));

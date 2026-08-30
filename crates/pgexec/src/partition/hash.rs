@@ -195,7 +195,10 @@ fn unsupported(type_name: &str) -> ExecError {
 /// PostgreSQL hashes each element with the same seed and folds the result with
 /// `result = result * 31 + element_hash`. NULL elements contribute zero. Array
 /// dimensions and lower bounds are intentionally not part of this hash.
-fn hash_array_extended(array: &crabka_pgtypes::ArrayValue, seed: u64) -> Result<u64, ExecError> {
+pub(crate) fn hash_array_extended(
+    array: &crabka_pgtypes::ArrayValue,
+    seed: u64,
+) -> Result<u64, ExecError> {
     let mut result = 1_u64;
     for element in &array.elems {
         let element_hash = column_hash(element, seed)?.unwrap_or(0);
