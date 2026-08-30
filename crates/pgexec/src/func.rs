@@ -3852,7 +3852,8 @@ fn eval_eager(
             let Datum::Array(array) = &vals[0] else {
                 return Err(type_error(&fc.name, &vals[0]));
             };
-            let hash = crate::partition::hash::hash_array_extended(array, seed)?;
+            let hash = crate::partition::hash::hash_array_extended(array, seed)
+                .map_err(|_| undefined_hash_function(array.elem.column_type().name(), extended))?;
             Ok(if extended {
                 Datum::Int8(i64::from_ne_bytes(hash.to_ne_bytes()))
             } else {
@@ -3981,11 +3982,10 @@ fn eval_eager(
             for value in &record.values {
                 let field_hash = crate::partition::hash::column_hash(value, seed)
                     .map_err(|_| {
-                        ExecError::UndefinedFunction(format!(
-                            "could not identify {}hash function for type {}",
-                            if extended { "an extended " } else { "a " },
+                        undefined_hash_function(
                             value.column_type().map_or("record", ColumnType::name),
-                        ))
+                            extended,
+                        )
                     })?
                     .unwrap_or(0);
                 hash = hash.wrapping_mul(31).wrapping_add(field_hash);
@@ -4112,6 +4112,13 @@ fn hash_result(hash: u64, extended: bool) -> Datum {
             hash.to_ne_bytes()[..4].try_into().expect("u64"),
         ))
     }
+}
+
+fn undefined_hash_function(type_name: &str, extended: bool) -> ExecError {
+    ExecError::UndefinedFunction(format!(
+        "could not identify {}hash function for type {type_name}",
+        if extended { "an extended " } else { "a " },
+    ))
 }
 
 fn numeric_hash(value: &crabka_pgtypes::numeric::NumericValue, seed: u64) -> u64 {
@@ -7005,6 +7012,21 @@ mod tests {
         assert!(ev("hash_numeric_extended(0, 1::int8)") == Datum::Int8(0));
         assert!(ev("hash_numeric('NaN'::numeric)") == Datum::Int4(0));
         assert!(ev("hash_numeric_extended('NaN'::numeric, 1::int8)") == Datum::Int8(1));
+        for (sql, message) in [
+            (
+                "hash_array('{101}'::varbit[])",
+                "could not identify a hash function for type bit varying",
+            ),
+            (
+                "hash_array_extended('{101}'::varbit[], 0)",
+                "could not identify an extended hash function for type bit varying",
+            ),
+        ] {
+            let ctx = crate::clock::EvalCtx::test_default();
+            let error = crate::eval::eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx)
+                .expect_err("non-hashable array element");
+            assert!(error.into_pg().message == message, "{sql}");
+        }
         assert!(ev("hashint4(null::int4)") == Datum::Null);
         assert!(err_code("hashint4(42::int8)", None) == "42883");
         assert!(err_code("hashint2(42)", None) == "42883");
