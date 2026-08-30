@@ -684,7 +684,7 @@ pub(crate) fn skipped_drop_notice(
         }
         Statement::AlterTable {
             table,
-            if_exists: true,
+            if_exists,
             actions,
             ..
         } => {
@@ -692,7 +692,7 @@ pub(crate) fn skipped_drop_notice(
             match resolve_relation(kv, &resolution, table, SchemaDisposition::Utility) {
                 Ok(name) => {
                     if relation_kind(kv, &name).is_none() {
-                        return Ok(Some(missing("relation", &name.name)));
+                        return Ok((*if_exists).then(|| missing("relation", &name.name)));
                     }
                     let table = crabka_pgcatalog::get_table(kv, &name)?;
                     for action in actions {
@@ -733,7 +733,7 @@ pub(crate) fn skipped_drop_notice(
                     }
                     Ok(None)
                 }
-                Err(_) => Ok(Some(missing("relation", &table.to_string()))),
+                Err(_) => Ok((*if_exists).then(|| missing("relation", &table.to_string()))),
             }
         }
         Statement::DropUserMapping {
