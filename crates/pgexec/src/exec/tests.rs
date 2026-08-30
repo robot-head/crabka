@@ -720,6 +720,26 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
     );
     run_s(
         &mut session,
+        "CREATE TABLE stat_ddl_plain (a int, b int, c int)",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE STATISTICS stat_ddl_plain_s ON b, c FROM stat_ddl_plain",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_get_statisticsobjdef_columns(oid) FROM pg_statistic_ext \
+             WHERE stxrelid = 'stat_ddl_plain'::regclass",
+        )
+        .await
+            == vec![text_row(&["b, c"])]
+    );
+    run_s(&mut session, "DROP TABLE stat_ddl_plain").await;
+    run_s(
+        &mut session,
         "INSERT INTO stat_ddl VALUES (1, 1), (1, 1), (2, 1); ANALYZE stat_ddl",
     )
     .await;
