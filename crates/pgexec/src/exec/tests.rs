@@ -971,8 +971,8 @@ async fn analyze_projects_expression_statistics() {
             == vec![text_row(&[
                 "lower(b)",
                 "0.33333334",
-                "2",
-                "1",
+                "6",
+                "-0.33333334",
                 "{hi}",
                 "{0.6666667}",
             ])]

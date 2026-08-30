@@ -6647,7 +6647,8 @@ impl SqlSession {
         let [statement] = parsed.as_slice() else {
             return None;
         };
-        let QueryResult::Rows { rows, .. } = Box::pin(self.run_select(statement)).await.ok()?
+        let QueryResult::Rows { fields, rows, .. } =
+            Box::pin(self.run_select(statement)).await.ok()?
         else {
             return None;
         };
@@ -6709,7 +6710,14 @@ impl SqlSession {
             .iter()
             .enumerate()
             .filter(|(_, key)| **key == 0)
-            .map(|(index, _)| Self::statistics_expression_stats(&rows, index))
+            .map(|(index, _)| {
+                self.statistics_expression_stats(
+                    &rows,
+                    fields.get(index),
+                    index,
+                    self.statistics_target(object.target),
+                )
+            })
             .collect();
         Some(crabka_pgcatalog::statistics::StatisticsData {
             inherited: false,
@@ -6721,40 +6729,93 @@ impl SqlSession {
     }
 
     fn statistics_expression_stats(
+        &self,
         rows: &[Vec<Option<Cell>>],
+        field: Option<&FieldDescription>,
         index: usize,
+        statistics_target: usize,
     ) -> crabka_pgcatalog::statistics::ExpressionStats {
         if rows.is_empty() {
             return crabka_pgcatalog::statistics::ExpressionStats::default();
         }
         let mut values = BTreeSet::new();
         let mut frequencies = BTreeMap::<Vec<u8>, usize>::new();
+        let mut ordered_values = Vec::new();
         let mut nulls = 0usize;
         let mut width = 0usize;
-        for row in rows {
+        for (position, row) in rows.iter().enumerate() {
             let Some(value) = row.get(index).and_then(Option::as_ref) else {
                 nulls += 1;
                 continue;
             };
-            width = width.saturating_add(value.text.len());
             values.insert(value.text.to_vec());
             *frequencies.entry(value.text.to_vec()).or_default() += 1;
+            let Some(field) = field else { continue };
+            let Ok(decoded) = self.plpgsql_decode_cell(field, Some(value)) else {
+                continue;
+            };
+            width = width.saturating_add(Self::statistics_width(&decoded));
+            ordered_values.push((position, decoded, value.text.to_vec()));
         }
         let non_null = rows.len().saturating_sub(nulls);
-        let mut common = frequencies
-            .into_iter()
-            .filter(|(_, count)| *count > 1)
-            .collect::<Vec<_>>();
-        common.sort_by(|(left_value, left_count), (right_value, right_count)| {
-            right_count
-                .cmp(left_count)
-                .then_with(|| left_value.cmp(right_value))
+        let nmultiple = frequencies.values().filter(|count| **count > 1).count();
+        let mut n_distinct = if nmultiple == 0 {
+            -(1.0 - nulls as f32 / rows.len() as f32)
+        } else {
+            values.len() as f32
+        };
+        if n_distinct > rows.len() as f32 * 0.1 {
+            n_distinct = -n_distinct / rows.len() as f32;
+        }
+        let mut comparison_failed = ordered_values.len() != non_null;
+        ordered_values.sort_by(|(_, left, _), (_, right, _)| {
+            crabka_pgtypes::ops::compare(left, right)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| {
+                    comparison_failed = true;
+                    CmpOrdering::Equal
+                })
         });
-        common.truncate(100);
+        let mut common = if !comparison_failed {
+            let mut common = Vec::new();
+            let mut start = 0;
+            while start < ordered_values.len() {
+                let mut end = start + 1;
+                while end < ordered_values.len()
+                    && crabka_pgtypes::ops::compare(
+                        &ordered_values[start].1,
+                        &ordered_values[end].1,
+                    )
+                    .ok()
+                        == Some(Some(CmpOrdering::Equal))
+                {
+                    end += 1;
+                }
+                if end - start > 1 {
+                    common.push((ordered_values[start].2.clone(), end - start));
+                }
+                start = end;
+            }
+            common.sort_by(|(_, left_count), (_, right_count)| right_count.cmp(left_count));
+            common
+        } else {
+            let mut common = frequencies
+                .into_iter()
+                .filter(|(_, count)| *count > 1)
+                .collect::<Vec<_>>();
+            common.sort_by(|(left_value, left_count), (right_value, right_count)| {
+                right_count
+                    .cmp(left_count)
+                    .then_with(|| left_value.cmp(right_value))
+            });
+            common
+        };
+        common.truncate(statistics_target);
         crabka_pgcatalog::statistics::ExpressionStats {
             null_frac: Some((nulls as f32 / rows.len() as f32).to_string()),
             avg_width: (non_null > 0).then(|| i32::try_from(width / non_null).unwrap_or(i32::MAX)),
-            n_distinct: Some((values.len() as f32).to_string()),
+            n_distinct: Some(n_distinct.to_string()),
             most_common_vals: (!common.is_empty()).then(|| {
                 format!(
                     "{{{}}}",
@@ -6959,10 +7020,10 @@ impl SqlSession {
                 nulls += 1;
                 continue;
             };
-            width = width.saturating_add(value.text.len());
             values.insert(value.text.to_vec());
             *frequencies.entry(value.text.to_vec()).or_default() += 1;
             let decoded = self.plpgsql_decode_cell(field, Some(value)).ok()?;
+            width = width.saturating_add(Self::statistics_width(&decoded));
             if let Datum::Array(array) = &decoded {
                 arrays.push(array.clone());
             }
@@ -7222,6 +7283,32 @@ impl SqlSession {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(100)
+    }
+
+    /// `ANALYZE` records PostgreSQL datum widths, not the length of text output.
+    fn statistics_width(value: &Datum) -> usize {
+        match value {
+            Datum::Bool(_) | Datum::InternalChar(_) => 1,
+            Datum::Int2(_) => 2,
+            Datum::Int4(_) | Datum::Float4(_) | Datum::Date(_) | Datum::Oid(_) => 4,
+            Datum::Int8(_)
+            | Datum::Float8(_)
+            | Datum::Time(_)
+            | Datum::Timestamp(_)
+            | Datum::Timestamptz(_)
+            | Datum::Money(_)
+            | Datum::Xid8(_)
+            | Datum::PgLsn(_) => 8,
+            Datum::Timetz(_) => 12,
+            Datum::Interval(_) => 16,
+            Datum::Tid(_) => 6,
+            Datum::Text(value)
+            | Datum::JsonPath(value)
+            | Datum::Json(value)
+            | Datum::Xml(value) => 4 + value.len(),
+            Datum::Bytea(value) => 4 + value.len(),
+            _ => 4 + crabka_pgtypes::encoding::encode_text(value, &jiff::tz::TimeZone::UTC).len(),
+        }
     }
 
     fn pg_stats_array_element(value: &[u8]) -> String {
@@ -31188,7 +31275,7 @@ mod session_conformance_tests {
                  FROM pg_stats WHERE tablename = 'analyzed' AND attname = 'id'",
             )
             .await
-                == "0.33333334,1,-0.6666666"
+                == "0.33333334,4,-0.6666666"
         );
         assert!(
             scalar(
