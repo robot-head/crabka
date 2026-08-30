@@ -21,6 +21,11 @@ pub fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(U64::new(v).as_bytes());
 }
 
+/// Append a signed 64-bit integer in lexicographic numeric order.
+pub fn put_i64(out: &mut Vec<u8>, v: i64) {
+    put_u64(out, (v as u64) ^ (1_u64 << 63));
+}
+
 /// Decodes and consumes one big-endian `u32` key component.
 ///
 /// # Errors
@@ -98,6 +103,18 @@ mod tests {
         let mut b = Vec::new();
         put_u64(&mut b, 0x0102_0304_0506_0708);
         assert_eq!(b, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    }
+
+    #[test]
+    fn signed_i64_encoding_preserves_numeric_order() {
+        let enc = |v| {
+            let mut bytes = Vec::new();
+            put_i64(&mut bytes, v);
+            bytes
+        };
+        assert!(enc(i64::MIN) < enc(-1));
+        assert!(enc(-1) < enc(0));
+        assert!(enc(0) < enc(i64::MAX));
     }
 
     proptest! {
