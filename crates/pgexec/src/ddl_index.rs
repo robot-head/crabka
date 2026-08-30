@@ -217,19 +217,23 @@ pub(crate) fn validate_index_opclasses(
                 "operator class \"{written}\" does not exist for access method \"{method_name}\""
             ))
         })?;
-        let Some(column) = key.column.as_deref() else {
-            return Err(ExecError::Unsupported(
-                "operator classes on expression index keys are not supported".into(),
-            ));
+        let ty = match key.column.as_deref() {
+            Some(column) => {
+                table
+                    .columns
+                    .iter()
+                    .find(|candidate| candidate.name == column)
+                    .ok_or_else(|| ExecError::UndefinedColumn(column.into()))?
+                    .ty
+            }
+            None => crate::eval::infer_type(
+                &crabka_pgparser::parser::parse_expression(&key.text)?,
+                &Scope::single(table, &table.name.name),
+            )?,
         };
-        let column = table
-            .columns
-            .iter()
-            .find(|candidate| candidate.name == column)
-            .ok_or_else(|| ExecError::UndefinedColumn(column.into()))?;
-        let column_oid = column.ty.oid();
+        let column_oid = ty.oid();
         let binary_text_compatible = input_oid == crabka_pgtypes::oids::TEXT
-            && matches!(column.ty, ColumnType::Text | ColumnType::Varchar(_));
+            && matches!(ty, ColumnType::Text | ColumnType::Varchar(_));
         if input_oid != column_oid && input_oid != 2277 && !binary_text_compatible {
             return Err(ExecError::TypeMismatch(format!(
                 "operator class \"{written}\" does not accept data type {}",

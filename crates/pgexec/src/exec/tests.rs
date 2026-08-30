@@ -3886,10 +3886,15 @@ async fn create_index_resolves_and_validates_operator_classes() {
         "CREATE INDEX i6 ON t (b COLLATE \"C\" text_ops)",
     )
     .await;
+    run_s(&mut session, "CREATE INDEX i7 ON t ((b || b) text_ops)").await;
     let index = crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("i6"))
         .expect("index metadata");
     assert!(index.key_options[0].collation.as_deref() == Some("C"));
     assert!(index.key_options[0].opclass.as_deref() == Some("text_ops"));
+    let expression_index =
+        crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("i7"))
+            .expect("expression index metadata");
+    assert!(expression_index.key_options[0].opclass.as_deref() == Some("text_ops"));
     assert!(
         text_rows_of(&mut session, "SELECT pg_get_indexdef('i6'::regclass)").await
             == vec![text_row(&[
