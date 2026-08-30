@@ -5203,7 +5203,7 @@ async fn q3_fixture() -> SqlEngine {
 async fn distinct_on_keeps_the_first_row_of_each_group() {
     use assert2::assert;
     let engine = q3_fixture().await;
-    let cases: [(&str, &[&[&str]]); 4] = [
+    let cases: [(&str, &[&[&str]]); 5] = [
         (
             "SELECT DISTINCT ON (grp) grp, id FROM q3 ORDER BY grp, id",
             &[&["10", "1"], &["20", "3"], &["NULL", "5"]],
@@ -5219,6 +5219,11 @@ async fn distinct_on_keeps_the_first_row_of_each_group() {
         (
             "SELECT DISTINCT ON (grp, v) id FROM q3 ORDER BY grp, v, id",
             &[&["1"], &["2"], &["3"], &["5"]],
+        ),
+        // A derived input must retain DISTINCT ON's sort-and-first-row step.
+        (
+            "SELECT DISTINCT ON (grp) grp, id FROM (SELECT * FROM q3) s ORDER BY grp, id DESC",
+            &[&["10", "2"], &["20", "4"], &["NULL", "5"]],
         ),
     ];
     for (sql, want) in cases {

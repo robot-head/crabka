@@ -1600,6 +1600,11 @@ fn plan_subquery_scan(
     let TableExpr::Derived { .. } = source else {
         return Ok(None);
     };
+    // This plan can execute plain DISTINCT with Unique, but DISTINCT ON needs
+    // its separate sort-and-first-row semantics from the shared row path.
+    if matches!(select.distinct, DistinctClause::On(_)) {
+        return Ok(None);
+    }
     let aggregate = needs_aggregate_node(select);
     let window = crate::window::has_window_calls(select);
     if !aggregate && crate::grouping::is_grouping_query(select)
