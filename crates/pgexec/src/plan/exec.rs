@@ -711,6 +711,15 @@ fn nested_loop_pruned_columns(
         .map(|target| target.expr.expr())
         .chain(filter.quals.iter().map(|qual| qual.clause.expr()))
         .chain(projection.iter())
+        // These expressions execute above the nested-loop input. Pruning their
+        // columns here turns every group key into NULL when it is not projected.
+        .chain(select.group_by.iter())
+        .chain(select.having.iter())
+        .chain(select.order_by.iter().map(|item| &item.expr))
+        .chain(match &select.distinct {
+            DistinctClause::On(exprs) => exprs.iter(),
+            DistinctClause::All | DistinctClause::Distinct => [].iter(),
+        })
     {
         crate::grouping::visit_expr(expr, &mut |node| {
             if let Expr::Column { table, name } = node {
@@ -3541,6 +3550,47 @@ mod tests {
     }
 
     #[test]
+    fn nested_loop_pruning_keeps_unprojected_group_keys() {
+        let select = select(
+            "SELECT count(*) FROM left_table x, right_table y \
+             WHERE x.a = y.a GROUP BY x.b ORDER BY x.b",
+        );
+        let scope = Scope {
+            columns: vec![
+                ColumnBinding {
+                    exposure: Exposure::Output,
+                    qualifier: Some("x".into()),
+                    name: "a".into(),
+                    ty: ColumnType::Int4,
+                },
+                ColumnBinding {
+                    exposure: Exposure::Output,
+                    qualifier: Some("x".into()),
+                    name: "b".into(),
+                    ty: ColumnType::Int4,
+                },
+                ColumnBinding {
+                    exposure: Exposure::Output,
+                    qualifier: Some("y".into()),
+                    name: "a".into(),
+                    ty: ColumnType::Int4,
+                },
+            ],
+            ..Default::default()
+        };
+        let filter = Plan {
+            target_list: Vec::new(),
+            quals: Vec::new(),
+            node: PlanNode::Result,
+        };
+
+        let kept = nested_loop_pruned_columns(&select, &filter, &[], &scope)
+            .expect("all grouped columns resolve");
+
+        assert!(kept.contains(&scope.columns[1]));
+    }
+
+    #[test]
     fn result_plan_declines_every_shape_owned_by_a_later_node() {
         for sql in [
             "SELECT 1 FROM t",
@@ -3884,5 +3934,39 @@ mod tests {
             panic!("expected count");
         };
         assert!(cell.text.as_ref() == b"128");
+    }
+
+    #[tokio::test]
+    async fn comma_join_keeps_unprojected_group_keys() {
+        use assert2::assert;
+        use crabka_pgwire::engine::{Engine, QueryResult, Session};
+
+        let engine = crate::SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE a (key int4, group_key int4); CREATE TABLE b (key int4); \
+                 INSERT INTO a VALUES (1,1),(2,2),(3,3),(4,4); \
+                 INSERT INTO b VALUES (1),(2),(3),(4)",
+            )
+            .await
+            .expect("fixture");
+
+        let result = session
+            .simple_query(
+                "SELECT count(*) FROM a x, b y WHERE x.key = y.key \
+                 GROUP BY x.group_key ORDER BY x.group_key",
+            )
+            .await
+            .expect("unprojected group key must survive the nested-loop input");
+        let [QueryResult::Rows { rows, .. }] = result.as_slice() else {
+            panic!("expected rows");
+        };
+        assert!(rows.len() == 4);
+        assert!(rows.iter().all(|row| {
+            row[0]
+                .as_ref()
+                .is_some_and(|cell| cell.text.as_ref() == b"1")
+        }));
     }
 }
