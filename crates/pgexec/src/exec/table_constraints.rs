@@ -43,6 +43,7 @@ pub(super) fn create_table_constraint_index(
         columns: columns.to_vec(),
         include: Vec::new(),
         predicate: None,
+        nulls_not_distinct: false,
         unique: true,
         placement: crabka_pgcatalog::IndexPlacement::Local,
         method: if without_overlaps {

@@ -2878,7 +2878,7 @@ pub(crate) fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
                 Datum::Int2(natts),
                 Datum::Int2(nkeyatts),
                 Datum::Bool(index.unique),
-                Datum::Bool(false),
+                Datum::Bool(index.nulls_not_distinct),
                 // The catalog knows which index backs the primary key; ORMs
                 // introspecting for upserts key off exactly this column.
                 Datum::Bool(

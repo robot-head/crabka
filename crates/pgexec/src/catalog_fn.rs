@@ -3415,6 +3415,9 @@ fn index_definition_as(index: &Index, table: &Table, qualify: bool) -> String {
         definition.push_str(&quoted_column_list(&index.include));
         definition.push(')');
     }
+    if index.nulls_not_distinct {
+        definition.push_str(" NULLS NOT DISTINCT");
+    }
     if let Some(predicate) = &index.predicate {
         definition.push_str(" WHERE (");
         definition.push_str(predicate);

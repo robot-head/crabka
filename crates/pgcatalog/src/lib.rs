@@ -424,6 +424,8 @@ pub struct Index {
     pub include: Vec<String>,
     /// Source text of a partial-index predicate, without the `WHERE` keyword.
     pub predicate: Option<String>,
+    /// `NULLS NOT DISTINCT` makes a unique key treat NULL values as equal.
+    pub nulls_not_distinct: bool,
     pub unique: bool,
     pub placement: IndexPlacement,
     pub method: IndexMethod,
@@ -496,6 +498,8 @@ pub struct NewIndex {
     pub include: Vec<String>,
     /// See [`Index::predicate`]. Constraint indexes are never partial.
     pub predicate: Option<String>,
+    /// See [`Index::nulls_not_distinct`]. Constraint indexes always use false.
+    pub nulls_not_distinct: bool,
     pub unique: bool,
     pub placement: IndexPlacement,
     pub method: IndexMethod,
@@ -4540,6 +4544,7 @@ pub fn create_index_with_method_ops(
         method,
         None,
         Vec::new(),
+        false,
     )
 }
 
@@ -4558,6 +4563,7 @@ pub fn create_index_with_method_and_predicate_ops(
     method: IndexMethod,
     predicate: Option<String>,
     include: Vec<String>,
+    nulls_not_distinct: bool,
 ) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
     if kv.get(&catalog_index_key(&table.sibling(name)))?.is_some() {
         return Err(CatalogError::DuplicateIndex(name.to_string()));
@@ -4574,6 +4580,7 @@ pub fn create_index_with_method_and_predicate_ops(
         columns,
         include,
         predicate,
+        nulls_not_distinct,
         unique,
         placement,
         method,
@@ -4631,6 +4638,7 @@ pub fn create_index_on_table_ops(
         columns,
         include: Vec::new(),
         predicate: None,
+        nulls_not_distinct: false,
         unique,
         placement,
         method: IndexMethod::Btree,
@@ -4692,6 +4700,7 @@ pub fn create_constraint_index_ops(
         columns: new_index.columns.clone(),
         include: new_index.include.clone(),
         predicate: new_index.predicate.clone(),
+        nulls_not_distinct: new_index.nulls_not_distinct,
         unique: new_index.unique,
         placement: new_index.placement,
         method: new_index.method,
@@ -4803,6 +4812,7 @@ pub fn create_indexes_on_table_ops(
             columns: new_index.columns.clone(),
             include: new_index.include.clone(),
             predicate: new_index.predicate.clone(),
+            nulls_not_distinct: new_index.nulls_not_distinct,
             unique: new_index.unique,
             placement: new_index.placement,
             method: new_index.method,
@@ -9339,6 +9349,7 @@ mod tests {
                 columns: vec!["id".into()],
                 include: Vec::new(),
                 predicate: None,
+                nulls_not_distinct: false,
                 unique: true,
                 placement: IndexPlacement::Local,
                 method: IndexMethod::Btree,
@@ -10832,6 +10843,7 @@ mod tests {
             columns: vec!["name".into()],
             include: Vec::new(),
             predicate: None,
+            nulls_not_distinct: false,
             unique: true,
             placement: IndexPlacement::Global,
             method: IndexMethod::Btree,

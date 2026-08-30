@@ -3813,6 +3813,41 @@ async fn unique_btree_expression_indexes_enforce_the_expression_value() {
 }
 
 #[tokio::test]
+async fn unique_indexes_can_treat_nulls_as_not_distinct() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE TABLE t (a int4)").await;
+    run_s(
+        &mut session,
+        "CREATE UNIQUE INDEX t_a_key ON t (a) NULLS NOT DISTINCT",
+    )
+    .await;
+
+    let index = crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_a_key"))
+        .expect("unique index");
+    assert!(index.nulls_not_distinct);
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT indnullsnotdistinct FROM pg_index WHERE indexrelid = 't_a_key'::regclass",
+        )
+        .await
+            == vec![text_row(&["t"])]
+    );
+    assert!(
+        text_rows_of(&mut session, "SELECT pg_get_indexdef('t_a_key'::regclass)").await
+            == vec![text_row(&[
+                "CREATE UNIQUE INDEX t_a_key ON public.t USING btree (a) NULLS NOT DISTINCT"
+            ])]
+    );
+
+    run_s(&mut session, "INSERT INTO t VALUES (NULL)").await;
+    assert!(sqlstate_of(&mut session, "INSERT INTO t VALUES (NULL)").await == "23505");
+}
+
+#[tokio::test]
 async fn create_index_resolves_and_validates_operator_classes() {
     use assert2::assert;
     let engine = SqlEngine::new();
@@ -11122,6 +11157,7 @@ fn arbiter_fixture(
                 columns: cols.iter().map(|c| (*c).to_string()).collect(),
                 include: Vec::new(),
                 predicate: None,
+                nulls_not_distinct: false,
                 unique: *unique,
                 placement: crabka_pgcatalog::IndexPlacement::Local,
                 method: crabka_pgcatalog::IndexMethod::Btree,

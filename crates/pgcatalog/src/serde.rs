@@ -60,7 +60,8 @@ const TABLE_OPTION_KNOWN: u8 =
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 9;
+const INDEX_VERSION: u8 = 10;
+const INDEX_VERSION_INCLUDE: u8 = 9;
 const INDEX_VERSION_PREDICATE: u8 = 8;
 const INDEX_VERSION_LEGACY: u8 = 7;
 const SEQUENCE_VERSION: u8 = 1;
@@ -1603,6 +1604,7 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
     for column in &index.include {
         write_str(&mut out, column);
     }
+    out.push(u8::from(index.nulls_not_distinct));
     out
 }
 
@@ -1620,6 +1622,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
     if version != INDEX_VERSION
+        && version != INDEX_VERSION_INCLUDE
         && version != INDEX_VERSION_PREDICATE
         && version != INDEX_VERSION_LEGACY
     {
@@ -1744,7 +1747,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
             }
         }
     };
-    let include = if version == INDEX_VERSION {
+    let include = if version >= INDEX_VERSION_INCLUDE {
         let count = usize::try_from(u32::from_be_bytes(
             take_n(&mut cur, 4)?.try_into().expect("4"),
         ))
@@ -1756,6 +1759,19 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         include
     } else {
         Vec::new()
+    };
+    let nulls_not_distinct = if version == INDEX_VERSION {
+        match take_u8(&mut cur)? {
+            0 => false,
+            1 => true,
+            flag => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown index NULLS NOT DISTINCT flag {flag}"
+                )));
+            }
+        }
+    } else {
+        false
     };
     if let Some(IndexConstraint::Exclusion(operators)) = &constraint
         && operators.len() != columns.len()
@@ -1772,6 +1788,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         columns,
         include,
         predicate,
+        nulls_not_distinct,
         unique,
         placement,
         method,
@@ -3884,6 +3901,7 @@ mod tests {
                 columns: vec!["email".into()],
                 include: vec!["name".into()],
                 predicate: Some("email IS NOT NULL".into()),
+                nulls_not_distinct: true,
                 unique: true,
                 placement: IndexPlacement::Global,
                 method,
@@ -3906,6 +3924,7 @@ mod tests {
             columns: vec!["room".into(), "during".into()],
             include: Vec::new(),
             predicate: None,
+            nulls_not_distinct: false,
             unique: false,
             placement: IndexPlacement::Local,
             method: IndexMethod::Gist,
@@ -3934,6 +3953,7 @@ mod tests {
             columns: vec!["id".into(), "valid_at".into()],
             include: Vec::new(),
             predicate: None,
+            nulls_not_distinct: false,
             unique: true,
             placement: IndexPlacement::Local,
             method: IndexMethod::Gist,
@@ -3965,6 +3985,7 @@ mod tests {
                     columns: vec!["placed".into()],
                     include: Vec::new(),
                     predicate: None,
+                    nulls_not_distinct: false,
                     unique: false,
                     placement: IndexPlacement::Local,
                     method: IndexMethod::Btree,
@@ -4000,6 +4021,7 @@ mod tests {
                 columns: vec!["i".into()],
                 include: Vec::new(),
                 predicate: None,
+                nulls_not_distinct: false,
                 unique: true,
                 placement: IndexPlacement::Local,
                 method: IndexMethod::Btree,

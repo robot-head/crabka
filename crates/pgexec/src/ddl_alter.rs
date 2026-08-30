@@ -1085,6 +1085,7 @@ pub(crate) fn execute_ddl(
             concurrently,
             method,
             include,
+            nulls_not_distinct,
             predicate,
             tablespace,
         } => {
@@ -1170,6 +1171,11 @@ pub(crate) fn execute_ddl(
             validate_index_expressions(&table_meta, keys, *unique, placement, index_method)?;
             validate_index_predicate(&table_meta, predicate.as_deref())?;
             validate_index_method(&table_meta, columns, *unique, placement, index_method)?;
+            if *nulls_not_distinct && !unique {
+                return Err(ExecError::Unsupported(
+                    "NULLS NOT DISTINCT is only supported for unique indexes".into(),
+                ));
+            }
             let (id, mut ops) = crabka_pgcatalog::create_index_with_method_and_predicate_ops(
                 kv,
                 &name.name,
@@ -1180,6 +1186,7 @@ pub(crate) fn execute_ddl(
                 index_method,
                 predicate.clone(),
                 include.clone(),
+                *nulls_not_distinct,
             )?;
             if let Some(tablespace) = tablespace {
                 let oid = resolve_relation_tablespace_oid(kv, tablespace)?;
@@ -1195,6 +1202,7 @@ pub(crate) fn execute_ddl(
                     columns: columns.clone(),
                     include: include.clone(),
                     predicate: predicate.clone(),
+                    nulls_not_distinct: *nulls_not_distinct,
                     unique: *unique,
                     placement,
                     method: index_method,

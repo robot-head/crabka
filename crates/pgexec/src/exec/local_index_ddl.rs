@@ -114,7 +114,7 @@ pub(crate) fn local_index_backfill_ops_for_rows(
     let mut ops = Vec::with_capacity(rows.len());
     for (rowid, _xmin, row) in rows {
         for values in index_entries(table, index, row)? {
-            if values.iter().any(Datum::is_null) {
+            if values.iter().any(Datum::is_null) && !index.nulls_not_distinct {
                 continue;
             }
             if index.unique && !seen.insert(values.clone()) {

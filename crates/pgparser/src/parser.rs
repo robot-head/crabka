@@ -9402,11 +9402,13 @@ impl Parser {
         } else {
             Vec::new()
         };
-        if self.eat_ident_eq("nulls") {
+        let nulls_not_distinct = if self.eat_ident_eq("nulls") {
             let not = self.eat_keyword(Keyword::Not);
             self.expect(&Token::Keyword(Keyword::Distinct))?;
-            let _ = not;
-        }
+            not
+        } else {
+            false
+        };
         if self.eat_keyword(Keyword::With) {
             // The access method decides which options exist: `fillfactor` is a
             // btree, hash, gist and spgist option but not a GIN or BRIN one,
@@ -9439,6 +9441,7 @@ impl Parser {
             concurrently,
             method,
             include,
+            nulls_not_distinct,
             predicate,
             tablespace,
         })
@@ -9469,9 +9472,10 @@ impl Parser {
             };
             let text_end = self.peek_pos();
             let mut text = self.source[start..text_end].trim().to_string();
-            if self.eat_ident_eq("collate") {
-                self.expect_col_id()?;
-            }
+            let collation = self
+                .eat_ident_eq("collate")
+                .then(|| self.expect_col_id())
+                .transpose()?;
             // An operator-class name is a bare identifier in the one position
             // where nothing else can appear.
             let opclass = if matches!(self.peek(), Token::Ident(_))
@@ -9504,6 +9508,7 @@ impl Parser {
                 column,
                 text,
                 opclass,
+                collation,
                 descending,
                 nulls_first,
             });
@@ -10682,6 +10687,7 @@ impl Parser {
             concurrently: false,
             method: None,
             include: Vec::new(),
+            nulls_not_distinct: false,
             predicate: None,
             tablespace: None,
         })
@@ -17832,6 +17838,7 @@ fn encode_sequence_options(options: &crate::ast::SequenceOptions) -> Vec<crate::
             column: None,
             text,
             opclass: None,
+            collation: None,
             descending: false,
             nulls_first: None,
         })
@@ -20207,6 +20214,7 @@ mod tests {
                 concurrently: false,
                 method: None,
                 include: Vec::new(),
+                nulls_not_distinct: false,
                 predicate: None,
                 tablespace: None,
             }
@@ -20223,6 +20231,7 @@ mod tests {
                 concurrently: false,
                 method: None,
                 include: Vec::new(),
+                nulls_not_distinct: false,
                 predicate: None,
                 tablespace: None,
             }
@@ -25280,6 +25289,7 @@ mod tests {
             column: Some(column.into()),
             text: column.into(),
             opclass: None,
+            collation: None,
             descending: false,
             nulls_first: None,
         }
@@ -25306,6 +25316,19 @@ mod tests {
             assert!(keys[0].column.as_deref() == Some("a"), "{sql}");
             assert!(keys[0].opclass.as_deref() == Some(expected), "{sql}");
         }
+
+        let Statement::CreateIndex {
+            keys,
+            nulls_not_distinct,
+            ..
+        } = one("CREATE UNIQUE INDEX i ON t (a COLLATE c DESC NULLS FIRST) NULLS NOT DISTINCT")
+        else {
+            panic!("expected CREATE INDEX");
+        };
+        assert!(keys[0].collation.as_deref() == Some("c"));
+        assert!(keys[0].descending);
+        assert!(keys[0].nulls_first == Some(true));
+        assert!(nulls_not_distinct);
 
         let Statement::CreateIndex { keys, .. } = one("CREATE INDEX i ON t ((lower(a)) text_ops)")
         else {

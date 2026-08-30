@@ -667,6 +667,8 @@ pub enum Statement {
         method: Option<String>,
         /// `INCLUDE (col, …)` non-key payload columns.
         include: Vec<String>,
+        /// `NULLS NOT DISTINCT`: unique keys treat NULL values as equal.
+        nulls_not_distinct: bool,
         /// Source text of a partial index's `WHERE` predicate.
         predicate: Option<String>,
         tablespace: Option<String>,
@@ -2810,6 +2812,8 @@ pub struct IndexKey {
     pub text: String,
     /// The operator-class name, when written.
     pub opclass: Option<String>,
+    /// The explicitly written collation, if any.
+    pub collation: Option<String>,
     pub descending: bool,
     /// `NULLS FIRST` (`Some(true)`) / `NULLS LAST` (`Some(false)`); `None` when
     /// the clause is absent and `PostgreSQL`'s direction-derived default applies.

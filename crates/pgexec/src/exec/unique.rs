@@ -319,7 +319,7 @@ pub(super) async fn enforce_unique_local_index(
     values: Vec<Datum>,
     writes: &mut StatementWrites,
 ) -> Result<(), ExecError> {
-    if values.iter().any(Datum::is_null) {
+    if values.iter().any(Datum::is_null) && !index.nulls_not_distinct {
         // SQL unique ignores NULLs: nothing to enforce, so no key lock either.
         return Ok(());
     }
@@ -614,7 +614,7 @@ pub(super) async fn arbitrate_insert_row(
     'arbitration: loop {
         for index in arbiters {
             let values = indexed_values(table, index, proposed)?;
-            if values.iter().any(Datum::is_null) {
+            if values.iter().any(Datum::is_null) && !index.nulls_not_distinct {
                 continue;
             }
             // An overlap conflict is not a key collision, so it is found by the

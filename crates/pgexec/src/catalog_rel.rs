@@ -5471,6 +5471,7 @@ mod tests {
                 columns: index_columns.iter().map(|c| (*c).to_string()).collect(),
                 include: Vec::new(),
                 predicate: None,
+                nulls_not_distinct: false,
                 unique: true,
                 method: IndexMethod::Btree,
                 placement: IndexPlacement::Local,
