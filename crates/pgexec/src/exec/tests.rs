@@ -842,6 +842,18 @@ async fn analyze_derives_functional_dependencies_for_statistics_objects() {
         .await
             == vec![text_row(&[r#"{"1 => 2": 1.000000, "2 => 1": 1.000000}"#])]
     );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT statistics_name, attnames::text, dependencies FROM pg_stats_ext",
+        )
+        .await
+            == vec![text_row(&[
+                "stat_dependencies_s",
+                "{a,b}",
+                r#"{"1 => 2": 1.000000, "2 => 1": 1.000000}"#,
+            ])]
+    );
     run_s(
         &mut session,
         "TRUNCATE stat_dependencies; INSERT INTO stat_dependencies VALUES (1, 1), (1, 1), (2, 1); ANALYZE stat_dependencies",
@@ -854,6 +866,45 @@ async fn analyze_derives_functional_dependencies_for_statistics_objects() {
         )
         .await
             == vec![text_row(&[r#"{"1 => 2": 1.000000}"#])]
+    );
+}
+
+#[tokio::test]
+async fn pg_stats_ext_hides_data_from_nonowners() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(&mut session, "CREATE USER stats_reader").await;
+    run_s(&mut session, "CREATE TABLE stat_visibility (a int, b int)").await;
+    run_s(
+        &mut session,
+        "CREATE STATISTICS stat_visibility_s (dependencies) ON a, b FROM stat_visibility; \
+         INSERT INTO stat_visibility VALUES (1, 1), (2, 2); ANALYZE stat_visibility",
+    )
+    .await;
+    run_s(&mut session, "SET SESSION AUTHORIZATION stats_reader").await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT statistics_name FROM pg_stats_ext WHERE tablename = 'stat_visibility'",
+        )
+        .await
+            == Vec::<Vec<Option<String>>>::new()
+    );
+    run_s(
+        &mut session,
+        "RESET SESSION AUTHORIZATION; ALTER TABLE stat_visibility OWNER TO stats_reader; \
+         SET SESSION AUTHORIZATION stats_reader",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT statistics_name FROM pg_stats_ext WHERE tablename = 'stat_visibility'",
+        )
+        .await
+            == vec![text_row(&["stat_visibility_s"])]
     );
 }
 

@@ -61,6 +61,7 @@ pub(crate) fn virtual_table(name: &str) -> Option<&'static str> {
         "pg_user" => Some("pg_user"),
         "pg_statistic" => Some("pg_statistic"),
         "pg_stats" => Some("pg_stats"),
+        "pg_stats_ext" => Some("pg_stats_ext"),
         _ => None,
     }
     .or_else(|| match name.strip_prefix("information_schema.")? {
@@ -338,6 +339,32 @@ pub(crate) fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("range_length_histogram", Text),
             ("range_empty_frac", ColumnType::Float4),
             ("range_bounds_histogram", Text),
+        ]),
+        "pg_stats_ext" => cols(&[
+            ("schemaname", Text),
+            ("tablename", Text),
+            ("statistics_schemaname", Text),
+            ("statistics_name", Text),
+            ("statistics_owner", Text),
+            (
+                "attnames",
+                ColumnType::Array(crabka_pgtypes::ElemType::Text),
+            ),
+            ("exprs", ColumnType::Array(crabka_pgtypes::ElemType::Text)),
+            ("kinds", ColumnType::Array(crabka_pgtypes::ElemType::Text)),
+            ("inherited", Bool),
+            ("n_distinct", Text),
+            ("dependencies", Text),
+            ("most_common_vals", Text),
+            ("most_common_val_nulls", Text),
+            (
+                "most_common_freqs",
+                ColumnType::Array(crabka_pgtypes::ElemType::Float4),
+            ),
+            (
+                "most_common_base_freqs",
+                ColumnType::Array(crabka_pgtypes::ElemType::Float4),
+            ),
         ]),
         // The full standard projection, in PostgreSQL 18.4's column order. The
         // three `default_character_set_*` columns and `sql_path` are NULL in

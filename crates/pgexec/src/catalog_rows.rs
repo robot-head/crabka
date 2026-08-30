@@ -115,6 +115,7 @@ pub(crate) fn virtual_catalog_rows(
         "pg_user" => pg_user_rows(catalog_kv),
         "pg_statistic" => pg_statistic_rows(catalog_kv),
         "pg_stats" => pg_stats_rows(catalog_kv),
+        "pg_stats_ext" => pg_stats_ext_rows(catalog_kv, ctx),
         "information_schema.schemata" => {
             information_schema_schemata_rows(catalog_kv, ctx.database())
         }
@@ -3506,6 +3507,79 @@ pub(crate) fn pg_stats_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
     Ok(rows)
 }
 
+/// `pg_stats_ext` exposes analyzed extended statistics to roles that own the
+/// source relation (or inherit that ownership).
+pub(crate) fn pg_stats_ext_rows(
+    catalog_kv: &dyn Kv,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let role = if ctx.current_user == crabka_pgcatalog::PUBLIC_ROLE {
+        crabka_pgcatalog::BOOTSTRAP_ROLE
+    } else {
+        &ctx.current_user
+    };
+    let superuser = crate::rls::role_is_superuser(catalog_kv, role)?;
+    let tables = crabka_pgcatalog::list_tables(catalog_kv)?;
+    let mut rows = Vec::new();
+    for object in crabka_pgcatalog::statistics::list(catalog_kv)? {
+        let Some(data) = object.data else { continue };
+        let Some(table) = tables.iter().find(|table| table.id == object.table_id) else {
+            continue;
+        };
+        if table.row_security
+            || (!superuser && !crabka_pgcatalog::role_has_privs_of(catalog_kv, role, &table.owner)?)
+        {
+            continue;
+        }
+        let attnames = object
+            .keys
+            .iter()
+            .filter_map(|key| {
+                (*key > 0)
+                    .then(|| usize::try_from(*key - 1).ok())
+                    .flatten()
+                    .and_then(|index| table.columns.get(index))
+                    .map(|column| Datum::Text(column.name.clone()))
+            })
+            .collect::<Vec<_>>();
+        rows.push(vec![
+            text(&table.name.schema),
+            text(&table.name.name),
+            text(&object.name.schema),
+            text(&object.name.name),
+            text(&object.owner),
+            (!attnames.is_empty())
+                .then(|| {
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Text,
+                        attnames,
+                    ))
+                })
+                .unwrap_or(Datum::Null),
+            (!object.expressions.is_empty())
+                .then(|| {
+                    Datum::Array(crabka_pgtypes::ArrayValue::new(
+                        crabka_pgtypes::ElemType::Text,
+                        object.expressions.into_iter().map(Datum::Text).collect(),
+                    ))
+                })
+                .unwrap_or(Datum::Null),
+            Datum::Array(crabka_pgtypes::ArrayValue::new(
+                crabka_pgtypes::ElemType::Text,
+                object.kinds.into_iter().map(Datum::Text).collect(),
+            )),
+            Datum::Bool(data.inherited),
+            data.ndistinct.map_or(Datum::Null, Datum::Text),
+            data.dependencies.map_or(Datum::Null, Datum::Text),
+            Datum::Null,
+            Datum::Null,
+            Datum::Null,
+            Datum::Null,
+        ]);
+    }
+    Ok(rows)
+}
+
 /// `pg_statistic` is the durable form of the same records `pg_stats` projects.
 /// Slots use PostgreSQL's fixed kind ordering, which is also the ordering the
 /// restore function reconstructs from `pg_stats` during pg_dump-style copies.
@@ -3624,6 +3698,7 @@ pub(crate) fn virtual_table_names() -> &'static [&'static str] {
             "pg_user",
             "pg_statistic",
             "pg_stats",
+            "pg_stats_ext",
             "information_schema.schemata",
             "information_schema.tables",
             "information_schema.columns",
@@ -4047,6 +4122,7 @@ pub(crate) fn virtual_relation_oid(name: &str) -> i32 {
         "pg_user" => 100_002,
         "pg_statistic" => 2619,
         "pg_stats" => 100_006,
+        "pg_stats_ext" => 100_007,
         "information_schema.schemata" => 100_010,
         "information_schema.tables" => 100_011,
         "information_schema.columns" => 100_012,
