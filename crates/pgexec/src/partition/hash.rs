@@ -227,6 +227,24 @@ pub(crate) fn hash_int32_extended(value: i32, seed: u64) -> i64 {
     i64::from_ne_bytes(hash_uint32_extended(value.cast_unsigned(), seed).to_ne_bytes())
 }
 
+/// PostgreSQL's `hashfloat8`, including the zero and NaN canonicalizations
+/// that preserve equality-compatible hashes.
+pub(crate) fn hash_float64(value: f64) -> i32 {
+    let [b0, b1, b2, b3, _, _, _, _] = hash_float64_extended(value, 0).to_ne_bytes();
+    i32::from_ne_bytes([b0, b1, b2, b3])
+}
+
+/// PostgreSQL's `hashfloat8extended`; `hashfloat4extended` widens first and
+/// uses this same routine.
+pub(crate) fn hash_float64_extended(value: f64, seed: u64) -> u64 {
+    if value == 0.0 {
+        return seed;
+    }
+    let canonical = if value.is_nan() { f64::NAN } else { value };
+    hash_bytes_extended(&canonical.to_ne_bytes(), seed)
+        .expect("an eight-byte floating-point value always fits PostgreSQL's hash input")
+}
+
 /// `hashint8extended`: fold the high half into the low half so an int8 and an
 /// int4 of equal value hash alike, then hash the folded word.
 pub(crate) fn hash_int64_extended(value: i64, seed: u64) -> u64 {
