@@ -699,6 +699,19 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
     );
     run_s(
         &mut session,
+        "COMMENT ON STATISTICS stat_ddl_s IS 'derived' ",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT obj_description(oid, 'pg_statistic_ext') FROM pg_statistic_ext",
+        )
+        .await
+            == vec![text_row(&["derived"])]
+    );
+    run_s(
+        &mut session,
         "INSERT INTO stat_ddl VALUES (1, 1), (1, 1), (2, 1); ANALYZE stat_ddl",
     )
     .await;
@@ -775,6 +788,14 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
     run_s(&mut session, "DROP TABLE stat_ddl").await;
     assert!(
         text_rows_of(&mut session, "SELECT count(*)::text FROM pg_statistic_ext").await
+            == vec![text_row(&["0"])]
+    );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT count(*)::text FROM pg_description WHERE classoid = 'pg_statistic_ext'::regclass",
+        )
+        .await
             == vec![text_row(&["0"])]
     );
 }

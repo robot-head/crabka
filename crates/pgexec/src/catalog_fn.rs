@@ -3209,6 +3209,21 @@ fn object_description(
             CommentObject::Named(&method.oid.to_string()),
         );
     }
+    if class_oid == crate::catalog_rel::relation_oid("pg_statistic_ext") {
+        let oid = u32::try_from(crate::func::int_arg(&values[0])?)
+            .map_err(|_| ExecError::Unsupported("statistics OID is out of range".into()))?;
+        let Some(statistics) = crabka_pgcatalog::statistics::list(kv)?
+            .into_iter()
+            .find(|statistics| statistics.oid == oid)
+        else {
+            return Ok(Datum::Null);
+        };
+        return comment_datum(
+            kv,
+            "statistics",
+            CommentObject::Named(&statistics.oid.to_string()),
+        );
+    }
     if class_oid != crate::catalog_rel::relation_oid("pg_largeobject") {
         return description(kv, scope, &values[0], 0);
     }

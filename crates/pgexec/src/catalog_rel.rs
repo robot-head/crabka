@@ -3353,6 +3353,19 @@ fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             ]);
         }
     }
+    for statistics in crabka_pgcatalog::statistics::list(kv)? {
+        let oid = statistics.oid.to_string();
+        if let Some(comment) =
+            crabka_pgcatalog::get_comment(kv, "statistics", CommentObject::Named(&oid))?
+        {
+            rows.push(vec![
+                int(i32::try_from(statistics.oid).expect("statistics oid fits int4")),
+                int(relation_oid("pg_statistic_ext")),
+                int(0),
+                text(&comment),
+            ]);
+        }
+    }
     for wrapper in crabka_pgcatalog::list_fdws(kv)? {
         if let Some(comment) = crabka_pgcatalog::get_comment(
             kv,

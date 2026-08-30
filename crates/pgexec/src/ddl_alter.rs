@@ -780,6 +780,7 @@ pub(crate) fn execute_ddl(
             aggregate.as_ref(),
             cast.as_ref(),
             comment.as_deref(),
+            fctx.effective_role(),
         ),
         Statement::CreateView {
             name,
@@ -8661,8 +8662,29 @@ pub(crate) fn comment_ops(
     aggregate: Option<&crabka_pgparser::ast::AggregateSignature>,
     cast: Option<&(ColumnType, ColumnType)>,
     comment: Option<&str>,
+    role: &str,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     use crabka_pgcatalog::CommentObject;
+
+    if object_kind == "statistics" {
+        let reference = match object_name.split_once('.') {
+            Some((schema, name)) => crabka_pgparser::ast::RelationRef::qualified(schema, name),
+            None => crabka_pgparser::ast::RelationRef::bare(object_name),
+        };
+        let name = resolve_relation(kv, resolution, &reference, SchemaDisposition::Utility)?;
+        let object = crabka_pgcatalog::statistics::get(kv, &name)?
+            .ok_or_else(|| crabka_pgcatalog::CatalogError::UndefinedObject(name.to_string()))?;
+        crate::statistics_ddl::require_statistics_owner(kv, &object, role)?;
+        let oid = object.oid.to_string();
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(&oid),
+                comment,
+            )],
+        ));
+    }
 
     if object_kind == "large object" {
         let oid = object_name

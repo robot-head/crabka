@@ -192,7 +192,11 @@ pub(crate) fn create(
     ))
 }
 
-fn require_statistics_owner(kv: &dyn Kv, object: &Statistics, role: &str) -> Result<(), ExecError> {
+pub(crate) fn require_statistics_owner(
+    kv: &dyn Kv,
+    object: &Statistics,
+    role: &str,
+) -> Result<(), ExecError> {
     if crabka_pgcatalog::role_has_privs_of(kv, role, &object.owner)?
         || crate::rls::role_is_superuser(kv, role)?
     {

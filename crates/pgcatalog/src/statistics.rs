@@ -6,7 +6,7 @@
 
 use crabka_pgkv::{Kv, KvError, WriteOp, key::push_key_part};
 
-use crate::{CatalogError, RelationName, TableId};
+use crate::{CatalogError, CommentObject, RelationName, TableId, set_comment_op};
 
 /// The first OID handed to an extended-statistics object.
 pub const STATISTICS_OID_BASE: u32 = 180_000;
@@ -115,10 +115,12 @@ pub fn put_op(object: &Statistics) -> WriteOp {
 
 /// Drop one object.
 pub fn drop_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, CatalogError> {
-    if get(kv, name)?.is_none() {
-        return Err(CatalogError::UndefinedObject(name.to_string()));
-    }
-    Ok(vec![WriteOp::Delete { key: key(name) }])
+    let object = get(kv, name)?.ok_or_else(|| CatalogError::UndefinedObject(name.to_string()))?;
+    let oid = object.oid.to_string();
+    Ok(vec![
+        WriteOp::Delete { key: key(name) },
+        set_comment_op("statistics", CommentObject::Named(&oid), None),
+    ])
 }
 
 /// Rename an object, preserving its OID and every definition field.
@@ -140,8 +142,14 @@ pub fn drop_for_table_ops(kv: &dyn Kv, table_id: TableId) -> Result<Vec<WriteOp>
     Ok(list(kv)?
         .into_iter()
         .filter(|object| object.table_id == table_id)
-        .map(|object| WriteOp::Delete {
-            key: key(&object.name),
+        .flat_map(|object| {
+            let oid = object.oid.to_string();
+            [
+                WriteOp::Delete {
+                    key: key(&object.name),
+                },
+                set_comment_op("statistics", CommentObject::Named(&oid), None),
+            ]
         })
         .collect())
 }
@@ -304,10 +312,10 @@ mod tests {
     use crabka_pgkv::{Kv, MemKv};
 
     use super::{
-        STATISTICS_OID_BASE, Statistics, StatisticsData, create_ops, drop_for_table_ops, get, list,
-        next_oid, rename_ops,
+        STATISTICS_OID_BASE, Statistics, StatisticsData, create_ops, drop_for_table_ops, drop_ops,
+        get, list, next_oid, rename_ops,
     };
-    use crate::RelationName;
+    use crate::{CommentObject, RelationName, get_comment, set_comment_op};
 
     fn object(name: &str, table_id: u32) -> Statistics {
         Statistics {
@@ -365,6 +373,32 @@ mod tests {
                 .expect("present")
                 .data
                 == record.data
+        );
+    }
+
+    #[test]
+    fn dropping_statistics_removes_its_comment() {
+        let kv = MemKv::new();
+        let name = RelationName::public("s");
+        kv.write_batch(&create_ops(&kv, &object("s", 42)).expect("create"))
+            .expect("write");
+        let oid = get(&kv, &name)
+            .expect("get")
+            .expect("present")
+            .oid
+            .to_string();
+        kv.write_batch(&[set_comment_op(
+            "statistics",
+            CommentObject::Named(&oid),
+            Some("comment"),
+        )])
+        .expect("comment");
+        kv.write_batch(&drop_ops(&kv, &name).expect("drop"))
+            .expect("write drop");
+        assert!(
+            get_comment(&kv, "statistics", CommentObject::Named(&oid))
+                .expect("comment")
+                .is_none()
         );
     }
 }
