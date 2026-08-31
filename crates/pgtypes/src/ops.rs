@@ -666,7 +666,7 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
             });
         }
         (Datum::TsVector(x), Datum::TsVector(y)) => x.cmp(y),
-        (Datum::TsQuery(x), Datum::TsQuery(y)) => x.cmp(y),
+        (Datum::TsQuery(x), Datum::TsQuery(y)) => x.postgres_cmp(y),
         // `network_cmp`: one comparison for `inet` and `cidr` alike, so a
         // `cidr` and an `inet` naming the same address compare equal.
         (Datum::Money(x), Datum::Money(y)) => x.cmp(y),
@@ -1106,6 +1106,35 @@ pub fn cmp_to_bool(op_holds: bool, ord: Option<Ordering>) -> Datum {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tsquery_comparisons_follow_postgresql_storage_order() {
+        use std::cmp::Ordering;
+
+        use assert2::assert;
+
+        use super::{Datum, compare};
+        use crate::TsQuery;
+
+        let target = "new <-> york".parse::<TsQuery>().expect("target query");
+        let cases = [
+            ("moscow", Ordering::Less),
+            ("5 <-> 6", Ordering::Less),
+            ("new <-> york", Ordering::Equal),
+            ("far <-> away", Ordering::Greater),
+            ("sanct <-> peter", Ordering::Greater),
+            ("1 & (2 <-> 3)", Ordering::Greater),
+            ("foo & bar & qq", Ordering::Greater),
+        ];
+
+        for (input, expected) in cases {
+            let query = input.parse::<TsQuery>().expect("query");
+            assert!(
+                compare(&Datum::TsQuery(query), &Datum::TsQuery(target.clone()))
+                    == Ok(Some(expected))
+            );
+        }
+    }
+
     /// `time` and `timetz` have no infinity, so PostgreSQL refuses to shift one
     /// by an infinite interval (22008). The alternative is a silent wrap of the
     /// clock by the sentinel's microseconds, which gives a wrong time-of-day.

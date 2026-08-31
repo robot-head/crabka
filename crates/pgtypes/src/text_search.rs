@@ -285,6 +285,36 @@ impl TsQuery {
                 query.into_query()
             })
     }
+
+    /// Compare queries using PostgreSQL's on-disk `tsquery` order.
+    #[must_use]
+    pub fn postgres_cmp(&self, other: &Self) -> Ordering {
+        let node_count = self.node_count().cmp(&other.node_count());
+        if !node_count.is_eq() {
+            return node_count;
+        }
+        let operand_bytes = self
+            .operand_storage_bytes()
+            .cmp(&other.operand_storage_bytes());
+        if !operand_bytes.is_eq() {
+            return operand_bytes;
+        }
+        match (Qtn::from_query(self), Qtn::from_query(other)) {
+            (Some(left), Some(right)) => Qtn::compare(&left, &right),
+            _ => Ordering::Equal,
+        }
+    }
+
+    fn operand_storage_bytes(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::Term(term) => term.text.len() + 1,
+            Self::Not(query) => query.operand_storage_bytes(),
+            Self::And(left, right) | Self::Or(left, right) | Self::Phrase(left, right, _) => {
+                left.operand_storage_bytes() + right.operand_storage_bytes()
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
