@@ -40,13 +40,13 @@ struct Slot {
 
 fn declaration_type(
     ty: &RoutineType,
-    lookup: impl FnOnce(&str) -> Option<ColumnType>,
+    lookup: impl FnOnce(&str) -> Result<Option<ColumnType>, ExecError>,
 ) -> Result<ColumnType, ExecError> {
     if let Some(ty) = ty.resolved {
         return Ok(ty);
     }
     if let Some(reference) = ty.name.strip_suffix("%type") {
-        return lookup(reference).ok_or_else(|| ExecError::UndefinedColumn(reference.into()));
+        return lookup(reference)?.ok_or_else(|| ExecError::UndefinedColumn(reference.into()));
     }
     if ty.name.ends_with("%rowtype") {
         return Ok(ColumnType::Record(None));
@@ -1025,6 +1025,11 @@ pub(crate) fn scalar_function_requires_session(
         fn block(&mut self, block: &PlPgSqlBlock) -> Result<bool, ExecError> {
             for declaration in &block.declarations {
                 match declaration {
+                    PlPgSqlDeclaration::Variable { ty, .. }
+                        if ty.name.ends_with("%type") && ty.name.contains('.') =>
+                    {
+                        return Ok(true);
+                    }
                     PlPgSqlDeclaration::Variable {
                         default: Some(default),
                         ..
@@ -1696,7 +1701,8 @@ impl ScalarInterpreter<'_> {
                 not_null,
                 default,
             } => {
-                let ty = declaration_type(ty, |name| self.lookup_slot(name).map(|slot| slot.ty))?;
+                let ty =
+                    declaration_type(ty, |name| Ok(self.lookup_slot(name).map(|slot| slot.ty)))?;
                 let value = default
                     .as_ref()
                     .map(|expr| self.eval(expr))
@@ -2700,7 +2706,7 @@ impl Interpreter<'_> {
                 not_null,
                 default,
             } => {
-                let ty = declaration_type(ty, |name| self.lookup_slot(name).map(|slot| slot.ty))?;
+                let ty = declaration_type(ty, |name| self.declaration_reference_type(name))?;
                 let value = match default {
                     Some(expr) => {
                         self.session
@@ -3191,6 +3197,15 @@ impl Interpreter<'_> {
             resolution: self.session.plpgsql_resolution_scope(),
         }
         .rewrite_procedural_expr(expr)
+    }
+
+    fn declaration_reference_type(&self, reference: &str) -> Result<Option<ColumnType>, ExecError> {
+        if let Some(slot) = self.lookup_slot(reference) {
+            return Ok(Some(slot.ty));
+        }
+        let resolution = self.session.plpgsql_resolution_scope();
+        crate::routine::relation_column_type(self.session.plpgsql_catalog(), &resolution, reference)
+            .map(Some)
     }
 
     fn bind_statement(&self, statement: &Statement) -> Result<Statement, ExecError> {

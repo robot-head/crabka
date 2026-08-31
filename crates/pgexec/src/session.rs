@@ -27411,6 +27411,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_declaration_can_use_a_qualified_column_type() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE plpgsql_type_source (value int4); \
+                 CREATE FUNCTION plpgsql_qualified_type() RETURNS int4 LANGUAGE plpgsql AS $$ \
+                 DECLARE result plpgsql_type_source.value%TYPE; \
+                 BEGIN result := 42; RETURN result; END $$",
+            )
+            .await
+            .expect("function setup");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_qualified_type()")
+                    .await
+                    .expect("function call")
+            ),
+            "42"
+        );
+    }
+
+    #[tokio::test]
+    async fn routine_signature_can_use_a_qualified_column_type() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE plpgsql_signature_type_source (value int4); \
+                 CREATE FUNCTION plpgsql_qualified_argument( \
+                 value plpgsql_signature_type_source.value%TYPE) RETURNS int4 LANGUAGE sql \
+                 RETURN value",
+            )
+            .await
+            .expect("function setup");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_qualified_argument(42)")
+                    .await
+                    .expect("function call")
+            ),
+            "42"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_perform_errors_include_sql_and_function_context() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();

@@ -713,6 +713,35 @@ pub(crate) fn resolve_routine_type(
     )
 }
 
+pub(crate) fn relation_column_type(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    reference: &str,
+) -> Result<ColumnType, ExecError> {
+    let Some((relation, column)) = reference.rsplit_once('.') else {
+        return Err(ExecError::UndefinedColumn(reference.into()));
+    };
+    let written = crate::relname::parse_written_relation(resolution, relation)?;
+    let relation = crate::relname::resolve_relation(
+        kv,
+        resolution,
+        &written.reference,
+        crate::relname::SchemaDisposition::Reference,
+    )?;
+    let columns = match crabka_pgcatalog::get_table(kv, &relation) {
+        Ok(table) => table.columns,
+        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {
+            crabka_pgcatalog::get_view(kv, &relation)?.columns
+        }
+        Err(error) => return Err(error.into()),
+    };
+    columns
+        .into_iter()
+        .find(|candidate| candidate.name == column)
+        .map(|candidate| candidate.ty)
+        .ok_or_else(|| ExecError::UndefinedColumn(reference.into()))
+}
+
 fn resolve_type(
     kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
@@ -725,6 +754,11 @@ fn resolve_type(
     let lowered = ty.name.to_ascii_lowercase();
     if KNOWN_TYPE_NAMES.contains(&lowered.as_str()) {
         return Ok(RoutineType::named(lowered));
+    }
+    if let Some(reference) = lowered.strip_suffix("%type") {
+        return Ok(RoutineType::builtin(relation_column_type(
+            kv, resolution, reference,
+        )?));
     }
     // A relation name is that relation's composite type. It follows the same
     // session search path as the routine statement, including `pg_temp`.

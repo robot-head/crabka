@@ -16114,7 +16114,20 @@ impl Parser {
             return Ok(RoutineType::builtin(ty, ty.name().to_string()).at(location));
         }
         self.pos = start;
-        let mut name = self.routine_name()?;
+        let mut name = self.expect_object_name()?;
+        while *self.peek() == Token::Dot {
+            self.bump();
+            name.push('.');
+            name.push_str(&self.expect_object_name()?);
+        }
+        if *self.peek() == Token::Percent {
+            self.bump();
+            let suffix = self.expect_object_name()?;
+            if !suffix.eq_ignore_ascii_case("type") {
+                return Err(ParseError::new("expected TYPE after %", self.peek_pos()));
+            }
+            name.push_str("%type");
+        }
         // `%TYPE` and array suffixes are accepted on an unresolved name so the
         // signature still parses; the executor reports what it cannot resolve.
         while *self.peek() == Token::LBracket {

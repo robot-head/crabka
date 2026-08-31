@@ -305,13 +305,14 @@ impl PlParser<'_> {
             if type_end == type_start {
                 return Err(self.error("expected a declaration type"));
             }
-            let ty = if type_end == type_start + 3
-                && self.tokens[type_start + 1].0 == Token::Percent
-                && self.word_at(type_start + 2).as_deref() == Some("type")
+            let ty = if type_end >= type_start + 3
+                && self.tokens[type_end - 2].0 == Token::Percent
+                && self.word_at(type_end - 1).as_deref() == Some("type")
             {
-                let reference = self
-                    .word_at(type_start)
-                    .ok_or_else(|| self.error("expected variable before %TYPE"))?;
+                let reference = self.slice_tokens(type_start, type_end - 2).trim();
+                if reference.is_empty() {
+                    return Err(self.error("expected variable before %TYPE"));
+                }
                 RoutineType::named(format!("{reference}%type"))
             } else if type_end >= type_start + 3
                 && self.tokens[type_end - 2].0 == Token::Percent
