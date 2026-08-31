@@ -4106,6 +4106,7 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
             message: error.message,
         }
     })?;
+    validate_plpgsql_raises(&block)?;
     if routine.kind == RoutineKind::Procedure && plpgsql_has_return_value(&block) {
         return Err(ExecError::FunctionError {
             sqlstate: "42804",
@@ -4141,6 +4142,45 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
 
 pub(crate) fn plpgsql_has_return_value(block: &PlPgSqlBlock) -> bool {
     plpgsql_has_return(block, true)
+}
+
+fn validate_plpgsql_raises(block: &PlPgSqlBlock) -> Result<(), ExecError> {
+    fn statements(body: &[PlPgSqlStatement]) -> Result<(), ExecError> {
+        for statement in body {
+            match statement {
+                PlPgSqlStatement::Raise(raise) => crate::plpgsql::validate_raise_parameters(raise)?,
+                PlPgSqlStatement::Block(block) => validate_plpgsql_raises(block)?,
+                PlPgSqlStatement::If {
+                    branches,
+                    else_body,
+                } => {
+                    for (_, body) in branches {
+                        statements(body)?;
+                    }
+                    statements(else_body)?;
+                }
+                PlPgSqlStatement::Case {
+                    arms, else_body, ..
+                } => {
+                    for (_, body) in arms {
+                        statements(body)?;
+                    }
+                    if let Some(body) = else_body {
+                        statements(body)?;
+                    }
+                }
+                PlPgSqlStatement::Loop { body, .. } => statements(body)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    statements(&block.statements)?;
+    for handler in &block.exceptions {
+        statements(&handler.statements)?;
+    }
+    Ok(())
 }
 
 fn plpgsql_has_bare_return(block: &PlPgSqlBlock) -> bool {
@@ -8939,6 +8979,27 @@ mod tests {
         ] {
             let error = define(&kv, sql).expect_err("invalid scalar RETURN is rejected");
             assert!(sqlstate(&error) == code);
+            assert!(error.into_pg().message == message);
+        }
+    }
+
+    #[test]
+    fn plpgsql_raise_parameter_counts_are_validated_when_defined() {
+        let kv = MemKv::default();
+        for (sql, message) in [
+            (
+                "CREATE FUNCTION raise_too_many() RETURNS void LANGUAGE plpgsql AS \
+                 $$ BEGIN RAISE NOTICE 'no placeholders', 1; END $$",
+                "too many parameters specified for RAISE",
+            ),
+            (
+                "CREATE FUNCTION raise_too_few() RETURNS void LANGUAGE plpgsql AS \
+                 $$ BEGIN IF true THEN RAISE NOTICE 'two %, %', 1; END IF; END $$",
+                "too few parameters specified for RAISE",
+            ),
+        ] {
+            let error = define(&kv, sql).expect_err("invalid RAISE is rejected");
+            assert!(sqlstate(&error) == "42601");
             assert!(error.into_pg().message == message);
         }
     }

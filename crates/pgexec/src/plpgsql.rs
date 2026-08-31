@@ -3595,6 +3595,13 @@ fn format_raise_message(template: &str, values: &[String]) -> Result<String, Exe
     Ok(output)
 }
 
+pub(crate) fn validate_raise_parameters(raise: &PlPgSqlRaise) -> Result<(), ExecError> {
+    let Some(template) = raise.message.as_deref() else {
+        return Ok(());
+    };
+    format_raise_message(template, &vec![String::new(); raise.parameters.len()]).map(|_| ())
+}
+
 fn result_row_count(result: &QueryResult) -> usize {
     match result {
         QueryResult::Rows { rows, .. } => rows.len(),
