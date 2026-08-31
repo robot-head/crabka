@@ -222,7 +222,7 @@ fn row_estimate(rows: f64) -> u64 {
     if !rows.is_finite() || rows <= 1.0 {
         1
     } else {
-        rows.round() as u64
+        rows.round_ties_even() as u64
     }
 }
 
@@ -3589,6 +3589,7 @@ mod tests {
         assert!(row_estimate(f64::NAN) == 1);
         assert!(row_estimate(0.25) == 1);
         assert!(row_estimate(200.000_001) == 200);
+        assert!(row_estimate(200.5) == 200);
         assert!(row_estimate(200.6) == 201);
     }
 
