@@ -1292,6 +1292,18 @@ fn mcv_clause_for_expr(
             all: false,
             array,
         } => mcv_array_clause(expr, array, table, ctx),
+        Expr::QuantifiedArray {
+            expr,
+            op,
+            all,
+            array,
+        } if matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ) =>
+        {
+            mcv_quantified_inequality_clause(expr, array, *op, *all, table, ctx)
+        }
         Expr::Column { .. } => bool_mcv_clause(expr, false, table, ctx),
         Expr::Unary {
             op: UnaryOp::Not,
@@ -1510,6 +1522,56 @@ fn mcv_array_clause(
         key,
         expr: key_expr.clone(),
         predicate: McvPredicate::Equal(values),
+    })
+}
+
+fn mcv_quantified_inequality_clause(
+    key_expr: &Expr,
+    array: &Expr,
+    op: BinaryOp,
+    all: bool,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<McvClause> {
+    let key = mcv_key(key_expr, table, ctx)?;
+    if !matches!(key, GroupKey::Attribute(_)) {
+        return None;
+    }
+    let crabka_pgtypes::Datum::Array(array) =
+        crate::eval::eval(array, &crate::scope::Scope::empty(), &[], ctx).ok()?
+    else {
+        return None;
+    };
+    if all && array.elems.iter().any(crabka_pgtypes::Datum::is_null) {
+        return None;
+    }
+    let mut values = array
+        .elems
+        .into_iter()
+        .filter(|value| !value.is_null())
+        .filter_map(|value| mcv_value(key.clone(), value, table, ctx));
+    let mut boundary = values.next()?;
+    let use_maximum = matches!(
+        (op, all),
+        (BinaryOp::Lt | BinaryOp::Le, false) | (BinaryOp::Gt | BinaryOp::Ge, true)
+    );
+    for value in values {
+        let ordering = crabka_pgtypes::ops::compare(
+            boundary.scalar_value.as_ref()?,
+            value.scalar_value.as_ref()?,
+        )
+        .ok()??;
+        if (use_maximum && ordering.is_lt()) || (!use_maximum && ordering.is_gt()) {
+            boundary = value;
+        }
+    }
+    Some(McvClause {
+        key,
+        expr: key_expr.clone(),
+        predicate: McvPredicate::Inequality {
+            op,
+            value: boundary,
+        },
     })
 }
 
