@@ -2000,6 +2000,12 @@ impl ScalarInterpreter<'_> {
                     ),
                 }
             },
+            &|table, record, field| {
+                let slot = table
+                    .and_then(|label| labeled_slot(&self.frames, label, record))
+                    .or_else(|| table.is_none().then(|| self.lookup_slot(record)).flatten());
+                rewrite_record_field(record, field, slot, self.lookup_slot("tg_relid"))
+            },
             &|_| {
                 Err(ExecError::Unsupported(
                     "subqueries require the async session executor".into(),
@@ -4345,9 +4351,10 @@ fn rewrite_record_field(
 fn rewrite_expr_with(
     expr: &Expr,
     column: &impl Fn(Option<&str>, &str) -> Result<Option<Expr>, ExecError>,
+    record_field: &impl Fn(Option<&str>, &str, &str) -> Result<Option<Expr>, ExecError>,
     subquery: &impl Fn(&QueryExpr) -> Result<QueryExpr, ExecError>,
 ) -> Result<Expr, ExecError> {
-    let one = |expr: &Expr| rewrite_expr_with(expr, column, subquery);
+    let one = |expr: &Expr| rewrite_expr_with(expr, column, record_field, subquery);
     let boxed = |expr: &Expr| -> Result<Box<Expr>, ExecError> { Ok(Box::new(one(expr)?)) };
     let list = |items: &[Expr]| items.iter().map(one).collect::<Result<Vec<_>, _>>();
     Ok(match expr {
@@ -4460,10 +4467,18 @@ fn rewrite_expr_with(
             expr: boxed(expr)?,
             ty: *ty,
         },
-        Expr::FieldSelect { base, field } => Expr::FieldSelect {
-            base: boxed(base)?,
-            field: field.clone(),
-        },
+        Expr::FieldSelect { base, field } => {
+            if let Expr::Column { table, name } = base.as_ref()
+                && let Some(value) = record_field(table.as_deref(), name, field)?
+            {
+                value
+            } else {
+                Expr::FieldSelect {
+                    base: boxed(base)?,
+                    field: field.clone(),
+                }
+            }
+        }
         Expr::FieldSelectAll(base) => Expr::FieldSelectAll(boxed(base)?),
         Expr::Collate { expr, collation } => Expr::Collate {
             expr: boxed(expr)?,
@@ -4944,6 +4959,22 @@ impl SqlBinder<'_, '_> {
         rewrite_expr_with(
             expr,
             &|table, name| self.rewrite_column(scope, outers, table, name),
+            &|table, record, field| {
+                let slot = table
+                    .and_then(|label| labeled_slot(&self.interpreter.frames, label, record))
+                    .or_else(|| {
+                        table
+                            .is_none()
+                            .then(|| self.interpreter.lookup_slot(record))
+                            .flatten()
+                    });
+                rewrite_record_field(
+                    record,
+                    field,
+                    slot,
+                    self.interpreter.lookup_slot("tg_relid"),
+                )
+            },
             &|query| {
                 let nested_outers = std::iter::once(scope.clone())
                     .chain(outers.iter().cloned())
@@ -4971,6 +5002,22 @@ impl SqlBinder<'_, '_> {
                         self.interpreter.lookup_slot("tg_relid"),
                     ),
                 }
+            },
+            &|table, record, field| {
+                let slot = table
+                    .and_then(|label| labeled_slot(&self.interpreter.frames, label, record))
+                    .or_else(|| {
+                        table
+                            .is_none()
+                            .then(|| self.interpreter.lookup_slot(record))
+                            .flatten()
+                    });
+                rewrite_record_field(
+                    record,
+                    field,
+                    slot,
+                    self.interpreter.lookup_slot("tg_relid"),
+                )
             },
             &|query| self.rewrite_query(query, &crate::cte::CteContext::empty()),
         )

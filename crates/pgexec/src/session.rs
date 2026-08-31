@@ -27589,6 +27589,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_labeled_record_field_keeps_its_column_type() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE plpgsql_labeled_slot (slotname char(16) PRIMARY KEY, backlink char(16) NOT NULL); \
+                 CREATE TABLE plpgsql_labeled_line (slotname char(16) PRIMARY KEY); \
+                 INSERT INTO plpgsql_labeled_slot VALUES ('slot', 'line'); \
+                 INSERT INTO plpgsql_labeled_line VALUES ('line'); \
+                 CREATE FUNCTION plpgsql_labeled_record_field(slot char(16)) RETURNS text LANGUAGE plpgsql AS $$ \
+                 <<outer>> \
+                 DECLARE rec record; \
+                 BEGIN \
+                   SELECT INTO rec * FROM plpgsql_labeled_slot WHERE slotname = $1; \
+                   DECLARE line record; \
+                   BEGIN \
+                     SELECT INTO line * FROM plpgsql_labeled_line \
+                     WHERE slotname = \"outer\".rec.backlink; \
+                     RETURN line.slotname; \
+                   END; \
+                 END $$",
+            )
+            .await
+            .expect("function setup");
+
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_labeled_record_field('slot')")
+                    .await
+                    .expect("function call"),
+            )
+            .trim_end(),
+            "line"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_perform_errors_include_sql_and_function_context() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
