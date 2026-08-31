@@ -1026,7 +1026,8 @@ pub(crate) fn scalar_function_requires_session(
             for declaration in &block.declarations {
                 match declaration {
                     PlPgSqlDeclaration::Variable { ty, .. }
-                        if ty.name.ends_with("%type") && ty.name.contains('.') =>
+                        if (ty.name.ends_with("%type") && ty.name.contains('.'))
+                            || ty.name.ends_with("%rowtype") =>
                     {
                         return Ok(true);
                     }
@@ -1858,6 +1859,7 @@ impl ScalarInterpreter<'_> {
                 let Some(slot) = frame.slots.get_mut(&name) else {
                     continue;
                 };
+                initialize_declared_record(slot);
                 let Datum::Record(record) = &mut slot.value else {
                     return Err(ExecError::ObjectNotInPrerequisiteState(format!(
                         "record \"{name}\" is not assigned yet"
@@ -2729,7 +2731,16 @@ impl Interpreter<'_> {
                 not_null,
                 default,
             } => {
-                let ty = declaration_type(ty, |name| self.declaration_reference_type(name))?;
+                let ty = if let Some(reference) = ty.name.strip_suffix("%rowtype") {
+                    let resolution = self.session.plpgsql_resolution_scope();
+                    crate::routine::relation_row_type(
+                        self.session.plpgsql_catalog(),
+                        &resolution,
+                        reference,
+                    )?
+                } else {
+                    declaration_type(ty, |name| self.declaration_reference_type(name))?
+                };
                 let value = match default {
                     Some(expr) => {
                         self.session
@@ -2909,6 +2920,7 @@ impl Interpreter<'_> {
                 let Some(slot) = frame.slots.get_mut(&name) else {
                     continue;
                 };
+                initialize_declared_record(slot);
                 let Datum::Record(record) = &mut slot.value else {
                     return Err(ExecError::ObjectNotInPrerequisiteState(format!(
                         "record \"{name}\" is not assigned yet"
@@ -3600,6 +3612,36 @@ fn condition_sqlstate(condition: &str) -> Result<String, ExecError> {
         .ok_or_else(|| {
             ExecError::Syntax(format!("unrecognized exception condition \"{condition}\""))
         })
+}
+
+fn initialize_declared_record(slot: &mut Slot) {
+    if matches!(slot.value, Datum::Record(_)) {
+        return;
+    }
+    let ColumnType::Record(Some(rowtype)) = slot.ty else {
+        return;
+    };
+    let Some((names, types)) =
+        crabka_pgtypes::usertype::lookup_oid(rowtype.oid).and_then(|definition| {
+            definition.fields().map(|fields| {
+                (
+                    fields
+                        .iter()
+                        .map(|field| field.name.clone())
+                        .collect::<Vec<_>>(),
+                    fields.iter().map(|field| field.ty).collect::<Vec<_>>(),
+                )
+            })
+        })
+    else {
+        return;
+    };
+    slot.value = Datum::Record(RecordValue::named(
+        Some(rowtype),
+        Arc::from(names),
+        vec![Datum::Null; types.len()],
+    ));
+    slot.record_types = Some(Arc::from(types));
 }
 
 fn rewrite_record_field(

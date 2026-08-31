@@ -27566,6 +27566,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_rowtype_preserves_unassigned_field_types() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE plpgsql_rowtype_source (value char(8)); \
+                 CREATE FUNCTION plpgsql_rowtype_field() RETURNS text LANGUAGE plpgsql AS $$ \
+                 DECLARE row plpgsql_rowtype_source%ROWTYPE; \
+                 BEGIN row.value := 'foo'; RETURN row.value; END $$",
+            )
+            .await
+            .expect("create function");
+
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_rowtype_field()")
+                    .await
+                    .expect("function call")
+            ),
+            "foo     "
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_raise_using_errcode_accepts_named_conditions() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();

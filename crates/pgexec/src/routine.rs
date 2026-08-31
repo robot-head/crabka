@@ -742,6 +742,24 @@ pub(crate) fn relation_column_type(
         .ok_or_else(|| ExecError::UndefinedColumn(reference.into()))
 }
 
+pub(crate) fn relation_row_type(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    reference: &str,
+) -> Result<ColumnType, ExecError> {
+    resolve_type(
+        kv,
+        resolution,
+        &crabka_pgparser::ast::RoutineType::named(reference.into()),
+        false,
+    )?
+    .column
+    .ok_or_else(|| ExecError::FunctionError {
+        sqlstate: "42704",
+        message: format!("type \"{reference}\" does not exist"),
+    })
+}
+
 fn resolve_type(
     kv: &dyn Kv,
     resolution: &crate::relname::ResolutionScope,
