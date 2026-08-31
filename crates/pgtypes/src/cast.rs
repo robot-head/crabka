@@ -83,6 +83,10 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
         // the catalog and is resolved a rung up, in the executor. This arm has
         // to precede the string fall-throughs below, or `xfloat4::text` would
         // be promised here and then fail at conversion.
+        // `pg_statistic.stavaluesN` has the `anyarray` pseudo-type. Its
+        // catalog text projection uses PostgreSQL's `anyarrayout` path, while
+        // ordinary user base types still have no implicit text conversion.
+        (ColumnType::Base(base), Text) if base.oid == 2277 => true,
         (ColumnType::Base(_), _) | (_, ColumnType::Base(_)) => {
             crate::usercast::is_declared(from.oid(), to.oid())
         }

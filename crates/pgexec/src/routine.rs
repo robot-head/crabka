@@ -2283,9 +2283,30 @@ fn resolved_candidate(routine: Routine, given: &[ArgType]) -> Result<Option<Rout
         .filter(|(param, _)| is_polymorphic_type(&param.ty.name));
     let mut has_unknown = false;
     let mut has_concrete_type = false;
+    let mut has_unbound_anyarray = false;
     for (param, arg) in polymorphic {
         has_unknown |= arg.is_unknown();
         has_concrete_type |= polymorphic_base_type(&param.ty.name, *arg).is_some();
+        has_unbound_anyarray |= matches!(arg, ArgType::Known(ty) if is_anyarray_pseudotype(*ty));
+    }
+    if has_unbound_anyarray {
+        if routine.language == "plpgsql"
+            && matches!(&routine.result, RoutineResult::Type { ty, setof: false } if ty.name == "anyarray")
+        {
+            return Err(ExecError::Remote(
+                crabka_pgwire::error::PgError::error(
+                    "0A000",
+                    "PL/pgSQL functions cannot accept type anyarray",
+                )
+                .with_context(format!(
+                    "compilation of PL/pgSQL function \"{}\" near line 1",
+                    routine.name
+                )),
+            ));
+        }
+        return Err(ExecError::TypeMismatch(
+            "cannot determine element type of \"anyarray\" argument".into(),
+        ));
     }
     if has_unknown && !has_concrete_type {
         return Err(crate::eval::undetermined_polymorphic_type());
@@ -2396,7 +2417,8 @@ fn polymorphic_argument_matches(name: &str, arg: ArgType) -> bool {
     match arg {
         ArgType::Unknown | ArgType::Opaque => true,
         ArgType::Known(ty) => match name {
-            "anyarray" | "anycompatiblearray" => matches!(ty, ColumnType::Array(_)),
+            "anyarray" => matches!(ty, ColumnType::Array(_)) || is_anyarray_pseudotype(ty),
+            "anycompatiblearray" => matches!(ty, ColumnType::Array(_)),
             "anyrange" | "anycompatiblerange" => matches!(ty, ColumnType::Range(_)),
             "anymultirange" | "anycompatiblemultirange" => {
                 matches!(ty, ColumnType::Multirange(_))
@@ -2407,6 +2429,10 @@ fn polymorphic_argument_matches(name: &str, arg: ArgType) -> bool {
             _ => false,
         },
     }
+}
+
+fn is_anyarray_pseudotype(ty: ColumnType) -> bool {
+    matches!(ty, ColumnType::Base(base) if base.oid == 2277)
 }
 
 fn polymorphic_base_type(name: &str, arg: ArgType) -> Option<ColumnType> {
@@ -9227,6 +9253,46 @@ mod tests {
                 to.name()
             );
         }
+    }
+
+    #[test]
+    fn unbound_anyarray_arguments_report_the_pseudotype_error() {
+        const TEXT: ColumnType = ColumnType::Text;
+        const ANYARRAY: ColumnType = ColumnType::Base(crabka_pgtypes::usertype::BaseRef {
+            oid: 2277,
+            name: "anyarray",
+            representation: &TEXT,
+        });
+        let kv = MemKv::default();
+        define(
+            &kv,
+            "CREATE FUNCTION array_element(x anyarray) RETURNS anyelement LANGUAGE plpgsql AS $$ BEGIN RETURN x[1]; END $$",
+        )
+        .expect("definition");
+        let error = resolve_call(&kv, "array_element", &[ArgType::Known(ANYARRAY)])
+            .expect_err("unbound array is rejected");
+        assert!(sqlstate(&error) == "42804");
+        assert!(
+            error.into_pg().message == "cannot determine element type of \"anyarray\" argument"
+        );
+
+        define(
+            &kv,
+            "CREATE FUNCTION array_copy(x anyarray) RETURNS anyarray LANGUAGE plpgsql AS $$ BEGIN RETURN x; END $$",
+        )
+        .expect("definition");
+        let error = resolve_call(&kv, "array_copy", &[ArgType::Known(ANYARRAY)])
+            .expect_err("PL/pgSQL cannot compile unbound array parameters");
+        let rendered = error.into_pg();
+        assert!(rendered.code == "0A000");
+        assert!(rendered.message == "PL/pgSQL functions cannot accept type anyarray");
+        assert!(
+            rendered
+                .diagnostics
+                .as_deref()
+                .and_then(|diagnostics| diagnostics.context.as_deref())
+                == Some("compilation of PL/pgSQL function \"array_copy\" near line 1")
+        );
     }
 
     #[test]

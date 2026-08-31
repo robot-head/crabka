@@ -1,5 +1,12 @@
 use super::*;
 
+const ANYARRAY_TEXT_REPRESENTATION: ColumnType = ColumnType::Text;
+const PG_STATISTIC_ANYARRAY: ColumnType = ColumnType::Base(crabka_pgtypes::usertype::BaseRef {
+    oid: 2277,
+    name: "anyarray",
+    representation: &ANYARRAY_TEXT_REPRESENTATION,
+});
+
 pub(crate) fn virtual_lookup_key(name: &crabka_pgcatalog::RelationName) -> String {
     if name.schema == crate::search_path::PG_CATALOG {
         name.name.clone()
@@ -304,14 +311,13 @@ pub(crate) fn virtual_catalog_columns(name: &str) -> Vec<Column> {
                 "stanumbers5",
                 ColumnType::Array(crabka_pgtypes::ElemType::Float4),
             ),
-            // PostgreSQL uses anyarray here. The executor only needs these
-            // values as text (including pg_dump's `::text` projection), so the
-            // durable canonical array text is the narrowest truthful surface.
-            ("stavalues1", Text),
-            ("stavalues2", Text),
-            ("stavalues3", Text),
-            ("stavalues4", Text),
-            ("stavalues5", Text),
+            // The values stay in their durable text form, but the catalog
+            // exposes PostgreSQL's unbound `anyarray` pseudo-type.
+            ("stavalues1", PG_STATISTIC_ANYARRAY),
+            ("stavalues2", PG_STATISTIC_ANYARRAY),
+            ("stavalues3", PG_STATISTIC_ANYARRAY),
+            ("stavalues4", PG_STATISTIC_ANYARRAY),
+            ("stavalues5", PG_STATISTIC_ANYARRAY),
         ]),
         "pg_stats" => cols(&[
             ("schemaname", Text),

@@ -11430,6 +11430,18 @@ fn pg_type_rows_match_the_declared_column_list() {
 }
 
 #[test]
+fn pg_statistic_exposes_unbound_anyarray_slots() {
+    use assert2::assert;
+
+    let columns = super::virtual_catalog_columns("pg_statistic");
+    let mut values = columns
+        .iter()
+        .filter(|column| column.name.starts_with("stavalues"));
+    assert!(values.clone().count() == 5);
+    assert!(values.all(|column| (column.ty.oid(), column.ty.name()) == (2277, "anyarray")));
+}
+
+#[test]
 fn coerce_assigns_literals_and_arrays_to_jsonb_and_array_columns() {
     use assert2::assert;
     use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
