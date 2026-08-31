@@ -355,6 +355,11 @@ fn restriction_selectivity(
     {
         return selectivity;
     }
+    if let Some(selectivity) =
+        quantified_all_equality_selectivity(catalog_kv, table, rows, ctx, expr)
+    {
+        return selectivity;
+    }
     if let Some(clause) = mcv_clause_for_expr(expr, table, ctx) {
         return scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, &clause);
     }
@@ -859,6 +864,51 @@ fn mcv_array_clause(
         key,
         predicate: McvPredicate::Equal(values),
     })
+}
+
+fn quantified_all_equality_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+) -> Option<f64> {
+    let Expr::QuantifiedArray {
+        expr,
+        op: BinaryOp::Eq,
+        all: true,
+        array,
+    } = expr
+    else {
+        return None;
+    };
+    let key = mcv_key(expr, table, ctx)?;
+    let crabka_pgtypes::Datum::Array(array) =
+        crate::eval::eval(array, &crate::scope::Scope::empty(), &[], ctx).ok()?
+    else {
+        return None;
+    };
+    let Some(first) = array.elems.first() else {
+        return Some(1.0);
+    };
+    let Some(first) = mcv_value(key.clone(), first.clone(), table, ctx) else {
+        return Some(0.0);
+    };
+    for value in &array.elems[1..] {
+        let Some(value) = mcv_value(key.clone(), value.clone(), table, ctx) else {
+            return Some(0.0);
+        };
+        if value.text != first.text {
+            return Some(0.0);
+        }
+    }
+    let clause = McvClause {
+        key,
+        predicate: McvPredicate::Equal(vec![first]),
+    };
+    Some(scalar_mcv_clause_selectivity(
+        catalog_kv, table, rows, ctx, &clause,
+    ))
 }
 
 fn mcv_key(

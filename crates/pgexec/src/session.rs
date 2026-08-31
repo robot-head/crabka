@@ -23909,6 +23909,25 @@ mod tests {
                 "{sql}"
             );
         }
+        for (sql, expected) in [
+            (
+                "EXPLAIN SELECT * FROM dependency_estimate WHERE a IN (1, 51) AND b = ALL (ARRAY['1'])",
+                2,
+            ),
+            (
+                "EXPLAIN SELECT * FROM dependency_estimate WHERE a IN (1, 51) AND b = ALL (ARRAY['1', '2'])",
+                1,
+            ),
+        ] {
+            let rows = rows_or_sqlstate(&mut s, sql).await.expect("ALL explain");
+            assert!(
+                rows.first()
+                    == Some(&vec![format!(
+                        "Seq Scan on dependency_estimate (cost=0.00..0.00 rows={expected} width=0)"
+                    )]),
+                "{sql}"
+            );
+        }
         s.simple_query(
             "CREATE STATISTICS dependency_estimate_abc (dependencies) \
              ON a, b, c FROM dependency_estimate; ANALYZE dependency_estimate",
