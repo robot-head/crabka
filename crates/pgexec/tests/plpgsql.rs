@@ -594,6 +594,53 @@ async fn exception_variables_are_scoped_to_the_handler() {
 }
 
 #[tokio::test]
+async fn return_expression_errors_include_the_internal_query() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE FUNCTION pl_bad_return() RETURNS int4 LANGUAGE plpgsql AS $$ \
+         BEGIN RETURN missing_name; END $$",
+    )
+    .await;
+
+    let error = session
+        .simple_query("SELECT pl_bad_return()")
+        .await
+        .expect_err("undefined RETURN expression must fail");
+    assert!(error.code == "42703", "{error:?}");
+    let diagnostics = error
+        .diagnostics
+        .as_deref()
+        .expect("internal query diagnostics");
+    assert!(diagnostics.internal_position == Some(1), "{error:?}");
+    assert!(
+        diagnostics.internal_query.as_deref() == Some("missing_name"),
+        "{error:?}"
+    );
+
+    execute(
+        &mut session,
+        "CREATE FUNCTION pl_bad_operator(value point) RETURNS point LANGUAGE plpgsql AS $$ \
+         BEGIN RETURN value + 1; END $$",
+    )
+    .await;
+    let error = session
+        .simple_query("SELECT pl_bad_operator(point(1, 2))")
+        .await
+        .expect_err("unsupported operator must fail");
+    let diagnostics = error
+        .diagnostics
+        .as_deref()
+        .expect("internal query diagnostics");
+    assert!(diagnostics.internal_position == Some(7), "{error:?}");
+    assert!(
+        diagnostics.internal_query.as_deref() == Some("value + 1"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn raise_notice_preserves_message_code_detail_and_hint() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

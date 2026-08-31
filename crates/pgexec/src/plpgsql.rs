@@ -3954,6 +3954,8 @@ fn plpgsql_expression_error(error: ExecError, source: &str) -> ExecError {
             error,
             &format!("PL/pgSQL expression \"{source}\""),
         ))
+    } else if error.code == "42703" || error.message.starts_with("operator does not exist:") {
+        plpgsql_internal_query_error(ExecError::Remote(error), source)
     } else {
         ExecError::Remote(error)
     }
@@ -3964,12 +3966,27 @@ fn plpgsql_internal_query_error(error: ExecError, source: &str) -> ExecError {
     if error
         .diagnostics
         .as_deref()
-        .and_then(|diagnostics| diagnostics.position)
-        .is_some()
+        .is_some_and(|diagnostics| diagnostics.position.is_some() || diagnostics.context.is_some())
     {
         ExecError::Remote(error)
     } else {
-        ExecError::Remote(error.with_internal_position(1).with_internal_query(source))
+        let position = internal_query_position(&error, source);
+        ExecError::Remote(
+            error
+                .with_internal_position(position)
+                .with_internal_query(source),
+        )
+    }
+}
+
+fn internal_query_position(error: &PgError, source: &str) -> usize {
+    if error.message.starts_with("operator does not exist:") {
+        source
+            .char_indices()
+            .find(|(_, character)| "=<>!~+-*/%^|&".contains(*character))
+            .map_or(1, |(offset, _)| source[..offset].chars().count() + 1)
+    } else {
+        1
     }
 }
 
