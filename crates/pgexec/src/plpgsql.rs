@@ -2121,8 +2121,11 @@ impl Interpreter<'_> {
                     Ok(Flow::Next)
                 }
                 PlPgSqlStatement::Sql {
-                    statement, into, ..
-                } => {
+                    statement,
+                    into,
+                    line,
+                    ..
+                } => async {
                     if let Statement::Call {
                         name,
                         args,
@@ -2141,6 +2144,10 @@ impl Interpreter<'_> {
                     }
                     Ok(Flow::Next)
                 }
+                .await
+                .map_err(|error| {
+                    plpgsql_statement_error(error, &self.context, *line, "SQL statement")
+                }),
                 PlPgSqlStatement::Perform {
                     query,
                     source,

@@ -1184,6 +1184,11 @@ impl PlParser<'_> {
 
     fn parse_static_sql(&mut self) -> Result<PlPgSqlStatement, ParseError> {
         let start = self.pos;
+        let line = self.source[..self.tokens[start].1]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
         let end = self.find_token(start, &Token::Semicolon)?;
         let mut into = None;
         let mut sql = self.slice_tokens(start, end).trim().to_string();
@@ -1231,6 +1236,7 @@ impl PlParser<'_> {
         Ok(PlPgSqlStatement::Sql {
             statement: Box::new(statement),
             source: self.slice_tokens(start, end).trim().to_string(),
+            line,
             into,
         })
     }

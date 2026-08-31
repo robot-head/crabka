@@ -27537,6 +27537,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_sql_errors_include_statement_line_context() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE FUNCTION sql_context() RETURNS void LANGUAGE plpgsql AS $$\n\
+                 BEGIN\n\
+                   SELECT 1 / 0;\n\
+                 END\n\
+                 $$",
+            )
+            .await
+            .expect("create function");
+
+        let error = session
+            .simple_query("SELECT sql_context()")
+            .await
+            .expect_err("division by zero");
+        assert_eq!(error.code, "22012");
+        assert_eq!(
+            error
+                .diagnostics
+                .as_deref()
+                .and_then(|diagnostics| diagnostics.context.as_deref()),
+            Some("PL/pgSQL function sql_context() line 3 at SQL statement")
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_raise_using_errcode_accepts_named_conditions() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();

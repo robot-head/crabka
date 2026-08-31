@@ -5235,6 +5235,7 @@ pub enum PlPgSqlStatement {
     Sql {
         statement: Box<Statement>,
         source: String,
+        line: usize,
         into: Option<PlPgSqlInto>,
     },
     Perform {
