@@ -1548,9 +1548,6 @@ fn mcv_quantified_inequality_clause(
     ctx: &crate::clock::EvalCtx,
 ) -> Option<McvClause> {
     let key = mcv_key(key_expr, table, ctx)?;
-    if !matches!(key, GroupKey::Attribute(_)) {
-        return None;
-    }
     let crabka_pgtypes::Datum::Array(array) =
         crate::eval::eval(array, &crate::scope::Scope::empty(), &[], ctx).ok()?
     else {
@@ -1571,8 +1568,8 @@ fn mcv_quantified_inequality_clause(
     );
     for value in values {
         let ordering = crabka_pgtypes::ops::compare(
-            boundary.scalar_value.as_ref()?,
-            value.scalar_value.as_ref()?,
+            &mcv_scalar_value(&boundary, key_expr, table, ctx)?,
+            &mcv_scalar_value(&value, key_expr, table, ctx)?,
         )
         .ok()??;
         if (use_maximum && ordering.is_lt()) || (!use_maximum && ordering.is_gt()) {
