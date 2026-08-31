@@ -5423,11 +5423,7 @@ pub(crate) fn plpgsql_table_function_schema(
             })
             .collect::<Result<Vec<_>, _>>()?,
         RoutineResult::Unspecified => output_params()?,
-        RoutineResult::Type { ty, .. }
-            if is_record_type(ty) && routine.output_params().next().is_some() =>
-        {
-            output_params()?
-        }
+        RoutineResult::Type { .. } if routine.output_params().next().is_some() => output_params()?,
         RoutineResult::Type { ty, .. } if is_record_type(ty) => call
             .column_defs
             .as_ref()

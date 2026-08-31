@@ -811,6 +811,13 @@ async fn out_functions_form_from_rows_and_set_functions_can_return_no_rows() {
             RETURN NEXT;
           END LOOP;
         END
+        $$;
+        CREATE FUNCTION pl_out_scalar_rows(input int4, OUT doubled int4)
+        RETURNS SETOF int4 LANGUAGE plpgsql AS $$
+        BEGIN
+          doubled := input * 2;
+          RETURN NEXT;
+        END
         $$
         ",
     )
@@ -833,6 +840,9 @@ async fn out_functions_form_from_rows_and_set_functions_can_return_no_rows() {
         query(&mut session, "SELECT * FROM pl_out_rows(2)").await
             == vec![row(&["2", "row"]), row(&["4", "row"])]
     );
+    let (field, rows) = described(&mut session, "SELECT * FROM pl_out_scalar_rows(4)").await;
+    assert!(field.name == "doubled", "{field:?}");
+    assert!(rows == vec![row(&["8"])]);
 }
 
 #[tokio::test]
