@@ -23758,6 +23758,20 @@ mod tests {
                     vec!["  Filter: ((a = 1) AND (b = 1))".into()],
                 ])
         );
+        for sql in [
+            "EXPLAIN SELECT * FROM mcv_estimate WHERE a IN (1, 2) AND b = 1",
+            "EXPLAIN SELECT * FROM mcv_estimate WHERE (a = 1 OR a = 2) AND b = 1",
+            "EXPLAIN SELECT * FROM mcv_estimate WHERE a = ANY (ARRAY[1, 2]) AND b = 1",
+        ] {
+            let rows = rows_or_sqlstate(&mut s, sql).await.expect("MCV explain");
+            assert!(
+                rows.first()
+                    == Some(&vec![
+                        "Seq Scan on mcv_estimate (cost=0.00..0.00 rows=50 width=0)".into()
+                    ]),
+                "{sql}"
+            );
+        }
         s.simple_query(
             "CREATE STATISTICS mcv_estimate_expr (mcv) \
              ON (a + b), (a - b) FROM mcv_estimate; ANALYZE mcv_estimate",
@@ -23905,6 +23919,22 @@ mod tests {
                     "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=50 width=0)".into()
                 ])
         );
+        for sql in [
+            "EXPLAIN SELECT * FROM dependency_estimate WHERE a IN (1, 51) AND b = 1",
+            "EXPLAIN SELECT * FROM dependency_estimate WHERE (a = 1 OR a = 51) AND b = 1",
+            "EXPLAIN SELECT * FROM dependency_estimate WHERE a = ANY (ARRAY[1, 51]) AND b = 1",
+        ] {
+            let rows = rows_or_sqlstate(&mut s, sql)
+                .await
+                .expect("dependency explain");
+            assert!(
+                rows.first()
+                    == Some(&vec![
+                        "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=100 width=0)".into()
+                    ]),
+                "{sql}"
+            );
+        }
     }
 
     #[tokio::test]

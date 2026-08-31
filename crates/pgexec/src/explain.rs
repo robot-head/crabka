@@ -499,14 +499,19 @@ fn decode_dependencies(data: &str) -> Option<Vec<(Vec<i16>, i16, f64)>> {
 #[derive(Debug)]
 struct McvClause {
     key: GroupKey,
-    value: Option<crabka_pgtypes::Datum>,
     predicate: McvPredicate,
 }
 
 #[derive(Debug)]
 enum McvPredicate {
-    Equal(Option<String>),
+    Equal(Vec<McvValue>),
     NotNull,
+}
+
+#[derive(Debug)]
+struct McvValue {
+    text: Option<String>,
+    scalar_value: Option<crabka_pgtypes::Datum>,
 }
 
 /// Estimate a complete equality conjunction from a matching extended MCV
@@ -627,18 +632,24 @@ fn scalar_mcv_clause_selectivity(
             })
     })
     .map_or(default, |stats| match &clause.predicate {
-        McvPredicate::Equal(Some(_)) => clause.value.as_ref().map_or(default, |value| {
-            crate::plan::selfuncs::eqsel(stats.as_stats(), Some(value))
-        }),
-        McvPredicate::Equal(None) => crate::plan::selfuncs::nulltestsel(stats.as_stats(), true),
+        McvPredicate::Equal(values) => values
+            .iter()
+            .map(|value| {
+                value.scalar_value.as_ref().map_or_else(
+                    || crate::plan::selfuncs::nulltestsel(stats.as_stats(), true),
+                    |value| crate::plan::selfuncs::eqsel(stats.as_stats(), Some(value)),
+                )
+            })
+            .sum::<f64>()
+            .min(1.0),
         McvPredicate::NotNull => crate::plan::selfuncs::nulltestsel(stats.as_stats(), false),
     })
 }
 
 fn default_mcv_selectivity(predicate: &McvPredicate) -> f64 {
     match predicate {
-        McvPredicate::Equal(None) | McvPredicate::Equal(Some(_)) => {
-            crate::plan::selfuncs::DEFAULT_EQ_SEL
+        McvPredicate::Equal(values) => {
+            (values.len() as f64 * crate::plan::selfuncs::DEFAULT_EQ_SEL).min(1.0)
         }
         McvPredicate::NotNull => 1.0 - crate::plan::selfuncs::DEFAULT_EQ_SEL,
     }
@@ -659,41 +670,84 @@ fn collect_mcv_clauses(
             collect_mcv_clauses(left, table, ctx, clauses)
                 && collect_mcv_clauses(right, table, ctx, clauses)
         }
+        _ => mcv_clause_for_expr(expr, table, ctx).is_some_and(|clause| {
+            clauses.push(clause);
+            true
+        }),
+    }
+}
+
+fn mcv_clause_for_expr(
+    expr: &Expr,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<McvClause> {
+    match expr {
         Expr::Binary {
             op: BinaryOp::Eq,
             left,
             right,
-        } => mcv_clause(left, right, table, ctx)
-            .or_else(|| mcv_clause(right, left, table, ctx))
-            .is_some_and(|clause| {
-                clauses.push(clause);
-                true
-            }),
-        Expr::Column { .. } => bool_mcv_clause(expr, false, table, ctx).is_some_and(|clause| {
-            clauses.push(clause);
-            true
-        }),
+        } => mcv_clause(left, right, table, ctx).or_else(|| mcv_clause(right, left, table, ctx)),
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => merge_mcv_or_clauses(
+            [left.as_ref(), right.as_ref()]
+                .into_iter()
+                .map(|expr| mcv_clause_for_expr(expr, table, ctx))
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        Expr::InList {
+            expr,
+            list,
+            negated: false,
+        } => mcv_list_clause(expr, list, table, ctx),
+        Expr::QuantifiedArray {
+            expr,
+            op: BinaryOp::Eq,
+            all: false,
+            array,
+        } => mcv_array_clause(expr, array, table, ctx),
+        Expr::Column { .. } => bool_mcv_clause(expr, false, table, ctx),
         Expr::Unary {
             op: UnaryOp::Not,
             expr,
-        } => bool_mcv_clause(expr, true, table, ctx).is_some_and(|clause| {
-            clauses.push(clause);
-            true
-        }),
-        Expr::IsNull { expr, negated } => {
-            null_mcv_clause(expr, *negated, table).is_some_and(|clause| {
-                clauses.push(clause);
-                true
-            })
-        }
-        _ => false,
+        } => bool_mcv_clause(expr, true, table, ctx),
+        Expr::IsNull { expr, negated } => null_mcv_clause(expr, *negated, table),
+        _ => None,
     }
+}
+
+fn merge_mcv_or_clauses(clauses: Vec<McvClause>) -> Option<McvClause> {
+    let mut clauses = clauses.into_iter();
+    let mut combined = clauses.next()?;
+    for clause in clauses {
+        if clause.key != combined.key {
+            return None;
+        }
+        let (McvPredicate::Equal(combined_values), McvPredicate::Equal(values)) =
+            (&mut combined.predicate, clause.predicate)
+        else {
+            return None;
+        };
+        for value in values {
+            if !combined_values
+                .iter()
+                .any(|candidate| candidate.text == value.text)
+            {
+                combined_values.push(value);
+            }
+        }
+    }
+    Some(combined)
 }
 
 fn mcv_item_matches(value: Option<&Option<String>>, predicate: &McvPredicate) -> bool {
     match (value, predicate) {
-        (Some(Some(value)), McvPredicate::Equal(Some(wanted))) => value == wanted,
-        (Some(None), McvPredicate::Equal(None)) => true,
+        (Some(value), McvPredicate::Equal(wanted)) => wanted
+            .iter()
+            .any(|candidate| candidate.text.as_ref() == value.as_ref()),
         (Some(Some(_)), McvPredicate::NotNull) => true,
         _ => false,
     }
@@ -706,11 +760,13 @@ fn null_mcv_clause(
 ) -> Option<McvClause> {
     Some(McvClause {
         key: GroupKey::Attribute(column_attnum(expr, table)?),
-        value: None,
         predicate: if negated {
             McvPredicate::NotNull
         } else {
-            McvPredicate::Equal(None)
+            McvPredicate::Equal(vec![McvValue {
+                text: None,
+                scalar_value: None,
+            }])
         },
     })
 }
@@ -732,8 +788,10 @@ fn bool_mcv_clause(
     .ok()?;
     Some(McvClause {
         key: GroupKey::Attribute(attnum),
-        value: Some(value),
-        predicate: McvPredicate::Equal(Some(text)),
+        predicate: McvPredicate::Equal(vec![McvValue {
+            text: Some(text),
+            scalar_value: Some(value),
+        }]),
     })
 }
 
@@ -743,7 +801,65 @@ fn mcv_clause(
     table: &crabka_pgcatalog::Table,
     ctx: &crate::clock::EvalCtx,
 ) -> Option<McvClause> {
-    let key = match key_expr {
+    let key = mcv_key(key_expr, table, ctx)?;
+    let literal = crate::eval::eval(literal, &crate::scope::Scope::empty(), &[], ctx).ok()?;
+    let value = mcv_value(key.clone(), literal, table, ctx)?;
+    Some(McvClause {
+        key,
+        predicate: McvPredicate::Equal(vec![value]),
+    })
+}
+
+fn mcv_list_clause(
+    key_expr: &Expr,
+    literals: &[Expr],
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<McvClause> {
+    let key = mcv_key(key_expr, table, ctx)?;
+    let values = literals
+        .iter()
+        .filter_map(|literal| {
+            crate::eval::eval(literal, &crate::scope::Scope::empty(), &[], ctx)
+                .ok()
+                .and_then(|value| mcv_value(key.clone(), value, table, ctx))
+        })
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then_some(McvClause {
+        key,
+        predicate: McvPredicate::Equal(values),
+    })
+}
+
+fn mcv_array_clause(
+    key_expr: &Expr,
+    array: &Expr,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<McvClause> {
+    let key = mcv_key(key_expr, table, ctx)?;
+    let crabka_pgtypes::Datum::Array(array) =
+        crate::eval::eval(array, &crate::scope::Scope::empty(), &[], ctx).ok()?
+    else {
+        return None;
+    };
+    let values = array
+        .elems
+        .into_iter()
+        .filter_map(|value| mcv_value(key.clone(), value, table, ctx))
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then_some(McvClause {
+        key,
+        predicate: McvPredicate::Equal(values),
+    })
+}
+
+fn mcv_key(
+    key_expr: &Expr,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<GroupKey> {
+    Some(match key_expr {
         Expr::Column { .. } => GroupKey::Attribute(column_attnum(key_expr, table)?),
         _ if crate::eval::eval(key_expr, &crate::scope::Scope::empty(), &[], ctx).is_ok() => {
             return None;
@@ -752,27 +868,33 @@ fn mcv_clause(
             key_expr,
             crabka_pgtypes::encoding::OutputStyle::with_zone(&jiff::tz::TimeZone::UTC),
         )),
-    };
-    let value = match &key {
+    })
+}
+
+fn mcv_value(
+    key: GroupKey,
+    value: crabka_pgtypes::Datum,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<McvValue> {
+    (!matches!(value, crabka_pgtypes::Datum::Null)).then_some(())?;
+    let (value, scalar_value) = match key {
         GroupKey::Attribute(attnum) => {
-            let definition = table.columns.get(usize::try_from(*attnum - 1).ok()?)?;
-            literal_for_type(literal, definition.ty, ctx)?
+            let definition = table.columns.get(usize::try_from(attnum - 1).ok()?)?;
+            let value =
+                crate::eval::cast_value_in(&value, definition.ty, ctx.output_style()).ok()?;
+            (value.clone(), Some(value))
         }
-        GroupKey::Expression(_) => {
-            let value = crate::eval::eval(literal, &crate::scope::Scope::empty(), &[], ctx).ok()?;
-            (!matches!(value, crabka_pgtypes::Datum::Null)).then_some(value)?
-        }
+        GroupKey::Expression(_) => (value, None),
     };
     let text = String::from_utf8(crabka_pgtypes::encoding::encode_text_in(
         &value,
         ctx.output_style(),
     ))
     .ok()?;
-    let scalar_value = matches!(key, GroupKey::Attribute(_)).then_some(value.clone());
-    Some(McvClause {
-        key,
-        value: scalar_value,
-        predicate: McvPredicate::Equal(Some(text)),
+    Some(McvValue {
+        text: Some(text),
+        scalar_value,
     })
 }
 
