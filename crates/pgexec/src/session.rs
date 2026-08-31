@@ -24396,6 +24396,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_expression_defaults_for_lists() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE expression_list_default (a int4, b text); \
+             INSERT INTO expression_list_default SELECT i, i FROM generate_series(1, 5000) s(i); \
+             ANALYZE expression_list_default",
+        )
+        .await
+        .expect("expression list setup");
+
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM expression_list_default \
+             WHERE (a * 2) IN (2, 102) AND upper(b) = '1'",
+        )
+        .await
+        .expect("expression list explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on expression_list_default (cost=0.00..0.00 rows=1 width=0)".into()
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_mcv_from_all_statistic_columns() {
         use assert2::assert;
 
