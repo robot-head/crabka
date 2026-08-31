@@ -711,6 +711,9 @@ async fn assert_accepts_true_and_raises_p0004_with_the_supplied_message() {
         .expect_err("false ASSERT must fail");
     assert!(error.code == "P0004", "{error:?}");
     assert!(error.message == "broken invariant", "{error:?}");
+
+    execute(&mut session, "SET plpgsql.check_asserts = off").await;
+    execute(&mut session, "DO $$ BEGIN ASSERT false; END $$").await;
 }
 
 #[tokio::test]

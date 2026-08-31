@@ -2563,12 +2563,15 @@ impl Interpreter<'_> {
                 }
                 PlPgSqlStatement::Assert {
                     condition,
-                    message,
-                    line,
-                } => async {
-                    if self.truth_async(condition).await? {
-                        Ok(Flow::Next)
-                    } else {
+                message,
+                line,
+            } => async {
+                if !self.session.plpgsql_setting_enabled("plpgsql.check_asserts") {
+                    return Ok(Flow::Next);
+                }
+                if self.truth_async(condition).await? {
+                    Ok(Flow::Next)
+                } else {
                         let message = match message {
                             Some(expr) => match self.eval_async(expr).await?.0 {
                                 Datum::Null => DEFAULT_ASSERT_MESSAGE.to_string(),

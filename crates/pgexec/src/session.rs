@@ -1208,6 +1208,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     guc("allow_in_place_tablespaces", "bool", "off", parse_bool).context(GucContext::Superuser),
     guc("array_nulls", "bool", "on", parse_bool),
     guc("check_function_bodies", "bool", "on", parse_bool),
+    guc("plpgsql.check_asserts", "bool", "on", parse_bool),
     guc("default_transaction_deferrable", "bool", "off", parse_bool),
     guc("default_transaction_read_only", "bool", "off", parse_bool),
     guc("default_with_oids", "bool", "off", parse_bool),
