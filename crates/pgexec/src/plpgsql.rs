@@ -1173,7 +1173,7 @@ pub(crate) fn scalar_function_requires_session(
                 | PlPgSqlStatement::GetDiagnostics { .. }
                 | PlPgSqlStatement::Transaction { .. }
                 | PlPgSqlStatement::ReturnNext(_)
-                | PlPgSqlStatement::ReturnQuery(_)
+                | PlPgSqlStatement::ReturnQuery { .. }
                 | PlPgSqlStatement::ReturnQueryExecute { .. } => Ok(true),
                 PlPgSqlStatement::Assign { target, value, .. } => {
                     Ok(self.expressions(&target.subscripts)? || self.expression(value)?)
@@ -1689,7 +1689,7 @@ impl ScalarInterpreter<'_> {
             | PlPgSqlStatement::GetDiagnostics { .. }
             | PlPgSqlStatement::Transaction { .. }
             | PlPgSqlStatement::ReturnNext(_)
-            | PlPgSqlStatement::ReturnQuery(_)
+            | PlPgSqlStatement::ReturnQuery { .. }
             | PlPgSqlStatement::ReturnQueryExecute { .. } => Err(ExecError::Unsupported(
                 "SQL-bearing or set-returning PL/pgSQL functions require the async session executor"
                     .into(),
@@ -2447,32 +2447,72 @@ impl Interpreter<'_> {
                     }
                     Ok(Flow::Next)
                 }
-                PlPgSqlStatement::ReturnQuery(query) => {
+                PlPgSqlStatement::ReturnQuery {
+                    query,
+                    source,
+                    line,
+                } => {
                     if !self.returns_set {
                         return Err(ExecError::Syntax(
                             "RETURN QUERY cannot be used in a non-SETOF function".into(),
                         ));
                     }
-                    let statement = self.bind_statement(query)?;
-                    let result = Box::pin(self.session.run_one(&statement)).await?;
-                    let count = self.push_query_result(result)?;
+                    let context = format!(
+                        "SQL statement \"{source}\"\n{} line {line} at RETURN QUERY",
+                        self.context
+                    );
+                    let statement = self.bind_statement(query).map_err(|error| {
+                        ExecError::Remote(stack_error_context(error.into_pg(), &context))
+                    })?;
+                    if matches!(statement, Statement::CreateTableAs { .. }) {
+                        return Err(ExecError::Remote(stack_error_context(
+                            ExecError::Syntax("SELECT INTO query does not return tuples".into())
+                                .into_pg(),
+                            &context,
+                        )));
+                    }
+                    let result = Box::pin(self.session.run_one(&statement))
+                        .await
+                        .map_err(|error| {
+                            ExecError::Remote(stack_error_context(error.into_pg(), &context))
+                        })?;
+                    let count = self.push_query_result(result).map_err(|error| {
+                        ExecError::Remote(stack_error_context(error.into_pg(), &context))
+                    })?;
                     self.set_found(count > 0);
                     Ok(Flow::Next)
                 }
-                PlPgSqlStatement::ReturnQueryExecute { query, using } => {
+                PlPgSqlStatement::ReturnQueryExecute { query, using, line } => {
                     if !self.returns_set {
                         return Err(ExecError::Syntax(
                             "RETURN QUERY EXECUTE cannot be used in a non-SETOF function".into(),
                         ));
                     }
-                    let (statement, _) = self.dynamic_statement(query, using).await?;
-                    let result = Box::pin(self.session.run_one(&statement)).await?;
-                    let count = self.push_query_result(result)?;
+                    let (statement, _, source) = self.dynamic_statement(query, using).await?;
+                    let context = format!(
+                        "SQL statement \"{source}\"\n{} line {line} at RETURN QUERY",
+                        self.context
+                    );
+                    if matches!(statement, Statement::CreateTableAs { .. }) {
+                        return Err(ExecError::Remote(stack_error_context(
+                            ExecError::Syntax("SELECT INTO query does not return tuples".into())
+                                .into_pg(),
+                            &context,
+                        )));
+                    }
+                    let result = Box::pin(self.session.run_one(&statement))
+                        .await
+                        .map_err(|error| {
+                            ExecError::Remote(stack_error_context(error.into_pg(), &context))
+                        })?;
+                    let count = self.push_query_result(result).map_err(|error| {
+                        ExecError::Remote(stack_error_context(error.into_pg(), &context))
+                    })?;
                     self.set_found(count > 0);
                     Ok(Flow::Next)
                 }
                 PlPgSqlStatement::Execute { query, into, using } => {
-                    let (statement, parameters) = self.dynamic_statement(query, using).await?;
+                    let (statement, parameters, _) = self.dynamic_statement(query, using).await?;
                     let dml_returning = statement_has_dml_returning(&statement);
                     let result = Box::pin(self.session.run_one(&statement)).await?;
                     self.consume_sql_result(
@@ -2792,7 +2832,7 @@ impl Interpreter<'_> {
                     query,
                     using,
                 } => {
-                    let (statement, _) = self.dynamic_statement(query, using).await?;
+                    let (statement, _, _) = self.dynamic_statement(query, using).await?;
                     let QueryResult::Rows { fields, rows, .. } =
                         Box::pin(self.session.run_one(&statement)).await?
                     else {
@@ -3013,7 +3053,7 @@ impl Interpreter<'_> {
         &mut self,
         query: &Expr,
         using: &[Expr],
-    ) -> Result<(Statement, Vec<Datum>), ExecError> {
+    ) -> Result<(Statement, Vec<Datum>, String), ExecError> {
         let Datum::Text(source) = self.eval_async(query).await?.0 else {
             return Err(ExecError::TypeMismatch(
                 "EXECUTE query string must be text".into(),
@@ -3035,6 +3075,7 @@ impl Interpreter<'_> {
         Ok((
             statement,
             values.into_iter().map(|(value, _)| value).collect(),
+            source,
         ))
     }
 

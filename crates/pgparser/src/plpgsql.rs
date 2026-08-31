@@ -814,12 +814,17 @@ impl PlParser<'_> {
                     Vec::new()
                 };
                 self.expect_token(&Token::Semicolon)?;
-                return Ok(PlPgSqlStatement::ReturnQueryExecute { query, using });
+                return Ok(PlPgSqlStatement::ReturnQueryExecute { query, using, line });
             }
             let end = self.find_token(self.pos, &Token::Semicolon)?;
+            let source = self.slice_tokens(self.pos, end).trim().to_owned();
             let query = self.parse_sql_range(self.pos, end)?;
             self.pos = end + 1;
-            return Ok(PlPgSqlStatement::ReturnQuery(Box::new(query)));
+            return Ok(PlPgSqlStatement::ReturnQuery {
+                query: Box::new(query),
+                source,
+                line,
+            });
         }
         if matches!(self.token(), Token::Semicolon) {
             self.bump();

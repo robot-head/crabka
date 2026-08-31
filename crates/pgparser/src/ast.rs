@@ -5272,10 +5272,15 @@ pub enum PlPgSqlStatement {
         line: usize,
     },
     ReturnNext(Option<Expr>),
-    ReturnQuery(Box<Statement>),
+    ReturnQuery {
+        query: Box<Statement>,
+        source: String,
+        line: usize,
+    },
     ReturnQueryExecute {
         query: Expr,
         using: Vec<Expr>,
+        line: usize,
     },
     Raise(PlPgSqlRaise),
     Execute {

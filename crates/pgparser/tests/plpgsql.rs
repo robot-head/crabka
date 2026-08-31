@@ -240,8 +240,12 @@ fn parses_return_raise_and_dynamic_execution() {
         PlPgSqlStatement::ReturnNext(_)
     ));
     assert!(matches!(
-        block.statements[1],
-        PlPgSqlStatement::ReturnQuery(_)
+        &block.statements[1],
+        PlPgSqlStatement::ReturnQuery {
+            source,
+            line: 4,
+            ..
+        } if source == "select * from things"
     ));
     assert!(matches!(
         block.statements[2],
