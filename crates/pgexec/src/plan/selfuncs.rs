@@ -58,6 +58,49 @@ impl DecodedColumnStats {
             histogram: &self.histogram,
         }
     }
+
+    /// Estimate a numeric inequality from typed scalar slots when every value
+    /// can be represented as a finite `f64`.
+    pub(crate) fn scalar_inequality(
+        &self,
+        constant: &Datum,
+        inequality: Inequality,
+    ) -> Option<f64> {
+        let constant = numeric_datum(constant)?;
+        let mcv = self
+            .mcv
+            .iter()
+            .map(|(value, frequency)| Some((numeric_datum(value)?, *frequency)))
+            .collect::<Option<Vec<_>>>()?;
+        let histogram = self
+            .histogram
+            .iter()
+            .map(numeric_datum)
+            .collect::<Option<Vec<_>>>()?;
+        Some(scalarineqsel(
+            ColumnStats {
+                rows: self.rows,
+                null_frac: self.null_frac,
+                n_distinct: self.n_distinct,
+                mcv: &mcv,
+                histogram: &histogram,
+            },
+            Some(constant),
+            inequality,
+        ))
+    }
+}
+
+fn numeric_datum(value: &Datum) -> Option<f64> {
+    let value = match value {
+        Datum::Int2(value) => f64::from(*value),
+        Datum::Int4(value) => f64::from(*value),
+        Datum::Int8(value) => *value as f64,
+        Datum::Float4(value) => f64::from(*value),
+        Datum::Float8(value) => *value,
+        _ => return None,
+    };
+    value.is_finite().then_some(value)
 }
 
 /// Decode the statistic slots belonging to one typed attribute. Corrupt or

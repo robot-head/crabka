@@ -785,9 +785,9 @@ fn estimate_binary_restriction(
     left: &Expr,
     right: &Expr,
 ) -> f64 {
-    let (column, constant) = match (column_name(left), column_name(right)) {
-        (Some(column), None) => (column, right),
-        (None, Some(column)) => (column, left),
+    let (column, constant, reversed) = match (column_name(left), column_name(right)) {
+        (Some(column), None) => (column, right, false),
+        (None, Some(column)) => (column, left, true),
         _ => return crate::plan::selfuncs::DEFAULT_INEQ_SEL,
     };
     let Some((position, definition)) = table
@@ -822,7 +822,25 @@ fn estimate_binary_restriction(
         BinaryOp::Eq => crate::plan::selfuncs::eqsel(stats.as_stats(), constant.as_ref()),
         BinaryOp::Ne => crate::plan::selfuncs::neqsel(stats.as_stats(), constant.as_ref()),
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-            crate::plan::selfuncs::DEFAULT_INEQ_SEL
+            let inequality = match (op, reversed) {
+                (BinaryOp::Lt, false) | (BinaryOp::Gt, true) => {
+                    crate::plan::selfuncs::Inequality::Less
+                }
+                (BinaryOp::Le, false) | (BinaryOp::Ge, true) => {
+                    crate::plan::selfuncs::Inequality::LessEqual
+                }
+                (BinaryOp::Gt, false) | (BinaryOp::Lt, true) => {
+                    crate::plan::selfuncs::Inequality::Greater
+                }
+                (BinaryOp::Ge, false) | (BinaryOp::Le, true) => {
+                    crate::plan::selfuncs::Inequality::GreaterEqual
+                }
+                _ => unreachable!("comparison branch only receives inequalities"),
+            };
+            constant
+                .as_ref()
+                .and_then(|constant| stats.scalar_inequality(constant, inequality))
+                .unwrap_or(crate::plan::selfuncs::DEFAULT_INEQ_SEL)
         }
         _ => unreachable!("binary restriction only receives comparison operators"),
     }

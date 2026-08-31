@@ -23908,6 +23908,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_scalar_statistics_for_inequalities() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE inequality_estimate (a int4); \
+             INSERT INTO inequality_estimate SELECT i FROM generate_series(1, 100) s(i); \
+             ANALYZE inequality_estimate",
+        )
+        .await
+        .expect("statistics setup");
+        for sql in [
+            "EXPLAIN SELECT * FROM inequality_estimate WHERE a < 20",
+            "EXPLAIN SELECT * FROM inequality_estimate WHERE 20 > a",
+        ] {
+            let rows = rows_or_sqlstate(&mut s, sql)
+                .await
+                .expect("inequality explain");
+            assert!(
+                rows.first()
+                    == Some(&vec![
+                        "Seq Scan on inequality_estimate (cost=0.00..0.00 rows=20 width=0)".into()
+                    ])
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn explain_uses_the_target_and_conflict_clause_of_an_instead_rule() {
         use assert2::assert;
 
