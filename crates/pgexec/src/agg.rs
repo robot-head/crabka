@@ -367,7 +367,11 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
         return Ok(user.result_type);
     }
     let Some(func) = aggregate_func(&fc.name) else {
-        return Err(undefined_function(&fc.name));
+        return Err(if fc.within_group {
+            undefined_function(&fc.name)
+        } else {
+            crate::func::undefined_function_spelled(&fc.name, crate::func::checked_args(fc)?, scope)
+        });
     };
     match func {
         AggFunc::Count => {

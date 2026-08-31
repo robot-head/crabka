@@ -6529,6 +6529,11 @@ mod tests {
         let t = table();
         // unknown function → 42883.
         assert_eq!(err_code("frobnicate(s)", Some(&t)), "42883");
+        let error =
+            crate::eval::infer_type(&pexpr("frobnicate(n)").expect("parse"), &scope_of(Some(&t)))
+                .expect_err("unknown function")
+                .into_pg();
+        assert_eq!(error.message, "function frobnicate(integer) does not exist");
         // wrong arity → 42883.
         assert_eq!(err_code("length(s, s)", Some(&t)), "42883");
         // bad argument type in a projected position → 42883.
