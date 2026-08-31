@@ -24478,6 +24478,23 @@ mod tests {
                     vec!["  Filter: ((a < 1) AND (b < '1'::text))".into()],
                 ])
         );
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT * FROM text_mcv_inequality \
+                 WHERE a <= ANY (ARRAY[1, 2, 3]) AND b IN ('1', '2', '3')",
+            )
+            .await
+                == Ok(vec![
+                    vec![
+                        "Seq Scan on text_mcv_inequality (cost=0.00..0.00 rows=26 width=0)".into()
+                    ],
+                    vec![
+                        "  Filter: ((a ANY SubPlan) AND (b IN ('1'::text, '2'::text, '3'::text)))"
+                            .into(),
+                    ],
+                ])
+        );
     }
 
     #[tokio::test]

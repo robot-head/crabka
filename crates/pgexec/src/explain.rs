@@ -1643,11 +1643,8 @@ fn quantified_inequality_selectivity(
     ) {
         return None;
     }
-    let column = column_name(expr)?;
-    let definition = table
-        .columns
-        .iter()
-        .find(|definition| definition.name == column)?;
+    let ty = crate::eval::infer_type(expr, &crate::scope::Scope::single(table, &table.name.name))
+        .ok()?;
     let crabka_pgtypes::Datum::Array(array) =
         crate::eval::eval(array, &crate::scope::Scope::empty(), &[], ctx).ok()?
     else {
@@ -1660,31 +1657,29 @@ fn quantified_inequality_selectivity(
         .elems
         .iter()
         .filter(|value| !value.is_null())
-        .map(|value| crate::eval::cast_value_in(value, definition.ty, ctx.output_style()).ok())
+        .map(|value| crate::eval::cast_value_in(value, ty, ctx.output_style()).ok())
         .collect::<Option<Vec<_>>>()?;
-    let Some(mut boundary) = values.first().cloned() else {
+    if values.is_empty() {
         return Some(if *all { 1.0 } else { 0.0 });
-    };
-    let use_maximum = matches!(
-        (*op, *all),
-        (BinaryOp::Lt | BinaryOp::Le, false) | (BinaryOp::Gt | BinaryOp::Ge, true)
-    );
-    for value in &values[1..] {
-        let ordering = crabka_pgtypes::ops::compare(&boundary, value).ok()??;
-        if (use_maximum && ordering.is_lt()) || (!use_maximum && ordering.is_gt()) {
-            boundary = value.clone();
-        }
     }
-    Some(estimate_column_restriction(
-        catalog_kv,
-        table,
-        rows,
-        ctx,
-        *op,
-        column,
-        Some(boundary),
-        false,
-    ))
+    let statistics = column_statistics(catalog_kv, table, rows, expr, ctx);
+    Some(
+        values
+            .into_iter()
+            .fold(if *all { 1.0 } else { 0.0 }, |selectivity, value| {
+                let individual = statistics.as_ref().map_or(
+                    crate::plan::selfuncs::DEFAULT_INEQ_SEL,
+                    |statistics| {
+                        decoded_restriction_selectivity(statistics, *op, Some(value), false)
+                    },
+                );
+                if *all {
+                    selectivity * individual
+                } else {
+                    selectivity + individual - selectivity * individual
+                }
+            }),
+    )
 }
 
 fn mcv_key(
@@ -1761,46 +1756,6 @@ fn estimate_binary_restriction(
         };
     };
     decoded_restriction_selectivity(&stats, op, literal_for_type(constant, ty, ctx), reversed)
-}
-
-fn estimate_column_restriction(
-    catalog_kv: &dyn crabka_pgkv::Kv,
-    table: &crabka_pgcatalog::Table,
-    rows: f64,
-    ctx: &crate::clock::EvalCtx,
-    op: BinaryOp,
-    column: &str,
-    constant: Option<crabka_pgtypes::Datum>,
-    reversed: bool,
-) -> f64 {
-    let Some((position, definition)) = table
-        .columns
-        .iter()
-        .enumerate()
-        .find(|(_, definition)| definition.name == column)
-    else {
-        return crate::plan::selfuncs::DEFAULT_INEQ_SEL;
-    };
-    let Some(stats) = crate::attrstats::get(
-        catalog_kv,
-        &crate::attrstats::AttributeStatsKey {
-            relation: table.name.clone(),
-            attnum: i16::try_from(position + 1).unwrap_or(i16::MAX),
-            inherited: false,
-        },
-    )
-    .ok()
-    .flatten()
-    .and_then(|stats| {
-        crate::plan::selfuncs::decode_catalog_stats(&stats, definition.ty, rows, ctx)
-    }) else {
-        return if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-            crate::plan::selfuncs::DEFAULT_EQ_SEL
-        } else {
-            crate::plan::selfuncs::DEFAULT_INEQ_SEL
-        };
-    };
-    decoded_restriction_selectivity(&stats, op, constant, reversed)
 }
 
 fn decoded_restriction_selectivity(
