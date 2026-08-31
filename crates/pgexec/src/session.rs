@@ -23736,12 +23736,26 @@ mod tests {
             "CREATE TABLE group_expression_estimate (filler1 text, filler2 numeric, a int4, b int4, filler3 date, c int4, d int4); \
              INSERT INTO group_expression_estimate (a, b, c, filler1) \
              SELECT i / 100, i / 100, i / 100, (i / 100)::text FROM generate_series(1, 1000) s(i); \
-             ANALYZE group_expression_estimate; \
-             CREATE STATISTICS group_expression_estimate_stats ON a, b, c FROM group_expression_estimate; \
              ANALYZE group_expression_estimate",
         )
         .await
         .expect("expression ndistinct statistics setup");
+        let fallback_statistics = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY (a + 1), (b + 100)",
+        )
+        .await
+        .expect("expression fallback explain");
+        assert!(
+            fallback_statistics.first().and_then(|row| row.first())
+                == Some(&"HashAggregate (cost=0.00..0.00 rows=100 width=0)".into())
+        );
+        s.simple_query(
+            "CREATE STATISTICS group_expression_estimate_stats ON a, b, c FROM group_expression_estimate; \
+             ANALYZE group_expression_estimate",
+        )
+        .await
+        .expect("attribute statistics setup");
         let attribute_statistics = rows_or_sqlstate(
             &mut s,
             "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY (a + 1), (b + 100)",

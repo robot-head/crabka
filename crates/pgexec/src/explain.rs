@@ -226,10 +226,15 @@ fn estimate_group_rows(
         });
         distincts.push(rows);
     }
-    let attnums = remaining
+    let mut attnums = remaining
         .iter()
-        .map(GroupKey::attnum)
-        .collect::<Option<Vec<_>>>()?;
+        .map(|key| group_key_attributes(key, table))
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    attnums.sort_unstable();
+    attnums.dedup();
     let relation_rows = crate::relstats::of(catalog_kv, &table.name)
         .ok()
         .map(|stats| f64::from(stats.reltuples))
@@ -267,15 +272,6 @@ fn estimate_group_rows(
 enum GroupKey {
     Attribute(i16),
     Expression(String),
-}
-
-impl GroupKey {
-    fn attnum(&self) -> Option<i16> {
-        match self {
-            Self::Attribute(attnum) => Some(*attnum),
-            Self::Expression(_) => None,
-        }
-    }
 }
 
 fn group_key(
@@ -395,6 +391,19 @@ fn group_key_attribute(key: &GroupKey, table: &crabka_pgcatalog::Table) -> Optio
         GroupKey::Attribute(attnum) => Some(*attnum),
         GroupKey::Expression(expression) => {
             statistic_expression_inverts_attribute(expression, table)
+        }
+    }
+}
+
+fn group_key_attributes(key: &GroupKey, table: &crabka_pgcatalog::Table) -> Option<Vec<i16>> {
+    match key {
+        GroupKey::Attribute(attnum) => Some(vec![*attnum]),
+        GroupKey::Expression(expression) => {
+            let expression = crabka_pgparser::parser::parse_expression(expression).ok()?;
+            let mut attributes = Vec::new();
+            (expression_group_attributes(&expression, table, &mut attributes)
+                && !attributes.is_empty())
+            .then_some(attributes)
         }
     }
 }
