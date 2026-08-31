@@ -105,6 +105,9 @@ pub(crate) fn virtual_catalog_rows(
             catalog_kv,
             crabka_pgparser::ast::TextSearchObjectKind::Dictionary,
         ),
+        "pg_ts_parser" => pg_ts_parser_rows(),
+        "pg_ts_template" => pg_ts_template_rows(),
+        "pg_ts_config_map" => pg_ts_config_map_rows(catalog_kv),
         "pg_range" => pg_range_rows(catalog_kv),
         "pg_index" => pg_index_rows(catalog_kv),
         "pg_settings" => pg_settings_rows(),
@@ -2532,6 +2535,80 @@ pub(crate) fn text_search_catalog_rows(
         .collect())
 }
 
+const TEXT_SEARCH_TOKEN_TYPES: &[i32] = &[
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18, 19, 20, 21, 22,
+];
+
+fn pg_ts_parser_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(vec![vec![
+        Datum::Int4(3722),
+        Datum::Text("default".into()),
+        Datum::Int4(PG_CATALOG_NAMESPACE_OID),
+        regproc(3717, "prsd_start"),
+        regproc(3718, "prsd_nexttoken"),
+        regproc(3719, "prsd_end"),
+        regproc(3720, "prsd_headline"),
+        regproc(3721, "prsd_lextype"),
+    ]])
+}
+
+fn pg_ts_template_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok([
+        (3727, "simple", 3725, "dsimple_init", 3726, "dsimple_lexize"),
+        (
+            3730,
+            "synonym",
+            3728,
+            "dsynonym_init",
+            3729,
+            "dsynonym_lexize",
+        ),
+        (3733, "ispell", 3731, "dispell_init", 3732, "dispell_lexize"),
+        (
+            3742,
+            "thesaurus",
+            3740,
+            "thesaurus_init",
+            3741,
+            "thesaurus_lexize",
+        ),
+    ]
+    .into_iter()
+    .map(|(oid, name, init_oid, init, lexize_oid, lexize)| {
+        vec![
+            Datum::Int4(oid),
+            Datum::Text(name.into()),
+            Datum::Int4(PG_CATALOG_NAMESPACE_OID),
+            regproc(init_oid, init),
+            regproc(lexize_oid, lexize),
+        ]
+    })
+    .collect())
+}
+
+fn pg_ts_config_map_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let configs = crate::text_search_catalog::catalog_rows(
+        kv,
+        crabka_pgparser::ast::TextSearchObjectKind::Configuration,
+    )?;
+    let mut rows = Vec::new();
+    for (config, _) in configs {
+        let config_oid = crate::text_search_catalog::object_oid(&config);
+        for dictionary in crate::text_search_catalog::config_dictionaries(Some(kv), &config)? {
+            let dictionary_oid = crate::text_search_catalog::object_oid(&dictionary);
+            rows.extend(TEXT_SEARCH_TOKEN_TYPES.iter().map(|&token_type| {
+                vec![
+                    Datum::Int4(config_oid),
+                    Datum::Int4(token_type),
+                    Datum::Int4(1),
+                    Datum::Int4(dictionary_oid),
+                ]
+            }));
+        }
+    }
+    Ok(rows)
+}
+
 /// The `pg_type` rows of the `CREATE TYPE`/`CREATE DOMAIN` types.
 ///
 /// `typrelid` of a composite is the derived `pg_class` oid its attributes hang
@@ -2825,6 +2902,16 @@ pub(crate) const BUILTIN_CATALOG_OID_INDEXES: &[BuiltinCatalogOidIndex] = &[
         table: "pg_ts_dict",
         name: "pg_ts_dict_oid_index",
         oid: 3605,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_ts_parser",
+        name: "pg_ts_parser_oid_index",
+        oid: 3607,
+    },
+    BuiltinCatalogOidIndex {
+        table: "pg_ts_template",
+        name: "pg_ts_template_oid_index",
+        oid: 3767,
     },
     BuiltinCatalogOidIndex {
         table: "pg_am",
@@ -3929,6 +4016,9 @@ pub(crate) fn virtual_table_names() -> &'static [&'static str] {
             "pg_type",
             "pg_ts_config",
             "pg_ts_dict",
+            "pg_ts_parser",
+            "pg_ts_template",
+            "pg_ts_config_map",
             "pg_range",
             "pg_index",
             "pg_cursors",
@@ -4354,6 +4444,9 @@ pub(crate) fn virtual_relation_oid(name: &str) -> i32 {
         "pg_type" => 1247,
         "pg_ts_config" => 3602,
         "pg_ts_dict" => 3600,
+        "pg_ts_parser" => 3601,
+        "pg_ts_template" => 3764,
+        "pg_ts_config_map" => 3603,
         "pg_range" => 3541,
         "pg_index" => 2610,
         "pg_cursors" => 100_005,
@@ -5476,6 +5569,39 @@ mod tests {
         let index = builtin_catalog_oid_index("pg_largeobject_metadata").expect("catalog index");
         assert_eq!(index.name, "pg_largeobject_metadata_oid_index");
         assert_eq!(index.oid, 2996);
+    }
+
+    #[test]
+    fn text_search_support_catalogs_have_the_default_parser_and_mappings() {
+        let kv = MemKv::new();
+        let parser = pg_ts_parser_rows().expect("parser rows");
+        assert!(
+            parser
+                == vec![vec![
+                    Datum::Int4(3722),
+                    Datum::Text("default".into()),
+                    Datum::Int4(PG_CATALOG_NAMESPACE_OID),
+                    regproc(3717, "prsd_start"),
+                    regproc(3718, "prsd_nexttoken"),
+                    regproc(3719, "prsd_end"),
+                    regproc(3720, "prsd_headline"),
+                    regproc(3721, "prsd_lextype"),
+                ]]
+        );
+        assert!(
+            pg_ts_template_rows()
+                .expect("template rows")
+                .iter()
+                .any(|row| row[1] == Datum::Text("simple".into()))
+        );
+        let mappings = pg_ts_config_map_rows(&kv).expect("config map rows");
+        assert!(mappings.len() == TEXT_SEARCH_TOKEN_TYPES.len() * 2);
+        assert!(mappings.iter().all(|row| {
+            row[0] != Datum::Int4(0)
+                && row[1] != Datum::Int4(0)
+                && row[2] == Datum::Int4(1)
+                && row[3] != Datum::Int4(0)
+        }));
     }
 
     #[test]
