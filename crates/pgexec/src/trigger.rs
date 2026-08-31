@@ -145,6 +145,7 @@ pub(crate) fn invoke(
             values: Vec::new(),
             kind: crate::routine::FunctionRequestKind::Trigger(Box::new(invocation)),
             command_row_claims: crate::routine::scalar_runtime_command_row_claims(),
+            plpgsql_context: None,
             reply,
         })
         .map_err(|_| {

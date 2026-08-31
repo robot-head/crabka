@@ -42,6 +42,7 @@ pub(crate) struct ScalarFunctionRequest {
     pub values: Vec<Datum>,
     pub kind: FunctionRequestKind,
     pub command_row_claims: Option<crate::exec::CommandRowClaims>,
+    pub plpgsql_context: Option<String>,
     pub reply: std::sync::mpsc::Sender<FunctionRequestReply>,
 }
 
@@ -80,6 +81,7 @@ pub(crate) fn request_statistics(
             values: Vec::new(),
             kind: FunctionRequestKind::Statistics(request),
             command_row_claims: scalar_runtime_command_row_claims(),
+            plpgsql_context: None,
             reply,
         })
         .map_err(|_| {
@@ -113,6 +115,7 @@ pub(crate) fn request_table_xml(
             values: Vec::new(),
             kind: FunctionRequestKind::TableXml(request),
             command_row_claims: scalar_runtime_command_row_claims(),
+            plpgsql_context: None,
             reply,
         })
         .map_err(|_| {
@@ -142,6 +145,7 @@ pub(crate) fn request_query_xml(
             values: Vec::new(),
             kind: FunctionRequestKind::QueryXml(request),
             command_row_claims: scalar_runtime_command_row_claims(),
+            plpgsql_context: None,
             reply,
         })
         .map_err(|_| {
@@ -171,6 +175,7 @@ pub(crate) fn request_cursor_xml(
             values: Vec::new(),
             kind: FunctionRequestKind::CursorXml(request),
             command_row_claims: scalar_runtime_command_row_claims(),
+            plpgsql_context: None,
             reply,
         })
         .map_err(|_| {
@@ -201,6 +206,7 @@ pub(crate) fn request_table_xmlschema(
             values: Vec::new(),
             kind: FunctionRequestKind::TableXmlSchema(request),
             command_row_claims: scalar_runtime_command_row_claims(),
+            plpgsql_context: None,
             reply,
         })
         .map_err(|_| {
@@ -253,6 +259,7 @@ fn request_xml_schema(kind: FunctionRequestKind, operation: &str) -> Result<Datu
             values: Vec::new(),
             kind,
             command_row_claims: scalar_runtime_command_row_claims(),
+            plpgsql_context: None,
             reply,
         })
         .map_err(|_| {
@@ -279,6 +286,7 @@ struct ScalarRuntime {
     catalog: Arc<dyn Kv>,
     requests: Option<tokio::sync::mpsc::Sender<ScalarFunctionRequest>>,
     command_row_claims: Option<crate::exec::CommandRowClaims>,
+    plpgsql_context: Option<String>,
 }
 
 thread_local! {
@@ -297,7 +305,7 @@ pub(crate) fn with_scalar_runtime<T>(
     requests: Option<tokio::sync::mpsc::Sender<ScalarFunctionRequest>>,
     f: impl FnOnce() -> T,
 ) -> T {
-    with_scalar_runtime_with_command_row_claims(catalog, requests, None, f)
+    with_scalar_runtime_with_context(catalog, requests, None, None, f)
 }
 
 pub(crate) fn with_scalar_runtime_with_command_row_claims<T>(
@@ -306,11 +314,22 @@ pub(crate) fn with_scalar_runtime_with_command_row_claims<T>(
     command_row_claims: Option<crate::exec::CommandRowClaims>,
     f: impl FnOnce() -> T,
 ) -> T {
+    with_scalar_runtime_with_context(catalog, requests, command_row_claims, None, f)
+}
+
+pub(crate) fn with_scalar_runtime_with_context<T>(
+    catalog: &Arc<dyn Kv>,
+    requests: Option<tokio::sync::mpsc::Sender<ScalarFunctionRequest>>,
+    command_row_claims: Option<crate::exec::CommandRowClaims>,
+    plpgsql_context: Option<String>,
+    f: impl FnOnce() -> T,
+) -> T {
     SCALAR_RUNTIME.with(|cell| {
         let previous = cell.replace(Some(ScalarRuntime {
             catalog: Arc::clone(catalog),
             requests,
             command_row_claims,
+            plpgsql_context,
         }));
         let result = f();
         cell.replace(previous);
@@ -348,6 +367,15 @@ pub(crate) fn scalar_runtime_command_row_claims() -> Option<crate::exec::Command
             .borrow()
             .as_ref()
             .and_then(|runtime| runtime.command_row_claims.clone())
+    })
+}
+
+pub(crate) fn scalar_runtime_plpgsql_context() -> Option<String> {
+    SCALAR_RUNTIME.with(|runtime| {
+        runtime
+            .borrow()
+            .as_ref()
+            .and_then(|runtime| runtime.plpgsql_context.clone())
     })
 }
 
@@ -3628,6 +3656,7 @@ pub(crate) fn eval_plpgsql_scalar_with(
                         values: values.clone(),
                         kind: FunctionRequestKind::Scalar,
                         command_row_claims: scalar_runtime_command_row_claims(),
+                        plpgsql_context: scalar_runtime_plpgsql_context(),
                         reply,
                     })
                     .map_err(|_| {
@@ -3739,6 +3768,7 @@ pub(crate) fn eval_plpgsql_set_function(
                     values,
                     kind: FunctionRequestKind::Table(columns.clone()),
                     command_row_claims: scalar_runtime_command_row_claims(),
+                    plpgsql_context: None,
                     reply,
                 })
                 .map_err(|_| {
@@ -5498,6 +5528,7 @@ pub(crate) fn eval_plpgsql_table_function(
                 values,
                 kind: FunctionRequestKind::Table(columns.clone()),
                 command_row_claims: scalar_runtime_command_row_claims(),
+                plpgsql_context: None,
                 reply,
             })
             .map_err(|_| {

@@ -1415,6 +1415,42 @@ async fn diagnostics_include_plpgsql_context() {
 }
 
 #[tokio::test]
+async fn current_diagnostics_includes_nested_call_frames() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "CREATE TABLE pl_call_context (value text)").await;
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_call_context_inner() RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE context text;
+        BEGIN
+          GET CURRENT DIAGNOSTICS context = PG_CONTEXT;
+          INSERT INTO pl_call_context VALUES (context);
+          RETURN 1;
+        END
+        $$;
+        CREATE FUNCTION pl_call_context_outer() RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE value int4;
+        BEGIN
+          value := pl_call_context_inner();
+        END
+        $$;
+        ",
+    )
+    .await;
+
+    execute(&mut session, "SELECT pl_call_context_outer()").await;
+    assert!(
+        scalar(&mut session, "SELECT value FROM pl_call_context").await
+            == Some(
+                "PL/pgSQL function pl_call_context_inner() line 4 at GET DIAGNOSTICS\nPL/pgSQL function pl_call_context_outer() line 4 at assignment"
+                    .into()
+            )
+    );
+}
+
+#[tokio::test]
 async fn scalar_raise_exception_formats_percent_and_using_diagnostics() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

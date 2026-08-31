@@ -132,6 +132,7 @@ struct Interpreter<'a> {
     variable_conflict: PlPgSqlVariableConflict,
     print_strict_params: Option<bool>,
     routine_oid: u32,
+    caller_context: Option<String>,
 }
 
 #[derive(Clone)]
@@ -280,6 +281,7 @@ async fn execute_call_body(
             variable_conflict: PlPgSqlVariableConflict::UseVariable,
             print_strict_params: None,
             routine_oid: routine.oid,
+            caller_context: None,
         };
         let statements = crate::routine::parse_body(&routine)?;
         for (index, statement) in statements.into_iter().enumerate() {
@@ -332,6 +334,7 @@ pub(crate) async fn execute_scalar_function(
     session: &mut SqlSession,
     routine: &Routine,
     values: &[Datum],
+    caller_context: Option<String>,
 ) -> Result<Datum, ExecError> {
     let block = crate::routine::parse_plpgsql_body(routine)?;
     let ctx = session.plpgsql_eval_context();
@@ -352,6 +355,7 @@ pub(crate) async fn execute_scalar_function(
         variable_conflict: block.variable_conflict,
         print_strict_params: block.print_strict_params,
         routine_oid: routine.oid,
+        caller_context,
     };
     let flow = interpreter.exec_block(&block).await?;
     if crate::routine::declared_output_parameter_count(routine) > 1 {
@@ -401,6 +405,7 @@ pub(crate) async fn execute_sql_scalar_function(
         variable_conflict: PlPgSqlVariableConflict::UseVariable,
         print_strict_params: None,
         routine_oid: routine.oid,
+        caller_context: None,
     };
     let statements = crate::routine::parse_body(routine)?;
     let mut final_result = None;
@@ -561,6 +566,7 @@ pub(crate) async fn execute_trigger_function(
         variable_conflict: block.variable_conflict,
         print_strict_params: block.print_strict_params,
         routine_oid: routine.oid,
+        caller_context: None,
     };
     match interpreter.exec_block(&block).await? {
         Flow::Return(value) => Ok(value),
@@ -603,6 +609,7 @@ pub(crate) async fn execute_table_function(
         variable_conflict: block.variable_conflict,
         print_strict_params: block.print_strict_params,
         routine_oid: routine.oid,
+        caller_context: None,
     };
     let flow = interpreter.exec_block(&block).await?;
     if !routine.returns_set() {
@@ -658,6 +665,7 @@ pub(crate) async fn execute_sql_table_function(
         variable_conflict: PlPgSqlVariableConflict::UseVariable,
         print_strict_params: None,
         routine_oid: routine.oid,
+        caller_context: None,
     };
     let mut final_result = None;
     let mut final_row_types = None;
@@ -1401,6 +1409,7 @@ async fn execute_invocation(
             variable_conflict: block.variable_conflict,
             print_strict_params: block.print_strict_params,
             routine_oid: 0,
+            caller_context: None,
         };
         interpreter.exec_block(&block).await
     };
@@ -1437,6 +1446,7 @@ async fn execute_procedure_invocation(
         variable_conflict: block.variable_conflict,
         print_strict_params: block.print_strict_params,
         routine_oid: routine.oid,
+        caller_context: None,
     };
     interpreter.exec_block(&block).await?;
     Ok(procedure_output(routine, &interpreter))
@@ -2196,7 +2206,8 @@ impl Interpreter<'_> {
                     value,
                     line,
                 } => async {
-                    let (value, _) = self.eval_async(value).await?;
+                    let context = self.statement_context(*line, "assignment");
+                    let (value, _) = self.eval_async_with_context(value, context).await?;
                     self.assign_target(target, value).await?;
                     Ok(Flow::Next)
                 }
@@ -2347,7 +2358,8 @@ impl Interpreter<'_> {
                     }
                     let value = match value {
                         Some(expr) => {
-                            self.eval_async(expr)
+                            let context = self.statement_context(*line, "RETURN");
+                            self.eval_async_with_context(expr, context)
                                 .await
                                 .map_err(|error| {
                                     plpgsql_expression_error(
@@ -2573,10 +2585,9 @@ impl Interpreter<'_> {
                         let fields = error.and_then(|error| error.diagnostics.as_deref());
                         let value = match item.as_str() {
                             "row_count" if !stacked => Datum::Int8(self.last_row_count as i64),
-                            "pg_context" if !stacked => Datum::Text(format!(
-                                "{} line {} at GET DIAGNOSTICS",
-                                self.context, line
-                            )),
+                            "pg_context" if !stacked => {
+                                Datum::Text(self.statement_context(*line, "GET DIAGNOSTICS"))
+                            }
                             "pg_routine_oid" if !stacked => {
                                 Datum::Int4(i32::try_from(self.routine_oid).map_err(|_| {
                                     ExecError::Unsupported(
@@ -2957,6 +2968,25 @@ impl Interpreter<'_> {
     async fn eval_async(&mut self, expr: &Expr) -> Result<(Datum, ColumnType), ExecError> {
         let expr = self.bind_expr(expr)?;
         self.session.plpgsql_eval_async(expr).await
+    }
+
+    async fn eval_async_with_context(
+        &mut self,
+        expr: &Expr,
+        context: String,
+    ) -> Result<(Datum, ColumnType), ExecError> {
+        let expr = self.bind_expr(expr)?;
+        self.session
+            .plpgsql_eval_async_with_context(expr, Some(context))
+            .await
+    }
+
+    fn statement_context(&self, line: usize, statement: &str) -> String {
+        let current = format!("{} line {line} at {statement}", self.context);
+        match &self.caller_context {
+            Some(caller) => format!("{current}\n{caller}"),
+            None => current,
+        }
     }
 
     async fn dynamic_statement(

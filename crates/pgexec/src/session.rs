@@ -4106,6 +4106,14 @@ impl SqlSession {
         &mut self,
         expr: Expr,
     ) -> Result<(Datum, ColumnType), ExecError> {
+        self.plpgsql_eval_async_with_context(expr, None).await
+    }
+
+    pub(crate) async fn plpgsql_eval_async_with_context(
+        &mut self,
+        expr: Expr,
+        plpgsql_context: Option<String>,
+    ) -> Result<(Datum, ColumnType), ExecError> {
         let mut contains_subquery = false;
         crate::grouping::visit_expr(&expr, &mut |node| {
             contains_subquery |= matches!(
@@ -4177,12 +4185,18 @@ impl SqlSession {
                 crate::telemetry::blocking_worker_span("plpgsql_expression").entered();
             let _finished = finished;
             with_guc_runtime(guc_values, guc_settings, prepared, cursors, || {
-                crate::routine::with_scalar_runtime(&worker_catalog, Some(request_tx), || {
-                    let scope = crate::scope::Scope::empty();
-                    let ty = crate::eval::infer_type(&expr, &scope)?;
-                    let value = crate::eval::eval(&expr, &scope, &[], &ctx)?;
-                    Ok((value, ty))
-                })
+                crate::routine::with_scalar_runtime_with_context(
+                    &worker_catalog,
+                    Some(request_tx),
+                    None,
+                    plpgsql_context,
+                    || {
+                        let scope = crate::scope::Scope::empty();
+                        let ty = crate::eval::infer_type(&expr, &scope)?;
+                        let value = crate::eval::eval(&expr, &scope, &[], &ctx)?;
+                        Ok((value, ty))
+                    },
+                )
             })
         });
         let (result, mutations) =
@@ -10397,6 +10411,7 @@ impl SqlSession {
                                         self,
                                         routine,
                                         &request.values,
+                                        request.plpgsql_context.clone(),
                                     )
                                     .await
                                 };
