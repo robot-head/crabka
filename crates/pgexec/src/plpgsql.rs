@@ -4051,13 +4051,25 @@ impl Interpreter<'_> {
     }
 
     fn bind_statement(&self, statement: &Statement) -> Result<Statement, ExecError> {
-        rewrite_statement(
+        let mut statement = rewrite_statement(
             statement,
             &SqlBinder {
                 interpreter: self,
                 resolution: self.session.plpgsql_resolution_scope(),
             },
-        )
+        )?;
+        match &mut statement {
+            Statement::Update {
+                where_current_of: Some(cursor),
+                ..
+            }
+            | Statement::Delete {
+                where_current_of: Some(cursor),
+                ..
+            } => *cursor = self.cursor_name(cursor),
+            _ => {}
+        }
+        Ok(statement)
     }
 
     async fn execute_nested_call(

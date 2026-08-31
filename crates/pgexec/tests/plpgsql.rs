@@ -1654,6 +1654,31 @@ async fn declared_cursor_for_loop_opens_fetches_and_closes_the_cursor() {
             .to_string()
             .contains("cursor FOR loop must use a bound cursor variable")
     );
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_cursor_current_of (value int4);
+        INSERT INTO pl_cursor_current_of VALUES (1), (2);
+        CREATE FUNCTION pl_cursor_current_of() RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE cursor_ CURSOR FOR SELECT value FROM pl_cursor_current_of;
+        BEGIN
+          FOR row_ IN cursor_ LOOP
+            UPDATE pl_cursor_current_of SET value = row_.value + 10 WHERE CURRENT OF cursor_;
+          END LOOP;
+        END
+        $$;
+        SELECT pl_cursor_current_of();
+        ",
+    )
+    .await;
+    assert!(
+        query(
+            &mut session,
+            "SELECT value FROM pl_cursor_current_of ORDER BY value"
+        )
+        .await
+            == vec![row(&["11"]), row(&["12"])]
+    );
 }
 
 #[tokio::test]
