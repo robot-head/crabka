@@ -4321,38 +4321,53 @@ fn plpgsql_has_bare_return(block: &PlPgSqlBlock) -> bool {
 }
 
 fn plpgsql_has_return(block: &PlPgSqlBlock, has_value: bool) -> bool {
-    fn statements_have_return(statements: &[PlPgSqlStatement], has_value: bool) -> bool {
-        statements.iter().any(|statement| match statement {
-            PlPgSqlStatement::Return { value, .. } => value.is_some() == has_value,
-            PlPgSqlStatement::Block(block) => plpgsql_has_return(block, has_value),
+    plpgsql_return_source(block, has_value).is_some()
+}
+
+/// The first `RETURN` matching a definition-time validation rule.
+pub(crate) fn plpgsql_return_source(
+    block: &PlPgSqlBlock,
+    has_value: bool,
+) -> Option<(Option<&str>, usize)> {
+    fn statements_have_return(
+        statements: &[PlPgSqlStatement],
+        has_value: bool,
+    ) -> Option<(Option<&str>, usize)> {
+        statements.iter().find_map(|statement| match statement {
+            PlPgSqlStatement::Return {
+                value,
+                source,
+                line,
+            } if value.is_some() == has_value => Some((source.as_deref(), *line)),
+            PlPgSqlStatement::Block(block) => plpgsql_return_source(block, has_value),
             PlPgSqlStatement::If {
                 branches,
                 else_body,
-            } => {
-                branches
-                    .iter()
-                    .any(|(_, body)| statements_have_return(body, has_value))
-                    || statements_have_return(else_body, has_value)
-            }
+            } => branches
+                .iter()
+                .find_map(|(_, body)| statements_have_return(body, has_value))
+                .or_else(|| statements_have_return(else_body, has_value)),
             PlPgSqlStatement::Case {
                 arms, else_body, ..
-            } => {
-                arms.iter()
-                    .any(|(_, body)| statements_have_return(body, has_value))
-                    || else_body
+            } => arms
+                .iter()
+                .find_map(|(_, body)| statements_have_return(body, has_value))
+                .or_else(|| {
+                    else_body
                         .as_deref()
-                        .is_some_and(|body| statements_have_return(body, has_value))
-            }
+                        .and_then(|body| statements_have_return(body, has_value))
+                }),
             PlPgSqlStatement::Loop { body, .. } => statements_have_return(body, has_value),
-            _ => false,
+            _ => None,
         })
     }
 
-    statements_have_return(&block.statements, has_value)
-        || block
+    statements_have_return(&block.statements, has_value).or_else(|| {
+        block
             .exceptions
             .iter()
-            .any(|handler| statements_have_return(&handler.statements, has_value))
+            .find_map(|handler| statements_have_return(&handler.statements, has_value))
+    })
 }
 
 /// A `LANGUAGE sql` routine's final query, the one whose result is the

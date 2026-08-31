@@ -17692,6 +17692,7 @@ fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError)
     // struct rather than on the position, so it has to run before anything that
     // can create one.
     let error = attach_hidden_target_alias_diagnostic(sql, stmt, error);
+    let error = attach_plpgsql_definition_return_position(sql, stmt, error);
     let error = attach_rule_action_position(sql, stmt, error);
     let error = attach_typed_table_position(sql, stmt, error);
     let error = attach_variadic_array_position(sql, error);
@@ -17706,6 +17707,61 @@ fn attach_known_runtime_diagnostics(sql: &str, stmt: &Statement, error: PgError)
         stmt,
         attach_range_literal_position(sql, attach_type_input_literal_position(sql, error)),
     )
+}
+
+fn attach_plpgsql_definition_return_position(
+    sql: &str,
+    stmt: &Statement,
+    error: PgError,
+) -> PgError {
+    if error
+        .diagnostics
+        .as_ref()
+        .is_some_and(|diagnostics| diagnostics.position.is_some())
+    {
+        return error;
+    }
+    let has_value = match error.message.as_str() {
+        message if message.starts_with("RETURN cannot have a parameter") => true,
+        "missing expression at or near \";\"" => false,
+        _ => return error,
+    };
+    let body = match stmt {
+        Statement::CreateRoutine(routine) => {
+            routine.options.iter().find_map(|option| match option {
+                crabka_pgparser::ast::RoutineOption::Body(
+                    crabka_pgparser::ast::RoutineBody::Source(body),
+                ) => Some(body.as_str()),
+                _ => None,
+            })
+        }
+        Statement::DoBlock { body, .. } => Some(body.as_str()),
+        _ => None,
+    };
+    let Some(body) = body else {
+        return error;
+    };
+    let Ok(block) = crabka_pgparser::parse_plpgsql(body) else {
+        return error;
+    };
+    let Some((source, line)) = crate::routine::plpgsql_return_source(&block, has_value) else {
+        return error;
+    };
+    let line_start = body
+        .match_indices('\n')
+        .nth(line.saturating_sub(2))
+        .map_or(0, |(offset, _)| offset + 1);
+    let line_source = &body[line_start..];
+    let Some(offset) = (match source {
+        Some(source) => line_source.find(source),
+        None => line_source.find(';'),
+    }) else {
+        return error;
+    };
+    let Some(body_start) = sql.find(body) else {
+        return error;
+    };
+    error.with_position(sql[..body_start + line_start + offset].chars().count() + 1)
 }
 
 fn attach_typed_table_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
@@ -27690,6 +27746,65 @@ mod tests {
                     .expect("function call")
             ),
             "{11,1,2}:integer[]:{42,34.5}:numeric[]"
+        );
+    }
+
+    #[tokio::test]
+    async fn plpgsql_definition_return_errors_keep_the_body_position() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let sql = "CREATE FUNCTION plpgsql_bad_return(IN value int, OUT result int) \
+                   LANGUAGE plpgsql AS $$\nBEGIN\n  RETURN value;\nEND $$";
+        let error = session
+            .simple_query(sql)
+            .await
+            .expect_err("OUT function RETURN value is rejected");
+        assert_eq!(error.code, "42804");
+        assert_eq!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position),
+            Some(sql.find("value;").expect("return expression") + 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn plpgsql_definition_bare_return_errors_point_at_the_semicolon() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let sql = "CREATE FUNCTION plpgsql_missing_return() RETURNS int LANGUAGE plpgsql AS \
+                   $$\nBEGIN\n  RETURN ;\nEND $$";
+        let error = session
+            .simple_query(sql)
+            .await
+            .expect_err("scalar function requires a RETURN expression");
+        assert_eq!(error.code, "42601");
+        assert_eq!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position),
+            Some(sql.find(";").expect("return terminator") + 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn plpgsql_do_return_errors_keep_the_body_position() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let sql = "DO LANGUAGE plpgsql $$begin return 1; end$$";
+        let error = session
+            .simple_query(sql)
+            .await
+            .expect_err("DO RETURN value is rejected");
+        assert_eq!(error.code, "42804");
+        assert_eq!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.position),
+            Some(sql.find("1;").expect("return expression") + 1)
         );
     }
 
