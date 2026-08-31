@@ -3022,7 +3022,7 @@ fn procedure_arguments(
 /// This is the implicit graph restricted to the types Gres models.
 pub(crate) fn implicitly_coercible(source: ColumnType, target: ColumnType) -> bool {
     use ColumnType::{
-        Char, Float8, Int2, Int4, Int8, Numeric, Oid, Regclass, Regnamespace, Regprocedure,
+        Char, Float4, Float8, Int2, Int4, Int8, Numeric, Oid, Regclass, Regnamespace, Regprocedure,
         Regtype, Text, Timestamp, Timestamptz, Varchar,
     };
     if source == target {
@@ -3030,8 +3030,10 @@ pub(crate) fn implicitly_coercible(source: ColumnType, target: ColumnType) -> bo
     }
     matches!(
         (source, target),
-        (Int4, Int8 | Numeric(_) | Float8)
+        (Int2, Int4 | Int8 | Numeric(_) | Float8)
+            | (Int4, Int8 | Numeric(_) | Float8)
             | (Int8, Numeric(_) | Float8)
+            | (Float4, Float8)
             | (Numeric(_), Float8)
             | (Timestamp, Timestamptz)
             | (Text | Varchar(_) | Char(_), Text | Varchar(_) | Char(_))
@@ -7629,6 +7631,11 @@ mod tests {
         .expect("compatible polymorphic function");
         define(
             &kv,
+            "CREATE FUNCTION compatible_range_values(r anycompatiblerange, a anycompatible, b anycompatible) RETURNS anycompatiblearray AS 'SELECT ARRAY[a, b]' LANGUAGE sql",
+        )
+        .expect("compatible range function");
+        define(
+            &kv,
             "CREATE FUNCTION multirange_poly(a anyarray, r anymultirange) RETURNS anyelement AS 'SELECT 1' LANGUAGE sql",
         )
         .expect("multirange polymorphic function");
@@ -7682,6 +7689,19 @@ mod tests {
             resolve_call(&kv, "compatible_poly", &[ints, ArgType::Known(numrange)])
                 .expect("integer promotes to numeric")
                 .is_some()
+        );
+        assert!(
+            resolve_call(
+                &kv,
+                "compatible_range_values",
+                &[
+                    ArgType::Known(int4range),
+                    ArgType::Known(ColumnType::Int4),
+                    ArgType::Known(ColumnType::Int2),
+                ],
+            )
+            .expect("smallint promotes to the range subtype")
+            .is_some()
         );
         let numerics = ArgType::Known(ColumnType::Array(crabka_pgtypes::ElemType::Numeric));
         assert!(
@@ -9188,7 +9208,9 @@ mod tests {
     #[test]
     fn only_postgresqls_implicit_casts_resolve_a_call() {
         let cases = [
+            (ColumnType::Int2, ColumnType::Int4, true),
             (ColumnType::Int4, ColumnType::Int8, true),
+            (ColumnType::Float4, ColumnType::Float8, true),
             (ColumnType::Int4, ColumnType::Float8, true),
             (ColumnType::Int8, ColumnType::Int4, false),
             (ColumnType::Int4, ColumnType::Text, false),
