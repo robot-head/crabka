@@ -24569,12 +24569,12 @@ mod tests {
             assert!(sqlstate(&mut s, sql).await == "00000", "{sql}");
         }
         assert!(sqlstate(&mut s, "ALTER SYSTEM SET no_such_parameter = 1").await == "42704");
-        for sql in [
-            "CREATE STATISTICS st ON id FROM t",
-            "ALTER STATISTICS st SET STATISTICS 100",
-            "DROP STATISTICS st",
+        for (sql, expected) in [
+            ("CREATE STATISTICS st ON id FROM t", "0A000"),
+            ("ALTER STATISTICS st SET STATISTICS 100", "42704"),
+            ("DROP STATISTICS st", "42704"),
         ] {
-            assert!(sqlstate(&mut s, sql).await == "0A000", "{sql}");
+            assert!(sqlstate(&mut s, sql).await == expected, "{sql}");
         }
         let error = s
             .simple_query("LOAD 'nosuchfile'")
