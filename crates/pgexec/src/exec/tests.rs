@@ -879,6 +879,48 @@ async fn statistics_ddl_reports_missing_and_skipped_objects() {
 }
 
 #[tokio::test]
+async fn statistics_ddl_rejects_unsupported_source_kinds() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(
+        &mut session,
+        "CREATE TABLE statistics_source (a int, b int); \
+         CREATE INDEX statistics_source_index ON statistics_source (a); \
+         CREATE SEQUENCE statistics_source_sequence; \
+         CREATE VIEW statistics_source_view AS SELECT * FROM statistics_source; \
+         CREATE TYPE statistics_source_type AS (a int, b int)",
+    )
+    .await;
+
+    for (source, detail) in [
+        ("statistics_source_index", "indexes"),
+        ("statistics_source_sequence", "sequences"),
+        ("statistics_source_view", "views"),
+        ("statistics_source_type", "composite types"),
+    ] {
+        let error = session
+            .simple_query(&format!("CREATE STATISTICS s ON a, b FROM {source}"))
+            .await
+            .expect_err("unsupported source relation");
+        assert!(error.code == "42809", "{source}");
+        assert!(
+            error.message == format!("cannot define statistics for relation \"{source}\""),
+            "{source}"
+        );
+        assert!(
+            error
+                .diagnostics
+                .as_ref()
+                .and_then(|diagnostics| diagnostics.detail.as_deref())
+                == Some(format!("This operation is not supported for {detail}.").as_str()),
+            "{source}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn analyze_derives_functional_dependencies_for_statistics_objects() {
     use assert2::assert;
 

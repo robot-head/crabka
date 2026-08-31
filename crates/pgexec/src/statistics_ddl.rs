@@ -47,6 +47,28 @@ fn source_table(stats: &ast::CreateStatistics) -> Result<&ast::RelationRef, Exec
     }
 }
 
+fn unsupported_source_relation(
+    kv: &dyn Kv,
+    source: &RelationName,
+) -> Result<Option<ExecError>, ExecError> {
+    let message = || format!("cannot define statistics for relation \"{}\"", source.name);
+    if let Some(error) = crate::exec::ddl_alter::wrong_kind(kv, source, |kind| {
+        Some(crate::exec::ddl_alter::relkind_not_supported(
+            message(),
+            kind,
+        ))
+    }) {
+        return Ok(Some(error));
+    }
+    if crabka_pgcatalog::get_user_type(kv, source)?.is_some_and(|ty| ty.fields().is_some()) {
+        return Ok(Some(ExecError::Remote(
+            crabka_pgwire::error::PgError::error("42809", message())
+                .with_detail("This operation is not supported for composite types."),
+        )));
+    }
+    Ok(None)
+}
+
 fn generated_name(
     kv: &dyn Kv,
     source: &RelationName,
@@ -224,7 +246,15 @@ pub(crate) fn create(
         source_table(stats)?,
         SchemaDisposition::Utility,
     )?;
-    let table = crabka_pgcatalog::get_table(kv, &source)?;
+    let table = match crabka_pgcatalog::get_table(kv, &source) {
+        Ok(table) => table,
+        Err(error) => {
+            if let Some(error) = unsupported_source_relation(kv, &source)? {
+                return Err(error);
+            }
+            return Err(error.into());
+        }
+    };
     require_ownership(
         kv,
         &source,

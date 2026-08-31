@@ -18,7 +18,7 @@ mod correlated_bind;
 #[path = "exec/correlated_rows.rs"]
 mod correlated_rows;
 #[path = "ddl_alter.rs"]
-mod ddl_alter;
+pub(crate) mod ddl_alter;
 pub(crate) use ddl_alter::resolve_table_access_method_oid;
 #[path = "exec/ddl_drop.rs"]
 mod ddl_drop;
