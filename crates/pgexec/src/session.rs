@@ -27459,6 +27459,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_trigger_keeps_new_field_types() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE plpgsql_room (number char(8)); \
+                 INSERT INTO plpgsql_room VALUES ('001'); \
+                 CREATE TABLE plpgsql_slot (room_number char(8)); \
+                 CREATE FUNCTION plpgsql_slot_room_check() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN IF count(*) = 0 FROM plpgsql_room WHERE number = new.room_number THEN \
+                 RAISE EXCEPTION 'room does not exist'; END IF; RETURN new; END $$; \
+                 CREATE TRIGGER plpgsql_slot_room_trigger BEFORE INSERT ON plpgsql_slot \
+                 FOR EACH ROW EXECUTE FUNCTION plpgsql_slot_room_check(); \
+                 INSERT INTO plpgsql_slot VALUES ('001')",
+            )
+            .await
+            .expect("trigger accepts a matching bpchar field");
+    }
+
+    #[tokio::test]
     async fn plpgsql_perform_errors_include_sql_and_function_context() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();

@@ -1760,9 +1760,12 @@ impl ScalarInterpreter<'_> {
                     }
                     match table {
                         None => Ok(self.lookup_slot(name).map(SqlBinder::slot_expr)),
-                        Some(record) => rewrite_record_field(record, name, &|name| {
-                            self.lookup_slot(name).map(SqlBinder::slot_expr)
-                        }),
+                        Some(record) => rewrite_record_field(
+                            record,
+                            name,
+                            self.lookup_slot(record),
+                            self.lookup_slot("tg_relid"),
+                        ),
                     }
                 },
                 &|_| {
@@ -3571,33 +3574,41 @@ fn condition_sqlstate(condition: &str) -> Result<String, ExecError> {
 fn rewrite_record_field(
     record: &str,
     name: &str,
-    variable: &impl Fn(&str) -> Option<Expr>,
+    slot: Option<&Slot>,
+    tableoid: Option<&Slot>,
 ) -> Result<Option<Expr>, ExecError> {
     if name == "*" {
-        return Ok(variable(record));
+        return Ok(slot.map(SqlBinder::slot_expr));
     }
     if matches!(record, "old" | "new") && name == "tableoid" {
-        return Ok(variable("tg_relid"));
+        return Ok(tableoid.map(SqlBinder::slot_expr));
     }
-    Ok(match variable(record) {
-        Some(Expr::Const {
+    Ok(match slot {
+        Some(Slot {
             value: Datum::Record(record),
+            record_types,
             ..
         }) => {
+            let index = record
+                .names
+                .iter()
+                .position(|field| field == name)
+                .ok_or_else(|| ExecError::UndefinedColumn(name.to_string()))?;
             let value = record
-                .field(name)
+                .values
+                .get(index)
                 .cloned()
                 .ok_or_else(|| ExecError::UndefinedColumn(name.to_string()))?;
-            let ty = value.column_type().unwrap_or(ColumnType::Text);
+            let ty = record_types
+                .as_deref()
+                .and_then(|types| types.get(index))
+                .copied()
+                .or_else(|| value.column_type())
+                .unwrap_or(ColumnType::Text);
             Some(Expr::Const { value, ty })
         }
-        Some(
-            base @ Expr::Const {
-                ty: ColumnType::Record(_),
-                ..
-            },
-        ) => Some(Expr::FieldSelect {
-            base: Box::new(base),
+        Some(slot) if matches!(slot.ty, ColumnType::Record(_)) => Some(Expr::FieldSelect {
+            base: Box::new(SqlBinder::slot_expr(slot)),
             field: name.to_string(),
         }),
         _ => None,
@@ -4153,7 +4164,12 @@ impl SqlBinder<'_, '_> {
                     return Ok(None);
                 }
             }
-            return rewrite_record_field(qualifier, name, &|record| self.variable(record));
+            return rewrite_record_field(
+                qualifier,
+                name,
+                self.interpreter.lookup_slot(qualifier),
+                self.interpreter.lookup_slot("tg_relid"),
+            );
         }
 
         let variable = self.variable(name);
@@ -4221,7 +4237,12 @@ impl SqlBinder<'_, '_> {
                 }
                 match table {
                     None => Ok(self.variable(name)),
-                    Some(record) => rewrite_record_field(record, name, &|name| self.variable(name)),
+                    Some(record) => rewrite_record_field(
+                        record,
+                        name,
+                        self.interpreter.lookup_slot(record),
+                        self.interpreter.lookup_slot("tg_relid"),
+                    ),
                 }
             },
             &|query| self.rewrite_query(query, &crate::cte::CteContext::empty()),
