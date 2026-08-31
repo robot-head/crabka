@@ -6285,6 +6285,11 @@ impl SqlSession {
             statement,
             &mut plan,
         );
+        if matches!(statement, Statement::Query(_))
+            && self.guc.effective("debug_parallel_query").as_deref() != Ok("off")
+        {
+            plan = crate::explain::debug_parallel_gather(plan);
+        }
         if let Some(state) =
             explain_plan_state.and_then(|slot| slot.lock().expect("EXPLAIN plan state").take())
         {

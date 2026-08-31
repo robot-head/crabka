@@ -6,8 +6,9 @@
 //! It uses `PostgreSQL`'s node names and text layout. For single-relation
 //! plans, `EXPLAIN (COSTS OFF)` over the statement shapes the engine executes
 //! therefore prints text byte-identical to `PostgreSQL`. Text that depends on a
-//! planner decision, such as join order, index choice, or parallelism,
-//! deliberately does not, and the compatibility matrix says so.
+//! planner decision, such as join order or index choice, deliberately does
+//! not. `debug_parallel_query` is the exception: its forced `Gather` shape is
+//! rendered explicitly for regression compatibility.
 //!
 //! Costs still use the conservative zero-cost placeholder until the cost model
 //! lands.  Row estimates, however, come from the persisted `ANALYZE` slots
@@ -94,6 +95,21 @@ impl PlanNode {
         }
         line
     }
+}
+
+/// Render the planner's forced-parallel shape for `debug_parallel_query`.
+pub(crate) fn debug_parallel_gather(child: PlanNode) -> PlanNode {
+    let output = child
+        .output
+        .iter()
+        .map(|value| format!("({value})"))
+        .collect();
+    let mut gather = PlanNode::new("Gather")
+        .detail("Workers Planned", "1".into())
+        .detail("Single Copy", "true".into())
+        .with_child(child);
+    gather.output = output;
+    gather
 }
 
 /// Apply the first statistics-backed row estimate to a rendered plan.  This
@@ -3175,6 +3191,31 @@ mod tests {
             panic!("expected exactly one statement");
         };
         render_with_rows(&plan_statement(statement), options, 0)
+    }
+
+    #[test]
+    fn debug_parallel_gather_wraps_the_query_output() {
+        let mut child = PlanNode::new("Result");
+        child.output.push("value".into());
+        assert_eq!(
+            render_with_rows(
+                &debug_parallel_gather(child),
+                &ExplainOptions {
+                    costs: false,
+                    verbose: true,
+                    ..ExplainOptions::default()
+                },
+                0,
+            ),
+            vec![
+                "Gather",
+                "  Output: (value)",
+                "  Workers Planned: 1",
+                "  Single Copy: true",
+                "  ->  Result",
+                "        Output: value",
+            ]
+        );
     }
 
     #[test]
