@@ -23761,6 +23761,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_selects_inherited_ndistinct_for_group_rows() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE inherited_group_estimate (a int4, b int4); \
+             CREATE TABLE inherited_group_estimate_child () INHERITS (inherited_group_estimate); \
+             INSERT INTO inherited_group_estimate VALUES (1, 1), (2, 2); \
+             INSERT INTO inherited_group_estimate_child VALUES (1, 1), (3, 3); \
+             CREATE STATISTICS inherited_group_estimate_ab (ndistinct) \
+                 ON a, b FROM inherited_group_estimate; \
+             ANALYZE inherited_group_estimate",
+        )
+        .await
+        .expect("statistics setup");
+
+        for (sql, rows) in [
+            (
+                "EXPLAIN SELECT a, b FROM inherited_group_estimate GROUP BY a, b",
+                3,
+            ),
+            (
+                "EXPLAIN SELECT a, b FROM ONLY inherited_group_estimate GROUP BY a, b",
+                2,
+            ),
+        ] {
+            let explain = rows_or_sqlstate(&mut s, sql).await.expect("group explain");
+            assert!(
+                explain.first().and_then(|row| row.first())
+                    == Some(&format!(
+                        "HashAggregate (cost=0.00..0.00 rows={rows} width=0)"
+                    )),
+                "{sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn explain_uses_expression_ndistinct_for_stats_ext_group_rows() {
         use assert2::assert;
 

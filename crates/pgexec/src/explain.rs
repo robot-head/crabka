@@ -113,7 +113,7 @@ pub(crate) fn apply_catalog_estimate(
     let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
         return;
     };
-    let [TableExpr::Table { name, .. }] = select.from.as_slice() else {
+    let [TableExpr::Table { name, only, .. }] = select.from.as_slice() else {
         return;
     };
     let Ok(relation) = crate::relname::resolve_relation(
@@ -127,6 +127,9 @@ pub(crate) fn apply_catalog_estimate(
     let Ok(table) = crabka_pgcatalog::get_table(catalog_kv, &relation) else {
         return;
     };
+    let inherited = !only
+        && (crate::inheritance::has_children(catalog_kv, &relation).unwrap_or(false)
+            || crate::partition::is_partitioned(catalog_kv, &relation).unwrap_or(false));
     let rows = crate::relstats::of(catalog_kv, &relation)
         .ok()
         .map(|stats| f64::from(stats.reltuples))
@@ -136,8 +139,8 @@ pub(crate) fn apply_catalog_estimate(
         restriction_selectivity(catalog_kv, &table, rows, ctx, filter)
     });
     let input_rows = rows * selectivity;
-    let output_rows =
-        estimate_group_rows(catalog_kv, &table, input_rows, select).unwrap_or(input_rows);
+    let output_rows = estimate_group_rows(catalog_kv, &table, input_rows, inherited, select)
+        .unwrap_or(input_rows);
     set_estimated_rows(plan, output_rows, input_rows);
 }
 
@@ -160,6 +163,7 @@ fn estimate_group_rows(
     catalog_kv: &dyn crabka_pgkv::Kv,
     table: &crabka_pgcatalog::Table,
     input_rows: f64,
+    inherited: bool,
     select: &crabka_pgparser::ast::SelectStmt,
 ) -> Option<f64> {
     if select.group_by.is_empty() {
@@ -179,13 +183,11 @@ fn estimate_group_rows(
         .collect::<Vec<_>>();
     if let Some(rows) = statistics.iter().find_map(|object| {
         let positions = statistics_positions(&object, &keys, table)?;
-        object
-            .data
-            .as_ref()
+        statistics_data(object, inherited)
             .and_then(|data| data.ndistinct.as_deref())
             .and_then(|data| ndistinct_for_keys(&data, &positions))
     }) {
-        return Some(rows.min(input_rows.max(1.0)));
+        return Some(rows);
     }
     let mut remaining = keys.clone();
     let mut distincts = Vec::new();
@@ -200,9 +202,7 @@ fn estimate_group_rows(
                 .iter()
                 .map(|(_, position)| *position)
                 .collect::<Vec<_>>();
-            let Some(rows) = object
-                .data
-                .as_ref()
+            let Some(rows) = statistics_data(object, inherited)
                 .and_then(|data| data.ndistinct.as_deref())
                 .and_then(|data| ndistinct_for_keys(data, &positions))
             else {
@@ -266,6 +266,17 @@ fn estimate_group_rows(
     distincts.extend(attribute_distincts);
     has_all_attribute_distincts
         .then(|| crate::plan::selfuncs::estimate_num_groups(input_rows, relation_rows, &distincts))
+}
+
+fn statistics_data(
+    object: &crabka_pgcatalog::statistics::Statistics,
+    inherited: bool,
+) -> Option<&crabka_pgcatalog::statistics::StatisticsData> {
+    if inherited {
+        object.inherited_data.as_ref()
+    } else {
+        object.data.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
