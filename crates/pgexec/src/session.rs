@@ -12252,6 +12252,20 @@ impl SqlSession {
         // shell, and a `CREATE FUNCTION` that names one, both change the answer.
         let shell_notices =
             crate::routine::shell_type_notices(&*self.catalog_kv, &resolution, stmt);
+        let plpgsql_shadows = match stmt {
+            Statement::CreateRoutine(routine) => {
+                crate::routine::plpgsql_shadowed_variables(routine)?
+            }
+            _ => Vec::new(),
+        };
+        if self.plpgsql_setting_contains("plpgsql.extra_errors", "shadowed_variables")
+            && let Some(name) = plpgsql_shadows.first()
+        {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42712",
+                message: format!("variable \"{name}\" shadows a previously defined variable"),
+            });
+        }
         // Computed before the drop runs, while the dependents still exist.
         let cascade_notice =
             crate::exec::cascade_drop_notice(&*self.catalog_kv, &resolution, stmt)?;
@@ -12439,6 +12453,13 @@ impl SqlSession {
         }
         for notice in shell_notices {
             self.plpgsql_notice(notice)?;
+        }
+        if self.plpgsql_setting_contains("plpgsql.extra_warnings", "shadowed_variables") {
+            for name in plpgsql_shadows {
+                self.plpgsql_notice(PgError::warning(format!(
+                    "variable \"{name}\" shadows a previously defined variable"
+                )))?;
+            }
         }
         if let Some(warning) = fdw_change_warning {
             self.plpgsql_notice(PgError::warning(warning))?;
@@ -27653,6 +27674,60 @@ mod tests {
                     .await
                     .expect("function call"),
             ) == "first"
+        );
+    }
+
+    #[tokio::test]
+    async fn plpgsql_shadowed_variable_extra_error_rejects_the_definition() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("SET plpgsql.extra_errors TO 'shadowed_variables'")
+            .await
+            .expect("enable check");
+        let error = session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_shadowed_value(value int) RETURNS bool LANGUAGE plpgsql AS $$ \
+                 DECLARE value int; BEGIN RETURN true; END $$",
+            )
+            .await
+            .expect_err("shadowed declaration");
+        assert!(error.code == "42712");
+        assert!(error.message == "variable \"value\" shadows a previously defined variable");
+        assert!(sqlstate(&mut session, "SELECT plpgsql_shadowed_value(1)").await == "42883");
+    }
+
+    #[tokio::test]
+    async fn plpgsql_shadowed_variable_extra_warning_keeps_the_definition() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+        session
+            .simple_query("SET plpgsql.extra_warnings TO 'shadowed_variables'")
+            .await
+            .expect("enable check");
+        session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_warn_shadowed_value(value int) RETURNS bool LANGUAGE plpgsql AS $$ \
+                 DECLARE value int; BEGIN RETURN true; END $$",
+            )
+            .await
+            .expect("shadow warning");
+        assert!(
+            notices.try_recv().expect("shadow warning").message
+                == "variable \"value\" shadows a previously defined variable"
+        );
+        assert!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_warn_shadowed_value(1)")
+                    .await
+                    .expect("function call"),
+            ) == "t"
         );
     }
 

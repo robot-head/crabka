@@ -14,6 +14,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     fmt::Write as _,
     sync::Arc,
 };
@@ -4259,6 +4260,103 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
         });
     }
     Ok(block)
+}
+
+/// Names in a PL/pgSQL declaration which hide a routine parameter or outer
+/// block declaration. PostgreSQL reports these while compiling the routine.
+pub(crate) fn plpgsql_shadowed_variables(
+    stmt: &CreateRoutineStmt,
+) -> Result<Vec<String>, ExecError> {
+    let language = stmt.options.iter().find_map(|option| match option {
+        RoutineOption::Language(language) => Some(language.as_str()),
+        _ => None,
+    });
+    let body = stmt.options.iter().find_map(|option| match option {
+        RoutineOption::Body(RoutineBody::Source(body)) => Some(body.as_str()),
+        _ => None,
+    });
+    if language != Some("plpgsql") || body.is_none() {
+        return Ok(Vec::new());
+    }
+    let block = crabka_pgparser::parse_plpgsql(body.expect("PL/pgSQL source body"))
+        .map_err(|error| ExecError::Syntax(error.message))?;
+    let mut names = stmt
+        .args
+        .iter()
+        .filter_map(|arg| arg.name.clone())
+        .collect::<HashSet<_>>();
+    if let RoutineReturn::Table(columns) = &stmt.returns {
+        names.extend(columns.iter().map(|column| column.name.clone()));
+    }
+    let mut shadows = Vec::new();
+    collect_plpgsql_shadows(&block, &mut names, &mut shadows);
+    Ok(shadows)
+}
+
+fn collect_plpgsql_shadows(
+    block: &PlPgSqlBlock,
+    names: &mut HashSet<String>,
+    shadows: &mut Vec<String>,
+) {
+    for declaration in &block.declarations {
+        let (name, cursor_args) = match declaration {
+            crabka_pgparser::ast::PlPgSqlDeclaration::Variable { name, .. }
+            | crabka_pgparser::ast::PlPgSqlDeclaration::Alias { name, .. } => (name, &[][..]),
+            crabka_pgparser::ast::PlPgSqlDeclaration::Cursor {
+                name, arguments, ..
+            } => (name, arguments.as_slice()),
+        };
+        if !names.insert(name.clone()) {
+            shadows.push(name.clone());
+        }
+        for (name, _) in cursor_args {
+            if names.contains(name) {
+                shadows.push(name.clone());
+            }
+        }
+    }
+    collect_plpgsql_statement_shadows(&block.statements, names, shadows);
+    for handler in &block.exceptions {
+        collect_plpgsql_statement_shadows(&handler.statements, names, shadows);
+    }
+}
+
+fn collect_plpgsql_statement_shadows(
+    statements: &[PlPgSqlStatement],
+    names: &HashSet<String>,
+    shadows: &mut Vec<String>,
+) {
+    for statement in statements {
+        match statement {
+            PlPgSqlStatement::Block(block) => {
+                let mut nested_names = names.clone();
+                collect_plpgsql_shadows(block, &mut nested_names, shadows);
+            }
+            PlPgSqlStatement::If {
+                branches,
+                else_body,
+            } => {
+                for (_, body) in branches {
+                    collect_plpgsql_statement_shadows(body, names, shadows);
+                }
+                collect_plpgsql_statement_shadows(else_body, names, shadows);
+            }
+            PlPgSqlStatement::Case {
+                arms, else_body, ..
+            } => {
+                for (_, body) in arms {
+                    collect_plpgsql_statement_shadows(body, names, shadows);
+                }
+                if let Some(body) = else_body {
+                    collect_plpgsql_statement_shadows(body, names, shadows);
+                }
+            }
+            PlPgSqlStatement::Loop { body, .. } => {
+                collect_plpgsql_statement_shadows(body, names, shadows);
+            }
+            _ => {}
+        }
+    }
 }
 
 pub(crate) fn plpgsql_has_return_value(block: &PlPgSqlBlock) -> bool {
