@@ -1191,15 +1191,21 @@ fn bind_scalar_parameters(
     }
     let mut output_slot = None;
     if include_outputs {
+        let mut output_index = 0;
         for (index, param) in routine.params.iter().enumerate() {
             if !param.mode.is_output() {
                 continue;
             }
-            let Some(name) = &param.name else {
-                continue;
-            };
+            output_index += 1;
+            let name = param
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("column{output_index}"));
             output_slot = Some(name.clone());
             if param.mode == crabka_pgcatalog::routine::ParamMode::InOut {
+                if param.name.is_none() {
+                    frame.aliases.insert(name, format!("${}", index + 1));
+                }
                 continue;
             }
             frame.slots.insert(
@@ -1212,9 +1218,7 @@ fn bind_scalar_parameters(
                     not_null: false,
                 },
             );
-            frame
-                .aliases
-                .insert(format!("${}", index + 1), name.clone());
+            frame.aliases.insert(format!("${}", index + 1), name);
         }
         if let crabka_pgcatalog::routine::RoutineResult::Table(columns) = &routine.result {
             for (name, ty) in columns {

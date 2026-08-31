@@ -27464,7 +27464,7 @@ mod tests {
         let mut session = engine.connect();
         session
             .simple_query(
-                "CREATE FUNCTION plpgsql_positional_outputs(OUT first int4, OUT second int4) \
+                "CREATE FUNCTION plpgsql_positional_outputs(OUT int4, OUT int4) \
                  RETURNS SETOF record LANGUAGE plpgsql AS $$ \
                  BEGIN $1 := -1; $2 := -2; RETURN NEXT; RETURN QUERY SELECT 1, 2; END $$",
             )
@@ -27473,11 +27473,14 @@ mod tests {
         assert_eq!(
             single_text(
                 &session
-                    .simple_query("SELECT count(*) FROM plpgsql_positional_outputs()")
+                    .simple_query(
+                        "SELECT column1::text || ':' || column2::text \
+                         FROM plpgsql_positional_outputs() LIMIT 1",
+                    )
                     .await
                     .expect("function call")
             ),
-            "2"
+            "-1:-2"
         );
     }
 
