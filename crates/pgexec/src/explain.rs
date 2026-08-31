@@ -324,6 +324,19 @@ fn statistics_key_positions(
         })
 }
 
+fn statistics_data_position(
+    object: &crabka_pgcatalog::statistics::Statistics,
+    wanted: usize,
+) -> Option<i16> {
+    let mut expression = 0_i16;
+    object.keys.iter().enumerate().find_map(|(index, key)| {
+        if *key == 0 {
+            expression -= 1;
+        }
+        (index == wanted).then_some(if *key == 0 { expression } else { *key })
+    })
+}
+
 fn restriction_selectivity(
     catalog_kv: &dyn crabka_pgkv::Kv,
     table: &crabka_pgcatalog::Table,
@@ -332,6 +345,10 @@ fn restriction_selectivity(
     expr: &Expr,
 ) -> f64 {
     if let Some(selectivity) = extended_mcv_selectivity(catalog_kv, table, rows, ctx, expr) {
+        return selectivity;
+    }
+    if let Some(selectivity) = functional_dependency_selectivity(catalog_kv, table, rows, ctx, expr)
+    {
         return selectivity;
     }
     match expr {
@@ -372,6 +389,111 @@ fn restriction_selectivity(
         Expr::Like { .. } => crate::plan::selfuncs::patternsel(),
         _ => crate::plan::selfuncs::DEFAULT_INEQ_SEL,
     }
+}
+
+/// Adjust an equality conjunction when an `ANALYZE`-derived functional
+/// dependency says one constrained key determines another constrained key.
+fn functional_dependency_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+) -> Option<f64> {
+    let mut clauses = Vec::new();
+    if !collect_mcv_clauses(expr, table, ctx, &mut clauses) || clauses.len() < 2 {
+        return None;
+    }
+    let scalar = clauses
+        .iter()
+        .map(|clause| scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, clause))
+        .collect::<Vec<_>>();
+    let mut selectivity = scalar.iter().product::<f64>();
+    let mut adjusted = false;
+    for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
+        if object.table_id != table.id {
+            continue;
+        }
+        let Some(clause_positions) = clauses
+            .iter()
+            .map(|clause| {
+                statistics_key_positions(&object, &clause.key)
+                    .and_then(|index| statistics_data_position(&object, index))
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let Some(mut dependencies) = object
+            .data
+            .as_ref()
+            .and_then(|data| data.dependencies.as_deref())
+            .and_then(decode_dependencies)
+        else {
+            continue;
+        };
+        dependencies.sort_by(|left, right| right.2.total_cmp(&left.2));
+        let mut implied = Vec::new();
+        for (determinants, dependent, degree) in dependencies {
+            if implied.contains(&dependent) {
+                continue;
+            }
+            let Some(dependent_index) = clause_positions
+                .iter()
+                .position(|position| *position == dependent)
+            else {
+                continue;
+            };
+            let determinant = determinants
+                .iter()
+                .map(|position| {
+                    clause_positions
+                        .iter()
+                        .position(|candidate| candidate == position)
+                })
+                .collect::<Option<Vec<_>>>();
+            let Some(determinant) = determinant else {
+                continue;
+            };
+            let determinant_selectivity = determinant
+                .iter()
+                .map(|index| scalar[*index])
+                .product::<f64>();
+            let dependent_selectivity = scalar[dependent_index];
+            if determinant_selectivity <= f64::EPSILON || dependent_selectivity <= f64::EPSILON {
+                continue;
+            }
+            let dependent_given_determinant =
+                (dependent_selectivity / determinant_selectivity).min(1.0);
+            let corrected =
+                (1.0 - degree) * dependent_selectivity + degree * dependent_given_determinant;
+            selectivity = selectivity / dependent_selectivity * corrected;
+            implied.push(dependent);
+            adjusted = true;
+        }
+    }
+    adjusted.then_some(selectivity.clamp(0.0, 1.0))
+}
+
+fn decode_dependencies(data: &str) -> Option<Vec<(Vec<i16>, i16, f64)>> {
+    data.strip_prefix('{')?
+        .strip_suffix('}')?
+        .split(", \"")
+        .map(|entry| {
+            let (dependency, degree) = entry.trim().trim_start_matches('"').split_once("\":")?;
+            let (determinants, dependent) = dependency.split_once("=>")?;
+            let determinants = determinants
+                .split(',')
+                .map(|value| value.trim().parse::<i16>().ok())
+                .collect::<Option<Vec<_>>>()?;
+            let degree = degree.trim().parse::<f64>().ok()?;
+            (degree.is_finite() && (0.0..=1.0).contains(&degree)).then_some((
+                determinants,
+                dependent.trim().parse::<i16>().ok()?,
+                degree,
+            ))
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -2146,6 +2268,14 @@ mod tests {
             panic!("expected exactly one statement");
         };
         render_with_rows(&plan_statement(statement), options, 0)
+    }
+
+    #[test]
+    fn dependencies_payload_decodes_positions_and_degrees() {
+        assert!(
+            decode_dependencies(r#"{"1 => 2": 1.000000, "1, 2 => 3": 0.500000}"#)
+                == Some(vec![(vec![1], 2, 1.0), (vec![1, 2], 3, 0.5)])
+        );
     }
 
     /// The deparser is two mutually recursive functions. An expression form

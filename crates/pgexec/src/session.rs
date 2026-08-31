@@ -23853,6 +23853,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_functional_dependencies_for_equality_conjunctions() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE dependency_estimate (a int4, b text, c int4); \
+             INSERT INTO dependency_estimate \
+             SELECT mod(i, 100), mod(i, 50), mod(i, 25) \
+             FROM generate_series(1, 5000) s(i); \
+             ANALYZE dependency_estimate",
+        )
+        .await
+        .expect("statistics setup");
+        let before = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM dependency_estimate WHERE a = 1 AND b = 1",
+        )
+        .await
+        .expect("independent explain");
+        assert!(
+            before.first()
+                == Some(&vec![
+                    "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=1 width=0)".into()
+                ])
+        );
+        s.simple_query(
+            "CREATE STATISTICS dependency_estimate_abc (dependencies) \
+             ON a, b, c FROM dependency_estimate; ANALYZE dependency_estimate",
+        )
+        .await
+        .expect("dependency setup");
+        let dependencies =
+            rows_or_sqlstate(&mut s, "SELECT stxddependencies FROM pg_statistic_ext_data").await;
+        assert!(
+            dependencies
+                == Ok(vec![vec![
+                    r#"{"1 => 2": 1.000000, "1 => 3": 1.000000, "2 => 3": 1.000000, "1, 2 => 3": 1.000000, "1, 3 => 2": 1.000000}"#.into()
+                ]])
+        );
+        let after = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM dependency_estimate WHERE a = 1 AND b = 1",
+        )
+        .await
+        .expect("dependency explain");
+        assert!(
+            after.first()
+                == Some(&vec![
+                    "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=50 width=0)".into()
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_the_target_and_conflict_clause_of_an_instead_rule() {
         use assert2::assert;
 
