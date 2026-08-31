@@ -1599,7 +1599,15 @@ async fn a_function_that_owes_a_value_still_needs_a_return() {
 
     assert!(error.code == "2F005", "{error:?}");
     assert!(
-        error.message == "control reached end of function owes_a_value() without RETURN",
+        error.message == "control reached end of function without RETURN",
+        "{error:?}"
+    );
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            == Some("PL/pgSQL function owes_a_value()"),
         "{error:?}"
     );
 }

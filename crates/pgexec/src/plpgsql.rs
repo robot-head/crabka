@@ -963,12 +963,11 @@ fn scalar_function_result(routine: &Routine, returned: Option<Datum>) -> Result<
     if crate::routine::declared_returns_void(routine) {
         return Ok(crate::routine::void_result_value());
     }
-    returned.ok_or_else(|| ExecError::FunctionError {
-        sqlstate: "2F005",
-        message: format!(
-            "control reached end of function {} without RETURN",
-            routine.identity()
-        ),
+    returned.ok_or_else(|| {
+        ExecError::Remote(
+            PgError::error("2F005", "control reached end of function without RETURN")
+                .with_context(format!("PL/pgSQL function {}", routine.identity())),
+        )
     })
 }
 
