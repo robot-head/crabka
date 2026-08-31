@@ -657,11 +657,11 @@ pub(crate) fn xml_text_of(value: &Datum, ctx: &EvalCtx) -> Result<String, ExecEr
         }),
         Datum::Timestamp(value) => {
             if crabka_pgtypes::datetime::timestamp_is_infinite(*value) {
-                return Err(ExecError::Type(
-                    crabka_pgtypes::TypeError::DatetimeOutOfRange {
-                        message: "timestamp out of range".into(),
-                    },
-                ));
+                return Err(ExecError::FunctionErrorWithMessageDetail {
+                    sqlstate: "22008",
+                    message: "timestamp out of range".into(),
+                    detail: "XML does not support infinite timestamp values.".into(),
+                });
             }
             Ok(crabka_pgtypes::datetime::timestamp_to_text_in(
                 *value,
@@ -672,11 +672,11 @@ pub(crate) fn xml_text_of(value: &Datum, ctx: &EvalCtx) -> Result<String, ExecEr
         }
         Datum::Timestamptz(value) => {
             if crabka_pgtypes::datetime::timestamptz_is_infinite(*value) {
-                return Err(ExecError::Type(
-                    crabka_pgtypes::TypeError::DatetimeOutOfRange {
-                        message: "timestamp out of range".into(),
-                    },
-                ));
+                return Err(ExecError::FunctionErrorWithMessageDetail {
+                    sqlstate: "22008",
+                    message: "timestamp out of range".into(),
+                    detail: "XML does not support infinite timestamp values.".into(),
+                });
             }
             let mut text = crabka_pgtypes::datetime::timestamptz_to_text_in(
                 *value,
@@ -694,11 +694,11 @@ pub(crate) fn xml_text_of(value: &Datum, ctx: &EvalCtx) -> Result<String, ExecEr
         }
         Datum::Date(value) => {
             if crabka_pgtypes::datetime::date_is_infinite(*value) {
-                return Err(ExecError::Type(
-                    crabka_pgtypes::TypeError::DatetimeOutOfRange {
-                        message: "date out of range".into(),
-                    },
-                ));
+                return Err(ExecError::FunctionErrorWithMessageDetail {
+                    sqlstate: "22008",
+                    message: "date out of range".into(),
+                    detail: "XML does not support infinite date values.".into(),
+                });
             }
             Ok(crabka_pgtypes::datetime::date_to_text(*value))
         }
