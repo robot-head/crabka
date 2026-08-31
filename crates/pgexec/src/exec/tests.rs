@@ -834,6 +834,51 @@ async fn statistics_ddl_persists_and_allows_its_catalog_lifecycle() {
 }
 
 #[tokio::test]
+async fn statistics_ddl_reports_missing_and_skipped_objects() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    run_s(
+        &mut session,
+        "CREATE TABLE statistics_messages (a int, b int)",
+    )
+    .await;
+    run_s(
+        &mut session,
+        "CREATE STATISTICS statistics_messages_s ON a, b FROM statistics_messages",
+    )
+    .await;
+
+    run_s(
+        &mut session,
+        "CREATE STATISTICS IF NOT EXISTS statistics_messages_s ON a, b FROM statistics_messages",
+    )
+    .await;
+    assert!(
+        notices.try_recv().expect("create notice").message
+            == "statistics object \"statistics_messages_s\" already exists, skipping"
+    );
+
+    run_s(
+        &mut session,
+        "DROP STATISTICS IF EXISTS statistics_messages_missing",
+    )
+    .await;
+    assert!(
+        notices.try_recv().expect("drop notice").message
+            == "statistics object \"statistics_messages_missing\" does not exist, skipping"
+    );
+
+    let error = session
+        .simple_query("ALTER STATISTICS statistics_messages_missing SET STATISTICS 1")
+        .await
+        .expect_err("missing statistics must fail");
+    assert!(error.message == "statistics object \"statistics_messages_missing\" does not exist");
+}
+
+#[tokio::test]
 async fn analyze_derives_functional_dependencies_for_statistics_objects() {
     use assert2::assert;
 

@@ -525,6 +525,32 @@ pub(crate) fn skipped_create_notice(
     // Each arm asks exactly what its statement asks before it skips, so the
     // notice cannot claim a skip the statement did not take.
     let reference = match stmt {
+        Statement::CreateStatistics(stats)
+            if stats.if_not_exists && !stats.name.name.is_empty() =>
+        {
+            let resolution = resolution();
+            let name = if stats.name.schema.as_deref() == Some(crabka_pgcatalog::PG_TEMP_ALIAS) {
+                crabka_pgcatalog::RelationName::new(
+                    resolution.temp_schema(),
+                    stats.name.name.clone(),
+                )
+            } else {
+                let Ok(name) =
+                    resolve_relation(kv, &resolution, &stats.name, SchemaDisposition::Creation)
+                else {
+                    return Ok(None);
+                };
+                name
+            };
+            return Ok(crabka_pgcatalog::statistics::get(kv, &name)?
+                .is_some()
+                .then(|| {
+                    crabka_pgwire::error::PgError::notice(format!(
+                        "statistics object \"{}\" already exists, skipping",
+                        name.name
+                    ))
+                }));
+        }
         Statement::CreateSchema {
             name: Some(name),
             if_not_exists: true,
@@ -650,6 +676,31 @@ pub(crate) fn skipped_drop_notice(
         crabka_pgwire::error::PgError::notice(format!("{kind} \"{name}\" does not exist, skipping"))
     };
     match stmt {
+        Statement::DropStatistics {
+            names,
+            if_exists: true,
+        } => {
+            let resolution = resolution();
+            for written in names {
+                let name = if written.schema.as_deref() == Some(crabka_pgcatalog::PG_TEMP_ALIAS) {
+                    crabka_pgcatalog::RelationName::new(
+                        resolution.temp_schema(),
+                        written.name.clone(),
+                    )
+                } else {
+                    let Ok(name) =
+                        resolve_relation(kv, &resolution, written, SchemaDisposition::Utility)
+                    else {
+                        continue;
+                    };
+                    name
+                };
+                if crabka_pgcatalog::statistics::get(kv, &name)?.is_none() {
+                    return Ok(Some(missing("statistics object", &name.name)));
+                }
+            }
+            Ok(None)
+        }
         Statement::DropFdw {
             name,
             if_exists: true,

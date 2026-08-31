@@ -22,6 +22,13 @@ fn command(tag: &str) -> QueryResult {
     QueryResult::Command { tag: tag.into() }
 }
 
+fn missing(name: &RelationName) -> ExecError {
+    ExecError::UndefinedObject(format!(
+        "statistics object \"{}\" does not exist",
+        name.name
+    ))
+}
+
 /// `CREATE STATISTICS` is intentionally limited to a plain relation here.
 /// PostgreSQL parses the larger FROM grammar and rejects every other shape
 /// semantically, so the parser retains it and this is the single shared gate.
@@ -297,7 +304,7 @@ pub(crate) fn alter(
         if if_exists {
             return Ok((command("ALTER STATISTICS"), Vec::new()));
         }
-        return Err(crabka_pgcatalog::CatalogError::UndefinedObject(name.to_string()).into());
+        return Err(missing(&name));
     };
     require_statistics_owner(kv, &object, fctx.effective_role())?;
     let ops = match action {
@@ -353,11 +360,7 @@ pub(crate) fn drop(
                 ops.extend(crabka_pgcatalog::statistics::drop_ops(kv, &name)?);
             }
             None if if_exists => {}
-            None => {
-                return Err(
-                    crabka_pgcatalog::CatalogError::UndefinedObject(name.to_string()).into(),
-                );
-            }
+            None => return Err(missing(&name)),
         }
     }
     Ok((command("DROP STATISTICS"), ops))
