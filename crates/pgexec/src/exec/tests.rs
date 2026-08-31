@@ -1756,6 +1756,41 @@ async fn foreign_table_comments_are_visible_in_pg_description() {
 }
 
 #[tokio::test]
+async fn function_comments_resolve_their_signature() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for sql in [
+        "CREATE FUNCTION described_function(value int) RETURNS int LANGUAGE sql AS 'SELECT $1'",
+        "COMMENT ON FUNCTION described_function(int) IS 'the function'",
+    ] {
+        run_s(&mut session, sql).await;
+    }
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT obj_description(oid, 'pg_proc') FROM pg_proc WHERE proname = 'described_function'",
+        )
+        .await
+            == vec![text_row(&["the function"])]
+    );
+    let error = session
+        .simple_query("COMMENT ON FUNCTION missing_function(int) IS 'missing'")
+        .await
+        .expect_err("missing function");
+    assert!(error.code == "42883");
+    assert!(error.message == "function missing_function(integer) does not exist");
+    assert!(
+        error
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.hint.as_deref())
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn user_type_and_domain_comments_are_visible_in_pg_description() {
     use assert2::assert;
     let engine = SqlEngine::new();

@@ -1903,6 +1903,11 @@ pub(crate) fn drop_routines(
                         )?);
                     }
                 }
+                ops.push(crabka_pgcatalog::set_comment_op(
+                    "function",
+                    crabka_pgcatalog::CommentObject::Named(&routine.oid.to_string()),
+                    None,
+                ));
                 ops.extend(drop_routine_ops(&routine.identity()));
             }
             Err(error) if if_exists && is_undefined(&error) => {}

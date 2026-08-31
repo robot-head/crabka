@@ -9726,8 +9726,20 @@ impl Parser {
                 object_name.push_str(&self.expect_col_id()?);
             }
         }
-        // A routine signature: COMMENT ON FUNCTION f(int) IS …
-        if aggregate.is_none() && cast.is_none() && *self.peek() == Token::LParen {
+        let routine = if object_kind == "function" {
+            Some(crate::ast::AggregateSignature {
+                name: object_name.clone(),
+                args: self.aggregate_args()?,
+            })
+        } else {
+            None
+        };
+        // Other routine-like object kinds have no signature we need to retain.
+        if aggregate.is_none()
+            && routine.is_none()
+            && cast.is_none()
+            && *self.peek() == Token::LParen
+        {
             let mut depth = 0usize;
             loop {
                 match self.bump() {
@@ -9771,6 +9783,7 @@ impl Parser {
             object_name,
             rule_table,
             aggregate,
+            routine,
             cast,
             comment,
         })
@@ -29651,6 +29664,30 @@ mod operator_tests {
         assert!(signature.name == "total");
         let crate::ast::AggregateArgs::Args(args) = signature.args else {
             panic!("ordinary aggregate signature");
+        };
+        assert!(args.len() == 1);
+        assert!(args[0].ty.name == "integer");
+    }
+
+    #[test]
+    fn comment_on_function_preserves_the_signature() {
+        let Statement::Comment {
+            object_kind,
+            object_name,
+            routine: Some(signature),
+            ..
+        } = parse("COMMENT ON FUNCTION total (int4) IS 'total comment'")
+            .expect("parse")
+            .pop()
+            .expect("one statement")
+        else {
+            panic!("not a function comment");
+        };
+        assert!(object_kind == "function");
+        assert!(object_name == "total");
+        assert!(signature.name == "total");
+        let crate::ast::AggregateArgs::Args(args) = signature.args else {
+            panic!("ordinary function signature");
         };
         assert!(args.len() == 1);
         assert!(args[0].ty.name == "integer");

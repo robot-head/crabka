@@ -774,6 +774,7 @@ pub(crate) fn execute_ddl(
             object_name,
             rule_table,
             aggregate,
+            routine,
             cast,
             comment,
         } => comment_ops(
@@ -783,6 +784,7 @@ pub(crate) fn execute_ddl(
             object_name,
             rule_table.as_ref(),
             aggregate.as_ref(),
+            routine.as_ref(),
             cast.as_ref(),
             comment.as_deref(),
             fctx.effective_role(),
@@ -8680,6 +8682,7 @@ pub(crate) fn comment_ops(
     object_name: &str,
     rule_table: Option<&crabka_pgparser::ast::RelationRef>,
     aggregate: Option<&crabka_pgparser::ast::AggregateSignature>,
+    routine: Option<&crabka_pgparser::ast::AggregateSignature>,
     cast: Option<&(ColumnType, ColumnType)>,
     comment: Option<&str>,
     role: &str,
@@ -8758,6 +8761,39 @@ pub(crate) fn comment_ops(
             vec![crabka_pgcatalog::set_comment_op(
                 object_kind,
                 CommentObject::Named(&routine.identity()),
+                comment,
+            )],
+        ));
+    }
+
+    if object_kind == "function" {
+        let signature = routine.expect("parser records every function comment signature");
+        let crabka_pgparser::ast::AggregateArgs::Args(args) = &signature.args else {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42883",
+                format!("function {}(*) does not exist", signature.name),
+            )));
+        };
+        let names = args
+            .iter()
+            .map(|arg| crate::routine::resolve_routine_type(kv, &arg.ty, false).map(|ty| ty.name))
+            .collect::<Result<Vec<_>, _>>()?;
+        let identity = crabka_pgcatalog::routine::signature_identity(&signature.name, &names);
+        let Some(routine) = crabka_pgcatalog::routine::get_routine(kv, &identity)? else {
+            return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+                "42883",
+                format!(
+                    "function {}({}) does not exist",
+                    signature.name,
+                    names.join(", ")
+                ),
+            )));
+        };
+        return Ok((
+            command("COMMENT"),
+            vec![crabka_pgcatalog::set_comment_op(
+                object_kind,
+                CommentObject::Named(&routine.oid.to_string()),
                 comment,
             )],
         ));

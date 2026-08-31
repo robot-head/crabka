@@ -716,6 +716,8 @@ pub enum Statement {
         rule_table: Option<RelationRef>,
         /// The mandatory signature for `COMMENT ON AGGREGATE`.
         aggregate: Option<AggregateSignature>,
+        /// The mandatory signature for `COMMENT ON FUNCTION`.
+        routine: Option<AggregateSignature>,
         /// The mandatory source and target types for `COMMENT ON CAST`.
         cast: Option<(ColumnType, ColumnType)>,
         comment: Option<String>,

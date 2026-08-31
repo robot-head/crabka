@@ -3228,6 +3228,14 @@ fn object_description(
             CommentObject::Named(&statistics.oid.to_string()),
         );
     }
+    if class_oid == crate::catalog_rel::relation_oid("pg_proc") {
+        let oid = u32::try_from(crate::func::int_arg(&values[0])?)
+            .map_err(|_| ExecError::Unsupported("function OID is out of range".into()))?;
+        if crate::routine::routine_by_oid(kv, i32::try_from(oid).unwrap_or_default())?.is_none() {
+            return Ok(Datum::Null);
+        }
+        return comment_datum(kv, "function", CommentObject::Named(&oid.to_string()));
+    }
     if class_oid != crate::catalog_rel::relation_oid("pg_largeobject") {
         return description(kv, scope, &values[0], 0);
     }
