@@ -77,6 +77,371 @@ pub(crate) const DEFAULT_PARSER_TOKEN_TYPES: &[(i32, &str, &str)] = &[
     (23, "entity", "XML entity"),
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultParserToken {
+    pub(crate) id: i32,
+    pub(crate) text: String,
+}
+
+/// Tokenize with PostgreSQL's built-in parser categories.
+///
+/// The full-text vector path deliberately keeps its existing dictionary-first
+/// normalization. This lexer instead preserves every lexical item, including
+/// blanks and XML syntax, for the parser inspection functions.
+pub(crate) fn default_parser_tokens(source: &str) -> Vec<DefaultParserToken> {
+    let mut tokens = Vec::new();
+    let mut offset = 0;
+    while offset < source.len() {
+        let rest = &source[offset..];
+        if let Some(length) = xml_tag_length(rest) {
+            push_token(&mut tokens, 13, &rest[..length]);
+            offset += length;
+            continue;
+        }
+        if let Some(length) = xml_entity_length(rest) {
+            push_token(&mut tokens, 23, &rest[..length]);
+            offset += length;
+            continue;
+        }
+        let end = if token_starts(rest) {
+            rest.char_indices()
+                .skip(1)
+                .find_map(|(index, character)| {
+                    (character.is_whitespace() || character == '<').then_some(index)
+                })
+                .unwrap_or(rest.len())
+        } else {
+            rest.char_indices()
+                .skip(1)
+                .find_map(|(index, _)| {
+                    let suffix = &rest[index..];
+                    (token_starts(suffix)
+                        || xml_tag_length(suffix).is_some()
+                        || xml_entity_length(suffix).is_some())
+                    .then_some(index)
+                })
+                .unwrap_or(rest.len())
+        };
+        let chunk = &rest[..end];
+        if token_starts(rest) {
+            let chunk = if is_url_like(chunk) {
+                chunk
+            } else {
+                chunk.split_once('&').map_or(chunk, |(prefix, _)| prefix)
+            };
+            if !chunk.is_empty() {
+                let length = chunk.len();
+                tokenize_chunk(&mut tokens, chunk);
+                offset += length;
+                continue;
+            }
+        }
+        push_token(&mut tokens, 12, chunk);
+        offset += end;
+    }
+    tokens
+}
+
+fn token_starts(value: &str) -> bool {
+    let mut characters = value.chars();
+    match characters.next() {
+        Some(character) if character.is_alphanumeric() || character == '_' => true,
+        Some('/' | '~') => characters
+            .next()
+            .is_some_and(|character| !character.is_whitespace()),
+        Some('+' | '-') => characters
+            .next()
+            .is_some_and(|character| character.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+fn xml_tag_length(value: &str) -> Option<usize> {
+    let body = value.strip_prefix('<')?;
+    let first = body.trim_start_matches('/').chars().next()?;
+    if !first.is_alphabetic() {
+        return None;
+    }
+    let mut quote = None;
+    for (index, character) in body.char_indices() {
+        match (quote, character) {
+            (Some(active), character) if character == active => quote = None,
+            (None, '"' | '\'') => quote = Some(character),
+            (None, '>') => return Some(index + 2),
+            (None, '<') => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn xml_entity_length(value: &str) -> Option<usize> {
+    let end = value.find(';')?;
+    let entity = &value[..=end];
+    is_entity(entity).then_some(entity.len())
+}
+
+fn is_url_like(value: &str) -> bool {
+    value.starts_with("http://")
+        || value.starts_with("https://")
+        || value
+            .split_once('/')
+            .is_some_and(|(host, path)| !path.is_empty() && is_host(host))
+}
+
+fn tokenize_chunk(tokens: &mut Vec<DefaultParserToken>, chunk: &str) {
+    if chunk.is_empty() {
+        return;
+    }
+    if let Some((protocol, body)) = chunk
+        .strip_prefix("http://")
+        .map(|body| ("http://", body))
+        .or_else(|| {
+            chunk
+                .strip_prefix("https://")
+                .map(|body| ("https://", body))
+        })
+    {
+        push_token(tokens, 14, protocol);
+        tokenize_url_body(tokens, body);
+        return;
+    }
+    if is_email(chunk) {
+        push_token(tokens, 4, chunk);
+        return;
+    }
+    if let Some((left, right)) = chunk.split_once('@') {
+        if !left.is_empty() {
+            tokenize_chunk(tokens, left);
+        }
+        push_token(tokens, 12, "@");
+        if !right.is_empty() {
+            tokenize_chunk(tokens, right);
+        }
+        return;
+    }
+    if let Some((host, _)) = chunk.split_once('/')
+        && is_host(host)
+    {
+        tokenize_url_body(tokens, chunk);
+        return;
+    }
+    let (core, trailing) = trim_trailing_punctuation(chunk);
+    if !core.is_empty() {
+        tokenize_core(tokens, core);
+    }
+    if !trailing.is_empty() {
+        push_token(tokens, 12, trailing);
+    }
+}
+
+fn tokenize_core(tokens: &mut Vec<DefaultParserToken>, chunk: &str) {
+    if is_scientific(chunk) {
+        push_token(tokens, 7, chunk);
+    } else if is_version(chunk) {
+        push_token(tokens, 8, chunk);
+    } else if is_decimal(chunk) {
+        push_token(tokens, 20, chunk);
+    } else if is_signed_integer(chunk) {
+        push_token(tokens, 21, chunk);
+    } else if chunk.bytes().all(|byte| byte.is_ascii_digit()) {
+        push_token(tokens, 22, chunk);
+    } else if is_host(chunk) {
+        push_token(tokens, 6, chunk);
+    } else if let Some((prefix, suffix)) = chunk.rsplit_once('-')
+        && is_word(prefix)
+        && (is_decimal(&format!("-{suffix}")) || suffix.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        tokenize_core(tokens, prefix);
+        tokenize_core(tokens, &format!("-{suffix}"));
+    } else if chunk.contains('-') && chunk.split('-').all(is_word) {
+        let id = if chunk
+            .split('-')
+            .all(|part| part.chars().all(char::is_alphabetic))
+        {
+            if chunk.is_ascii() { 16 } else { 17 }
+        } else {
+            15
+        };
+        push_token(tokens, id, chunk);
+        for (index, part) in chunk.split('-').enumerate() {
+            if index > 0 {
+                push_token(tokens, 12, "-");
+            }
+            push_token(tokens, hword_part_type(part), part);
+        }
+    } else if is_file(chunk) {
+        push_token(tokens, 19, chunk);
+    } else if is_word(chunk) {
+        let id = if chunk.chars().all(char::is_alphabetic) {
+            if chunk.is_ascii() { 1 } else { 2 }
+        } else {
+            3
+        };
+        push_token(tokens, id, chunk);
+    } else {
+        let mut offset = 0;
+        while offset < chunk.len() {
+            let rest = &chunk[offset..];
+            let word = rest
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_alphanumeric() || character == '_');
+            let length = rest
+                .char_indices()
+                .skip(1)
+                .find_map(|(index, character)| {
+                    (word != (character.is_alphanumeric() || character == '_')).then_some(index)
+                })
+                .unwrap_or(rest.len());
+            let part = &rest[..length];
+            if word {
+                tokenize_core(tokens, part);
+            } else {
+                push_token(tokens, 12, part);
+            }
+            offset += length;
+        }
+    }
+}
+
+fn hword_part_type(part: &str) -> i32 {
+    if part.chars().all(char::is_alphabetic) {
+        if part.is_ascii() { 11 } else { 10 }
+    } else {
+        9
+    }
+}
+
+fn tokenize_url_body(tokens: &mut Vec<DefaultParserToken>, body: &str) {
+    let (body, trailing) = trim_trailing_punctuation(body);
+    if let Some((host, path)) = body.split_once('/')
+        && is_host(host)
+    {
+        if path.is_empty() {
+            push_token(tokens, 6, host);
+            push_token(tokens, 12, "/");
+        } else {
+            push_token(tokens, 5, body);
+            push_token(tokens, 6, host);
+            push_token(tokens, 18, &body[host.len()..]);
+        }
+    } else if is_host(body) {
+        push_token(tokens, 6, body);
+    } else if !body.is_empty() {
+        tokenize_core(tokens, body);
+    }
+    if !trailing.is_empty() {
+        push_token(tokens, 12, trailing);
+    }
+}
+
+fn trim_trailing_punctuation(chunk: &str) -> (&str, &str) {
+    let end = chunk
+        .trim_end_matches(|character: char| matches!(character, ',' | '.' | ';' | ':'))
+        .len();
+    chunk.split_at(end)
+}
+
+fn is_entity(value: &str) -> bool {
+    value.ends_with(';')
+        && value.strip_prefix('&').is_some_and(|body| {
+            body[..body.len() - 1].starts_with('#')
+                || body[..body.len() - 1].chars().all(char::is_alphanumeric)
+        })
+}
+
+fn is_email(value: &str) -> bool {
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty()
+        && local.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        && is_host(domain)
+        && domain
+            .rsplit_once('.')
+            .is_some_and(|(_, top_level)| top_level.len() >= 2)
+}
+
+fn is_host(value: &str) -> bool {
+    value.contains('.')
+        && value.split('.').all(|part| {
+            !part.is_empty()
+                && part.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | ':')
+                })
+        })
+        && value
+            .rsplit_once('.')
+            .is_some_and(|(_, top_level)| top_level.len() >= 2)
+}
+
+fn is_version(value: &str) -> bool {
+    value.split('.').count() > 2
+        && value
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn is_file(value: &str) -> bool {
+    value.len() > 1
+        && (value.starts_with('/')
+            || value.starts_with('~')
+            || value.contains('/')
+            || value.contains('.'))
+}
+
+fn is_scientific(value: &str) -> bool {
+    let Some((mantissa, exponent)) = value.split_once(['e', 'E']) else {
+        return false;
+    };
+    is_decimal(mantissa) && is_signed_integer(exponent)
+}
+
+fn is_decimal(value: &str) -> bool {
+    let Some((whole, fraction)) = value.split_once('.') else {
+        return false;
+    };
+    !whole.is_empty()
+        && !fraction.is_empty()
+        && whole.parse::<i64>().is_ok()
+        && fraction.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_signed_integer(value: &str) -> bool {
+    value.strip_prefix(['+', '-']).is_some_and(|digits| {
+        !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn is_word(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_')
+}
+
+fn push_token(tokens: &mut Vec<DefaultParserToken>, id: i32, text: &str) {
+    if !text.is_empty() {
+        if id == 12
+            && let Some(DefaultParserToken {
+                id: previous_id,
+                text: previous_text,
+            }) = tokens.last_mut()
+            && *previous_id == 12
+        {
+            previous_text.push_str(text);
+            return;
+        }
+        tokens.push(DefaultParserToken {
+            id,
+            text: text.into(),
+        });
+    }
+}
+
 fn text_search_func(name: &str) -> Option<TextSearchFunc> {
     Some(match name {
         "to_tsvector" => TextSearchFunc::ToTsVector,
@@ -1106,6 +1471,53 @@ fn lexize_dictionary(
     })
 }
 
+/// One parser token with the dictionary result that `ts_debug` exposes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DebugToken {
+    pub(crate) dictionaries: Vec<String>,
+    pub(crate) dictionary: Option<String>,
+    pub(crate) lexemes: Option<Vec<String>>,
+}
+
+/// Run the configuration mapping for one token from the built-in parser.
+pub(crate) fn debug_token(
+    config: &str,
+    token: &DefaultParserToken,
+    catalog: Catalog<'_>,
+) -> Result<DebugToken, ExecError> {
+    let configured_dictionaries = crate::text_search_catalog::config_dictionaries(catalog, config)?;
+    let config_name = config
+        .strip_prefix("pg_catalog.")
+        .unwrap_or(config)
+        .to_ascii_lowercase();
+    let dictionaries = if matches!(token.id, 12 | 13 | 14 | 23) {
+        Vec::new()
+    } else if config_name == "english" {
+        vec![if matches!(token.id, 1 | 2 | 10 | 11 | 16 | 17) {
+            "english_stem".into()
+        } else {
+            "simple".into()
+        }]
+    } else {
+        configured_dictionaries
+    };
+    for index in 0..dictionaries.len() {
+        let dictionary = dictionaries[index].clone();
+        if let Some(lexemes) = lexize_dictionary(&dictionary, &token.text, catalog)? {
+            return Ok(DebugToken {
+                dictionaries,
+                dictionary: Some(dictionary),
+                lexemes: Some(lexemes),
+            });
+        }
+    }
+    Ok(DebugToken {
+        dictionaries,
+        dictionary: None,
+        lexemes: None,
+    })
+}
+
 fn default_config() -> Result<String, ExecError> {
     crate::session::current_setting_runtime("default_text_search_config", false)?
         .ok_or_else(|| ExecError::UnrecognizedParameter("default_text_search_config".into()))
@@ -1490,6 +1902,106 @@ mod tests {
         assert2::assert!(text_lexemes("simple", "SkIeS") == vec!["skies".to_string()]);
         assert2::assert!(text_lexemes("simple", "the") == vec!["the".to_string()]);
         assert2::assert!(text_lexemes("simple", "").is_empty());
+    }
+
+    #[test]
+    fn default_parser_preserves_words_urls_xml_and_blanks() {
+        assert2::assert!(
+            default_parser_tokens("cat 42 http://example.com/a <b>&amp;")
+                == vec![
+                    DefaultParserToken {
+                        id: 1,
+                        text: "cat".into(),
+                    },
+                    DefaultParserToken {
+                        id: 12,
+                        text: " ".into(),
+                    },
+                    DefaultParserToken {
+                        id: 22,
+                        text: "42".into(),
+                    },
+                    DefaultParserToken {
+                        id: 12,
+                        text: " ".into(),
+                    },
+                    DefaultParserToken {
+                        id: 14,
+                        text: "http://".into(),
+                    },
+                    DefaultParserToken {
+                        id: 5,
+                        text: "example.com/a".into(),
+                    },
+                    DefaultParserToken {
+                        id: 6,
+                        text: "example.com".into(),
+                    },
+                    DefaultParserToken {
+                        id: 18,
+                        text: "/a".into(),
+                    },
+                    DefaultParserToken {
+                        id: 12,
+                        text: " ".into(),
+                    },
+                    DefaultParserToken {
+                        id: 13,
+                        text: "<b>".into(),
+                    },
+                    DefaultParserToken {
+                        id: 23,
+                        text: "&amp;".into(),
+                    },
+                ]
+        );
+    }
+
+    #[test]
+    fn default_parser_separates_inline_xml_entities() {
+        let source =
+            "<myns:foo-bar_baz.blurfl>abc&nm1;def&#xa9;ghi&#245;jkl</myns:foo-bar_baz.blurfl>";
+        assert2::assert!(
+            default_parser_tokens(source)
+                == vec![
+                    DefaultParserToken {
+                        id: 13,
+                        text: "<myns:foo-bar_baz.blurfl>".into(),
+                    },
+                    DefaultParserToken {
+                        id: 1,
+                        text: "abc".into(),
+                    },
+                    DefaultParserToken {
+                        id: 23,
+                        text: "&nm1;".into(),
+                    },
+                    DefaultParserToken {
+                        id: 1,
+                        text: "def".into(),
+                    },
+                    DefaultParserToken {
+                        id: 23,
+                        text: "&#xa9;".into(),
+                    },
+                    DefaultParserToken {
+                        id: 1,
+                        text: "ghi".into(),
+                    },
+                    DefaultParserToken {
+                        id: 23,
+                        text: "&#245;".into(),
+                    },
+                    DefaultParserToken {
+                        id: 1,
+                        text: "jkl".into(),
+                    },
+                    DefaultParserToken {
+                        id: 13,
+                        text: "</myns:foo-bar_baz.blurfl>".into(),
+                    },
+                ]
+        );
     }
 
     /// A dictionary built on a template crabka does not have never reaches the

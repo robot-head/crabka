@@ -108,6 +108,8 @@ enum Srf {
     PgMcvListItems,
     PgShowAllSettings,
     TsTokenType,
+    TsParse,
+    TsDebug,
     /// `pg_snapshot_xip(pg_snapshot)` → `xid8`, and `txid_snapshot_xip`, which
     /// is the same expansion reported as `bigint`. One row per running
     /// transaction the snapshot lists, ascending, and no row at all for a
@@ -340,6 +342,8 @@ fn classify(name: &str) -> Option<Srf> {
         "pg_mcv_list_items" => Srf::PgMcvListItems,
         "pg_show_all_settings" => Srf::PgShowAllSettings,
         "ts_token_type" => Srf::TsTokenType,
+        "ts_parse" => Srf::TsParse,
+        "ts_debug" => Srf::TsDebug,
         "pg_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Modern),
         "txid_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Legacy),
         "pg_partition_ancestors" => Srf::PgPartitionAncestors,
@@ -616,6 +620,24 @@ pub(crate) fn plan(
                 column("description", ColumnType::Text),
             ]
         }
+        Srf::TsParse => {
+            require_arity(name, &given, (2, 2))?;
+            vec![
+                column("tokid", ColumnType::Int4),
+                column("token", ColumnType::Text),
+            ]
+        }
+        Srf::TsDebug => {
+            require_arity(name, &given, (2, 2))?;
+            vec![
+                column("alias", ColumnType::Text),
+                column("description", ColumnType::Text),
+                column("token", ColumnType::Text),
+                column("dictionaries", ColumnType::Array(ElemType::Text)),
+                column("dictionary", ColumnType::Text),
+                column("lexemes", ColumnType::Array(ElemType::Text)),
+            ]
+        }
         Srf::PgPartitionAncestors => {
             require_arity(name, &given, (1, 1))?;
             vec![column("relid", ColumnType::Regclass)]
@@ -827,6 +849,8 @@ pub(crate) fn rows_with_memory(
         Srf::PgMcvListItems => pg_mcv_list_item_rows(vals)?,
         Srf::PgShowAllSettings => crate::exec::catalog_rows::pg_show_all_settings_rows()?,
         Srf::TsTokenType => token_type_rows(&vals[0])?,
+        Srf::TsParse => parse_rows(&vals[0], &vals[1])?,
+        Srf::TsDebug => debug_rows(&vals[0], &vals[1], ctx)?,
         Srf::SnapshotXip(family) => snapshot_xip_rows(family, &plan.name, &vals[0], ctx)?,
         Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
@@ -885,6 +909,8 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
         Srf::PgMcvListItems => vec![text],
         Srf::PgShowAllSettings => Vec::new(),
         Srf::TsTokenType => vec![None],
+        Srf::TsParse => vec![None, Some(ColumnType::Text)],
+        Srf::TsDebug => vec![None, Some(ColumnType::Text)],
         Srf::SnapshotXip(family) => vec![Some(family.snapshot_type())],
         // `regclass`, but resolving a *name* to a relation needs the catalog and
         // the search path, which the pure cast this drives has neither of. The
@@ -3087,21 +3113,7 @@ fn ensure_expansion_fits(
 }
 
 fn token_type_rows(parser: &Datum) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let default_parser = matches!(parser, Datum::Int4(3722))
-        || matches!(parser, Datum::Text(name) if name.eq_ignore_ascii_case("default"));
-    if !default_parser {
-        let name = match parser {
-            Datum::Int4(oid) => oid.to_string(),
-            Datum::Text(name) => format!("\"{name}\""),
-            value => value
-                .column_type()
-                .map_or("unknown", ColumnType::name)
-                .to_string(),
-        };
-        return Err(ExecError::UndefinedObject(format!(
-            "text search parser {name} does not exist"
-        )));
-    }
+    require_default_parser(parser)?;
     Ok(crate::text_search_fn::DEFAULT_PARSER_TOKEN_TYPES
         .iter()
         .map(|&(id, alias, description)| {
@@ -3112,6 +3124,80 @@ fn token_type_rows(parser: &Datum) -> Result<Vec<Vec<Datum>>, ExecError> {
             ]
         })
         .collect())
+}
+
+fn parse_rows(parser: &Datum, source: &Datum) -> Result<Vec<Vec<Datum>>, ExecError> {
+    require_default_parser(parser)?;
+    let Datum::Text(source) = source else {
+        return Err(ExecError::TypeMismatch(format!(
+            "ts_parse does not accept an argument of type {}",
+            source.column_type().map_or("unknown", ColumnType::name)
+        )));
+    };
+    Ok(crate::text_search_fn::default_parser_tokens(source)
+        .into_iter()
+        .map(|token| vec![Datum::Int4(token.id), Datum::Text(token.text)])
+        .collect())
+}
+
+fn debug_rows(config: &Datum, source: &Datum, ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let Datum::Text(config) = config else {
+        return Err(ExecError::TypeMismatch(format!(
+            "ts_debug does not accept an argument of type {}",
+            config.column_type().map_or("unknown", ColumnType::name)
+        )));
+    };
+    let Datum::Text(source) = source else {
+        return Err(ExecError::TypeMismatch(format!(
+            "ts_debug does not accept an argument of type {}",
+            source.column_type().map_or("unknown", ColumnType::name)
+        )));
+    };
+    crate::text_search_fn::default_parser_tokens(source)
+        .into_iter()
+        .map(|token| {
+            let (_, alias, description) = crate::text_search_fn::DEFAULT_PARSER_TOKEN_TYPES
+                .iter()
+                .find(|&&(id, _, _)| id == token.id)
+                .expect("the default parser only returns its declared token IDs");
+            let debug = crate::text_search_fn::debug_token(config, &token, ctx.catalog())?;
+            Ok(vec![
+                Datum::Text((*alias).into()),
+                Datum::Text((*description).into()),
+                Datum::Text(token.text),
+                Datum::Array(ArrayValue::new(
+                    ElemType::Text,
+                    debug.dictionaries.into_iter().map(Datum::Text).collect(),
+                )),
+                debug.dictionary.map_or(Datum::Null, Datum::Text),
+                debug.lexemes.map_or(Datum::Null, |lexemes| {
+                    Datum::Array(ArrayValue::new(
+                        ElemType::Text,
+                        lexemes.into_iter().map(Datum::Text).collect(),
+                    ))
+                }),
+            ])
+        })
+        .collect()
+}
+
+fn require_default_parser(parser: &Datum) -> Result<(), ExecError> {
+    if matches!(parser, Datum::Int4(3722))
+        || matches!(parser, Datum::Text(name) if name.eq_ignore_ascii_case("default"))
+    {
+        return Ok(());
+    }
+    let name = match parser {
+        Datum::Int4(oid) => oid.to_string(),
+        Datum::Text(name) => format!("\"{name}\""),
+        value => value
+            .column_type()
+            .map_or("unknown", ColumnType::name)
+            .to_string(),
+    };
+    Err(ExecError::UndefinedObject(format!(
+        "text search parser {name} does not exist"
+    )))
 }
 
 #[cfg(test)]
@@ -3304,6 +3390,8 @@ mod tests {
             "pg_mcv_list_items",
             "pg_show_all_settings",
             "ts_token_type",
+            "ts_parse",
+            "ts_debug",
             "pg_snapshot_xip",
             "txid_snapshot_xip",
         ] {
@@ -3353,6 +3441,60 @@ mod tests {
             .into_pg();
         assert!(error.code == "42704");
         assert!(error.message == "text search parser 5 does not exist");
+    }
+
+    #[test]
+    fn parse_reports_default_parser_tokens() {
+        assert!(
+            call("ts_parse", &[text("default"), text("cat 42")]).expect("parsed tokens")
+                == vec![
+                    vec![Datum::Int4(1), Datum::Text("cat".into())],
+                    vec![Datum::Int4(12), Datum::Text(" ".into())],
+                    vec![Datum::Int4(22), Datum::Text("42".into())],
+                ]
+        );
+    }
+
+    #[test]
+    fn debug_reports_dictionary_selection_and_stop_words() {
+        let text_array = |values: &[&str]| {
+            Datum::Array(ArrayValue::new(
+                ElemType::Text,
+                values
+                    .iter()
+                    .map(|value| Datum::Text((*value).into()))
+                    .collect(),
+            ))
+        };
+        assert!(
+            call("ts_debug", &[text("english"), text("a title")]).expect("debug rows")
+                == vec![
+                    vec![
+                        Datum::Text("asciiword".into()),
+                        Datum::Text("Word, all ASCII".into()),
+                        Datum::Text("a".into()),
+                        text_array(&["english_stem"]),
+                        Datum::Text("english_stem".into()),
+                        text_array(&[]),
+                    ],
+                    vec![
+                        Datum::Text("blank".into()),
+                        Datum::Text("Space symbols".into()),
+                        Datum::Text(" ".into()),
+                        text_array(&[]),
+                        Datum::Null,
+                        Datum::Null,
+                    ],
+                    vec![
+                        Datum::Text("asciiword".into()),
+                        Datum::Text("Word, all ASCII".into()),
+                        Datum::Text("title".into()),
+                        text_array(&["english_stem"]),
+                        Datum::Text("english_stem".into()),
+                        text_array(&["titl"]),
+                    ],
+                ]
+        );
     }
 
     #[test]
@@ -3510,6 +3652,23 @@ mod tests {
                     ("tokid", ColumnType::Int4),
                     ("alias", ColumnType::Text),
                     ("description", ColumnType::Text),
+                ],
+            ),
+            (
+                "ts_parse",
+                vec![text("default"), text("cat")],
+                vec![("tokid", ColumnType::Int4), ("token", ColumnType::Text)],
+            ),
+            (
+                "ts_debug",
+                vec![text("english"), text("cat")],
+                vec![
+                    ("alias", ColumnType::Text),
+                    ("description", ColumnType::Text),
+                    ("token", ColumnType::Text),
+                    ("dictionaries", ColumnType::Array(ElemType::Text)),
+                    ("dictionary", ColumnType::Text),
+                    ("lexemes", ColumnType::Array(ElemType::Text)),
                 ],
             ),
         ];
