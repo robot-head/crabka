@@ -23738,8 +23738,22 @@ mod tests {
              SELECT i / 100, i / 100, i / 100, (i / 100)::text FROM generate_series(1, 1000) s(i); \
              ANALYZE group_expression_estimate; \
              CREATE STATISTICS group_expression_estimate_stats ON a, b, c FROM group_expression_estimate; \
-             ANALYZE group_expression_estimate; \
-             TRUNCATE group_expression_estimate; \
+             ANALYZE group_expression_estimate",
+        )
+        .await
+        .expect("expression ndistinct statistics setup");
+        let attribute_statistics = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY (a + 1), (b + 100)",
+        )
+        .await
+        .expect("attribute statistics explain");
+        assert!(
+            attribute_statistics.first().and_then(|row| row.first())
+                == Some(&"HashAggregate (cost=0.00..0.00 rows=11 width=0)".into())
+        );
+        s.simple_query(
+            "TRUNCATE group_expression_estimate; \
              INSERT INTO group_expression_estimate (a, b, c, filler1) \
              SELECT mod(i, 13), mod(i, 17), mod(i, 19), (mod(i, 23))::text FROM generate_series(1, 1000) s(i); \
              ANALYZE group_expression_estimate; \
@@ -23749,7 +23763,7 @@ mod tests {
              ANALYZE group_expression_estimate",
         )
         .await
-        .expect("expression ndistinct statistics setup");
+        .expect("expression ndistinct statistics refresh");
         for (sql, rows) in [
             (
                 "EXPLAIN ANALYZE SELECT count(*) FROM group_expression_estimate GROUP BY (a+1), (b+100)",

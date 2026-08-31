@@ -306,23 +306,37 @@ fn statistics_positions(
         .collect::<Option<Vec<_>>>()?;
     let mut positions = Vec::new();
     for (key, position) in &object_keys {
-        let relevant = keys.contains(key)
-            || matches!(key, GroupKey::Expression(expression)
-                if statistic_expression_inverts_attribute(expression, table)
-                    .is_some_and(|attnum| keys.contains(&GroupKey::Attribute(attnum))));
+        let relevant = keys
+            .iter()
+            .any(|wanted| group_keys_match(key, wanted, table));
         if relevant && !positions.contains(position) {
             positions.push(*position);
         }
     }
     let covered = keys.iter().all(|wanted| {
-        object_keys.iter().any(|(key, _)| key == wanted)
-            || matches!(wanted, GroupKey::Attribute(attnum)
-                if object_keys.iter().any(|(key, _)| matches!(key, GroupKey::Expression(expression)
-                    if statistic_expression_inverts_attribute(expression, table) == Some(*attnum))))
+        object_keys
+            .iter()
+            .any(|(key, _)| group_keys_match(key, wanted, table))
             || matches!(wanted, GroupKey::Expression(expression)
                 if statistic_expression_is_grouped_by_attributes(expression, keys, table))
     });
     (covered && !positions.is_empty()).then_some(positions)
+}
+
+fn group_keys_match(left: &GroupKey, right: &GroupKey, table: &crabka_pgcatalog::Table) -> bool {
+    left == right
+        || group_key_attribute(left, table)
+            .zip(group_key_attribute(right, table))
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn group_key_attribute(key: &GroupKey, table: &crabka_pgcatalog::Table) -> Option<i16> {
+    match key {
+        GroupKey::Attribute(attnum) => Some(*attnum),
+        GroupKey::Expression(expression) => {
+            statistic_expression_inverts_attribute(expression, table)
+        }
+    }
 }
 
 fn statistic_expression_inverts_attribute(
