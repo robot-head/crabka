@@ -2017,24 +2017,22 @@ fn quantified_inequality_selectivity(
     if values.is_empty() {
         return Some(if *all { 1.0 } else { 0.0 });
     }
-    let use_maximum = matches!(
-        (*op, *all),
-        (BinaryOp::Lt | BinaryOp::Le, false) | (BinaryOp::Gt | BinaryOp::Ge, true)
-    );
-    let mut values = values.into_iter();
-    let mut boundary = values.next()?;
-    for value in values {
-        let ordering = crabka_pgtypes::ops::compare(&boundary, &value).ok()??;
-        if (use_maximum && ordering.is_lt()) || (!use_maximum && ordering.is_gt()) {
-            boundary = value;
-        }
-    }
     let statistics = column_statistics(catalog_kv, table, rows, expr, ctx);
     Some(
-        statistics
-            .as_ref()
-            .map_or(crate::plan::selfuncs::DEFAULT_INEQ_SEL, |statistics| {
-                decoded_restriction_selectivity(statistics, *op, Some(boundary), false)
+        values
+            .into_iter()
+            .fold(if *all { 1.0 } else { 0.0 }, |selectivity, value| {
+                let individual = statistics.as_ref().map_or(
+                    crate::plan::selfuncs::DEFAULT_INEQ_SEL,
+                    |statistics| {
+                        decoded_restriction_selectivity(statistics, *op, Some(value), false)
+                    },
+                );
+                if *all {
+                    selectivity * individual
+                } else {
+                    selectivity + individual - selectivity * individual
+                }
             }),
     )
 }
