@@ -2573,7 +2573,10 @@ impl Interpreter<'_> {
                         let fields = error.and_then(|error| error.diagnostics.as_deref());
                         let value = match item.as_str() {
                             "row_count" if !stacked => Datum::Int8(self.last_row_count as i64),
-                            "pg_context" if !stacked => Datum::Text(self.context.clone()),
+                            "pg_context" if !stacked => Datum::Text(format!(
+                                "{} line {} at GET DIAGNOSTICS",
+                                self.context, line
+                            )),
                             "pg_routine_oid" if !stacked => {
                                 Datum::Int4(i32::try_from(self.routine_oid).map_err(|_| {
                                     ExecError::Unsupported(

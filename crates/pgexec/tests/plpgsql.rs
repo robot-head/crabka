@@ -1404,11 +1404,13 @@ async fn diagnostics_include_plpgsql_context() {
     assert!(
         query(
             &mut session,
-            "SELECT current_context LIKE 'PL/pgSQL%', exception_context LIKE 'PL/pgSQL%' \
-             FROM pl_context_result",
+            "SELECT current_context, exception_context FROM pl_context_result",
         )
         .await
-            == vec![row(&["t", "t"])]
+            == vec![row(&[
+                "PL/pgSQL DO line 4 at GET DIAGNOSTICS",
+                "PL/pgSQL DO line 6 at RAISE",
+            ])]
     );
 }
 
