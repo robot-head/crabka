@@ -23965,6 +23965,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_only_partitioned_parent_has_one_estimated_group() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE partitioned_group_estimate (i int4, a int4, b int4) PARTITION BY RANGE (i); \
+             CREATE TABLE partitioned_group_estimate_1 PARTITION OF partitioned_group_estimate \
+                 FOR VALUES FROM (1) TO (2); \
+             INSERT INTO partitioned_group_estimate SELECT 1, i / 10, i / 10 \
+                 FROM generate_series(1, 100) AS i; \
+             ANALYZE partitioned_group_estimate",
+        )
+        .await
+        .expect("partitioned statistics setup");
+
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT a, b FROM ONLY partitioned_group_estimate GROUP BY a, b",
+            )
+            .await
+                == Ok(vec![
+                    vec!["HashAggregate (cost=0.00..0.00 rows=1 width=0)".into()],
+                    vec!["  Group Key: a, b".into()],
+                    vec![
+                        "  ->  Seq Scan on partitioned_group_estimate (cost=0.00..0.00 rows=1 width=0)"
+                            .into()
+                    ],
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_selects_inherited_mcv_for_predicates() {
         use assert2::assert;
 

@@ -143,14 +143,21 @@ pub(crate) fn apply_catalog_estimate(
     let Ok(table) = crabka_pgcatalog::get_table(catalog_kv, &relation) else {
         return;
     };
+    let partitioned = crate::partition::is_partitioned(catalog_kv, &relation).unwrap_or(false);
     let inherited = !only
         && (crate::inheritance::has_children(catalog_kv, &relation).unwrap_or(false)
-            || crate::partition::is_partitioned(catalog_kv, &relation).unwrap_or(false));
-    let rows = crate::relstats::of(catalog_kv, &relation)
-        .ok()
-        .map(|stats| f64::from(stats.reltuples))
-        .filter(|rows| *rows >= 0.0)
-        .unwrap_or(1_000.0);
+            || partitioned);
+    // A partitioned table's `reltuples` describes its whole tree, while an
+    // `ONLY` scan has no local rows to estimate.
+    let rows = if *only && partitioned {
+        0.0
+    } else {
+        crate::relstats::of(catalog_kv, &relation)
+            .ok()
+            .map(|stats| f64::from(stats.reltuples))
+            .filter(|rows| *rows >= 0.0)
+            .unwrap_or(1_000.0)
+    };
     let selectivity = select.filter.as_ref().map_or(1.0, |filter| {
         restriction_selectivity(catalog_kv, &table, rows, inherited, ctx, filter)
     });
