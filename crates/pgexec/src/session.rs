@@ -24560,6 +24560,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_combines_disjoint_mcv_or_lists() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE mcv_disjoint_or (a int, b int, c int, d int); \
+             INSERT INTO mcv_disjoint_or \
+             SELECT mod(i, 5), mod(i, 5), mod(i, 7), mod(i, 7) \
+             FROM generate_series(1, 5000) s(i); \
+             CREATE STATISTICS mcv_disjoint_or_ab (mcv) ON a, b FROM mcv_disjoint_or; \
+             CREATE STATISTICS mcv_disjoint_or_cd (mcv) ON c, d FROM mcv_disjoint_or; \
+             ANALYZE mcv_disjoint_or",
+        )
+        .await
+        .expect("disjoint MCV OR setup");
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_disjoint_or WHERE a = 0 OR b = 0 OR c = 0 OR d = 0",
+        )
+        .await
+        .expect("disjoint MCV OR explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_disjoint_or (cost=0.00..0.00 rows=1571 width=0)".into()
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_text_mcv_for_inequalities() {
         use assert2::assert;
 

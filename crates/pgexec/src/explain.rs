@@ -869,8 +869,92 @@ fn extended_mcv_or_selectivity(
         .iter()
         .map(|expression| mcv_expr_scalar(catalog_kv, table, rows, ctx, expression))
         .collect::<Vec<_>>();
+    let mut selectivity = 0.0;
+    for scalar in &scalar {
+        selectivity = (selectivity + scalar - selectivity * scalar).clamp(0.0, 1.0);
+    }
+    let mut remaining = (0..expressions.len()).collect::<Vec<_>>();
+    let mut applied = false;
+    for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
+        if object.table_id != table.id {
+            continue;
+        }
+        let indexes = remaining
+            .iter()
+            .copied()
+            .filter(|index| mcv_expr_has_unique_statistics_keys(&expressions[*index], &object))
+            .collect::<Vec<_>>();
+        if indexes.len() < 2 {
+            continue;
+        }
+        let object_expressions = indexes
+            .iter()
+            .map(|index| &expressions[*index])
+            .collect::<Vec<_>>();
+        let object_scalar = indexes
+            .iter()
+            .map(|index| scalar[*index])
+            .fold(0.0, |or, scalar| {
+                (or + scalar - or * scalar).clamp(0.0, 1.0)
+            });
+        let Some(object_selectivity) = mcv_or_selectivity_for_object(
+            &object,
+            inherited,
+            &object_expressions,
+            &indexes
+                .iter()
+                .map(|index| scalar[*index])
+                .collect::<Vec<_>>(),
+            table,
+            ctx,
+        ) else {
+            continue;
+        };
+        selectivity = if object_scalar < 1.0 {
+            1.0 - (1.0 - selectivity) * (1.0 - object_selectivity) / (1.0 - object_scalar)
+        } else {
+            object_selectivity
+        };
+        remaining.retain(|index| !indexes.contains(index));
+        applied = true;
+    }
+    applied.then_some(selectivity.clamp(0.0, 1.0))
+}
+
+fn mcv_expr_has_unique_statistics_keys(
+    expression: &McvExpr,
+    object: &crabka_pgcatalog::statistics::Statistics,
+) -> bool {
     let mut clauses = Vec::new();
-    for expression in &expressions {
+    mcv_expr_clauses(expression, &mut clauses);
+    let mut keys = Vec::new();
+    for clause in clauses {
+        if !keys.iter().any(|key: &&McvClause| key.key == clause.key) {
+            keys.push(clause);
+        }
+    }
+    let Some(mut positions) = keys
+        .iter()
+        .map(|clause| statistics_key_positions(object, &clause.key))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    positions.sort_unstable();
+    positions.dedup();
+    positions.len() == keys.len()
+}
+
+fn mcv_or_selectivity_for_object(
+    object: &crabka_pgcatalog::statistics::Statistics,
+    inherited: bool,
+    expressions: &[&McvExpr],
+    scalar: &[f64],
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<f64> {
+    let mut clauses = Vec::new();
+    for expression in expressions {
         mcv_expr_clauses(expression, &mut clauses);
     }
     let mut keys = Vec::new();
@@ -879,87 +963,72 @@ fn extended_mcv_or_selectivity(
             keys.push(clause);
         }
     }
-    for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
-        if object.table_id != table.id {
-            continue;
-        }
-        let Some(positions) = keys
-            .iter()
-            .map(|clause| statistics_key_positions(&object, &clause.key))
-            .collect::<Option<Vec<_>>>()
-        else {
-            continue;
-        };
-        let mut unique_positions = positions.clone();
-        unique_positions.sort_unstable();
-        unique_positions.dedup();
-        if unique_positions.len() != positions.len() {
-            continue;
-        }
-        let Some(items) = statistics_data(&object, inherited)
-            .and_then(|data| data.mcv.as_deref())
-            .and_then(crabka_pgcatalog::statistics::decode_mcv)
-        else {
-            continue;
-        };
-        let frequencies = items
-            .iter()
-            .map(|item| {
-                Some((
-                    item.frequency.parse::<f64>().ok()?,
-                    item.base_frequency.parse::<f64>().ok()?,
-                ))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        let total = frequencies
-            .iter()
-            .map(|(frequency, _)| frequency)
-            .sum::<f64>();
-        if !total.is_finite() || !(0.0..=1.0 + 1e-12).contains(&total) {
-            continue;
-        }
-        let mut prior_matches = vec![false; items.len()];
-        let (mut simple_or, mut selectivity) = (0.0, 0.0);
-        for (expression, scalar) in expressions.iter().zip(&scalar) {
-            let overlap_simple = simple_or * scalar;
-            simple_or = (simple_or + scalar - overlap_simple).clamp(0.0, 1.0);
-            let mut clause_matches = Vec::with_capacity(items.len());
-            let (mut mcv, mut mcv_base, mut overlap, mut overlap_base) = (0.0, 0.0, 0.0, 0.0);
-            for ((item, (frequency, base_frequency)), prior_match) in
-                items.iter().zip(&frequencies).zip(&prior_matches)
-            {
-                if !frequency.is_finite()
-                    || !base_frequency.is_finite()
-                    || !(0.0..=1.0).contains(frequency)
-                    || !(0.0..=1.0).contains(base_frequency)
-                {
-                    return None;
-                }
-                let matches = mcv_expr_matches(expression, item, &keys, &positions, table, ctx);
-                if matches {
-                    mcv += frequency;
-                    mcv_base += base_frequency;
-                    if *prior_match {
-                        overlap += frequency;
-                        overlap_base += base_frequency;
-                    }
-                }
-                clause_matches.push(matches);
-            }
-            let overlap = mcv_combine_selectivities(overlap_simple, overlap, overlap_base, total);
-            let clause = if matches!(expression, McvExpr::Clause(_)) {
-                *scalar
-            } else {
-                mcv_combine_selectivities(*scalar, mcv, mcv_base, total)
-            };
-            selectivity = (selectivity + clause - overlap).clamp(0.0, 1.0);
-            for (prior_match, matches) in prior_matches.iter_mut().zip(clause_matches) {
-                *prior_match |= matches;
-            }
-        }
-        return Some(selectivity);
+    let positions = keys
+        .iter()
+        .map(|clause| statistics_key_positions(object, &clause.key))
+        .collect::<Option<Vec<_>>>()?;
+    let Some(items) = statistics_data(object, inherited)
+        .and_then(|data| data.mcv.as_deref())
+        .and_then(crabka_pgcatalog::statistics::decode_mcv)
+    else {
+        return None;
+    };
+    let frequencies = items
+        .iter()
+        .map(|item| {
+            Some((
+                item.frequency.parse::<f64>().ok()?,
+                item.base_frequency.parse::<f64>().ok()?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let total = frequencies
+        .iter()
+        .map(|(frequency, _)| frequency)
+        .sum::<f64>();
+    if !total.is_finite() || !(0.0..=1.0 + 1e-12).contains(&total) {
+        return None;
     }
-    None
+    let mut prior_matches = vec![false; items.len()];
+    let (mut simple_or, mut selectivity) = (0.0, 0.0);
+    for (expression, scalar) in expressions.iter().zip(scalar) {
+        let overlap_simple = simple_or * scalar;
+        simple_or = (simple_or + scalar - overlap_simple).clamp(0.0, 1.0);
+        let mut clause_matches = Vec::with_capacity(items.len());
+        let (mut mcv, mut mcv_base, mut overlap, mut overlap_base) = (0.0, 0.0, 0.0, 0.0);
+        for ((item, (frequency, base_frequency)), prior_match) in
+            items.iter().zip(&frequencies).zip(&prior_matches)
+        {
+            if !frequency.is_finite()
+                || !base_frequency.is_finite()
+                || !(0.0..=1.0).contains(frequency)
+                || !(0.0..=1.0).contains(base_frequency)
+            {
+                return None;
+            }
+            let matches = mcv_expr_matches(expression, item, &keys, &positions, table, ctx);
+            if matches {
+                mcv += frequency;
+                mcv_base += base_frequency;
+                if *prior_match {
+                    overlap += frequency;
+                    overlap_base += base_frequency;
+                }
+            }
+            clause_matches.push(matches);
+        }
+        let overlap = mcv_combine_selectivities(overlap_simple, overlap, overlap_base, total);
+        let clause = if matches!(expression, McvExpr::Clause(_)) {
+            *scalar
+        } else {
+            mcv_combine_selectivities(*scalar, mcv, mcv_base, total)
+        };
+        selectivity = (selectivity + clause - overlap).clamp(0.0, 1.0);
+        for (prior_match, matches) in prior_matches.iter_mut().zip(clause_matches) {
+            *prior_match |= matches;
+        }
+    }
+    Some(selectivity)
 }
 
 fn mcv_combine_selectivities(simple: f64, mcv: f64, mcv_base: f64, mcv_total: f64) -> f64 {
