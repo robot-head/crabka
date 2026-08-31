@@ -351,6 +351,9 @@ fn restriction_selectivity(
     {
         return selectivity;
     }
+    if let Some(clause) = mcv_clause_for_expr(expr, table, ctx) {
+        return scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, &clause);
+    }
     match expr {
         Expr::Binary {
             op: BinaryOp::And,

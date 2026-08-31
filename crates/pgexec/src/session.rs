@@ -23893,6 +23893,22 @@ mod tests {
                     "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=1 width=0)".into()
                 ])
         );
+        for sql in [
+            "EXPLAIN SELECT * FROM dependency_estimate WHERE a IN (1, 51) AND b = 1",
+            "EXPLAIN SELECT * FROM dependency_estimate WHERE (a = 1 OR a = 51) AND b = 1",
+            "EXPLAIN SELECT * FROM dependency_estimate WHERE a = ANY (ARRAY[1, 51]) AND b = 1",
+        ] {
+            let rows = rows_or_sqlstate(&mut s, sql)
+                .await
+                .expect("independent explain");
+            assert!(
+                rows.first()
+                    == Some(&vec![
+                        "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=2 width=0)".into()
+                    ]),
+                "{sql}"
+            );
+        }
         s.simple_query(
             "CREATE STATISTICS dependency_estimate_abc (dependencies) \
              ON a, b, c FROM dependency_estimate; ANALYZE dependency_estimate",
