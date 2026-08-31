@@ -94,6 +94,65 @@ fn inferred_record_types(value: &Datum) -> Option<Arc<[ColumnType]>> {
         .map(Arc::from)
 }
 
+fn check_composite_return_type(expr: &Expr, target: ColumnType) -> Result<(), ExecError> {
+    let (Expr::Row(items), ColumnType::Record(Some(target))) = (expr, target) else {
+        return Ok(());
+    };
+    let Some(target) = crabka_pgtypes::usertype::lookup_oid(target.oid) else {
+        return Ok(());
+    };
+    let Some(fields) = target.fields() else {
+        return Ok(());
+    };
+    for (index, (item, field)) in items.iter().zip(fields).enumerate() {
+        let actual = crate::eval::infer_type(item, &crate::scope::Scope::empty())?;
+        if actual.oid() != field.ty.oid() {
+            let actual_name: &str = if crate::eval::is_unknown_literal(item) {
+                "unknown"
+            } else {
+                actual.name()
+            };
+            return Err(ExecError::Remote(
+                PgError::error(
+                    "42804",
+                    "returned record type does not match expected record type",
+                )
+                .with_detail(format!(
+                    "Returned type {actual_name} does not match expected type {} in column \"{}\" (position {}).",
+                    field.ty.name(),
+                    field.name,
+                    index + 1,
+                )),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn return_cast_input(
+    expr: Option<&Expr>,
+    value: Datum,
+    target: ColumnType,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, ExecError> {
+    let Some(expr) = expr else {
+        return Ok(value);
+    };
+    if !matches!(value, Datum::Record(_))
+        || matches!(target, ColumnType::Record(_))
+        || !matches!(
+            crate::eval::infer_type(expr, &crate::scope::Scope::empty())?,
+            ColumnType::Record(_)
+        )
+    {
+        return Ok(value);
+    }
+    Ok(Datum::Text(
+        String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(&value, time_zone))
+            .into_owned(),
+    ))
+}
+
 enum Flow {
     Next,
     Return(Datum),
@@ -2082,6 +2141,9 @@ impl ScalarInterpreter<'_> {
         }
         (|| match self.return_type {
             Some(ty) => {
+                if let Some(expr) = expr {
+                    check_composite_return_type(expr, ty)?;
+                }
                 if crabka_pgtypes::usercast::any_declared()
                     && let Some(expr) = expr
                     && let Some(value) = crate::usercast::coerce_declared(
@@ -2094,7 +2156,11 @@ impl ScalarInterpreter<'_> {
                 {
                     return Ok(value);
                 }
-                cast_value(&value, ty, self.ctx)
+                cast_value(
+                    &return_cast_input(expr, value, ty, &self.ctx.time_zone)?,
+                    ty,
+                    self.ctx,
+                )
             }
             None => Ok(value),
         })()

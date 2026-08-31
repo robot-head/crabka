@@ -2047,6 +2047,100 @@ async fn composite_functions_reject_scalar_return_values() {
 }
 
 #[tokio::test]
+async fn composite_returns_require_exact_row_field_types() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TYPE pl_return_pair AS (id int4, label varchar);
+        CREATE FUNCTION pl_return_pair_value() RETURNS pl_return_pair LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN (1, 'ready'::varchar);
+        END
+        $$
+        ",
+    )
+    .await;
+    assert!(
+        scalar(&mut session, "SELECT pl_return_pair_value()").await == Some("(1,ready)".into())
+    );
+
+    execute(
+        &mut session,
+        r"
+        CREATE OR REPLACE FUNCTION pl_return_pair_value() RETURNS pl_return_pair LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN (1, 'ready');
+        END
+        $$
+        ",
+    )
+    .await;
+    let error = session
+        .simple_query("SELECT pl_return_pair_value()")
+        .await
+        .expect_err("an untyped row field cannot satisfy a composite return");
+    assert!(error.code == "42804", "{error:?}");
+    assert!(error.message == "returned record type does not match expected record type");
+    let diagnostics = error.diagnostics.as_deref().expect("return diagnostics");
+    assert!(
+        diagnostics.detail.as_deref()
+            == Some(
+                "Returned type unknown does not match expected type character varying in column \"label\" (position 2)."
+            ),
+        "{error:?}"
+    );
+    assert!(
+        diagnostics.context.as_deref()
+            == Some(
+                "PL/pgSQL function pl_return_pair_value() while casting return value to function's return type"
+            ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn scalar_returns_use_composite_text_input() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TYPE pl_return_pair AS (id int4, label text);
+        CREATE FUNCTION pl_return_composite_as_int() RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE value pl_return_pair;
+        BEGIN
+          value := (1, 'ready');
+          RETURN value;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    let error = session
+        .simple_query("SELECT pl_return_composite_as_int()")
+        .await
+        .expect_err("a composite's text form is not a valid integer");
+    assert!(error.code == "22P02", "{error:?}");
+    assert!(
+        error.message == "invalid input syntax for type integer: \"(1,ready)\"",
+        "{error:?}"
+    );
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            == Some(
+                "PL/pgSQL function pl_return_composite_as_int() while casting return value to function's return type"
+            ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn set_functions_expand_composite_return_next_values() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
