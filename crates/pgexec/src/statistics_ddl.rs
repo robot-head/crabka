@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use crabka_pgcatalog::{RelationName, statistics::Statistics};
 use crabka_pgkv::{Kv, WriteOp};
-use crabka_pgparser::ast::{self, Expr, TableExpr};
+use crabka_pgparser::ast::{self, BinaryOp, Expr, TableExpr};
 use crabka_pgwire::engine::QueryResult;
 
 use crate::{
@@ -12,6 +12,7 @@ use crate::{
     exec::ForeignCtx,
     privilege::{RelationKind, require_ownership},
     relname::{SchemaDisposition, resolve_relation},
+    scope::Scope,
 };
 
 type DdlResult = Result<(QueryResult, Vec<WriteOp>), ExecError>;
@@ -135,11 +136,73 @@ fn kinds(kinds: &[String], keys: &[i16]) -> Result<Vec<String>, ExecError> {
     Ok(kinds)
 }
 
-fn expression_text(expr: &Expr) -> String {
-    crate::viewdef::expression_text(
-        expr,
+pub(crate) fn expression_text(
+    expr: &Expr,
+    table: &crabka_pgcatalog::Table,
+) -> Result<String, ExecError> {
+    let expr = normalize_expression(expr, &Scope::single(table, &table.name.name))?;
+    let text = crate::viewdef::expression_text_pretty(
+        &expr,
         crabka_pgtypes::encoding::OutputStyle::with_zone(&jiff::tz::TimeZone::UTC),
-    )
+    );
+    Ok(if matches!(expr, Expr::Binary { .. }) {
+        format!("({text})")
+    } else {
+        text
+    })
+}
+
+/// Store the implicit casts PostgreSQL retains in an expression-statistics
+/// definition. The parser deliberately keeps its input AST untyped, while the
+/// durable statistics catalog stores only the deparsed expression text.
+fn normalize_expression(expr: &Expr, scope: &Scope) -> Result<Expr, ExecError> {
+    let Expr::Binary { op, left, right } = expr else {
+        return Ok(expr.clone());
+    };
+    let mut left = normalize_expression(left, scope)?;
+    let mut right = normalize_expression(right, scope)?;
+    if matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div
+    ) {
+        let (left_type, right_type) = (
+            crate::eval::infer_type(&left, scope)?,
+            crate::eval::infer_type(&right, scope)?,
+        );
+        if let Some(ty) = arithmetic_literal_cast(&left, right_type) {
+            left = Expr::Cast {
+                expr: Box::new(left),
+                ty,
+            };
+        }
+        if let Some(ty) = arithmetic_literal_cast(&right, left_type) {
+            right = Expr::Cast {
+                expr: Box::new(right),
+                ty,
+            };
+        }
+    }
+    Ok(Expr::Binary {
+        op: *op,
+        left: Box::new(left),
+        right: Box::new(right),
+    })
+}
+
+fn arithmetic_literal_cast(
+    expr: &Expr,
+    sibling: crabka_pgtypes::ColumnType,
+) -> Option<crabka_pgtypes::ColumnType> {
+    match (expr, sibling) {
+        (Expr::IntLiteral(_), ty) if ty.is_numeric() => {
+            Some(crabka_pgtypes::ColumnType::Numeric(None))
+        }
+        (
+            Expr::IntLiteral(_) | Expr::NumericLiteral(_),
+            crabka_pgtypes::ColumnType::Float4 | crabka_pgtypes::ColumnType::Float8,
+        ) => Some(crabka_pgtypes::ColumnType::Float8),
+        _ => None,
+    }
 }
 
 fn statistic_column_ordinal(
@@ -205,7 +268,7 @@ fn definition(
     let mut expressions = Vec::new();
     for expr in &stats.expressions {
         validate_expression_columns(expr, table)?;
-        let text = expression_text(expr);
+        let text = expression_text(expr, table)?;
         if !seen.insert(text.clone()) {
             return Err(if matches!(expr, Expr::Column { table: None, .. }) {
                 ExecError::Remote(crabka_pgwire::error::PgError::error(
@@ -416,6 +479,8 @@ mod tests {
             columns: vec![
                 Column::new("a", ColumnType::Int4),
                 Column::new("b", ColumnType::Int4),
+                Column::new("n", ColumnType::Numeric(None)),
+                Column::new("r", ColumnType::Float4),
             ],
             sharded: false,
             row_security: false,
@@ -465,6 +530,28 @@ mod tests {
                 &table()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn definition_keeps_implicit_arithmetic_literal_casts() {
+        let parsed =
+            crabka_pgparser::parse("CREATE STATISTICS s ON (n + 1), (1 + n), (r + 1.5) FROM t")
+                .expect("parse");
+        let [crabka_pgparser::ast::Statement::CreateStatistics(parsed_stats)] = parsed.as_slice()
+        else {
+            panic!("stats");
+        };
+        assert!(
+            definition(parsed_stats, &table())
+                == Ok((
+                    vec![0, 0, 0],
+                    vec![
+                        "(n + 1::numeric)".into(),
+                        "(1::numeric + n)".into(),
+                        "(r + 1.5::double precision)".into(),
+                    ],
+                ))
         );
     }
 

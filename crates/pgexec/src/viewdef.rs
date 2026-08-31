@@ -345,6 +345,27 @@ pub(crate) fn expression_text(
     )
 }
 
+/// Render an expression without the redundant parentheses used in a stored
+/// view definition.
+pub(crate) fn expression_text_pretty(
+    expr: &Expr,
+    style: crabka_pgtypes::encoding::OutputStyle<'_>,
+) -> String {
+    expr_text(
+        expr,
+        Ctx {
+            pretty: true,
+            qualify: false,
+            qualifier: None,
+            wrap: None,
+            colnames: false,
+            window_calls: &[],
+            indent: 0,
+            style,
+        },
+    )
+}
+
 /// Render one stored expression while retaining explicitly qualified columns.
 ///
 /// Rule actions use `OLD` and `NEW` pseudo-relations, so their qualifiers are

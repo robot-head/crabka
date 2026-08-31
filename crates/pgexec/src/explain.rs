@@ -384,10 +384,9 @@ fn group_key(
             }
         }
         Expr::Column { .. } => column_attnum(expr, table).map(GroupKey::Attribute),
-        expr => Some(GroupKey::Expression(crate::viewdef::expression_text(
-            expr,
-            crabka_pgtypes::encoding::OutputStyle::with_zone(&jiff::tz::TimeZone::UTC),
-        ))),
+        expr => Some(GroupKey::Expression(
+            crate::statistics_ddl::expression_text(expr, table).ok()?,
+        )),
     }
 }
 
@@ -2047,10 +2046,7 @@ fn mcv_key(
         _ if crate::eval::eval(key_expr, &crate::scope::Scope::empty(), &[], ctx).is_ok() => {
             return None;
         }
-        _ => GroupKey::Expression(crate::viewdef::expression_text(
-            key_expr,
-            crabka_pgtypes::encoding::OutputStyle::with_zone(&jiff::tz::TimeZone::UTC),
-        )),
+        _ => GroupKey::Expression(crate::statistics_ddl::expression_text(key_expr, table).ok()?),
     })
 }
 
