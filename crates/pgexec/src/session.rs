@@ -23805,6 +23805,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_mcv_from_all_statistic_columns() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE mcv_all_columns (a int4, b varchar, c int4, ia int4[]); \
+             INSERT INTO mcv_all_columns \
+             SELECT mod(i, 100), mod(i, 50), mod(i, 25), ARRAY[mod(i, 25)] \
+             FROM generate_series(1, 5000) s(i); \
+             CREATE STATISTICS mcv_all_columns_stats (mcv) \
+             ON a, b, c, ia FROM mcv_all_columns; \
+             ANALYZE mcv_all_columns",
+        )
+        .await
+        .expect("four-column MCV setup");
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_all_columns WHERE a = 1 AND b = '1'",
+        )
+        .await
+        .expect("four-column MCV explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_all_columns (cost=0.00..0.00 rows=50 width=0)".into()
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_extended_mcv_for_boolean_conjunctions() {
         use assert2::assert;
 

@@ -609,9 +609,11 @@ fn extended_mcv_selectivity(
                 mcv_base_selectivity += base_frequency;
             }
         }
-        if !mcv_total.is_finite() || mcv_total > 1.0 || mcv_base_total > 1.0 {
+        if !mcv_total.is_finite() || mcv_total > 1.0 + 1e-12 || mcv_base_total > 1.0 + 1e-12 {
             continue;
         }
+        mcv_total = mcv_total.min(1.0);
+        mcv_base_total = mcv_base_total.min(1.0);
         let remaining_base = (1.0 - mcv_base_total).max(0.0);
         let remainder = if remaining_base > f64::EPSILON {
             ((scalar - mcv_base_selectivity) / remaining_base).clamp(0.0, 1.0)
