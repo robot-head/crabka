@@ -23752,6 +23752,16 @@ mod tests {
             attribute_statistics.first().and_then(|row| row.first())
                 == Some(&"HashAggregate (cost=0.00..0.00 rows=11 width=0)".into())
         );
+        let partial_statistics = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY a, b, c, d",
+        )
+        .await
+        .expect("partial attribute statistics explain");
+        assert!(
+            partial_statistics.first().and_then(|row| row.first())
+                == Some(&"HashAggregate (cost=0.00..0.00 rows=200 width=0)".into())
+        );
         s.simple_query(
             "TRUNCATE group_expression_estimate; \
              INSERT INTO group_expression_estimate (a, b, c, filler1) \

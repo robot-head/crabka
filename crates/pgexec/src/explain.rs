@@ -172,21 +172,61 @@ fn estimate_group_rows(
         .collect::<Option<Vec<_>>>()?;
     keys.sort_unstable();
     keys.dedup();
-    if let Some(rows) = crabka_pgcatalog::statistics::list(catalog_kv)
+    let statistics = crabka_pgcatalog::statistics::list(catalog_kv)
         .ok()?
         .into_iter()
         .filter(|object| object.table_id == table.id)
-        .find_map(|object| {
-            let positions = statistics_positions(&object, &keys, table)?;
-            object
-                .data
-                .and_then(|data| data.ndistinct)
-                .and_then(|data| ndistinct_for_keys(&data, &positions))
-        })
-    {
+        .collect::<Vec<_>>();
+    if let Some(rows) = statistics.iter().find_map(|object| {
+        let positions = statistics_positions(&object, &keys, table)?;
+        object
+            .data
+            .as_ref()
+            .and_then(|data| data.ndistinct.as_deref())
+            .and_then(|data| ndistinct_for_keys(&data, &positions))
+    }) {
         return Some(rows.min(input_rows.max(1.0)));
     }
-    let attnums = keys
+    let mut remaining = keys.clone();
+    let mut distincts = Vec::new();
+    loop {
+        let mut best: Option<(Vec<(GroupKey, i16)>, f64)> = None;
+        for object in &statistics {
+            let Some(object_keys) = statistic_object_keys(object) else {
+                continue;
+            };
+            let matched = matching_statistics_keys(&object_keys, &remaining, table);
+            let positions = matched
+                .iter()
+                .map(|(_, position)| *position)
+                .collect::<Vec<_>>();
+            let Some(rows) = object
+                .data
+                .as_ref()
+                .and_then(|data| data.ndistinct.as_deref())
+                .and_then(|data| ndistinct_for_keys(data, &positions))
+            else {
+                continue;
+            };
+            if matched.len() >= 2
+                && best
+                    .as_ref()
+                    .is_none_or(|(best, _)| matched.len() > best.len())
+            {
+                best = Some((matched, rows));
+            }
+        }
+        let Some((matched, rows)) = best else {
+            break;
+        };
+        remaining.retain(|wanted| {
+            !matched
+                .iter()
+                .any(|(key, _)| group_keys_match(key, wanted, table))
+        });
+        distincts.push(rows);
+    }
+    let attnums = remaining
         .iter()
         .map(GroupKey::attnum)
         .collect::<Option<Vec<_>>>()?;
@@ -195,7 +235,7 @@ fn estimate_group_rows(
         .map(|stats| f64::from(stats.reltuples))
         .filter(|rows| *rows > 0.0)
         .unwrap_or(input_rows);
-    let distincts = attnums
+    let attribute_distincts = attnums
         .iter()
         .filter_map(|attnum| {
             let stats = crate::attrstats::get(
@@ -210,12 +250,16 @@ fn estimate_group_rows(
             let n_distinct = f64::from(stats.n_distinct?);
             Some(if n_distinct < 0.0 {
                 -n_distinct * relation_rows
-            } else {
+            } else if n_distinct > 0.0 {
                 n_distinct
+            } else {
+                1.0 / crate::plan::selfuncs::DEFAULT_EQ_SEL
             })
         })
         .collect::<Vec<_>>();
-    (distincts.len() == attnums.len())
+    let has_all_attribute_distincts = attribute_distincts.len() == attnums.len();
+    distincts.extend(attribute_distincts);
+    has_all_attribute_distincts
         .then(|| crate::plan::selfuncs::estimate_num_groups(input_rows, relation_rows, &distincts))
 }
 
@@ -285,8 +329,26 @@ fn statistics_positions(
     keys: &[GroupKey],
     table: &crabka_pgcatalog::Table,
 ) -> Option<Vec<i16>> {
+    let object_keys = statistic_object_keys(object)?;
+    let positions = matching_statistics_keys(&object_keys, keys, table)
+        .into_iter()
+        .map(|(_, position)| position)
+        .collect::<Vec<_>>();
+    let covered = keys.iter().all(|wanted| {
+        object_keys
+            .iter()
+            .any(|(key, _)| group_keys_match(key, wanted, table))
+            || matches!(wanted, GroupKey::Expression(expression)
+                if statistic_expression_is_grouped_by_attributes(expression, keys, table))
+    });
+    (covered && !positions.is_empty()).then_some(positions)
+}
+
+fn statistic_object_keys(
+    object: &crabka_pgcatalog::statistics::Statistics,
+) -> Option<Vec<(GroupKey, i16)>> {
     let mut expression = 0_i16;
-    let object_keys = object
+    object
         .keys
         .iter()
         .map(|attnum| {
@@ -303,24 +365,22 @@ fn statistics_positions(
             };
             Some((key, if *attnum == 0 { expression } else { *attnum }))
         })
-        .collect::<Option<Vec<_>>>()?;
-    let mut positions = Vec::new();
-    for (key, position) in &object_keys {
-        let relevant = keys
-            .iter()
-            .any(|wanted| group_keys_match(key, wanted, table));
-        if relevant && !positions.contains(position) {
-            positions.push(*position);
-        }
-    }
-    let covered = keys.iter().all(|wanted| {
-        object_keys
-            .iter()
-            .any(|(key, _)| group_keys_match(key, wanted, table))
-            || matches!(wanted, GroupKey::Expression(expression)
-                if statistic_expression_is_grouped_by_attributes(expression, keys, table))
-    });
-    (covered && !positions.is_empty()).then_some(positions)
+        .collect()
+}
+
+fn matching_statistics_keys(
+    object_keys: &[(GroupKey, i16)],
+    keys: &[GroupKey],
+    table: &crabka_pgcatalog::Table,
+) -> Vec<(GroupKey, i16)> {
+    object_keys
+        .iter()
+        .filter(|(key, _)| {
+            keys.iter()
+                .any(|wanted| group_keys_match(key, wanted, table))
+        })
+        .cloned()
+        .collect()
 }
 
 fn group_keys_match(left: &GroupKey, right: &GroupKey, table: &crabka_pgcatalog::Table) -> bool {
