@@ -24392,6 +24392,18 @@ mod tests {
                     "Seq Scan on mcv_function_estimate (cost=0.00..0.00 rows=150 width=0)".into()
                 ])
         );
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_function_estimate WHERE mod(a, 20) = 1 OR mod(b::int, 10) = 1",
+        )
+        .await
+        .expect("function expression MCV OR explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_function_estimate (cost=0.00..0.00 rows=100 width=0)".into()
+                ])
+        );
     }
 
     #[tokio::test]

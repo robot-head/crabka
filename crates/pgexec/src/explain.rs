@@ -637,6 +637,11 @@ fn restriction_selectivity(
     expr: &Expr,
 ) -> f64 {
     if let Some(selectivity) =
+        extended_mcv_or_selectivity(catalog_kv, table, rows, inherited, ctx, expr)
+    {
+        return selectivity;
+    }
+    if let Some(selectivity) =
         extended_mcv_selectivity(catalog_kv, table, rows, inherited, ctx, expr)
     {
         return selectivity;
@@ -839,6 +844,109 @@ enum McvPredicate {
 struct McvValue {
     text: Option<String>,
     scalar_value: Option<crabka_pgtypes::Datum>,
+}
+
+/// Estimate a flat OR with a matching extended MCV list. PostgreSQL retains
+/// single-column selectivity estimates and applies MCV statistics to overlaps.
+fn extended_mcv_or_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    inherited: bool,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+) -> Option<f64> {
+    let mut clauses = Vec::new();
+    if !collect_mcv_or_clauses(expr, table, ctx, &mut clauses) || clauses.len() < 2 {
+        return None;
+    }
+    let scalar = clauses
+        .iter()
+        .map(|clause| scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, clause))
+        .collect::<Vec<_>>();
+    for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
+        if object.table_id != table.id {
+            continue;
+        }
+        let Some(positions) = clauses
+            .iter()
+            .map(|clause| statistics_key_positions(&object, &clause.key))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let mut unique_positions = positions.clone();
+        unique_positions.sort_unstable();
+        unique_positions.dedup();
+        if unique_positions.len() != positions.len() {
+            continue;
+        }
+        let Some(items) = statistics_data(&object, inherited)
+            .and_then(|data| data.mcv.as_deref())
+            .and_then(crabka_pgcatalog::statistics::decode_mcv)
+        else {
+            continue;
+        };
+        let frequencies = items
+            .iter()
+            .map(|item| {
+                Some((
+                    item.frequency.parse::<f64>().ok()?,
+                    item.base_frequency.parse::<f64>().ok()?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let total = frequencies
+            .iter()
+            .map(|(frequency, _)| frequency)
+            .sum::<f64>();
+        if !total.is_finite() || !(0.0..=1.0 + 1e-12).contains(&total) {
+            continue;
+        }
+        let mut prior_matches = vec![false; items.len()];
+        let (mut simple_or, mut selectivity) = (0.0, 0.0);
+        for ((clause, position), scalar) in clauses.iter().zip(&positions).zip(&scalar) {
+            let overlap_simple = simple_or * scalar;
+            simple_or = (simple_or + scalar - overlap_simple).clamp(0.0, 1.0);
+            let mut clause_matches = Vec::with_capacity(items.len());
+            let (mut overlap, mut overlap_base) = (0.0, 0.0);
+            for ((item, (frequency, base_frequency)), prior_match) in
+                items.iter().zip(&frequencies).zip(&prior_matches)
+            {
+                if !frequency.is_finite()
+                    || !base_frequency.is_finite()
+                    || !(0.0..=1.0).contains(frequency)
+                    || !(0.0..=1.0).contains(base_frequency)
+                {
+                    return None;
+                }
+                let matches = mcv_item_matches(
+                    item.values.get(*position),
+                    &clause.key,
+                    &clause.expr,
+                    &clause.predicate,
+                    table,
+                    ctx,
+                );
+                if matches && *prior_match {
+                    overlap += frequency;
+                    overlap_base += base_frequency;
+                }
+                clause_matches.push(matches);
+            }
+            let overlap = mcv_combine_selectivities(overlap_simple, overlap, overlap_base, total);
+            selectivity = (selectivity + scalar - overlap).clamp(0.0, 1.0);
+            for (prior_match, matches) in prior_matches.iter_mut().zip(clause_matches) {
+                *prior_match |= matches;
+            }
+        }
+        return Some(selectivity);
+    }
+    None
+}
+
+fn mcv_combine_selectivities(simple: f64, mcv: f64, mcv_base: f64, mcv_total: f64) -> f64 {
+    (mcv + (simple - mcv_base).clamp(0.0, (1.0 - mcv_total).max(0.0))).clamp(0.0, 1.0)
 }
 
 /// Estimate a complete equality predicate from a matching extended MCV list.
@@ -1245,6 +1353,28 @@ fn collect_mcv_clauses(
             ) {
                 return false;
             }
+            clauses.push(clause);
+            true
+        }),
+    }
+}
+
+fn collect_mcv_or_clauses(
+    expr: &Expr,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+    clauses: &mut Vec<McvClause>,
+) -> bool {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            collect_mcv_or_clauses(left, table, ctx, clauses)
+                && collect_mcv_or_clauses(right, table, ctx, clauses)
+        }
+        _ => mcv_clause_for_expr(expr, table, ctx).is_some_and(|clause| {
             clauses.push(clause);
             true
         }),
