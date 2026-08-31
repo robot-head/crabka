@@ -365,6 +365,9 @@ pub enum ExecError {
     SequenceLimit(String),
     /// Object state does not satisfy a command precondition (55000).
     ObjectNotInPrerequisiteState(String),
+    /// A backwards cursor operation was requested for a cursor declared
+    /// without `SCROLL` (55000).
+    CursorCanOnlyScanForward,
     /// A write named a view whose body is not simple enough to rewrite onto the
     /// relation underneath it (55000).
     ///
@@ -1400,6 +1403,11 @@ impl ExecError {
             ExecError::StackDepthExceeded => PgError::error("54001", "stack depth limit exceeded"),
             ExecError::SequenceLimit(m) => PgError::error("2200H", m),
             ExecError::ObjectNotInPrerequisiteState(m) => PgError::error("55000", m),
+            ExecError::CursorCanOnlyScanForward => PgError::error(
+                "55000",
+                "cursor can only scan forward",
+            )
+            .with_hint("Declare it with SCROLL option to enable backward scan."),
             ExecError::ViewNotUpdatable {
                 message,
                 detail,

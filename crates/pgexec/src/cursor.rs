@@ -25,8 +25,7 @@ pub(crate) struct CursorPosition {
 pub(crate) struct FetchPlan {
     /// One-based row numbers, in output order. A backward walk is descending.
     pub(crate) rows: Vec<usize>,
-    /// Whether the walk moved the position backward at any point. This is the
-    /// check `PostgreSQL` applies before it runs a `NO SCROLL` cursor's fetch.
+    /// Whether `PostgreSQL` rejects this operation for a `NO SCROLL` cursor.
     pub(crate) backward: bool,
 }
 
@@ -98,8 +97,7 @@ impl CursorPosition {
             FetchDirection::Absolute(target) => {
                 // A negative absolute counts back from the end: `-1` is the last row.
                 let resolved = i64::try_from(self.count).unwrap_or(i64::MAX) + 1 + target;
-                let backward = resolved < i64::try_from(self.position).unwrap_or(i64::MAX);
-                self.jump(resolved, backward)
+                self.jump(resolved, true)
             }
         }
     }
@@ -227,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_steps_that_move_backward_report_a_backward_walk() {
+    fn no_scroll_restrictions_follow_cursor_direction() {
         let cases: &[(&str, usize, bool)] = &[
             ("NEXT", 2, false),
             ("FORWARD ALL", 2, false),
@@ -237,7 +235,7 @@ mod tests {
             ("BACKWARD ALL", 0, false),
             ("FIRST", 3, true),
             ("FIRST", 0, false),
-            ("LAST", 1, false),
+            ("LAST", 1, true),
             ("ABSOLUTE 2", 4, true),
             ("ABSOLUTE 4", 2, false),
             ("RELATIVE -1", 3, true),

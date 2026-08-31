@@ -5316,6 +5316,7 @@ pub enum PlPgSqlStatement {
         direction: String,
         into: Option<PlPgSqlInto>,
         move_only: bool,
+        line: usize,
     },
     Close(String),
     GetDiagnostics {

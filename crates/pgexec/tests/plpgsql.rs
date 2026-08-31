@@ -1619,6 +1619,29 @@ async fn fetch_backward_without_a_count_moves_one_row() {
 }
 
 #[tokio::test]
+async fn non_scroll_cursor_fetch_keeps_hint_and_plpgsql_context() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let error = session
+        .simple_query(
+            "DO $$\nDECLARE cursor_ NO SCROLL CURSOR FOR VALUES (1); value_ int4;\nBEGIN\n  OPEN cursor_;\n  FETCH LAST FROM cursor_ INTO value_;\n  FETCH PRIOR FROM cursor_ INTO value_;\nEND\n$$",
+        )
+        .await
+        .expect_err("backwards fetch must require SCROLL");
+
+    assert!(error.code == "55000", "{error:?}");
+    let diagnostics = error.diagnostics.as_deref().expect("fetch diagnostics");
+    assert!(
+        diagnostics.hint.as_deref()
+            == Some("Declare it with SCROLL option to enable backward scan.")
+    );
+    assert!(
+        diagnostics.context.as_deref()
+            == Some("PL/pgSQL function inline_code_block line 5 at FETCH")
+    );
+}
+
+#[tokio::test]
 async fn declared_cursor_for_loop_opens_fetches_and_closes_the_cursor() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

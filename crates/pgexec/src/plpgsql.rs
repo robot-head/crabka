@@ -2838,7 +2838,8 @@ impl Interpreter<'_> {
                     direction,
                     into,
                     move_only,
-                } => {
+                    line,
+                } => async {
                     let direction = parse_cursor_direction(direction)?;
                     let cursor_name = self.cursor_name(cursor);
                     let result = self
@@ -2858,6 +2859,8 @@ impl Interpreter<'_> {
                     .await?;
                     Ok(Flow::Next)
                 }
+                .await
+                .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "FETCH")),
                 PlPgSqlStatement::Close(cursor) => {
                     let cursor_name = self.cursor_name(cursor);
                     self.session

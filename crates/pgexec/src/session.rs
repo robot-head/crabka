@@ -5689,9 +5689,7 @@ impl SqlSession {
         let mut probe = cursor.position;
         let plan = probe.walk(direction);
         if plan.backward && !cursor.scrollable {
-            return Err(ExecError::ObjectNotInPrerequisiteState(
-                "cursor can only scan forward".into(),
-            ));
+            return Err(ExecError::CursorCanOnlyScanForward);
         }
         cursor.position = probe;
         let moved = plan.rows.len();

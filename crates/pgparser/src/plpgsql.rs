@@ -1083,6 +1083,7 @@ impl PlParser<'_> {
     }
 
     fn parse_fetch(&mut self) -> Result<PlPgSqlStatement, ParseError> {
+        let line = self.line();
         let move_only = self.eat_word("move");
         if !move_only {
             self.expect_word("fetch")?;
@@ -1118,6 +1119,7 @@ impl PlParser<'_> {
             direction,
             into,
             move_only,
+            line,
         })
     }
 
