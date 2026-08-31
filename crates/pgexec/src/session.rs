@@ -27442,7 +27442,7 @@ mod tests {
             .simple_query(
                 "CREATE TABLE plpgsql_signature_type_source (value int4); \
                  CREATE FUNCTION plpgsql_qualified_argument( \
-                 value plpgsql_signature_type_source.value%TYPE) RETURNS int4 LANGUAGE sql \
+                 value public.plpgsql_signature_type_source.value%TYPE) RETURNS int4 LANGUAGE sql \
                  RETURN value",
             )
             .await

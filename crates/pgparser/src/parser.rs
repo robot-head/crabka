@@ -16110,7 +16110,9 @@ impl Parser {
         let start = self.pos;
         // One-based, as `PostgreSQL` reports every error position.
         let location = self.peek_pos() + 1;
-        if let Ok(ty) = self.parse_type_name() {
+        if let Ok(ty) = self.parse_type_name()
+            && !matches!(self.peek(), Token::Dot | Token::Percent)
+        {
             return Ok(RoutineType::builtin(ty, ty.name().to_string()).at(location));
         }
         self.pos = start;
