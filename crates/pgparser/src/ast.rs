@@ -5306,6 +5306,7 @@ pub enum PlPgSqlStatement {
     Assert {
         condition: Expr,
         message: Option<Expr>,
+        line: usize,
     },
     Transaction {
         commit: bool,

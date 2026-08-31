@@ -1088,6 +1088,12 @@ impl PlParser<'_> {
     }
 
     fn parse_assert(&mut self) -> Result<PlPgSqlStatement, ParseError> {
+        let start = self.pos;
+        let line = self.source[..self.tokens[start].1]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
         self.expect_word("assert")?;
         let end = self.find_token(self.pos, &Token::Semicolon)?;
         let comma = self.top_level_commas(self.pos, end).into_iter().next();
@@ -1097,7 +1103,11 @@ impl PlParser<'_> {
             .map(|comma| self.parse_expr_range(comma + 1, end))
             .transpose()?;
         self.pos = end + 1;
-        Ok(PlPgSqlStatement::Assert { condition, message })
+        Ok(PlPgSqlStatement::Assert {
+            condition,
+            message,
+            line,
+        })
     }
 
     fn parse_transaction(&mut self) -> Result<PlPgSqlStatement, ParseError> {

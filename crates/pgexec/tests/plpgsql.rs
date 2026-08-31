@@ -1628,6 +1628,14 @@ async fn a_null_reaching_a_raise_is_rendered_rather_than_fatal() {
         .expect_err("false ASSERT must fail");
     assert!(error.code == "P0004", "{error:?}");
     assert!(error.message == "assertion failed", "{error:?}");
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            == Some("PL/pgSQL DO line 1 at ASSERT"),
+        "{error:?}"
+    );
 
     // The session is still usable, which a panicking backend would not be.
     assert!(scalar(&mut session, "SELECT 1").await == Some("1".into()));

@@ -1179,8 +1179,9 @@ pub(crate) fn scalar_function_requires_session(
                     Some(value) => self.expression(value),
                     None => Ok(false),
                 },
-                PlPgSqlStatement::Assert { condition, message } => Ok(self
-                    .expression(condition)?
+                PlPgSqlStatement::Assert {
+                    condition, message, ..
+                } => Ok(self.expression(condition)?
                     || match message {
                         Some(message) => self.expression(message)?,
                         None => false,
@@ -1638,7 +1639,11 @@ impl ScalarInterpreter<'_> {
             PlPgSqlStatement::Raise(raise) => self.raise(raise).map_err(|error| {
                 plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
             }),
-            PlPgSqlStatement::Assert { condition, message } => {
+            PlPgSqlStatement::Assert {
+                condition,
+                message,
+                line,
+            } => (|| {
                 if self.truth(condition)? {
                     Ok(ScalarFlow::Next)
                 } else {
@@ -1664,7 +1669,8 @@ impl ScalarInterpreter<'_> {
                         message,
                     })
                 }
-            }
+            })()
+            .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "ASSERT")),
             PlPgSqlStatement::Null => Ok(ScalarFlow::Next),
             PlPgSqlStatement::Sql { .. }
             | PlPgSqlStatement::Perform { .. }
@@ -2378,7 +2384,11 @@ impl Interpreter<'_> {
                 PlPgSqlStatement::Raise(raise) => self.raise(raise).await.map_err(|error| {
                     plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
                 }),
-                PlPgSqlStatement::Assert { condition, message } => {
+                PlPgSqlStatement::Assert {
+                    condition,
+                    message,
+                    line,
+                } => async {
                     if self.truth_async(condition).await? {
                         Ok(Flow::Next)
                     } else {
@@ -2395,6 +2405,8 @@ impl Interpreter<'_> {
                         })
                     }
                 }
+                .await
+                .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "ASSERT")),
                 PlPgSqlStatement::Transaction { commit, chain } => {
                     if !self.allow_transaction_control || self.exception_depth > 0 {
                         return Err(ExecError::ActiveSqlTransaction(
