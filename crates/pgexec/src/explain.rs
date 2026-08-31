@@ -136,7 +136,7 @@ pub(crate) fn apply_catalog_estimate(
         .filter(|rows| *rows >= 0.0)
         .unwrap_or(1_000.0);
     let selectivity = select.filter.as_ref().map_or(1.0, |filter| {
-        restriction_selectivity(catalog_kv, &table, rows, ctx, filter)
+        restriction_selectivity(catalog_kv, &table, rows, inherited, ctx, filter)
     });
     let input_rows = rows * selectivity;
     let output_rows = estimate_group_rows(catalog_kv, &table, input_rows, inherited, select)
@@ -546,13 +546,17 @@ fn restriction_selectivity(
     catalog_kv: &dyn crabka_pgkv::Kv,
     table: &crabka_pgcatalog::Table,
     rows: f64,
+    inherited: bool,
     ctx: &crate::clock::EvalCtx,
     expr: &Expr,
 ) -> f64 {
-    if let Some(selectivity) = extended_mcv_selectivity(catalog_kv, table, rows, ctx, expr) {
+    if let Some(selectivity) =
+        extended_mcv_selectivity(catalog_kv, table, rows, inherited, ctx, expr)
+    {
         return selectivity;
     }
-    if let Some(selectivity) = functional_dependency_selectivity(catalog_kv, table, rows, ctx, expr)
+    if let Some(selectivity) =
+        functional_dependency_selectivity(catalog_kv, table, rows, inherited, ctx, expr)
     {
         return selectivity;
     }
@@ -576,16 +580,16 @@ fn restriction_selectivity(
             left,
             right,
         } => {
-            restriction_selectivity(catalog_kv, table, rows, ctx, left)
-                * restriction_selectivity(catalog_kv, table, rows, ctx, right)
+            restriction_selectivity(catalog_kv, table, rows, inherited, ctx, left)
+                * restriction_selectivity(catalog_kv, table, rows, inherited, ctx, right)
         }
         Expr::Binary {
             op: BinaryOp::Or,
             left,
             right,
         } => {
-            let left = restriction_selectivity(catalog_kv, table, rows, ctx, left);
-            let right = restriction_selectivity(catalog_kv, table, rows, ctx, right);
+            let left = restriction_selectivity(catalog_kv, table, rows, inherited, ctx, left);
+            let right = restriction_selectivity(catalog_kv, table, rows, inherited, ctx, right);
             left + right - left * right
         }
         Expr::Binary { op, left, right }
@@ -616,6 +620,7 @@ fn functional_dependency_selectivity(
     catalog_kv: &dyn crabka_pgkv::Kv,
     table: &crabka_pgcatalog::Table,
     rows: f64,
+    inherited: bool,
     ctx: &crate::clock::EvalCtx,
     expr: &Expr,
 ) -> Option<f64> {
@@ -642,9 +647,7 @@ fn functional_dependency_selectivity(
                     .and_then(|index| statistics_data_position(&object, index))
             })
             .collect::<Vec<_>>();
-        let Some(mut dependencies) = object
-            .data
-            .as_ref()
+        let Some(mut dependencies) = statistics_data(&object, inherited)
             .and_then(|data| data.dependencies.as_deref())
             .and_then(decode_dependencies)
         else {
@@ -761,6 +764,7 @@ fn extended_mcv_selectivity(
     catalog_kv: &dyn crabka_pgkv::Kv,
     table: &crabka_pgcatalog::Table,
     rows: f64,
+    inherited: bool,
     ctx: &crate::clock::EvalCtx,
     expr: &Expr,
 ) -> Option<f64> {
@@ -782,9 +786,7 @@ fn extended_mcv_selectivity(
         else {
             continue;
         };
-        let Some(items) = object
-            .data
-            .as_ref()
+        let Some(items) = statistics_data(&object, inherited)
             .and_then(|data| data.mcv.as_deref())
             .and_then(crabka_pgcatalog::statistics::decode_mcv)
         else {
@@ -839,7 +841,7 @@ fn extended_mcv_selectivity(
         };
         return Some((mcv_selectivity + (1.0 - mcv_total).max(0.0) * remainder).clamp(0.0, 1.0));
     }
-    extended_mcv_conjunction_selectivity(catalog_kv, table, rows, ctx, expr)
+    extended_mcv_conjunction_selectivity(catalog_kv, table, rows, inherited, ctx, expr)
 }
 
 /// Combine independent MCV objects for a conjunction when no single object
@@ -848,6 +850,7 @@ fn extended_mcv_conjunction_selectivity(
     catalog_kv: &dyn crabka_pgkv::Kv,
     table: &crabka_pgcatalog::Table,
     rows: f64,
+    inherited: bool,
     ctx: &crate::clock::EvalCtx,
     expr: &Expr,
 ) -> Option<f64> {
@@ -868,9 +871,7 @@ fn extended_mcv_conjunction_selectivity(
         let mut best = None;
         for object in &objects {
             if object.table_id != table.id
-                || object
-                    .data
-                    .as_ref()
+                || statistics_data(object, inherited)
                     .and_then(|data| data.mcv.as_deref())
                     .is_none()
             {
@@ -899,9 +900,7 @@ fn extended_mcv_conjunction_selectivity(
         let Some((object, positions)) = best else {
             break;
         };
-        let Some(items) = object
-            .data
-            .as_ref()
+        let Some(items) = statistics_data(object, inherited)
             .and_then(|data| data.mcv.as_deref())
             .and_then(crabka_pgcatalog::statistics::decode_mcv)
         else {

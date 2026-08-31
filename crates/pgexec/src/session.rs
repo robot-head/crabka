@@ -23800,6 +23800,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_selects_inherited_mcv_for_predicates() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE inherited_mcv_estimate (a int4, b int4); \
+             CREATE TABLE inherited_mcv_estimate_child () INHERITS (inherited_mcv_estimate); \
+             INSERT INTO inherited_mcv_estimate SELECT i + 1, i + 1 \
+                 FROM generate_series(1, 100) AS i; \
+             INSERT INTO inherited_mcv_estimate_child SELECT 1, 1 \
+                 FROM generate_series(1, 100); \
+             CREATE STATISTICS inherited_mcv_estimate_ab (mcv) \
+                 ON a, b FROM inherited_mcv_estimate; \
+             ANALYZE inherited_mcv_estimate",
+        )
+        .await
+        .expect("statistics setup");
+
+        let explain = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM inherited_mcv_estimate WHERE a = 1 AND b = 1",
+        )
+        .await
+        .expect("predicate explain");
+        assert!(
+            explain.first().and_then(|row| row.first())
+                == Some(
+                    &"Seq Scan on inherited_mcv_estimate (cost=0.00..0.00 rows=50 width=0)".into()
+                )
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_expression_ndistinct_for_stats_ext_group_rows() {
         use assert2::assert;
 
