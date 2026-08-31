@@ -23779,6 +23779,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_extended_mcv_for_boolean_conjunctions() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE mcv_bool_estimate (a bool, b bool); \
+             INSERT INTO mcv_bool_estimate \
+             SELECT true, true FROM generate_series(1, 40); \
+             INSERT INTO mcv_bool_estimate \
+             SELECT true, false FROM generate_series(1, 10); \
+             INSERT INTO mcv_bool_estimate \
+             SELECT false, true FROM generate_series(1, 10); \
+             INSERT INTO mcv_bool_estimate \
+             SELECT false, false FROM generate_series(1, 40); \
+             CREATE STATISTICS mcv_bool_estimate_ab (mcv) ON a, b FROM mcv_bool_estimate; \
+             ANALYZE mcv_bool_estimate",
+        )
+        .await
+        .expect("statistics setup");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT * FROM mcv_bool_estimate WHERE a AND b"
+            )
+            .await
+                == Ok(vec![
+                    vec!["Seq Scan on mcv_bool_estimate (cost=0.00..0.00 rows=40 width=0)".into()],
+                    vec!["  Filter: (a AND b)".into()],
+                ])
+        );
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT * FROM mcv_bool_estimate WHERE NOT a AND b",
+            )
+            .await
+                == Ok(vec![
+                    vec!["Seq Scan on mcv_bool_estimate (cost=0.00..0.00 rows=10 width=0)".into()],
+                    vec!["  Filter: ((NOT a) AND b)".into()],
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_the_target_and_conflict_clause_of_an_instead_rule() {
         use assert2::assert;
 

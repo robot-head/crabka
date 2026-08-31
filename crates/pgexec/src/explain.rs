@@ -527,8 +527,41 @@ fn collect_mcv_clauses(
                 clauses.push(clause);
                 true
             }),
+        Expr::Column { .. } => bool_mcv_clause(expr, false, table, ctx).is_some_and(|clause| {
+            clauses.push(clause);
+            true
+        }),
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => bool_mcv_clause(expr, true, table, ctx).is_some_and(|clause| {
+            clauses.push(clause);
+            true
+        }),
         _ => false,
     }
+}
+
+fn bool_mcv_clause(
+    expr: &Expr,
+    negated: bool,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<McvClause> {
+    let attnum = column_attnum(expr, table)?;
+    (table.columns.get(usize::try_from(attnum - 1).ok()?)?.ty == crabka_pgtypes::ColumnType::Bool)
+        .then_some(())?;
+    let value = crabka_pgtypes::Datum::Bool(!negated);
+    let text = String::from_utf8(crabka_pgtypes::encoding::encode_text_in(
+        &value,
+        ctx.output_style(),
+    ))
+    .ok()?;
+    Some(McvClause {
+        key: GroupKey::Attribute(attnum),
+        value: Some(value),
+        text,
+    })
 }
 
 fn mcv_clause(
