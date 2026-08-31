@@ -4264,9 +4264,14 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
 
 /// Names in a PL/pgSQL declaration which hide a routine parameter or outer
 /// block declaration. PostgreSQL reports these while compiling the routine.
+pub(crate) struct PlPgSqlShadow {
+    pub(crate) name: String,
+    pub(crate) position: usize,
+}
+
 pub(crate) fn plpgsql_shadowed_variables(
     stmt: &CreateRoutineStmt,
-) -> Result<Vec<String>, ExecError> {
+) -> Result<Vec<PlPgSqlShadow>, ExecError> {
     let language = stmt.options.iter().find_map(|option| match option {
         RoutineOption::Language(language) => Some(language.as_str()),
         _ => None,
@@ -4275,11 +4280,14 @@ pub(crate) fn plpgsql_shadowed_variables(
         RoutineOption::Body(RoutineBody::Source(body)) => Some(body.as_str()),
         _ => None,
     });
-    if language != Some("plpgsql") || body.is_none() {
+    if language != Some("plpgsql") {
         return Ok(Vec::new());
     }
-    let block = crabka_pgparser::parse_plpgsql(body.expect("PL/pgSQL source body"))
-        .map_err(|error| ExecError::Syntax(error.message))?;
+    let Some(body) = body else {
+        return Ok(Vec::new());
+    };
+    let block =
+        crabka_pgparser::parse_plpgsql(body).map_err(|error| ExecError::Syntax(error.message))?;
     let mut names = stmt
         .args
         .iter()
@@ -4296,22 +4304,33 @@ pub(crate) fn plpgsql_shadowed_variables(
 fn collect_plpgsql_shadows(
     block: &PlPgSqlBlock,
     names: &mut HashSet<String>,
-    shadows: &mut Vec<String>,
+    shadows: &mut Vec<PlPgSqlShadow>,
 ) {
     for declaration in &block.declarations {
-        let (name, cursor_args) = match declaration {
-            crabka_pgparser::ast::PlPgSqlDeclaration::Variable { name, .. }
-            | crabka_pgparser::ast::PlPgSqlDeclaration::Alias { name, .. } => (name, &[][..]),
+        let (name, position, cursor_args) = match declaration {
+            crabka_pgparser::ast::PlPgSqlDeclaration::Variable { name, position, .. }
+            | crabka_pgparser::ast::PlPgSqlDeclaration::Alias { name, position, .. } => {
+                (name, *position, &[][..])
+            }
             crabka_pgparser::ast::PlPgSqlDeclaration::Cursor {
-                name, arguments, ..
-            } => (name, arguments.as_slice()),
+                name,
+                position,
+                arguments,
+                ..
+            } => (name, *position, arguments.as_slice()),
         };
         if !names.insert(name.clone()) {
-            shadows.push(name.clone());
+            shadows.push(PlPgSqlShadow {
+                name: name.clone(),
+                position,
+            });
         }
-        for (name, _) in cursor_args {
+        for (name, _, position) in cursor_args {
             if names.contains(name) {
-                shadows.push(name.clone());
+                shadows.push(PlPgSqlShadow {
+                    name: name.clone(),
+                    position: *position,
+                });
             }
         }
     }
@@ -4324,7 +4343,7 @@ fn collect_plpgsql_shadows(
 fn collect_plpgsql_statement_shadows(
     statements: &[PlPgSqlStatement],
     names: &HashSet<String>,
-    shadows: &mut Vec<String>,
+    shadows: &mut Vec<PlPgSqlShadow>,
 ) {
     for statement in statements {
         match statement {

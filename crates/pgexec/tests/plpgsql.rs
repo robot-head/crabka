@@ -1373,7 +1373,7 @@ async fn cursor_arguments_and_dynamic_open_using_are_bound() {
 }
 
 #[tokio::test]
-async fn execute_discards_rows_and_dml_returning_rejects_multiple_rows() {
+async fn execute_discards_rows_and_dynamic_dml_returning_assigns_the_first_row() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
     execute(
@@ -1390,11 +1390,8 @@ async fn execute_discards_rows_and_dml_returning_rejects_multiple_rows() {
         DECLARE picked int4;
         BEGIN
           EXECUTE 'SELECT n FROM pl_returning_input ORDER BY n';
-          BEGIN
-            EXECUTE 'UPDATE pl_returning_input SET n = n + 10 RETURNING n' INTO picked;
-          EXCEPTION WHEN too_many_rows THEN
-            INSERT INTO pl_returning_result VALUES (SQLSTATE);
-          END;
+          EXECUTE 'UPDATE pl_returning_input SET n = n + 10 RETURNING n' INTO picked;
+          INSERT INTO pl_returning_result VALUES (picked::text);
         END
         $$
         ",
@@ -1402,11 +1399,11 @@ async fn execute_discards_rows_and_dml_returning_rejects_multiple_rows() {
     .await;
 
     assert!(
-        scalar(&mut session, "SELECT state FROM pl_returning_result").await == Some("P0003".into())
+        scalar(&mut session, "SELECT state FROM pl_returning_result").await == Some("11".into())
     );
     assert!(
         query(&mut session, "SELECT n FROM pl_returning_input ORDER BY n").await
-            == vec![row(&["1"]), row(&["2"])]
+            == vec![row(&["11"]), row(&["12"])]
     );
 }
 

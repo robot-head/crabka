@@ -5197,6 +5197,7 @@ pub enum PlPgSqlVariableConflict {
 pub enum PlPgSqlDeclaration {
     Variable {
         name: String,
+        position: usize,
         ty: RoutineType,
         constant: bool,
         not_null: bool,
@@ -5204,12 +5205,14 @@ pub enum PlPgSqlDeclaration {
     },
     Alias {
         name: String,
+        position: usize,
         target: String,
     },
     Cursor {
         name: String,
+        position: usize,
         scroll: Option<bool>,
-        arguments: Vec<(String, RoutineType)>,
+        arguments: Vec<(String, RoutineType, usize)>,
         query: Box<Statement>,
     },
 }

@@ -1929,6 +1929,7 @@ impl ScalarInterpreter<'_> {
                 constant,
                 not_null,
                 default,
+                ..
             } => {
                 let ty =
                     declaration_type(ty, |name| Ok(self.lookup_slot(name).map(|slot| slot.ty)))?;
@@ -1958,7 +1959,7 @@ impl ScalarInterpreter<'_> {
                 );
                 Ok(())
             }
-            PlPgSqlDeclaration::Alias { name, target } => {
+            PlPgSqlDeclaration::Alias { name, target, .. } => {
                 if self.lookup_slot(target).is_none() {
                     return Err(ExecError::Syntax(format!(
                         "alias target \"{target}\" does not exist"
@@ -3133,6 +3134,7 @@ impl Interpreter<'_> {
                 constant,
                 not_null,
                 default,
+                ..
             } => {
                 let ty = if let Some(reference) = ty.name.strip_suffix("%rowtype") {
                     let resolution = self.session.plpgsql_resolution_scope();
@@ -3178,7 +3180,7 @@ impl Interpreter<'_> {
                 );
                 Ok(())
             }
-            PlPgSqlDeclaration::Alias { name, target } => {
+            PlPgSqlDeclaration::Alias { name, target, .. } => {
                 if self.lookup_slot(target).is_none() {
                     return Err(ExecError::Syntax(format!(
                         "alias target \"{target}\" does not exist"
@@ -3196,12 +3198,16 @@ impl Interpreter<'_> {
                 scroll,
                 arguments,
                 query,
+                ..
             } => {
                 self.cursor_declarations.insert(
                     name.clone(),
                     CursorDeclaration {
                         scroll: *scroll,
-                        arguments: arguments.clone(),
+                        arguments: arguments
+                            .iter()
+                            .map(|(name, ty, _)| (name.clone(), ty.clone()))
+                            .collect(),
                         statement: query.as_ref().clone(),
                     },
                 );

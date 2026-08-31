@@ -8988,7 +8988,7 @@ impl SqlSession {
         } else {
             tracing::Span::none()
         };
-        let result = Box::pin(self.run_one_inner(stmt))
+        let result = Box::pin(self.run_one_inner(stmt, sql))
             .instrument(span.clone())
             .await;
         // `run_one_inner`'s guard clauses — a statement in an aborted block, a
@@ -9099,7 +9099,11 @@ impl SqlSession {
         carrier.apply_to(span);
     }
 
-    async fn run_one_inner(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+    async fn run_one_inner(
+        &mut self,
+        stmt: &Statement,
+        sql: Option<&str>,
+    ) -> Result<QueryResult, ExecError> {
         if !self.login_event_fired {
             self.login_event_fired = true;
             if let Err(error) = self
@@ -9285,14 +9289,16 @@ impl SqlSession {
             | Statement::CreateStatistics(_)
             | Statement::AlterStatistics { .. }
             | Statement::DropStatistics { .. }
-            | Statement::Utility(UtilityStatement::TextSearch(_)) => self.run_ddl(stmt).await,
+            | Statement::Utility(UtilityStatement::TextSearch(_)) => {
+                self.run_ddl_with_source(stmt, sql).await
+            }
         // `DROP TABLE` takes that same path, once the cursors this session
         // still holds have had their say. The internal drops reach `run_ddl`
         // directly and are deliberately exempt: a failed `CREATE TABLE AS`
         // undoing itself, and `ON COMMIT DROP` at the end of a block.
         Statement::DropTable { .. } => {
             self.refuse_relation_pinned_by_cursor(stmt)?;
-            self.run_ddl(stmt).await
+            self.run_ddl_with_source(stmt, sql).await
         }
         Statement::Call {
             name,
@@ -12066,6 +12072,14 @@ impl SqlSession {
     }
 
     async fn run_ddl(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        self.run_ddl_with_source(stmt, None).await
+    }
+
+    async fn run_ddl_with_source(
+        &mut self,
+        stmt: &Statement,
+        sql: Option<&str>,
+    ) -> Result<QueryResult, ExecError> {
         self.validate_routine_settings(stmt)?;
         let fires_event_triggers = !crate::trigger::event_trigger_ddl_is_excluded(stmt);
         let publishes_user_casts = matches!(
@@ -12259,12 +12273,22 @@ impl SqlSession {
             _ => Vec::new(),
         };
         if self.plpgsql_setting_contains("plpgsql.extra_errors", "shadowed_variables")
-            && let Some(name) = plpgsql_shadows.first()
+            && let Some(shadow) = plpgsql_shadows.first()
         {
-            return Err(ExecError::FunctionError {
-                sqlstate: "42712",
-                message: format!("variable \"{name}\" shadows a previously defined variable"),
-            });
+            let error = PgError::error(
+                "42712",
+                format!(
+                    "variable \"{}\" shadows a previously defined variable",
+                    shadow.name
+                ),
+            );
+            let error = match sql
+                .and_then(|sql| plpgsql_body_source_position(sql, stmt, shadow.position))
+            {
+                Some(position) => error.with_position(position),
+                None => error,
+            };
+            return Err(ExecError::Remote(error));
         }
         // Computed before the drop runs, while the dependents still exist.
         let cascade_notice =
@@ -12455,10 +12479,18 @@ impl SqlSession {
             self.plpgsql_notice(notice)?;
         }
         if self.plpgsql_setting_contains("plpgsql.extra_warnings", "shadowed_variables") {
-            for name in plpgsql_shadows {
-                self.plpgsql_notice(PgError::warning(format!(
-                    "variable \"{name}\" shadows a previously defined variable"
-                )))?;
+            for shadow in plpgsql_shadows {
+                let warning = PgError::warning(format!(
+                    "variable \"{}\" shadows a previously defined variable",
+                    shadow.name
+                ));
+                let warning = match sql
+                    .and_then(|sql| plpgsql_body_source_position(sql, stmt, shadow.position))
+                {
+                    Some(position) => warning.with_position(position),
+                    None => warning,
+                };
+                self.plpgsql_notice(warning)?;
             }
         }
         if let Some(warning) = fdw_change_warning {
@@ -17779,10 +17811,27 @@ fn attach_plpgsql_definition_return_position(
     }) else {
         return error;
     };
-    let Some(body_start) = sql.find(body) else {
+    let Some(position) = plpgsql_body_source_position(sql, stmt, line_start + offset) else {
         return error;
     };
-    error.with_position(sql[..body_start + line_start + offset].chars().count() + 1)
+    error.with_position(position)
+}
+
+fn plpgsql_body_source_position(sql: &str, stmt: &Statement, offset: usize) -> Option<usize> {
+    let body = match stmt {
+        Statement::CreateRoutine(routine) => {
+            routine.options.iter().find_map(|option| match option {
+                crabka_pgparser::ast::RoutineOption::Body(
+                    crabka_pgparser::ast::RoutineBody::Source(body),
+                ) => Some(body.as_str()),
+                _ => None,
+            })
+        }
+        Statement::DoBlock { body, .. } => Some(body.as_str()),
+        _ => None,
+    }?;
+    let body_start = sql.find(body)?;
+    Some(sql[..body_start + offset].chars().count() + 1)
 }
 
 fn attach_typed_table_position(sql: &str, stmt: &Statement, error: PgError) -> PgError {
@@ -27687,15 +27736,26 @@ mod tests {
             .simple_query("SET plpgsql.extra_errors TO 'shadowed_variables'")
             .await
             .expect("enable check");
+        let sql = "CREATE FUNCTION plpgsql_shadowed_value(value int) RETURNS bool LANGUAGE plpgsql AS $$\n\
+                   DECLARE\n\
+                     value int;\n\
+                   BEGIN\n\
+                     RETURN true;\n\
+                   END\n\
+                   $$";
         let error = session
-            .simple_query(
-                "CREATE FUNCTION plpgsql_shadowed_value(value int) RETURNS bool LANGUAGE plpgsql AS $$ \
-                 DECLARE value int; BEGIN RETURN true; END $$",
-            )
+            .simple_query(sql)
             .await
             .expect_err("shadowed declaration");
         assert!(error.code == "42712");
         assert!(error.message == "variable \"value\" shadows a previously defined variable");
+        assert!(
+            error
+                .diagnostics
+                .as_deref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(sql.rfind("value int").expect("declaration position") + 1)
+        );
         assert!(sqlstate(&mut session, "SELECT plpgsql_shadowed_value(1)").await == "42883");
     }
 
@@ -27710,16 +27770,22 @@ mod tests {
             .simple_query("SET plpgsql.extra_warnings TO 'shadowed_variables'")
             .await
             .expect("enable check");
-        session
-            .simple_query(
-                "CREATE FUNCTION plpgsql_warn_shadowed_value(value int) RETURNS bool LANGUAGE plpgsql AS $$ \
-                 DECLARE value int; BEGIN RETURN true; END $$",
-            )
-            .await
-            .expect("shadow warning");
+        let sql = "CREATE FUNCTION plpgsql_warn_shadowed_value(value int) RETURNS bool LANGUAGE plpgsql AS $$\n\
+                   DECLARE\n\
+                     c CURSOR (value int) FOR SELECT 1;\n\
+                   BEGIN\n\
+                     RETURN true;\n\
+                   END\n\
+                   $$";
+        session.simple_query(sql).await.expect("shadow warning");
+        let warning = notices.try_recv().expect("shadow warning");
+        assert!(warning.message == "variable \"value\" shadows a previously defined variable");
         assert!(
-            notices.try_recv().expect("shadow warning").message
-                == "variable \"value\" shadows a previously defined variable"
+            warning
+                .diagnostics
+                .as_deref()
+                .and_then(|diagnostics| diagnostics.position)
+                == Some(sql.rfind("value int").expect("cursor argument position") + 1)
         );
         assert!(
             single_text(

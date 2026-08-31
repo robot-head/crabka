@@ -286,6 +286,7 @@ impl PlParser<'_> {
             if self.at_eof() {
                 return Err(self.error("unterminated DECLARE section"));
             }
+            let position = self.offset();
             let name = self.expect_name()?;
             if !names.insert(name.clone()) {
                 return Err(self.error(format!("duplicate declaration \"{name}\"")));
@@ -298,11 +299,15 @@ impl PlParser<'_> {
                     other => return Err(self.error(format!("invalid alias target {other:?}"))),
                 };
                 self.expect_token(&Token::Semicolon)?;
-                declarations.push(PlPgSqlDeclaration::Alias { name, target });
+                declarations.push(PlPgSqlDeclaration::Alias {
+                    name,
+                    position,
+                    target,
+                });
                 continue;
             }
             if self.cursor_declaration_starts() {
-                declarations.push(self.parse_cursor_declaration(name)?);
+                declarations.push(self.parse_cursor_declaration(name, position)?);
                 continue;
             }
             let constant = self.eat_word("constant");
@@ -357,6 +362,7 @@ impl PlParser<'_> {
             self.expect_token(&Token::Semicolon)?;
             declarations.push(PlPgSqlDeclaration::Variable {
                 name,
+                position,
                 ty,
                 constant,
                 not_null,
@@ -375,7 +381,11 @@ impl PlParser<'_> {
                     .is_some_and(|word| word == "scroll"))
     }
 
-    fn parse_cursor_declaration(&mut self, name: String) -> Result<PlPgSqlDeclaration, ParseError> {
+    fn parse_cursor_declaration(
+        &mut self,
+        name: String,
+        position: usize,
+    ) -> Result<PlPgSqlDeclaration, ParseError> {
         let scroll = if self.eat_word("no") {
             self.expect_word("scroll")?;
             Some(false)
@@ -389,13 +399,14 @@ impl PlParser<'_> {
         if matches!(self.token(), Token::LParen) {
             self.bump();
             while !matches!(self.token(), Token::RParen) {
+                let position = self.offset();
                 let arg = self.expect_name()?;
                 let end = self.find_top(self.pos, |parser, pos| {
                     matches!(parser.tokens[pos].0, Token::Comma | Token::RParen)
                 });
                 let ty = parse_routine_type(self.slice_tokens(self.pos, end).trim())?;
                 self.pos = end;
-                arguments.push((arg, ty));
+                arguments.push((arg, ty, position));
                 if matches!(self.token(), Token::Comma) {
                     self.bump();
                 } else {
@@ -411,6 +422,7 @@ impl PlParser<'_> {
         self.bump();
         Ok(PlPgSqlDeclaration::Cursor {
             name,
+            position,
             scroll,
             arguments,
             query: Box::new(query),
