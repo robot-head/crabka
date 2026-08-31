@@ -1141,6 +1141,14 @@ async fn dropping_a_column_removes_only_its_statistics_objects() {
         .await
             == vec![text_row(&["stat_bc"])]
     );
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_get_statisticsobjdef_columns(oid) FROM pg_statistic_ext",
+        )
+        .await
+            == vec![text_row(&["b, c"])]
+    );
 }
 
 #[tokio::test]

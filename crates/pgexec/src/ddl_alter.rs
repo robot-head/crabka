@@ -6738,14 +6738,27 @@ fn drop_statistics_referencing_column_ops(
     column: &str,
     index: usize,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
-    crabka_pgcatalog::statistics::list(kv)?
-        .into_iter()
-        .filter(|statistics| statistics_references_column(statistics, table, column, index))
-        .map(|statistics| {
-            crabka_pgcatalog::statistics::drop_ops(kv, &statistics.name).map_err(Into::into)
-        })
-        .collect::<Result<Vec<_>, ExecError>>()
-        .map(|ops| ops.into_iter().flatten().collect())
+    let attnum = i16::try_from(index + 1)
+        .map_err(|_| ExecError::Unsupported("statistics column number exceeds int2".into()))?;
+    let mut ops = Vec::new();
+    for mut statistics in crabka_pgcatalog::statistics::list(kv)? {
+        if statistics_references_column(&statistics, table, column, index) {
+            ops.extend(crabka_pgcatalog::statistics::drop_ops(
+                kv,
+                &statistics.name,
+            )?);
+        } else if statistics.table_id == table.id && statistics.keys.iter().any(|key| *key > attnum)
+        {
+            for key in &mut statistics.keys {
+                if *key > attnum {
+                    *key -= 1;
+                }
+            }
+            statistics.data = None;
+            ops.push(crabka_pgcatalog::statistics::put_op(&statistics));
+        }
+    }
+    Ok(ops)
 }
 
 fn clear_statistics_data_referencing_column_ops(
