@@ -23758,6 +23758,24 @@ mod tests {
                     vec!["  Filter: ((a = 1) AND (b = 1))".into()],
                 ])
         );
+        s.simple_query(
+            "CREATE STATISTICS mcv_estimate_expr (mcv) \
+             ON (a + b), (a - b) FROM mcv_estimate; ANALYZE mcv_estimate",
+        )
+        .await
+        .expect("expression MCV setup");
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_estimate WHERE (a + b) = 2 AND (a - b) = 0",
+        )
+        .await
+        .expect("expression MCV explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_estimate (cost=0.00..0.00 rows=40 width=0)".into()
+                ])
+        );
     }
 
     #[tokio::test]

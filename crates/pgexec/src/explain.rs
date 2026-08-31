@@ -303,6 +303,27 @@ fn statistics_positions(
     (positions.len() == keys.len()).then_some(positions)
 }
 
+fn statistics_key_positions(
+    object: &crabka_pgcatalog::statistics::Statistics,
+    wanted: &GroupKey,
+) -> Option<usize> {
+    let mut expression = 0_usize;
+    object
+        .keys
+        .iter()
+        .enumerate()
+        .find_map(|(position, attnum)| {
+            let key = if *attnum == 0 {
+                let key = GroupKey::Expression(object.expressions.get(expression)?.clone());
+                expression += 1;
+                key
+            } else {
+                GroupKey::Attribute(*attnum)
+            };
+            (key == *wanted).then_some(position)
+        })
+}
+
 fn restriction_selectivity(
     catalog_kv: &dyn crabka_pgkv::Kv,
     table: &crabka_pgcatalog::Table,
@@ -355,8 +376,8 @@ fn restriction_selectivity(
 
 #[derive(Debug)]
 struct McvClause {
-    attnum: i16,
-    value: crabka_pgtypes::Datum,
+    key: GroupKey,
+    value: Option<crabka_pgtypes::Datum>,
     text: String,
 }
 
@@ -370,75 +391,29 @@ fn extended_mcv_selectivity(
     ctx: &crate::clock::EvalCtx,
     expr: &Expr,
 ) -> Option<f64> {
-    let mut pairs = Vec::new();
-    if !collect_equality_pairs(expr, &mut pairs) || pairs.len() < 2 {
+    let mut clauses = Vec::new();
+    if !collect_mcv_clauses(expr, table, ctx, &mut clauses) || clauses.len() < 2 {
         return None;
     }
-    let clauses = pairs
-        .into_iter()
-        .map(|(column, literal)| {
-            let (position, definition) = table
-                .columns
-                .iter()
-                .enumerate()
-                .find(|(_, definition)| definition.name == column)?;
-            let value = literal_for_type(literal, definition.ty, ctx)?;
-            let text = String::from_utf8(crabka_pgtypes::encoding::encode_text_in(
-                &value,
-                ctx.output_style(),
-            ))
-            .ok()?;
-            Some(McvClause {
-                attnum: i16::try_from(position + 1).ok()?,
-                value,
-                text,
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
     let scalar = clauses.iter().fold(1.0, |selectivity, clause| {
-        selectivity
-            * crate::attrstats::get(
-                catalog_kv,
-                &crate::attrstats::AttributeStatsKey {
-                    relation: table.name.clone(),
-                    attnum: clause.attnum,
-                    inherited: false,
-                },
-            )
-            .ok()
-            .flatten()
-            .and_then(|stats| {
-                table
-                    .columns
-                    .get(usize::try_from(clause.attnum - 1).ok()?)
-                    .and_then(|definition| {
-                        crate::plan::selfuncs::decode_catalog_stats(
-                            &stats,
-                            definition.ty,
-                            rows,
-                            ctx,
-                        )
-                    })
-            })
-            .map_or(crate::plan::selfuncs::DEFAULT_EQ_SEL, |stats| {
-                crate::plan::selfuncs::eqsel(stats.as_stats(), Some(&clause.value))
-            })
+        selectivity * scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, clause)
     });
     for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
         if object.table_id != table.id {
             continue;
         }
-        let Some(items) = object
-            .data
-            .and_then(|data| data.mcv)
-            .and_then(|data| crabka_pgcatalog::statistics::decode_mcv(&data))
+        let Some(positions) = clauses
+            .iter()
+            .map(|clause| statistics_key_positions(&object, &clause.key))
+            .collect::<Option<Vec<_>>>()
         else {
             continue;
         };
-        let Some(positions) = clauses
-            .iter()
-            .map(|clause| object.keys.iter().position(|key| *key == clause.attnum))
-            .collect::<Option<Vec<_>>>()
+        let Some(items) = object
+            .data
+            .as_ref()
+            .and_then(|data| data.mcv.as_deref())
+            .and_then(crabka_pgcatalog::statistics::decode_mcv)
         else {
             continue;
         };
@@ -494,30 +469,105 @@ fn extended_mcv_selectivity(
     None
 }
 
-fn collect_equality_pairs<'a>(expr: &'a Expr, pairs: &mut Vec<(&'a str, &'a Expr)>) -> bool {
+fn scalar_mcv_clause_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    clause: &McvClause,
+) -> f64 {
+    let (GroupKey::Attribute(attnum), Some(value)) = (&clause.key, &clause.value) else {
+        return crate::plan::selfuncs::DEFAULT_EQ_SEL;
+    };
+    crate::attrstats::get(
+        catalog_kv,
+        &crate::attrstats::AttributeStatsKey {
+            relation: table.name.clone(),
+            attnum: *attnum,
+            inherited: false,
+        },
+    )
+    .ok()
+    .flatten()
+    .and_then(|stats| {
+        table
+            .columns
+            .get(usize::try_from(*attnum - 1).ok()?)
+            .and_then(|definition| {
+                crate::plan::selfuncs::decode_catalog_stats(&stats, definition.ty, rows, ctx)
+            })
+    })
+    .map_or(crate::plan::selfuncs::DEFAULT_EQ_SEL, |stats| {
+        crate::plan::selfuncs::eqsel(stats.as_stats(), Some(value))
+    })
+}
+
+fn collect_mcv_clauses(
+    expr: &Expr,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+    clauses: &mut Vec<McvClause>,
+) -> bool {
     match expr {
         Expr::Binary {
             op: BinaryOp::And,
             left,
             right,
-        } => collect_equality_pairs(left, pairs) && collect_equality_pairs(right, pairs),
+        } => {
+            collect_mcv_clauses(left, table, ctx, clauses)
+                && collect_mcv_clauses(right, table, ctx, clauses)
+        }
         Expr::Binary {
             op: BinaryOp::Eq,
             left,
             right,
-        } => match (column_name(left), column_name(right)) {
-            (Some(column), None) => {
-                pairs.push((column, right));
+        } => mcv_clause(left, right, table, ctx)
+            .or_else(|| mcv_clause(right, left, table, ctx))
+            .is_some_and(|clause| {
+                clauses.push(clause);
                 true
-            }
-            (None, Some(column)) => {
-                pairs.push((column, left));
-                true
-            }
-            _ => false,
-        },
+            }),
         _ => false,
     }
+}
+
+fn mcv_clause(
+    key_expr: &Expr,
+    literal: &Expr,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<McvClause> {
+    let key = match key_expr {
+        Expr::Column { .. } => GroupKey::Attribute(column_attnum(key_expr, table)?),
+        _ if crate::eval::eval(key_expr, &crate::scope::Scope::empty(), &[], ctx).is_ok() => {
+            return None;
+        }
+        _ => GroupKey::Expression(crate::viewdef::expression_text(
+            key_expr,
+            crabka_pgtypes::encoding::OutputStyle::with_zone(&jiff::tz::TimeZone::UTC),
+        )),
+    };
+    let value = match &key {
+        GroupKey::Attribute(attnum) => {
+            let definition = table.columns.get(usize::try_from(*attnum - 1).ok()?)?;
+            literal_for_type(literal, definition.ty, ctx)?
+        }
+        GroupKey::Expression(_) => {
+            let value = crate::eval::eval(literal, &crate::scope::Scope::empty(), &[], ctx).ok()?;
+            (!matches!(value, crabka_pgtypes::Datum::Null)).then_some(value)?
+        }
+    };
+    let text = String::from_utf8(crabka_pgtypes::encoding::encode_text_in(
+        &value,
+        ctx.output_style(),
+    ))
+    .ok()?;
+    let scalar_value = matches!(key, GroupKey::Attribute(_)).then_some(value.clone());
+    Some(McvClause {
+        key,
+        value: scalar_value,
+        text,
+    })
 }
 
 fn estimate_binary_restriction(
