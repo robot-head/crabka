@@ -1119,7 +1119,15 @@ impl PlParser<'_> {
     }
 
     fn parse_target(&mut self) -> Result<PlPgSqlTarget, ParseError> {
-        let mut path = vec![self.expect_name()?];
+        let first = match self.token() {
+            Token::Param(number) => {
+                let number = *number;
+                self.bump();
+                format!("${number}")
+            }
+            _ => self.expect_name()?,
+        };
+        let mut path = vec![first];
         let mut subscripts = Vec::new();
         loop {
             if matches!(self.token(), Token::Dot) {

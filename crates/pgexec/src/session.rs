@@ -27459,6 +27459,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_return_query_can_assign_positional_output_parameters() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_positional_outputs(OUT first int4, OUT second int4) \
+                 RETURNS SETOF record LANGUAGE plpgsql AS $$ \
+                 BEGIN $1 := -1; $2 := -2; RETURN NEXT; RETURN QUERY SELECT 1, 2; END $$",
+            )
+            .await
+            .expect("function setup");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT count(*) FROM plpgsql_positional_outputs()")
+                    .await
+                    .expect("function call")
+            ),
+            "2"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_trigger_keeps_new_field_types() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();

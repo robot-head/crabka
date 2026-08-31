@@ -1191,7 +1191,10 @@ fn bind_scalar_parameters(
     }
     let mut output_slot = None;
     if include_outputs {
-        for param in routine.output_params() {
+        for (index, param) in routine.params.iter().enumerate() {
+            if !param.mode.is_output() {
+                continue;
+            }
             let Some(name) = &param.name else {
                 continue;
             };
@@ -1209,6 +1212,9 @@ fn bind_scalar_parameters(
                     not_null: false,
                 },
             );
+            frame
+                .aliases
+                .insert(format!("${}", index + 1), name.clone());
         }
         if let crabka_pgcatalog::routine::RoutineResult::Table(columns) = &routine.result {
             for (name, ty) in columns {
