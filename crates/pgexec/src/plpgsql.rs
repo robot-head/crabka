@@ -3453,12 +3453,17 @@ fn build_raise_diagnostic<'a>(
             )));
         }
     }
+    if raise.message.is_some() && options.contains_key("message") {
+        return Err(ExecError::Syntax(
+            "RAISE option already specified: MESSAGE".into(),
+        ));
+    }
+    if raise.condition.is_some() && options.contains_key("errcode") {
+        return Err(ExecError::Syntax(
+            "RAISE option already specified: ERRCODE".into(),
+        ));
+    }
     if let Some(value) = options.get("message") {
-        if raise.message.is_some() {
-            return Err(ExecError::Syntax(
-                "RAISE option MESSAGE cannot be used with a message string".into(),
-            ));
-        }
         message.clone_from(value);
     }
     let mut code = match raise.condition.as_deref() {

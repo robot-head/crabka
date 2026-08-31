@@ -27680,6 +27680,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_raise_using_rejects_duplicate_message_and_errcode() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (name, body, message) in [
+            (
+                "duplicate_raise_message",
+                "RAISE EXCEPTION 'custom' USING MESSAGE = 'other'",
+                "RAISE option already specified: MESSAGE",
+            ),
+            (
+                "duplicate_raise_errcode",
+                "RAISE SQLSTATE '22012' USING ERRCODE = '22003'",
+                "RAISE option already specified: ERRCODE",
+            ),
+        ] {
+            session
+                .simple_query(&format!(
+                    "CREATE FUNCTION {name}() RETURNS void LANGUAGE plpgsql AS $$ BEGIN {body}; END $$"
+                ))
+                .await
+                .expect("create function");
+            let error = session
+                .simple_query(&format!("SELECT {name}()"))
+                .await
+                .expect_err("duplicate option is rejected");
+            assert_eq!(error.code, "42601");
+            assert_eq!(error.message, message);
+        }
+    }
+
+    #[tokio::test]
     async fn function_guc_options_scope_and_propagate_plpgsql_changes() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
