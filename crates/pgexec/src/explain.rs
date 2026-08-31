@@ -618,20 +618,19 @@ fn functional_dependency_selectivity(
         .collect::<Vec<_>>();
     let mut selectivity = scalar.iter().product::<f64>();
     let mut adjusted = false;
+    let mut implied = Vec::new();
+    let mut applied = Vec::new();
     for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
         if object.table_id != table.id {
             continue;
         }
-        let Some(clause_positions) = clauses
+        let clause_positions = clauses
             .iter()
             .map(|clause| {
                 statistics_key_positions(&object, &clause.key)
                     .and_then(|index| statistics_data_position(&object, index))
             })
-            .collect::<Option<Vec<_>>>()
-        else {
-            continue;
-        };
+            .collect::<Vec<_>>();
         let Some(mut dependencies) = object
             .data
             .as_ref()
@@ -641,28 +640,30 @@ fn functional_dependency_selectivity(
             continue;
         };
         dependencies.sort_by(|left, right| right.2.total_cmp(&left.2));
-        let mut implied = Vec::new();
         for (determinants, dependent, degree) in dependencies {
-            if implied.contains(&dependent) {
-                continue;
-            }
             let Some(dependent_index) = clause_positions
                 .iter()
-                .position(|position| *position == dependent)
+                .position(|position| *position == Some(dependent))
             else {
                 continue;
             };
+            if implied.contains(&dependent_index) {
+                continue;
+            }
             let determinant = determinants
                 .iter()
                 .map(|position| {
                     clause_positions
                         .iter()
-                        .position(|candidate| candidate == position)
+                        .position(|candidate| *candidate == Some(*position))
                 })
                 .collect::<Option<Vec<_>>>();
             let Some(determinant) = determinant else {
                 continue;
             };
+            if dependencies_are_reciprocal(&determinant, dependent_index, &applied) {
+                continue;
+            }
             let determinant_selectivity = determinant
                 .iter()
                 .map(|index| scalar[*index])
@@ -676,11 +677,22 @@ fn functional_dependency_selectivity(
             let corrected =
                 (1.0 - degree) * dependent_selectivity + degree * dependent_given_determinant;
             selectivity = selectivity / dependent_selectivity * corrected;
-            implied.push(dependent);
+            implied.push(dependent_index);
+            applied.push((determinant, dependent_index));
             adjusted = true;
         }
     }
     adjusted.then_some(selectivity.clamp(0.0, 1.0))
+}
+
+fn dependencies_are_reciprocal(
+    determinants: &[usize],
+    dependent: usize,
+    applied: &[(Vec<usize>, usize)],
+) -> bool {
+    applied.iter().any(|(prior_determinants, prior_dependent)| {
+        prior_determinants.contains(&dependent) && determinants.contains(prior_dependent)
+    })
 }
 
 fn decode_dependencies(data: &str) -> Option<Vec<(Vec<i16>, i16, f64)>> {
@@ -3033,6 +3045,14 @@ mod tests {
             decode_dependencies(r#"{"1 => 2": 1.000000, "1, 2 => 3": 0.500000}"#)
                 == Some(vec![(vec![1], 2, 1.0), (vec![1, 2], 3, 0.5)])
         );
+    }
+
+    #[test]
+    fn dependency_selection_rejects_reciprocal_cycles_but_keeps_chains() {
+        let applied = vec![(vec![1], 2)];
+
+        assert!(dependencies_are_reciprocal(&[2], 1, &applied));
+        assert!(!dependencies_are_reciprocal(&[2], 3, &applied));
     }
 
     #[test]
