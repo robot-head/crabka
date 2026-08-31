@@ -1993,6 +1993,21 @@ fn coerce_untyped_literal_operands(
                 };
             return resolves.then_some(scalar_type);
         }
+        if matches!(other, Datum::TsVector(_) | Datum::TsQuery(_))
+            && matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::IsDistinctFrom
+                    | BinaryOp::IsNotDistinctFrom
+            )
+        {
+            return other.column_type();
+        }
         // A `json` counterpart resolves a literal for the two PATH operators
         // only. PostgreSQL gives `json` six operators and no more; of those,
         // `->` and `->>` take `text` (which the literal already is) or
@@ -6183,6 +6198,17 @@ mod tests {
         for (sql, fragment) in cases {
             let message = ev_err(sql).into_pg().message;
             assert2::assert!(message.contains(fragment), "{sql} produced {message}");
+        }
+    }
+
+    #[test]
+    fn text_search_comparisons_adopt_unknown_literals() {
+        for sql in [
+            "'new'::tsquery = 'new'",
+            "'new'::tsquery < 'york'",
+            "'''new'':1'::tsvector < '''york'':1'",
+        ] {
+            assert2::assert!(ev(sql, None, &[]) == Datum::Bool(true), "{sql}");
         }
     }
 
