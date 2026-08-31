@@ -147,6 +147,129 @@ async fn case_without_a_matching_arm_raises_case_not_found() {
 }
 
 #[tokio::test]
+async fn strict_into_reports_postgres_diagnostics_and_extra_checks() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE strict_source (value int4);
+        INSERT INTO strict_source VALUES (1), (2);
+        SET plpgsql.print_strict_params = on;
+        CREATE FUNCTION strict_detail() RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE selected int4; needle int4 := 0;
+        BEGIN
+          SELECT value FROM strict_source WHERE value > needle INTO STRICT selected;
+        END
+        $$;
+        CREATE FUNCTION strict_detail_off() RETURNS void LANGUAGE plpgsql AS $$
+        #print_strict_params off
+        DECLARE selected int4; needle int4 := 0;
+        BEGIN
+          SELECT value FROM strict_source WHERE value > needle INTO STRICT selected;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    let error = session
+        .simple_query("SELECT strict_detail()")
+        .await
+        .expect_err("STRICT SELECT must reject multiple rows");
+    assert!(error.code == "P0003", "{error:?}");
+    let diagnostics = error.diagnostics.expect("strict diagnostics");
+    assert!(diagnostics.detail.as_deref() == Some("parameters: needle = '0'"));
+    assert!(
+        diagnostics.hint.as_deref()
+            == Some("Make sure the query returns a single row, or use LIMIT 1.")
+    );
+
+    let error = session
+        .simple_query("SELECT strict_detail_off()")
+        .await
+        .expect_err("directive still keeps STRICT behavior");
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.detail.as_deref())
+            .is_none(),
+        "{error:?}"
+    );
+
+    let error = session
+        .simple_query(
+            "DO $$ DECLARE selected int4; BEGIN EXECUTE 'SELECT value FROM strict_source WHERE value > $1' INTO STRICT selected USING 0; END $$",
+        )
+        .await
+        .expect_err("dynamic STRICT SELECT must reject multiple rows");
+    let diagnostics = error.diagnostics.expect("dynamic strict diagnostics");
+    assert!(diagnostics.detail.as_deref() == Some("parameters: $1 = '0'"));
+    assert!(diagnostics.hint.is_none(), "{diagnostics:?}");
+
+    execute(
+        &mut session,
+        "SET plpgsql.extra_warnings = 'strict_multi_assignment'",
+    )
+    .await;
+    execute(
+        &mut session,
+        "DO $$ DECLARE left_value int4; right_value int4; BEGIN SELECT 1 INTO left_value, right_value; END $$",
+    )
+    .await;
+    let warning = notices.try_recv().expect("assignment warning");
+    assert!(warning.message == "number of source and target fields in assignment does not match");
+    let diagnostics = warning.diagnostics.expect("warning diagnostics");
+    assert!(
+        diagnostics.detail.as_deref()
+            == Some("strict_multi_assignment check of extra_warnings is active.")
+    );
+
+    execute(
+        &mut session,
+        "SET plpgsql.extra_errors = 'strict_multi_assignment'",
+    )
+    .await;
+    let error = session
+        .simple_query(
+            "DO $$ DECLARE left_value int4; right_value int4; BEGIN SELECT 1 INTO left_value, right_value; END $$",
+        )
+        .await
+        .expect_err("error-level assignment check must reject the mismatch");
+    let diagnostics = error.diagnostics.expect("assignment error diagnostics");
+    assert!(
+        diagnostics.detail.as_deref()
+            == Some("strict_multi_assignment check of extra_errors is active.")
+    );
+
+    execute(
+        &mut session,
+        "CREATE TABLE strict_pair (first_value int4, second_value int4)",
+    )
+    .await;
+    let error = session
+        .simple_query(
+            "DO $$ DECLARE pair_value strict_pair; BEGIN SELECT 1, 2, 3 INTO pair_value; END $$",
+        )
+        .await
+        .expect_err("named composite assignment must use its field count");
+    let diagnostics = error.diagnostics.expect("composite assignment diagnostics");
+    assert!(
+        diagnostics.detail.as_deref()
+            == Some("strict_multi_assignment check of extra_errors is active.")
+    );
+
+    execute(&mut session, "SET plpgsql.extra_errors = 'too_many_rows'").await;
+    let error = session
+        .simple_query("DO $$ DECLARE selected int4; BEGIN SELECT value FROM strict_source INTO selected; END $$")
+        .await
+        .expect_err("too_many_rows extra check must reject multiple rows");
+    assert!(error.code == "P0003", "{error:?}");
+}
+
+#[tokio::test]
 async fn query_for_assigns_each_selected_column_to_scalar_targets() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

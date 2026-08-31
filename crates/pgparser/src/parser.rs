@@ -21846,35 +21846,45 @@ mod tests {
         // off a bare `Token::Hash` at the very start of a body. `#` is now also a
         // prefix operator and the lead byte of `##`, so each directive shape has
         // to be pinned: one directive, two in a row, and one on the first line.
-        let cases: &[(&str, PlPgSqlVariableConflict)] = &[
+        let cases: &[(&str, PlPgSqlVariableConflict, Option<bool>)] = &[
             (
                 "#variable_conflict use_variable\nBEGIN NULL; END",
                 PlPgSqlVariableConflict::UseVariable,
+                None,
             ),
             (
                 "#variable_conflict use_column\nBEGIN NULL; END",
                 PlPgSqlVariableConflict::UseColumn,
+                None,
             ),
             (
                 "#variable_conflict error\nBEGIN NULL; END",
                 PlPgSqlVariableConflict::Error,
+                None,
             ),
             (
                 "#print_strict_params on\nBEGIN NULL; END",
                 PlPgSqlVariableConflict::Error,
+                Some(true),
             ),
             (
                 "#variable_conflict use_column\n#print_strict_params on\nBEGIN NULL; END",
                 PlPgSqlVariableConflict::UseColumn,
+                Some(true),
             ),
             (
                 "#print_strict_params off\n#variable_conflict use_variable\nBEGIN NULL; END",
                 PlPgSqlVariableConflict::UseVariable,
+                Some(false),
             ),
         ];
-        for (body, want) in cases {
+        for (body, want, strict_params) in cases {
             let block = crate::plpgsql::parse_plpgsql(body).expect("parse PL/pgSQL");
             assert!(block.variable_conflict == *want, "parsing {body:?}");
+            assert!(
+                block.print_strict_params == *strict_params,
+                "parsing {body:?}"
+            );
         }
         // An unknown directive is still named in the error, rather than being
         // swallowed as a prefix operator applied to an identifier.

@@ -5164,6 +5164,8 @@ pub struct CreateRoutineStmt {
 pub struct PlPgSqlBlock {
     /// How unqualified names shared by a PL variable and SQL column resolve.
     pub variable_conflict: PlPgSqlVariableConflict,
+    /// Per-function override for the `plpgsql.print_strict_params` setting.
+    pub print_strict_params: Option<bool>,
     pub label: Option<String>,
     pub declarations: Vec<PlPgSqlDeclaration>,
     pub statements: Vec<PlPgSqlStatement>,

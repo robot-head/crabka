@@ -4226,6 +4226,19 @@ impl SqlSession {
         })
     }
 
+    pub(crate) fn plpgsql_setting_enabled(&self, name: &str) -> bool {
+        self.guc.effective(name).as_deref() == Ok("on")
+    }
+
+    pub(crate) fn plpgsql_setting_contains(&self, name: &str, value: &str) -> bool {
+        self.guc.effective(name).is_ok_and(|setting| {
+            setting.eq_ignore_ascii_case("all")
+                || setting
+                    .split(',')
+                    .any(|item| item.trim().eq_ignore_ascii_case(value))
+        })
+    }
+
     pub(crate) fn plpgsql_catalog(&self) -> &dyn Kv {
         self.catalog_kv.as_ref()
     }

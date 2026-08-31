@@ -45,10 +45,11 @@ pub fn parse_plpgsql(source: &str) -> Result<PlPgSqlBlock, ParseError> {
         pos: 0,
         scopes: Vec::new(),
     };
-    let variable_conflict = parser.parse_directives()?;
+    let (variable_conflict, print_strict_params) = parser.parse_directives()?;
     let label = parser.eat_label()?;
     let mut block = parser.parse_block(label, true)?;
     block.variable_conflict = variable_conflict;
+    block.print_strict_params = print_strict_params;
     if !parser.at_eof() {
         return Err(parser.error("trailing tokens after PL/pgSQL block"));
     }
@@ -143,8 +144,9 @@ impl PlParser<'_> {
         }
     }
 
-    fn parse_directives(&mut self) -> Result<PlPgSqlVariableConflict, ParseError> {
+    fn parse_directives(&mut self) -> Result<(PlPgSqlVariableConflict, Option<bool>), ParseError> {
         let mut variable_conflict = PlPgSqlVariableConflict::Error;
+        let mut print_strict_params = None;
         while matches!(self.token(), Token::Hash) {
             self.bump();
             let line = self.source[..self.offset()]
@@ -166,7 +168,9 @@ impl PlParser<'_> {
                         }
                     };
                 }
-                "print_strict_params" if matches!(setting.as_str(), "on" | "off") => {}
+                "print_strict_params" if matches!(setting.as_str(), "on" | "off") => {
+                    print_strict_params = Some(setting == "on");
+                }
                 "print_strict_params" => {
                     return Err(self.error(format!(
                         "unrecognized #print_strict_params setting \"{setting}\""
@@ -188,7 +192,7 @@ impl PlParser<'_> {
                 self.bump();
             }
         }
-        Ok(variable_conflict)
+        Ok((variable_conflict, print_strict_params))
     }
 
     fn eat_label(&mut self) -> Result<Option<String>, ParseError> {
@@ -239,6 +243,7 @@ impl PlParser<'_> {
         self.scopes.pop();
         Ok(PlPgSqlBlock {
             variable_conflict: PlPgSqlVariableConflict::Error,
+            print_strict_params: None,
             label,
             declarations,
             statements,

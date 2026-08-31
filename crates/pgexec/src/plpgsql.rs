@@ -130,6 +130,7 @@ struct Interpreter<'a> {
     returns_set: bool,
     context: String,
     variable_conflict: PlPgSqlVariableConflict,
+    print_strict_params: Option<bool>,
     routine_oid: u32,
 }
 
@@ -277,6 +278,7 @@ async fn execute_call_body(
             returns_set: false,
             context: format!("SQL procedure {}", routine.identity()),
             variable_conflict: PlPgSqlVariableConflict::UseVariable,
+            print_strict_params: None,
             routine_oid: routine.oid,
         };
         let statements = crate::routine::parse_body(&routine)?;
@@ -348,6 +350,7 @@ pub(crate) async fn execute_scalar_function(
         returns_set: false,
         context: format!("PL/pgSQL function {}", routine.identity()),
         variable_conflict: block.variable_conflict,
+        print_strict_params: block.print_strict_params,
         routine_oid: routine.oid,
     };
     let flow = interpreter.exec_block(&block).await?;
@@ -396,6 +399,7 @@ pub(crate) async fn execute_sql_scalar_function(
         returns_set: false,
         context: format!("SQL function {}", routine.identity()),
         variable_conflict: PlPgSqlVariableConflict::UseVariable,
+        print_strict_params: None,
         routine_oid: routine.oid,
     };
     let statements = crate::routine::parse_body(routine)?;
@@ -555,6 +559,7 @@ pub(crate) async fn execute_trigger_function(
         returns_set: false,
         context: format!("PL/pgSQL function {}", routine.identity()),
         variable_conflict: block.variable_conflict,
+        print_strict_params: block.print_strict_params,
         routine_oid: routine.oid,
     };
     match interpreter.exec_block(&block).await? {
@@ -596,6 +601,7 @@ pub(crate) async fn execute_table_function(
         returns_set: routine.returns_set(),
         context: format!("PL/pgSQL function {}", routine.identity()),
         variable_conflict: block.variable_conflict,
+        print_strict_params: block.print_strict_params,
         routine_oid: routine.oid,
     };
     let flow = interpreter.exec_block(&block).await?;
@@ -650,6 +656,7 @@ pub(crate) async fn execute_sql_table_function(
         returns_set: false,
         context: format!("SQL function {}", routine.identity()),
         variable_conflict: PlPgSqlVariableConflict::UseVariable,
+        print_strict_params: None,
         routine_oid: routine.oid,
     };
     let mut final_result = None;
@@ -1392,6 +1399,7 @@ async fn execute_invocation(
             returns_set: false,
             context: format!("PL/pgSQL {tag}"),
             variable_conflict: block.variable_conflict,
+            print_strict_params: block.print_strict_params,
             routine_oid: 0,
         };
         interpreter.exec_block(&block).await
@@ -1427,6 +1435,7 @@ async fn execute_procedure_invocation(
         returns_set: false,
         context: format!("PL/pgSQL procedure {}", routine.identity()),
         variable_conflict: block.variable_conflict,
+        print_strict_params: block.print_strict_params,
         routine_oid: routine.oid,
     };
     interpreter.exec_block(&block).await?;
@@ -2189,8 +2198,16 @@ impl Interpreter<'_> {
                         let bound = self.bind_statement(statement)?;
                         let dml_returning = statement_has_dml_returning(&bound);
                         let result = Box::pin(self.session.run_one(&bound)).await?;
-                        self.consume_sql_result(result, into.as_ref(), true, false, dml_returning)
-                            .await?;
+                        self.consume_sql_result(
+                            result,
+                            into.as_ref(),
+                            true,
+                            false,
+                            dml_returning,
+                            true,
+                            None,
+                        )
+                        .await?;
                     }
                     Ok(Flow::Next)
                 }
@@ -2375,18 +2392,26 @@ impl Interpreter<'_> {
                             "RETURN QUERY EXECUTE cannot be used in a non-SETOF function".into(),
                         ));
                     }
-                    let statement = self.dynamic_statement(query, using).await?;
+                    let (statement, _) = self.dynamic_statement(query, using).await?;
                     let result = Box::pin(self.session.run_one(&statement)).await?;
                     let count = self.push_query_result(result)?;
                     self.set_found(count > 0);
                     Ok(Flow::Next)
                 }
                 PlPgSqlStatement::Execute { query, into, using } => {
-                    let statement = self.dynamic_statement(query, using).await?;
+                    let (statement, parameters) = self.dynamic_statement(query, using).await?;
                     let dml_returning = statement_has_dml_returning(&statement);
                     let result = Box::pin(self.session.run_one(&statement)).await?;
-                    self.consume_sql_result(result, into.as_ref(), false, true, dml_returning)
-                        .await?;
+                    self.consume_sql_result(
+                        result,
+                        into.as_ref(),
+                        false,
+                        true,
+                        dml_returning,
+                        false,
+                        Some(&parameters),
+                    )
+                    .await?;
                     Ok(Flow::Next)
                 }
                 PlPgSqlStatement::Open {
@@ -2403,7 +2428,10 @@ impl Interpreter<'_> {
                                 "arguments cannot be used with OPEN FOR EXECUTE".into(),
                             ));
                         }
-                        (*scroll, self.dynamic_statement(dynamic_query, using).await?)
+                        (
+                            *scroll,
+                            self.dynamic_statement(dynamic_query, using).await?.0,
+                        )
                     } else if let Some(query) = query {
                         if !arguments.is_empty() || !using.is_empty() {
                             return Err(ExecError::Syntax(
@@ -2478,7 +2506,7 @@ impl Interpreter<'_> {
                         .session
                         .fetch_cursor(cursor, direction, *move_only)
                         .await?;
-                    self.consume_sql_result(result, into.as_ref(), true, false, false)
+                    self.consume_sql_result(result, into.as_ref(), true, false, false, false, None)
                         .await?;
                     Ok(Flow::Next)
                 }
@@ -2672,7 +2700,7 @@ impl Interpreter<'_> {
                     query,
                     using,
                 } => {
-                    let statement = self.dynamic_statement(query, using).await?;
+                    let (statement, _) = self.dynamic_statement(query, using).await?;
                     let QueryResult::Rows { fields, rows, .. } =
                         Box::pin(self.session.run_one(&statement)).await?
                     else {
@@ -2874,7 +2902,7 @@ impl Interpreter<'_> {
         &mut self,
         query: &Expr,
         using: &[Expr],
-    ) -> Result<Statement, ExecError> {
+    ) -> Result<(Statement, Vec<Datum>), ExecError> {
         let Datum::Text(source) = self.eval_async(query).await?.0 else {
             return Err(ExecError::TypeMismatch(
                 "EXECUTE query string must be text".into(),
@@ -2893,7 +2921,10 @@ impl Interpreter<'_> {
         }
         let mut statement = statements.pop().expect("one dynamic statement");
         self.session.plpgsql_bind_params(&mut statement, &values)?;
-        Ok(statement)
+        Ok((
+            statement,
+            values.into_iter().map(|(value, _)| value).collect(),
+        ))
     }
 
     async fn truth_async(&mut self, expr: &Expr) -> Result<bool, ExecError> {
@@ -3155,21 +3186,35 @@ impl Interpreter<'_> {
         update_found: bool,
         discard_rows: bool,
         dml_returning: bool,
+        too_many_rows_hint: bool,
+        dynamic_parameters: Option<&[Datum]>,
     ) -> Result<(), ExecError> {
         self.last_row_count = result_row_count(&result);
         let found = self.last_row_count > 0;
         match (result, into) {
             (QueryResult::Rows { fields, rows, .. }, Some(into)) => {
-                if (into.strict && rows.len() != 1) || (dml_returning && rows.len() > 1) {
+                let strict_row_count = into.strict && rows.len() != 1;
+                let implicit_strict = dml_returning && rows.len() > 1;
+                if strict_row_count || implicit_strict {
                     let (sqlstate, message) = if rows.is_empty() {
                         ("P0002", "query returned no rows")
                     } else {
                         ("P0003", "query returned more than one row")
                     };
-                    return Err(ExecError::FunctionError {
-                        sqlstate,
-                        message: message.into(),
-                    });
+                    let mut error = PgError::error(sqlstate, message);
+                    if rows.len() > 1 && too_many_rows_hint {
+                        error = error
+                            .with_hint("Make sure the query returns a single row, or use LIMIT 1.");
+                    }
+                    if strict_row_count
+                        && let Some(detail) = self.strict_parameter_detail(dynamic_parameters)
+                    {
+                        error = error.with_detail(detail);
+                    }
+                    return Err(ExecError::Remote(error));
+                }
+                if rows.len() > 1 && !dml_returning {
+                    self.extra_too_many_rows()?;
                 }
                 self.assign_row(&into.targets, &fields, rows.first())
                     .await?;
@@ -3192,12 +3237,142 @@ impl Interpreter<'_> {
         Ok(())
     }
 
+    fn strict_parameter_detail(&self, dynamic_parameters: Option<&[Datum]>) -> Option<String> {
+        if !self.print_strict_params.unwrap_or_else(|| {
+            self.session
+                .plpgsql_setting_enabled("plpgsql.print_strict_params")
+        }) {
+            return None;
+        }
+        let mut parameters = dynamic_parameters.map_or_else(
+            || {
+                let mut seen = HashSet::new();
+                let mut parameters = Vec::new();
+                for frame in self.frames.iter().rev() {
+                    for (name, slot) in &frame.slots {
+                        if !name.starts_with('$')
+                            && !matches!(name.as_str(), "found" | "sqlstate" | "sqlerrm")
+                            && !slot.value.is_null()
+                            && seen.insert(name.as_str())
+                        {
+                            parameters.push((name.clone(), &slot.value));
+                        }
+                    }
+                    for (name, target) in &frame.aliases {
+                        if target.starts_with('$')
+                            && let Some(slot) = frame.slots.get(target)
+                            && !slot.value.is_null()
+                            && seen.insert(name.as_str())
+                        {
+                            parameters.push((name.clone(), &slot.value));
+                        }
+                    }
+                }
+                parameters.sort_unstable_by_key(|(name, _)| name.clone());
+                parameters
+            },
+            |parameters| {
+                parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| (format!("${}", index + 1), value))
+                    .collect()
+            },
+        );
+        if parameters.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "parameters: {}",
+            parameters
+                .drain(..)
+                .map(|(name, value)| format!("{name} = {}", self.strict_parameter_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+
+    fn strict_parameter_value(&self, value: &Datum) -> String {
+        if value.is_null() {
+            return "NULL".into();
+        }
+        format!(
+            "'{}'",
+            self.session.plpgsql_render(value).replace('\'', "''")
+        )
+    }
+
+    fn extra_too_many_rows(&self) -> Result<(), ExecError> {
+        let error = PgError::error("P0003", "query returned more than one row")
+            .with_hint("Make sure the query returns a single row, or use LIMIT 1.");
+        if self
+            .session
+            .plpgsql_setting_contains("plpgsql.extra_errors", "too_many_rows")
+        {
+            return Err(ExecError::Remote(error));
+        }
+        if self
+            .session
+            .plpgsql_setting_contains("plpgsql.extra_warnings", "too_many_rows")
+        {
+            self.session.plpgsql_notice(
+                PgError::warning(error.message)
+                    .with_hint("Make sure the query returns a single row, or use LIMIT 1."),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn extra_multi_assignment(&self) -> Result<(), ExecError> {
+        let detail = if self
+            .session
+            .plpgsql_setting_contains("plpgsql.extra_errors", "strict_multi_assignment")
+        {
+            "strict_multi_assignment check of extra_errors is active."
+        } else if self
+            .session
+            .plpgsql_setting_contains("plpgsql.extra_warnings", "strict_multi_assignment")
+        {
+            "strict_multi_assignment check of extra_warnings is active."
+        } else {
+            return Ok(());
+        };
+        let error = PgError::error(
+            "42804",
+            "number of source and target fields in assignment does not match",
+        )
+        .with_detail(detail)
+        .with_hint("Make sure the query returns the exact list of columns.");
+        if detail.contains("extra_errors") {
+            return Err(ExecError::Remote(error));
+        }
+        self.session.plpgsql_notice(
+            PgError::warning(error.message)
+                .with_detail(detail)
+                .with_hint("Make sure the query returns the exact list of columns."),
+        )
+    }
+
     async fn assign_row(
         &mut self,
         targets: &[PlPgSqlTarget],
         fields: &[FieldDescription],
         row: Option<&Vec<Option<crabka_pgwire::engine::Cell>>>,
     ) -> Result<(), ExecError> {
+        let expected_fields = if let [target] = targets
+            && target.path.len() == 1
+            && target.subscripts.is_empty()
+            && let Some(ColumnType::Record(Some(rowtype))) =
+                self.lookup_slot(&target.path[0]).map(|slot| slot.ty)
+        {
+            crabka_pgtypes::usertype::lookup_oid(rowtype.oid)
+                .map_or(1, |ty| ty.fields().map_or(1, <[_]>::len))
+        } else {
+            targets.len()
+        };
+        if expected_fields != fields.len() {
+            self.extra_multi_assignment()?;
+        }
         if let [target] = targets
             && target.path.len() == 1
             && target.subscripts.is_empty()
@@ -3228,16 +3403,13 @@ impl Interpreter<'_> {
             self.set_record_types(&target.path[0], Arc::from(record_types))?;
             return Ok(());
         }
-        if targets.len() != row.map_or(targets.len(), Vec::len) {
-            return Err(ExecError::Syntax(
-                "number of PL/pgSQL targets does not match result columns".into(),
-            ));
-        }
         for (index, target) in targets.iter().enumerate() {
-            let value = self.session.plpgsql_decode_cell(
-                &fields[index],
-                row.and_then(|row| row.get(index)).and_then(Option::as_ref),
-            )?;
+            let value = fields.get(index).map_or(Ok(Datum::Null), |field| {
+                self.session.plpgsql_decode_cell(
+                    field,
+                    row.and_then(|row| row.get(index)).and_then(Option::as_ref),
+                )
+            })?;
             self.assign_target(target, value).await?;
         }
         Ok(())
