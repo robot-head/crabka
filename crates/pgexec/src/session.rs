@@ -23758,6 +23758,18 @@ mod tests {
                     vec!["  Filter: ((a = 1) AND (b = 1))".into()],
                 ])
         );
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_estimate WHERE a = 1 OR b = 1",
+        )
+        .await
+        .expect("MCV disjunction explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_estimate (cost=0.00..0.00 rows=60 width=0)".into()
+                ])
+        );
         for sql in [
             "EXPLAIN SELECT * FROM mcv_estimate WHERE a IN (1, 2) AND b = 1",
             "EXPLAIN SELECT * FROM mcv_estimate WHERE (a = 1 OR a = 2) AND b = 1",

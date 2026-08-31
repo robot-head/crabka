@@ -519,6 +519,13 @@ struct McvClause {
 }
 
 #[derive(Debug)]
+enum McvExpr {
+    Clause(McvClause),
+    And(Box<McvExpr>, Box<McvExpr>),
+    Or(Box<McvExpr>, Box<McvExpr>),
+}
+
+#[derive(Debug)]
 enum McvPredicate {
     Equal(Vec<McvValue>),
     NotNull,
@@ -530,9 +537,9 @@ struct McvValue {
     scalar_value: Option<crabka_pgtypes::Datum>,
 }
 
-/// Estimate a complete equality conjunction from a matching extended MCV
-/// list. The MCV portion gives its observed frequency; the remainder retains
-/// the scalar estimate after removing the MCV population from both sides.
+/// Estimate a complete equality predicate from a matching extended MCV list.
+/// The MCV portion gives its observed frequency; the remainder retains the
+/// scalar estimate after removing the MCV population from both sides.
 fn extended_mcv_selectivity(
     catalog_kv: &dyn crabka_pgkv::Kv,
     table: &crabka_pgcatalog::Table,
@@ -540,13 +547,13 @@ fn extended_mcv_selectivity(
     ctx: &crate::clock::EvalCtx,
     expr: &Expr,
 ) -> Option<f64> {
+    let expression = mcv_expr_for_expr(expr, table, ctx)?;
     let mut clauses = Vec::new();
-    if !collect_mcv_clauses(expr, table, ctx, &mut clauses) || clauses.len() < 2 {
+    mcv_expr_clauses(&expression, &mut clauses);
+    if clauses.len() < 2 {
         return None;
     }
-    let scalar = clauses.iter().fold(1.0, |selectivity, clause| {
-        selectivity * scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, clause)
-    });
+    let scalar = mcv_expr_scalar(catalog_kv, table, rows, ctx, &expression);
     for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
         if object.table_id != table.id {
             continue;
@@ -597,9 +604,7 @@ fn extended_mcv_selectivity(
             }
             mcv_total += frequency;
             mcv_base_total += base_frequency;
-            if positions.iter().zip(&clauses).all(|(position, clause)| {
-                mcv_item_matches(item.values.get(*position), &clause.predicate)
-            }) {
+            if mcv_expr_matches(&expression, item, &clauses, &positions) {
                 mcv_selectivity += frequency;
                 mcv_base_selectivity += base_frequency;
             }
@@ -616,6 +621,92 @@ fn extended_mcv_selectivity(
         return Some((mcv_selectivity + (1.0 - mcv_total).max(0.0) * remainder).clamp(0.0, 1.0));
     }
     None
+}
+
+fn mcv_expr_for_expr(
+    expr: &Expr,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<McvExpr> {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => Some(McvExpr::And(
+            Box::new(mcv_expr_for_expr(left, table, ctx)?),
+            Box::new(mcv_expr_for_expr(right, table, ctx)?),
+        )),
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => mcv_clause_for_expr(expr, table, ctx)
+            .map(McvExpr::Clause)
+            .or_else(|| {
+                Some(McvExpr::Or(
+                    Box::new(mcv_expr_for_expr(left, table, ctx)?),
+                    Box::new(mcv_expr_for_expr(right, table, ctx)?),
+                ))
+            }),
+        _ => mcv_clause_for_expr(expr, table, ctx).map(McvExpr::Clause),
+    }
+}
+
+fn mcv_expr_clauses<'a>(expression: &'a McvExpr, clauses: &mut Vec<&'a McvClause>) {
+    match expression {
+        McvExpr::Clause(clause) => clauses.push(clause),
+        McvExpr::And(left, right) | McvExpr::Or(left, right) => {
+            mcv_expr_clauses(left, clauses);
+            mcv_expr_clauses(right, clauses);
+        }
+    }
+}
+
+fn mcv_expr_scalar(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    expression: &McvExpr,
+) -> f64 {
+    match expression {
+        McvExpr::Clause(clause) => {
+            scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, clause)
+        }
+        McvExpr::And(left, right) => {
+            mcv_expr_scalar(catalog_kv, table, rows, ctx, left)
+                * mcv_expr_scalar(catalog_kv, table, rows, ctx, right)
+        }
+        McvExpr::Or(left, right) => {
+            let left = mcv_expr_scalar(catalog_kv, table, rows, ctx, left);
+            let right = mcv_expr_scalar(catalog_kv, table, rows, ctx, right);
+            (left + right - left * right).clamp(0.0, 1.0)
+        }
+    }
+}
+
+fn mcv_expr_matches(
+    expression: &McvExpr,
+    item: &crabka_pgcatalog::statistics::McvItem,
+    clauses: &[&McvClause],
+    positions: &[usize],
+) -> bool {
+    match expression {
+        McvExpr::Clause(clause) => clauses
+            .iter()
+            .zip(positions)
+            .find_map(|(candidate, position)| (candidate.key == clause.key).then_some(*position))
+            .is_some_and(|position| mcv_item_matches(item.values.get(position), &clause.predicate)),
+        McvExpr::And(left, right) => {
+            mcv_expr_matches(left, item, clauses, positions)
+                && mcv_expr_matches(right, item, clauses, positions)
+        }
+        McvExpr::Or(left, right) => {
+            mcv_expr_matches(left, item, clauses, positions)
+                || mcv_expr_matches(right, item, clauses, positions)
+        }
+    }
 }
 
 fn scalar_mcv_clause_selectivity(
