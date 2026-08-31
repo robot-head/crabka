@@ -24738,7 +24738,6 @@ mod tests {
         );
         for sql in [
             "EXPLAIN SELECT * FROM dependency_estimate WHERE a IN (1, 51) AND b = 1",
-            "EXPLAIN SELECT * FROM dependency_estimate WHERE (a = 1 OR a = 51) AND b = 1",
             "EXPLAIN SELECT * FROM dependency_estimate WHERE a = ANY (ARRAY[1, 51]) AND b = 1",
         ] {
             let rows = rows_or_sqlstate(&mut s, sql)
@@ -24799,7 +24798,6 @@ mod tests {
         );
         for sql in [
             "EXPLAIN SELECT * FROM dependency_estimate WHERE a IN (1, 51) AND b = 1",
-            "EXPLAIN SELECT * FROM dependency_estimate WHERE (a = 1 OR a = 51) AND b = 1",
             "EXPLAIN SELECT * FROM dependency_estimate WHERE a = ANY (ARRAY[1, 51]) AND b = 1",
         ] {
             let rows = rows_or_sqlstate(&mut s, sql)
@@ -24810,6 +24808,31 @@ mod tests {
                     == Some(&vec![
                         "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=100 width=0)".into()
                     ]),
+                "{sql}"
+            );
+        }
+        for (sql, expected) in [
+            (
+                "EXPLAIN SELECT * FROM dependency_estimate WHERE (a = 1 OR a = 51) AND b = 1",
+                99,
+            ),
+            (
+                "EXPLAIN SELECT * FROM dependency_estimate WHERE (a = 1 OR a = 51) AND (b = 1 OR b = 2)",
+                99,
+            ),
+            (
+                "EXPLAIN SELECT * FROM dependency_estimate WHERE (a = 1 OR a = 2 OR a = 51 OR a = 52) AND (b = 1 OR b = 2)",
+                197,
+            ),
+        ] {
+            let rows = rows_or_sqlstate(&mut s, sql)
+                .await
+                .expect("dependency explain");
+            assert!(
+                rows.first()
+                    == Some(&vec![format!(
+                        "Seq Scan on dependency_estimate (cost=0.00..0.00 rows={expected} width=0)"
+                    )]),
                 "{sql}"
             );
         }
@@ -24829,6 +24852,19 @@ mod tests {
             expression.first()
                 == Some(&vec![
                     "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=50 width=0)".into()
+                ])
+        );
+        let expression_or = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM dependency_estimate \
+             WHERE ((a * 2) = 2 OR (a * 2) = 102) AND upper(b) = '1'",
+        )
+        .await
+        .expect("expression dependency explain");
+        assert!(
+            expression_or.first()
+                == Some(&vec![
+                    "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=99 width=0)".into()
                 ])
         );
     }

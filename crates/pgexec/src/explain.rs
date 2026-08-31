@@ -719,12 +719,14 @@ fn functional_dependency_selectivity(
     expr: &Expr,
 ) -> Option<f64> {
     let mut clauses = Vec::new();
-    if !collect_mcv_clauses(expr, table, ctx, &mut clauses) || clauses.len() < 2 {
+    if !collect_functional_dependency_clauses(expr, table, ctx, &mut clauses) || clauses.len() < 2 {
         return None;
     }
     let scalar = clauses
         .iter()
-        .map(|clause| scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, clause))
+        .map(|(expr, clause)| {
+            functional_dependency_clause_selectivity(catalog_kv, table, rows, ctx, expr, clause)
+        })
         .collect::<Vec<_>>();
     let mut selectivity = scalar.iter().product::<f64>();
     let mut adjusted = false;
@@ -736,7 +738,7 @@ fn functional_dependency_selectivity(
         }
         let clause_positions = clauses
             .iter()
-            .map(|clause| {
+            .map(|(_, clause)| {
                 statistics_key_positions(&object, &clause.key)
                     .and_then(|index| statistics_data_position(&object, index))
             })
@@ -791,6 +793,96 @@ fn functional_dependency_selectivity(
         }
     }
     adjusted.then_some(selectivity.clamp(0.0, 1.0))
+}
+
+fn collect_functional_dependency_clauses<'a>(
+    expr: &'a Expr,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+    clauses: &mut Vec<(&'a Expr, McvClause)>,
+) -> bool {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            collect_functional_dependency_clauses(left, table, ctx, clauses)
+                && collect_functional_dependency_clauses(right, table, ctx, clauses)
+        }
+        _ => mcv_clause_for_expr(expr, table, ctx).is_some_and(|clause| {
+            if !matches!(
+                &clause.predicate,
+                McvPredicate::Equal(_) | McvPredicate::NotNull
+            ) {
+                return false;
+            }
+            clauses.push((expr, clause));
+            true
+        }),
+    }
+}
+
+fn functional_dependency_clause_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+    clause: &McvClause,
+) -> f64 {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            let Some(left) = scalar_mcv_expression_selectivity(catalog_kv, table, rows, ctx, left)
+            else {
+                return functional_dependency_mcv_selectivity(catalog_kv, table, rows, ctx, clause);
+            };
+            let Some(right) =
+                scalar_mcv_expression_selectivity(catalog_kv, table, rows, ctx, right)
+            else {
+                return functional_dependency_mcv_selectivity(catalog_kv, table, rows, ctx, clause);
+            };
+            (left + right - left * right).clamp(0.0, 1.0)
+        }
+        _ => functional_dependency_mcv_selectivity(catalog_kv, table, rows, ctx, clause),
+    }
+}
+
+fn functional_dependency_mcv_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    clause: &McvClause,
+) -> f64 {
+    f64::from(scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, clause) as f32)
+}
+
+fn scalar_mcv_expression_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+) -> Option<f64> {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            let left = scalar_mcv_expression_selectivity(catalog_kv, table, rows, ctx, left)?;
+            let right = scalar_mcv_expression_selectivity(catalog_kv, table, rows, ctx, right)?;
+            Some((left + right - left * right).clamp(0.0, 1.0))
+        }
+        _ => mcv_clause_for_expr(expr, table, ctx).map(|clause| {
+            functional_dependency_mcv_selectivity(catalog_kv, table, rows, ctx, &clause)
+        }),
+    }
 }
 
 fn dependencies_are_reciprocal(
