@@ -47,6 +47,12 @@ enum TextSearchFunc {
 
 type Catalog<'a> = Option<&'a dyn crabka_pgkv::Kv>;
 
+#[derive(Debug, Clone)]
+pub(crate) struct TsRewriteQueryRequest {
+    pub(crate) query: TsQuery,
+    pub(crate) source: String,
+}
+
 /// The default parser's token metadata, in PostgreSQL's stable `tokid` order.
 pub(crate) const DEFAULT_PARSER_TOKEN_TYPES: &[(i32, &str, &str)] = &[
     (1, "asciiword", "Word, all ASCII"),
@@ -509,7 +515,7 @@ pub(crate) fn text_search_result_type(
             ColumnType::TsQuery
         }
         TextSearchFunc::TsRewrite => {
-            require_arity(fc, count == 3)?;
+            require_arity(fc, count == 2 || count == 3)?;
             ColumnType::TsQuery
         }
         TextSearchFunc::ArrayToTsVector => {
@@ -626,6 +632,7 @@ fn tsquery_param_types(function: TextSearchFunc, count: usize) -> Option<Vec<Opt
     match (function, count) {
         (TextSearchFunc::TsQueryPhrase, 2) => Some(vec![query, query]),
         (TextSearchFunc::TsQueryPhrase, 3) => Some(vec![query, query, Some(ColumnType::Int4)]),
+        (TextSearchFunc::TsRewrite, 2) => Some(vec![query, Some(ColumnType::Text)]),
         (TextSearchFunc::TsRewrite, 3) => Some(vec![query, query, query]),
         _ => None,
     }
@@ -1012,6 +1019,34 @@ fn normalize_query_inner(
     match query {
         TsQuery::Empty => (None, gap),
         TsQuery::Term(mut term) => {
+            let phrase = {
+                let words = words(&term.text).collect::<Vec<_>>();
+                let Some((first, rest)) = words.split_first() else {
+                    return (None, gap);
+                };
+                (!rest.is_empty()).then(|| {
+                    let mut phrase = TsQuery::Term(QueryTerm {
+                        text: (*first).into(),
+                        weights: term.weights.clone(),
+                        prefix: term.prefix,
+                    });
+                    for word in rest {
+                        phrase = TsQuery::Phrase(
+                            Box::new(phrase),
+                            Box::new(TsQuery::Term(QueryTerm {
+                                text: (*word).into(),
+                                weights: term.weights.clone(),
+                                prefix: term.prefix,
+                            })),
+                            1,
+                        );
+                    }
+                    phrase
+                })
+            };
+            if let Some(phrase) = phrase {
+                return normalize_query_inner(phrase, simple, stemmer);
+            }
             // The stop-word list is consulted on the folded word, before
             // stemming, exactly as `dsnowball_lexize` does: `above` is a stop
             // word, its stem `abov` is not on any list.
@@ -1290,13 +1325,22 @@ fn query_phrase(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
 }
 
 fn ts_rewrite(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
-    let [query, target, replacement] = values else {
-        return Err(undefined_function(&fc.name));
-    };
-    let query = tsquery_argument(query)?;
-    let target = tsquery_argument(target)?;
-    let replacement = tsquery_argument(replacement)?;
-    Ok(Datum::TsQuery(query.rewrite(&target, &replacement)))
+    match values {
+        [query, Datum::Text(source)] => {
+            let query = tsquery_argument(query)?;
+            crate::routine::request_ts_rewrite_query(TsRewriteQueryRequest {
+                query,
+                source: source.clone(),
+            })
+        }
+        [query, target, replacement] => {
+            let query = tsquery_argument(query)?;
+            let target = tsquery_argument(target)?;
+            let replacement = tsquery_argument(replacement)?;
+            Ok(Datum::TsQuery(query.rewrite(&target, &replacement)))
+        }
+        _ => Err(undefined_function(&fc.name)),
+    }
 }
 
 fn tsquery_argument(value: &Datum) -> Result<TsQuery, ExecError> {
@@ -1880,6 +1924,16 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "'cat'"
+        );
+    }
+
+    #[test]
+    fn quoted_to_tsquery_terms_form_a_phrase() {
+        assert2::assert!(
+            to_tsquery("english", "'New York'", None)
+                .unwrap()
+                .to_string()
+                == "'new' <-> 'york'"
         );
     }
 

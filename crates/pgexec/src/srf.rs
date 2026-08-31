@@ -30,15 +30,15 @@
 //! until the longest is exhausted. The pre-10 "least common multiple" rule is
 //! gone from PostgreSQL itself.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use crabka_pgparser::ast::{
     ArraySubscript, AssignmentValue, Expr, FuncArgs, FuncCall, SelectItem, SelectStmt, Statement,
     TableFuncCall, TableFuncColumnDef,
 };
 use crabka_pgtypes::{
-    ArrayValue, ColumnType, Datum, ElemType, RecordValue, TypeError, numeric::NumericValue,
-    usertype::UserTypeRef,
+    ArrayValue, ColumnType, Datum, ElemType, RecordValue, TsVector, TypeError, Weight,
+    numeric::NumericValue, usertype::UserTypeRef,
 };
 use crabka_pgwire::engine::FieldDescription;
 
@@ -55,6 +55,57 @@ use crate::{
 
 /// The columns and rows a single FROM-position function call produces.
 pub(crate) type FunctionCallRows = (Vec<(String, ColumnType)>, Vec<Vec<Datum>>);
+
+#[derive(Debug, Clone)]
+pub(crate) struct TsStatRequest {
+    pub(crate) source: String,
+    pub(crate) weights: Option<String>,
+}
+
+pub(crate) fn ts_stat_rows_from_vectors<'a>(
+    vectors: impl IntoIterator<Item = &'a TsVector>,
+    weights: Option<&str>,
+) -> Vec<Vec<Datum>> {
+    let selected = weights
+        .map(|weights| {
+            weights
+                .chars()
+                .filter_map(Weight::parse)
+                .collect::<Vec<_>>()
+        })
+        .filter(|weights| !weights.is_empty());
+    let mut counts = BTreeMap::<String, (i32, i32)>::new();
+    for vector in vectors {
+        for entry in &vector.0 {
+            let occurrences = if entry.positions.is_empty() {
+                i32::from(selected.is_none())
+            } else {
+                entry
+                    .positions
+                    .iter()
+                    .filter(|position| {
+                        selected
+                            .as_ref()
+                            .is_none_or(|weights| weights.contains(&position.weight))
+                    })
+                    .count()
+                    .try_into()
+                    .unwrap_or(i32::MAX)
+            };
+            if occurrences != 0 {
+                let count = counts.entry(entry.text.clone()).or_default();
+                count.0 = count.0.saturating_add(1);
+                count.1 = count.1.saturating_add(occurrences);
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(word, (ndoc, nentry))| {
+            vec![Datum::Text(word), Datum::Int4(ndoc), Datum::Int4(nentry)]
+        })
+        .collect()
+}
 
 /// The set-returning functions crabka implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +161,7 @@ enum Srf {
     TsTokenType,
     TsParse,
     TsDebug,
+    TsStat,
     /// `pg_snapshot_xip(pg_snapshot)` → `xid8`, and `txid_snapshot_xip`, which
     /// is the same expansion reported as `bigint`. One row per running
     /// transaction the snapshot lists, ascending, and no row at all for a
@@ -344,6 +396,7 @@ fn classify(name: &str) -> Option<Srf> {
         "ts_token_type" => Srf::TsTokenType,
         "ts_parse" => Srf::TsParse,
         "ts_debug" => Srf::TsDebug,
+        "ts_stat" => Srf::TsStat,
         "pg_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Modern),
         "txid_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Legacy),
         "pg_partition_ancestors" => Srf::PgPartitionAncestors,
@@ -638,6 +691,14 @@ pub(crate) fn plan(
                 column("lexemes", ColumnType::Array(ElemType::Text)),
             ]
         }
+        Srf::TsStat => {
+            require_arity(name, &given, (1, 2))?;
+            vec![
+                column("word", ColumnType::Text),
+                column("ndoc", ColumnType::Int4),
+                column("nentry", ColumnType::Int4),
+            ]
+        }
         Srf::PgPartitionAncestors => {
             require_arity(name, &given, (1, 1))?;
             vec![column("relid", ColumnType::Regclass)]
@@ -851,6 +912,7 @@ pub(crate) fn rows_with_memory(
         Srf::TsTokenType => token_type_rows(&vals[0])?,
         Srf::TsParse => parse_rows(&vals[0], &vals[1])?,
         Srf::TsDebug => debug_rows(&vals[0], &vals[1], ctx)?,
+        Srf::TsStat => ts_stat_rows(vals)?,
         Srf::SnapshotXip(family) => snapshot_xip_rows(family, &plan.name, &vals[0], ctx)?,
         Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
@@ -911,6 +973,7 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
         Srf::TsTokenType => vec![None],
         Srf::TsParse => vec![None, Some(ColumnType::Text)],
         Srf::TsDebug => vec![None, Some(ColumnType::Text)],
+        Srf::TsStat => vec![text, text],
         Srf::SnapshotXip(family) => vec![Some(family.snapshot_type())],
         // `regclass`, but resolving a *name* to a relation needs the catalog and
         // the search path, which the pure cast this drives has neither of. The
@@ -3140,6 +3203,21 @@ fn parse_rows(parser: &Datum, source: &Datum) -> Result<Vec<Vec<Datum>>, ExecErr
         .collect())
 }
 
+fn ts_stat_rows(values: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let (source, weights) = match values {
+        [Datum::Text(source)] => (source.clone(), None),
+        [Datum::Text(source), Datum::Text(weights)] => (source.clone(), Some(weights.clone())),
+        [value, ..] => {
+            return Err(ExecError::TypeMismatch(format!(
+                "ts_stat does not accept an argument of type {}",
+                value.column_type().map_or("unknown", ColumnType::name)
+            )));
+        }
+        [] => unreachable!("planned ts_stat has an argument"),
+    };
+    crate::routine::request_ts_stat(TsStatRequest { source, weights })
+}
+
 fn debug_rows(config: &Datum, source: &Datum, ctx: &EvalCtx) -> Result<Vec<Vec<Datum>>, ExecError> {
     let Datum::Text(config) = config else {
         return Err(ExecError::TypeMismatch(format!(
@@ -3451,6 +3529,21 @@ mod tests {
                     vec![Datum::Int4(1), Datum::Text("cat".into())],
                     vec![Datum::Int4(12), Datum::Text(" ".into())],
                     vec![Datum::Int4(22), Datum::Text("42".into())],
+                ]
+        );
+    }
+
+    #[test]
+    fn ts_stat_counts_documents_and_selected_weight_positions() {
+        let vectors = [
+            "'a':1A,2B 'b':3C".parse().expect("vector"),
+            "'a':1D 'b':2A".parse().expect("vector"),
+        ];
+        assert!(
+            ts_stat_rows_from_vectors(vectors.iter(), Some("AB"))
+                == vec![
+                    vec![Datum::Text("a".into()), Datum::Int4(1), Datum::Int4(2)],
+                    vec![Datum::Text("b".into()), Datum::Int4(1), Datum::Int4(1)],
                 ]
         );
     }

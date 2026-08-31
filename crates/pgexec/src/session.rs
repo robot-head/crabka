@@ -10508,6 +10508,15 @@ impl SqlSession {
                                     Err(error) => Err(error),
                                 }
                             }
+                            crate::routine::FunctionRequestKind::TsRewriteQuery(request) => {
+                                self.execute_ts_rewrite_query(request)
+                                    .await
+                                    .map(crate::routine::FunctionRequestResult::Scalar)
+                            }
+                            crate::routine::FunctionRequestKind::TsStat(request) => self
+                                .execute_ts_stat(request)
+                                .await
+                                .map(crate::routine::FunctionRequestResult::Table),
                             crate::routine::FunctionRequestKind::TableXml(request) => {
                                 self.execute_table_to_xml(request)
                                     .await
@@ -10626,6 +10635,84 @@ impl SqlSession {
         Ok(Datum::Xml(crate::xmlmap::query_to_xml(
             &fields, &rows, &request,
         )))
+    }
+
+    async fn execute_ts_rewrite_query(
+        &mut self,
+        request: crate::text_search_fn::TsRewriteQueryRequest,
+    ) -> Result<Datum, ExecError> {
+        let statements = crabka_pgparser::parse(&request.source)?;
+        let [statement @ Statement::Query(_)] = statements.as_slice() else {
+            return Err(ExecError::Syntax(
+                "ts_rewrite query must return target and substitute".into(),
+            ));
+        };
+        let result = self.run_select(statement).await?;
+        let crabka_pgwire::engine::QueryResult::Rows { rows, .. } = result else {
+            return Err(ExecError::ObjectNotInPrerequisiteState(
+                "ts_rewrite query returned no rows result".into(),
+            ));
+        };
+        let mut query = request.query;
+        for row in rows {
+            let [Some(target), Some(replacement)] = row.as_slice() else {
+                return Err(ExecError::InvalidParameterValue(
+                    "ts_rewrite query must return two non-null tsquery columns".into(),
+                ));
+            };
+            let target = std::str::from_utf8(&target.text)
+                .map_err(|_| ExecError::InvalidParameterValue("invalid tsquery result".into()))?
+                .parse::<crabka_pgtypes::TsQuery>()?;
+            let replacement = std::str::from_utf8(&replacement.text)
+                .map_err(|_| ExecError::InvalidParameterValue("invalid tsquery result".into()))?
+                .parse::<crabka_pgtypes::TsQuery>()?;
+            query = query.rewrite(&target, &replacement);
+        }
+        Ok(Datum::TsQuery(query))
+    }
+
+    async fn execute_ts_stat(
+        &mut self,
+        request: crate::srf::TsStatRequest,
+    ) -> Result<Vec<Vec<Datum>>, ExecError> {
+        let statements = crabka_pgparser::parse(&request.source)?;
+        let [statement @ Statement::Query(_)] = statements.as_slice() else {
+            return Err(ExecError::Syntax(
+                "ts_stat query must contain exactly one query statement".into(),
+            ));
+        };
+        let result = self.run_select(statement).await?;
+        let crabka_pgwire::engine::QueryResult::Rows { fields, rows, .. } = result else {
+            return Err(ExecError::ObjectNotInPrerequisiteState(
+                "ts_stat query returned no rows result".into(),
+            ));
+        };
+        let [field] = fields.as_slice() else {
+            return Err(ExecError::InvalidParameterValue(
+                "ts_stat query must return one tsvector column".into(),
+            ));
+        };
+        if field.type_oid != crabka_pgtypes::oids::TSVECTOR {
+            return Err(ExecError::InvalidParameterValue(
+                "ts_stat query must return one tsvector column".into(),
+            ));
+        }
+        let vectors = rows
+            .iter()
+            .filter_map(|row| row.first().and_then(Option::as_ref))
+            .map(|cell| {
+                std::str::from_utf8(&cell.text)
+                    .map_err(|_| {
+                        ExecError::InvalidParameterValue("invalid tsvector result".into())
+                    })?
+                    .parse::<crabka_pgtypes::TsVector>()
+                    .map_err(ExecError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::srf::ts_stat_rows_from_vectors(
+            vectors.iter(),
+            request.weights.as_deref(),
+        ))
     }
 
     async fn execute_cursor_to_xml(

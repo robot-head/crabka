@@ -52,6 +52,8 @@ pub(crate) enum FunctionRequestKind {
     Table(Vec<(String, ColumnType)>),
     Trigger(Box<crate::trigger::TriggerInvocation>),
     Statistics(crate::stats_fn::StatisticsRequest),
+    TsRewriteQuery(crate::text_search_fn::TsRewriteQueryRequest),
+    TsStat(crate::srf::TsStatRequest),
     TableXml(crate::xmlmap::TableXmlRequest),
     QueryXml(crate::xmlmap::QueryXmlRequest),
     CursorXml(crate::xmlmap::CursorXmlRequest),
@@ -100,6 +102,65 @@ pub(crate) fn request_statistics(
         FunctionRequestResult::Scalar(value) => Ok(value),
         FunctionRequestResult::Table(_) => Err(ExecError::ObjectNotInPrerequisiteState(
             "statistics import function executor returned rows".into(),
+        )),
+    }
+}
+
+pub(crate) fn request_ts_rewrite_query(
+    request: crate::text_search_fn::TsRewriteQueryRequest,
+) -> Result<Datum, ExecError> {
+    let requests = scalar_runtime_request_sender().ok_or_else(|| {
+        ExecError::Unsupported("ts_rewrite query form requires a SQL session".into())
+    })?;
+    let (reply, response) = std::sync::mpsc::channel();
+    requests
+        .try_send(ScalarFunctionRequest {
+            routine: None,
+            values: Vec::new(),
+            kind: FunctionRequestKind::TsRewriteQuery(request),
+            command_row_claims: scalar_runtime_command_row_claims(),
+            plpgsql_context: None,
+            reply,
+        })
+        .map_err(|_| {
+            ExecError::ObjectNotInPrerequisiteState("ts_rewrite query executor stopped".into())
+        })?;
+    let (result, mutations) = response.recv().map_err(|_| {
+        ExecError::ObjectNotInPrerequisiteState("ts_rewrite query executor stopped".into())
+    })??;
+    crate::session::apply_guc_runtime_mutations(mutations)?;
+    match result {
+        FunctionRequestResult::Scalar(value) => Ok(value),
+        FunctionRequestResult::Table(_) => Err(ExecError::ObjectNotInPrerequisiteState(
+            "ts_rewrite query executor returned rows".into(),
+        )),
+    }
+}
+
+pub(crate) fn request_ts_stat(
+    request: crate::srf::TsStatRequest,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let requests = scalar_runtime_request_sender()
+        .ok_or_else(|| ExecError::Unsupported("ts_stat requires a SQL session".into()))?;
+    let (reply, response) = std::sync::mpsc::channel();
+    requests
+        .try_send(ScalarFunctionRequest {
+            routine: None,
+            values: Vec::new(),
+            kind: FunctionRequestKind::TsStat(request),
+            command_row_claims: scalar_runtime_command_row_claims(),
+            plpgsql_context: None,
+            reply,
+        })
+        .map_err(|_| ExecError::ObjectNotInPrerequisiteState("ts_stat executor stopped".into()))?;
+    let (result, mutations) = response.recv().map_err(|_| {
+        ExecError::ObjectNotInPrerequisiteState("ts_stat executor stopped".into())
+    })??;
+    crate::session::apply_guc_runtime_mutations(mutations)?;
+    match result {
+        FunctionRequestResult::Table(rows) => Ok(rows),
+        FunctionRequestResult::Scalar(_) => Err(ExecError::ObjectNotInPrerequisiteState(
+            "ts_stat executor returned a scalar".into(),
         )),
     }
 }
