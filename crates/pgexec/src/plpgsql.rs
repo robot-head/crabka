@@ -2104,17 +2104,20 @@ impl ScalarInterpreter<'_> {
         let values = raise
             .parameters
             .iter()
-            .map(|expr| {
-                self.eval(expr).map(|value| {
-                    if value.is_null() {
-                        return NULL_RAISE_PARAMETER.to_string();
-                    }
-                    String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
-                        &value,
-                        &self.ctx.time_zone,
-                    ))
-                    .into_owned()
-                })
+            .zip(&raise.parameter_sources)
+            .map(|(expr, source)| {
+                self.eval(expr)
+                    .map_err(|error| plpgsql_internal_query_error(error, source))
+                    .map(|value| {
+                        if value.is_null() {
+                            return NULL_RAISE_PARAMETER.to_string();
+                        }
+                        String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
+                            &value,
+                            &self.ctx.time_zone,
+                        ))
+                        .into_owned()
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let options = raise
@@ -3661,8 +3664,12 @@ impl Interpreter<'_> {
             return Err(ExecError::Remote(error));
         }
         let mut values = Vec::with_capacity(raise.parameters.len());
-        for expr in &raise.parameters {
-            let value = self.eval_async(expr).await?.0;
+        for (expr, source) in raise.parameters.iter().zip(&raise.parameter_sources) {
+            let value = self
+                .eval_async(expr)
+                .await
+                .map_err(|error| plpgsql_internal_query_error(error, source))?
+                .0;
             values.push(self.session.plpgsql_render(&value));
         }
         let mut options = Vec::with_capacity(raise.options.len());
@@ -3949,6 +3956,20 @@ fn plpgsql_expression_error(error: ExecError, source: &str) -> ExecError {
         ))
     } else {
         ExecError::Remote(error)
+    }
+}
+
+fn plpgsql_internal_query_error(error: ExecError, source: &str) -> ExecError {
+    let error = error.into_pg();
+    if error
+        .diagnostics
+        .as_deref()
+        .and_then(|diagnostics| diagnostics.position)
+        .is_some()
+    {
+        ExecError::Remote(error)
+    } else {
+        ExecError::Remote(error.with_internal_position(1).with_internal_query(source))
     }
 }
 

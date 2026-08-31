@@ -130,3 +130,24 @@ fn source_position_uses_the_postgres_p_field() {
 
     assert!(fields.last() == Some(&(b'P', "17".to_owned())));
 }
+
+#[test]
+fn internal_query_uses_the_postgres_p_and_q_fields() {
+    let fields = decode_error_response(&encode(
+        &PgError::error(sqlstate::SYNTAX_ERROR, "oops")
+            .with_internal_position(1)
+            .with_internal_query("sqlstate"),
+    ));
+
+    assert!(
+        fields
+            == vec![
+                (b'S', "ERROR".to_owned()),
+                (b'V', "ERROR".to_owned()),
+                (b'C', "42601".to_owned()),
+                (b'M', "oops".to_owned()),
+                (b'p', "1".to_owned()),
+                (b'q', "sqlstate".to_owned()),
+            ]
+    );
+}

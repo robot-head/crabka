@@ -877,6 +877,7 @@ impl PlParser<'_> {
                 condition: None,
                 message: None,
                 parameters: Vec::new(),
+                parameter_sources: Vec::new(),
                 options: Vec::new(),
             }));
         }
@@ -907,12 +908,14 @@ impl PlParser<'_> {
             condition = Some(self.expect_name()?);
         }
         let mut parameters = Vec::new();
+        let mut parameter_sources = Vec::new();
         while matches!(self.token(), Token::Comma) {
             self.bump();
             let end = self.find_top(self.pos, |parser, pos| {
                 matches!(parser.tokens[pos].0, Token::Comma | Token::Semicolon)
                     || parser.word_at(pos).is_some_and(|word| word == "using")
             });
+            parameter_sources.push(self.slice_tokens(self.pos, end).trim().to_owned());
             parameters.push(self.parse_expr_range(self.pos, end)?);
             self.pos = end;
         }
@@ -942,6 +945,7 @@ impl PlParser<'_> {
             condition,
             message,
             parameters,
+            parameter_sources,
             options,
         }))
     }

@@ -269,6 +269,17 @@ fn diagnostic_response(out: &mut BytesMut, tag: u8, diagnostic: &PgError) {
                     .map(usize::to_string)
                     .as_deref(),
             ),
+            (
+                b'p',
+                fields
+                    .and_then(|fields| fields.internal_position.as_ref())
+                    .map(usize::to_string)
+                    .as_deref(),
+            ),
+            (
+                b'q',
+                fields.and_then(|fields| fields.internal_query.as_deref()),
+            ),
             (b'W', fields.and_then(|fields| fields.context.as_deref())),
             (b's', fields.and_then(|fields| fields.schema.as_deref())),
             (b't', fields.and_then(|fields| fields.table.as_deref())),

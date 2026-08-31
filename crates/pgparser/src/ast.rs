@@ -5368,6 +5368,7 @@ pub struct PlPgSqlRaise {
     pub condition: Option<String>,
     pub message: Option<String>,
     pub parameters: Vec<Expr>,
+    pub parameter_sources: Vec<String>,
     pub options: Vec<(String, Expr)>,
 }
 

@@ -569,6 +569,15 @@ async fn exception_variables_are_scoped_to_the_handler() {
         .await
         .expect_err("SQLSTATE is unavailable outside an exception handler");
     assert!(error.code == "42703", "{error:?}");
+    let diagnostics = error
+        .diagnostics
+        .as_deref()
+        .expect("internal query diagnostics");
+    assert!(diagnostics.internal_position == Some(1), "{error:?}");
+    assert!(
+        diagnostics.internal_query.as_deref() == Some("SQLSTATE"),
+        "{error:?}"
+    );
 
     execute(
         &mut session,

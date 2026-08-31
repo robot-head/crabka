@@ -80,6 +80,10 @@ pub struct DiagnosticFields {
     pub hint: Option<String>,
     /// One-based character position in the original query (`P`).
     pub position: Option<usize>,
+    /// One-based character position in an internal query (`p`).
+    pub internal_position: Option<usize>,
+    /// Internal query text paired with [`Self::internal_position`] (`q`).
+    pub internal_query: Option<String>,
     /// `PostgreSQL`'s `W` diagnostic field (often rendered as `CONTEXT`).
     pub context: Option<String>,
     pub schema: Option<String>,
@@ -154,6 +158,18 @@ impl PgError {
     #[must_use]
     pub fn with_position(mut self, position: usize) -> Self {
         self.diagnostics_mut().position = Some(position);
+        self
+    }
+
+    #[must_use]
+    pub fn with_internal_position(mut self, position: usize) -> Self {
+        self.diagnostics_mut().internal_position = Some(position);
+        self
+    }
+
+    #[must_use]
+    pub fn with_internal_query(mut self, query: impl Into<String>) -> Self {
+        self.diagnostics_mut().internal_query = Some(query.into());
         self
     }
 
