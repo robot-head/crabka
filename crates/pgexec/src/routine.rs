@@ -5195,7 +5195,9 @@ pub(crate) fn table_function_result_rows(
 pub(crate) fn table_function_columns(routine: &Routine) -> Option<Vec<String>> {
     match &routine.result {
         RoutineResult::Table(columns) => Some(columns.iter().map(|(n, _)| n.clone()).collect()),
-        RoutineResult::Unspecified => {
+        RoutineResult::Unspecified | RoutineResult::Type { .. }
+            if routine.output_params().next().is_some() =>
+        {
             let names: Vec<String> = routine
                 .output_params()
                 .enumerate()
@@ -5208,6 +5210,7 @@ pub(crate) fn table_function_columns(routine: &Routine) -> Option<Vec<String>> {
                 .collect();
             (!names.is_empty()).then_some(names)
         }
+        RoutineResult::Unspecified => None,
         RoutineResult::Type { .. } => Some(vec![routine.name.clone()]),
     }
 }
@@ -9074,6 +9077,19 @@ mod tests {
                         ColumnType::array_of(ColumnType::Text).expect("text array")
                     ),
                 ]
+        );
+    }
+
+    #[test]
+    fn table_function_columns_keep_named_out_parameters() {
+        let routine = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION named_out(IN value int, OUT result int) RETURNS SETOF int \
+             LANGUAGE plpgsql AS $$ BEGIN result := value; RETURN NEXT; END $$",
+        );
+        assert_eq!(
+            table_function_columns(&routine),
+            Some(vec!["result".into()])
         );
     }
 }
