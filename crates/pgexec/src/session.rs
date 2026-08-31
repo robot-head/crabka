@@ -23805,6 +23805,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_extended_mcv_for_function_expressions() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE mcv_function_estimate (a int4, b varchar, c numeric); INSERT INTO mcv_function_estimate SELECT i, i, i FROM generate_series(1, 1000) s(i); CREATE STATISTICS mcv_function_estimate_stats (mcv) ON (mod(a, 20)), (mod(b::int, 10)), (mod(c, 5)) FROM mcv_function_estimate; ANALYZE mcv_function_estimate",
+        )
+        .await
+        .expect("function expression MCV setup");
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_function_estimate WHERE mod(a, 20) = 1 AND mod(b::int, 10) = 1",
+        )
+        .await
+        .expect("function expression MCV explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_function_estimate (cost=0.00..0.00 rows=50 width=0)".into()
+                ])
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_uses_expression_statistics_for_selectivity() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE expression_estimate (a int4, b varchar); INSERT INTO expression_estimate SELECT i, i FROM generate_series(1, 1000) s(i); CREATE STATISTICS expression_estimate_a ON (mod(a, 20)) FROM expression_estimate; CREATE STATISTICS expression_estimate_b ON (mod(b::int, 10)) FROM expression_estimate; ANALYZE expression_estimate",
+        )
+        .await
+        .expect("expression statistics setup");
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM expression_estimate WHERE mod(a, 20) = 1 AND mod(b::int, 10) = 1",
+        )
+        .await
+        .expect("expression statistics explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on expression_estimate (cost=0.00..0.00 rows=5 width=0)".into()
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_mcv_from_all_statistic_columns() {
         use assert2::assert;
 

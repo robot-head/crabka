@@ -364,7 +364,9 @@ fn restriction_selectivity(
     {
         return selectivity;
     }
-    if let Some(clause) = mcv_clause_for_expr(expr, table, ctx) {
+    if let Some(clause) = mcv_clause_for_expr(expr, table, ctx)
+        && matches!(clause.key, GroupKey::Attribute(_))
+    {
         return scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, &clause);
     }
     match expr {
@@ -1238,21 +1240,27 @@ fn estimate_binary_restriction(
     left: &Expr,
     right: &Expr,
 ) -> f64 {
-    let (column, constant, reversed) = match (column_name(left), column_name(right)) {
-        (Some(column), None) => (column, right, false),
-        (None, Some(column)) => (column, left, true),
+    let (key, constant, reversed) = match (
+        crate::eval::eval(left, &crate::scope::Scope::empty(), &[], ctx).is_ok(),
+        crate::eval::eval(right, &crate::scope::Scope::empty(), &[], ctx).is_ok(),
+    ) {
+        (false, true) => (left, right, false),
+        (true, false) => (right, left, true),
         _ => return crate::plan::selfuncs::DEFAULT_INEQ_SEL,
     };
-    let Some((_, definition)) = table
-        .columns
-        .iter()
-        .enumerate()
-        .find(|(_, definition)| definition.name == column)
+    let Some(ty) =
+        crate::eval::infer_type(key, &crate::scope::Scope::single(table, &table.name.name)).ok()
     else {
         return crate::plan::selfuncs::DEFAULT_INEQ_SEL;
     };
-    let constant = literal_for_type(constant, definition.ty, ctx);
-    estimate_column_restriction(catalog_kv, table, rows, ctx, op, column, constant, reversed)
+    let Some(stats) = column_statistics(catalog_kv, table, rows, key, ctx) else {
+        return if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            crate::plan::selfuncs::DEFAULT_EQ_SEL
+        } else {
+            crate::plan::selfuncs::DEFAULT_INEQ_SEL
+        };
+    };
+    decoded_restriction_selectivity(&stats, op, literal_for_type(constant, ty, ctx), reversed)
 }
 
 fn estimate_column_restriction(
@@ -1292,6 +1300,15 @@ fn estimate_column_restriction(
             crate::plan::selfuncs::DEFAULT_INEQ_SEL
         };
     };
+    decoded_restriction_selectivity(&stats, op, constant, reversed)
+}
+
+fn decoded_restriction_selectivity(
+    stats: &crate::plan::selfuncs::DecodedColumnStats,
+    op: BinaryOp,
+    constant: Option<crabka_pgtypes::Datum>,
+    reversed: bool,
+) -> f64 {
     match op {
         BinaryOp::Eq => crate::plan::selfuncs::eqsel(stats.as_stats(), constant.as_ref()),
         BinaryOp::Ne => crate::plan::selfuncs::neqsel(stats.as_stats(), constant.as_ref()),
@@ -1327,22 +1344,68 @@ fn column_statistics(
     expr: &Expr,
     ctx: &crate::clock::EvalCtx,
 ) -> Option<crate::plan::selfuncs::DecodedColumnStats> {
-    let column = column_name(expr)?;
-    let (position, definition) = table
-        .columns
-        .iter()
-        .enumerate()
-        .find(|(_, definition)| definition.name == column)?;
-    let stats = crate::attrstats::get(
-        catalog_kv,
-        &crate::attrstats::AttributeStatsKey {
-            relation: table.name.clone(),
-            attnum: i16::try_from(position + 1).ok()?,
-            inherited: false,
-        },
-    )
-    .ok()??;
-    crate::plan::selfuncs::decode_catalog_stats(&stats, definition.ty, rows, ctx)
+    if let Some(column) = column_name(expr) {
+        let (position, definition) = table
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(_, definition)| definition.name == column)?;
+        let stats = crate::attrstats::get(
+            catalog_kv,
+            &crate::attrstats::AttributeStatsKey {
+                relation: table.name.clone(),
+                attnum: i16::try_from(position + 1).ok()?,
+                inherited: false,
+            },
+        )
+        .ok()??;
+        return crate::plan::selfuncs::decode_catalog_stats(&stats, definition.ty, rows, ctx);
+    }
+    expression_statistics(catalog_kv, table, rows, expr, ctx)
+}
+
+fn expression_statistics(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    expr: &Expr,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<crate::plan::selfuncs::DecodedColumnStats> {
+    let GroupKey::Expression(key) = mcv_key(expr, table, ctx)? else {
+        return None;
+    };
+    let ty = crate::eval::infer_type(expr, &crate::scope::Scope::single(table, &table.name.name))
+        .ok()?;
+    for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
+        if object.table_id != table.id {
+            continue;
+        }
+        let Some(index) = object.expressions.iter().position(|value| value == &key) else {
+            continue;
+        };
+        let Some(data) = object.data else {
+            continue;
+        };
+        let Some(expression) = data.expression_stats.get(index) else {
+            continue;
+        };
+        let stats = crate::attrstats::AttributeStats {
+            null_frac: expression
+                .null_frac
+                .as_deref()
+                .and_then(|value| value.parse().ok()),
+            avg_width: expression.avg_width,
+            n_distinct: expression
+                .n_distinct
+                .as_deref()
+                .and_then(|value| value.parse().ok()),
+            most_common_vals: expression.most_common_vals.clone(),
+            most_common_freqs: expression.most_common_freqs.clone(),
+            ..crate::attrstats::AttributeStats::default()
+        };
+        return crate::plan::selfuncs::decode_catalog_stats(&stats, ty, rows, ctx);
+    }
+    None
 }
 
 fn column_name(expr: &Expr) -> Option<&str> {
