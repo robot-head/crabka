@@ -768,7 +768,17 @@ fn eval_depth_inner(
             // LEFT operand's type.
             let a = match (&a, matches!(array.as_ref(), Expr::StringLiteral(_))) {
                 (Datum::Text(_), true) => {
-                    let elem = x.column_type().unwrap_or(ColumnType::Text);
+                    let elem = match (*op, x.column_type()) {
+                        (
+                            BinaryOp::JsonPathMatch,
+                            Some(ColumnType::TsVector | ColumnType::Text),
+                        ) => ColumnType::TsQuery,
+                        (BinaryOp::JsonPathMatch, Some(ColumnType::TsQuery)) => {
+                            ColumnType::TsVector
+                        }
+                        (_, Some(ty)) => ty,
+                        (_, None) => ColumnType::Text,
+                    };
                     let target = ColumnType::array_of(elem).ok_or_else(|| {
                         ExecError::Unsupported(format!(
                             "arrays of {} are not supported",
@@ -7721,6 +7731,20 @@ mod tests {
         for (sql, want) in cases {
             assert2::assert!(eval_jt(sql).expect("eval") == *want, "for {sql}");
         }
+    }
+
+    #[test]
+    fn text_search_any_casts_unknown_array_to_tsquery() {
+        let expression = pexpr("'''wr'':1'::tsvector @@ ANY('{wr,qh}')").expect("parse");
+
+        assert2::assert!(
+            eval(
+                &expression,
+                &Scope::empty(),
+                &[],
+                &crate::clock::EvalCtx::test_default()
+            ) == Ok(Datum::Bool(true))
+        );
     }
 
     /// The jsonb + array FUNCTION families are reachable from scalar `eval` and
