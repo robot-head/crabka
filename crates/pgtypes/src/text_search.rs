@@ -684,8 +684,7 @@ fn query_matches(query: &TsQuery, vector: &TsVector) -> (bool, Vec<u16>) {
                         entry.text.starts_with(&term.text)
                     } else {
                         entry.text == term.text
-                    }) && term.weights.is_empty()
-                        && entry.positions.is_empty()
+                    }) && entry.positions.is_empty()
                 })
             } else {
                 true
@@ -1087,6 +1086,8 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
 
     #[test]
@@ -1114,6 +1115,14 @@ mod tests {
         assert!(vector.matches(&"cat:A".parse().expect("weight")));
         assert!(vector.matches(&"cat:*B".parse().expect("prefix")));
         assert!(vector.matches(&"cat & !dog".parse().expect("not")));
+    }
+
+    #[test]
+    fn unpositioned_lexemes_match_every_weight() {
+        let vector: TsVector = "'wd'".parse().expect("vector");
+
+        assert!(vector.matches(&"wd:A".parse().expect("A query")));
+        assert!(vector.matches(&"wd:D".parse().expect("D query")));
     }
 
     #[test]
