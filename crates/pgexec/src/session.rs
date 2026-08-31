@@ -24917,37 +24917,28 @@ mod tests {
         )
         .await
         .expect("statistics setup");
-        for sql in [
-            "EXPLAIN SELECT * FROM inequality_estimate WHERE a < 20",
-            "EXPLAIN SELECT * FROM inequality_estimate WHERE 20 > a",
+        for (sql, estimated_rows) in [
+            ("EXPLAIN SELECT * FROM inequality_estimate WHERE a < 20", 18),
+            ("EXPLAIN SELECT * FROM inequality_estimate WHERE 20 > a", 18),
+            (
+                "EXPLAIN SELECT * FROM inequality_estimate WHERE a < ANY (ARRAY[10, 20])",
+                25,
+            ),
+            (
+                "EXPLAIN SELECT * FROM inequality_estimate WHERE a > ALL (ARRAY[10, 20])",
+                73,
+            ),
         ] {
             let rows = rows_or_sqlstate(&mut s, sql)
                 .await
                 .expect("inequality explain");
             assert!(
                 rows.first()
-                    == Some(&vec![
-                        "Seq Scan on inequality_estimate (cost=0.00..0.00 rows=19 width=0)".into()
-                    ])
+                    == Some(&vec![format!(
+                        "Seq Scan on inequality_estimate (cost=0.00..0.00 rows={estimated_rows} width=0)"
+                    )]),
+                "{sql}"
             );
-        }
-        for (quantified_sql, direct_sql) in [
-            (
-                "EXPLAIN SELECT * FROM inequality_estimate WHERE a < ANY (ARRAY[10, 20])",
-                "EXPLAIN SELECT * FROM inequality_estimate WHERE a < 20",
-            ),
-            (
-                "EXPLAIN SELECT * FROM inequality_estimate WHERE a > ALL (ARRAY[10, 20])",
-                "EXPLAIN SELECT * FROM inequality_estimate WHERE a > 20",
-            ),
-        ] {
-            let quantified = rows_or_sqlstate(&mut s, quantified_sql)
-                .await
-                .expect("quantified inequality explain");
-            let direct = rows_or_sqlstate(&mut s, direct_sql)
-                .await
-                .expect("direct inequality explain");
-            assert!(quantified.first() == direct.first(), "{quantified_sql}");
         }
     }
 

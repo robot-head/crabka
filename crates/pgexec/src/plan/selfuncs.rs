@@ -278,7 +278,12 @@ pub(crate) fn scalarineqsel(
         .filter(|(value, _)| matches_inequality(*value, constant, inequality))
         .map(|(_, frequency)| *frequency)
         .sum();
-    let histogram = histogram_selectivity(stats.histogram, constant, inequality).unwrap_or(0.5);
+    let other_distinct = stats.distinct_count() - stats.mcv.len() as f64;
+    let equality = (other_distinct > 1.0)
+        .then(|| other_distinct.recip())
+        .unwrap_or(0.0);
+    let histogram =
+        histogram_selectivity(stats.histogram, constant, inequality, equality).unwrap_or(0.5);
     probability(mcv + (1.0 - stats.null_frac() - common).max(0.0) * histogram)
 }
 
@@ -386,7 +391,12 @@ pub(crate) const fn patternsel() -> f64 {
     DEFAULT_MATCH_SEL
 }
 
-fn histogram_selectivity(bounds: &[f64], constant: f64, inequality: Inequality) -> Option<f64> {
+fn histogram_selectivity(
+    bounds: &[f64],
+    constant: f64,
+    inequality: Inequality,
+    equality: f64,
+) -> Option<f64> {
     let (first, last) = (*bounds.first()?, *bounds.last()?);
     if bounds.len() < 2 || !constant.is_finite() {
         return None;
@@ -406,9 +416,12 @@ fn histogram_selectivity(bounds: &[f64], constant: f64, inequality: Inequality) 
         };
         (lower as f64 + fraction) / (bounds.len() - 1) as f64
     };
+    let equality = (constant <= last).then_some(equality).unwrap_or(0.0);
     Some(match inequality {
-        Inequality::Less | Inequality::LessEqual => less,
-        Inequality::Greater | Inequality::GreaterEqual => 1.0 - less,
+        Inequality::Less => probability(less - equality),
+        Inequality::LessEqual => less,
+        Inequality::Greater => 1.0 - less,
+        Inequality::GreaterEqual => probability(1.0 - less + equality),
     })
 }
 
@@ -489,8 +502,8 @@ mod tests {
             mcv: &[(1.0, 0.4), (9.0, 0.1)],
             histogram: &[2.0, 6.0, 10.0],
         };
-        // MCV 1 plus half of the non-MCV, non-null histogram population.
-        assert!((scalarineqsel(stats, Some(6.0), Inequality::Less) - 0.6).abs() < f64::EPSILON);
+        // MCV 1 plus the strict histogram fraction after excluding equality.
+        assert!((scalarineqsel(stats, Some(6.0), Inequality::Less) - 0.55).abs() < f64::EPSILON);
         for inequality in [
             Inequality::LessEqual,
             Inequality::Greater,
