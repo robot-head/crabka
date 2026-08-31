@@ -23965,6 +23965,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_sums_local_group_estimates_for_inheritance() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE inherited_member_estimate (a int4, b int4); \
+             CREATE TABLE inherited_member_estimate_1 () INHERITS (inherited_member_estimate); \
+             CREATE TABLE inherited_member_estimate_2 () INHERITS (inherited_member_estimate); \
+             INSERT INTO inherited_member_estimate VALUES (1, 1), (2, 2); \
+             INSERT INTO inherited_member_estimate_1 VALUES (1, 1); \
+             INSERT INTO inherited_member_estimate_2 VALUES (3, 3); \
+             ANALYZE inherited_member_estimate, inherited_member_estimate_1, inherited_member_estimate_2",
+        )
+        .await
+        .expect("inheritance statistics setup");
+
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT a, b FROM inherited_member_estimate GROUP BY a, b",
+            )
+            .await
+                == Ok(vec![
+                    vec!["HashAggregate (cost=0.00..0.00 rows=4 width=0)".into()],
+                    vec!["  Group Key: a, b".into()],
+                    vec![
+                        "  ->  Seq Scan on inherited_member_estimate (cost=0.00..0.00 rows=4 width=0)"
+                            .into()
+                    ],
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_only_partitioned_parent_has_one_estimated_group() {
         use assert2::assert;
 

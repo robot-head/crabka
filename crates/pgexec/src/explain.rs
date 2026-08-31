@@ -144,19 +144,52 @@ pub(crate) fn apply_catalog_estimate(
         return;
     };
     let partitioned = crate::partition::is_partitioned(catalog_kv, &relation).unwrap_or(false);
-    let inherited = !only
-        && (crate::inheritance::has_children(catalog_kv, &relation).unwrap_or(false)
-            || partitioned);
+    let inheritance_children =
+        crate::inheritance::has_children(catalog_kv, &relation).unwrap_or(false);
+    let inherited = !only && (inheritance_children || partitioned);
+    if !*only && inheritance_children && !partitioned {
+        let mut members = vec![table.clone()];
+        for descendant in crate::inheritance::descendants(catalog_kv, &relation).unwrap_or_default()
+        {
+            if let Ok(table) = crabka_pgcatalog::get_table(catalog_kv, &descendant) {
+                members.push(table);
+            }
+        }
+        let estimates = members
+            .iter()
+            .map(|table| {
+                let rows = relation_rows(catalog_kv, &table.name);
+                let input_rows = select.filter.as_ref().map_or(rows, |filter| {
+                    rows * restriction_selectivity(catalog_kv, table, rows, false, ctx, filter)
+                });
+                (table, input_rows)
+            })
+            .collect::<Vec<_>>();
+        let input_rows = estimates
+            .iter()
+            .map(|(_, rows)| row_estimate(*rows) as f64)
+            .sum();
+        let output_rows =
+            extended_group_estimate(catalog_kv, &table, true, select).unwrap_or_else(|| {
+                estimates
+                    .iter()
+                    .map(|(table, rows)| {
+                        row_estimate(
+                            estimate_group_rows(catalog_kv, table, *rows, false, select)
+                                .unwrap_or(*rows),
+                        ) as f64
+                    })
+                    .sum()
+            });
+        set_estimated_rows(plan, output_rows, input_rows);
+        return;
+    }
     // A partitioned table's `reltuples` describes its whole tree, while an
     // `ONLY` scan has no local rows to estimate.
     let rows = if *only && partitioned {
         0.0
     } else {
-        crate::relstats::of(catalog_kv, &relation)
-            .ok()
-            .map(|stats| f64::from(stats.reltuples))
-            .filter(|rows| *rows >= 0.0)
-            .unwrap_or(1_000.0)
+        relation_rows(catalog_kv, &relation)
     };
     let selectivity = select.filter.as_ref().map_or(1.0, |filter| {
         restriction_selectivity(catalog_kv, &table, rows, inherited, ctx, filter)
@@ -165,6 +198,17 @@ pub(crate) fn apply_catalog_estimate(
     let output_rows = estimate_group_rows(catalog_kv, &table, input_rows, inherited, select)
         .unwrap_or(input_rows);
     set_estimated_rows(plan, output_rows, input_rows);
+}
+
+fn relation_rows(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    relation: &crabka_pgcatalog::RelationName,
+) -> f64 {
+    crate::relstats::of(catalog_kv, relation)
+        .ok()
+        .map(|stats| f64::from(stats.reltuples))
+        .filter(|rows| *rows >= 0.0)
+        .unwrap_or(1_000.0)
 }
 
 fn set_estimated_rows(node: &mut PlanNode, rows: f64, child_rows: f64) {
@@ -189,29 +233,15 @@ fn estimate_group_rows(
     inherited: bool,
     select: &crabka_pgparser::ast::SelectStmt,
 ) -> Option<f64> {
-    if select.group_by.is_empty() {
-        return None;
+    if let Some(rows) = extended_group_estimate(catalog_kv, table, inherited, select) {
+        return Some(rows);
     }
-    let mut keys = select
-        .group_by
-        .iter()
-        .map(|expr| group_key(expr, &select.projection, table))
-        .collect::<Option<Vec<_>>>()?;
-    keys.sort_unstable();
-    keys.dedup();
+    let keys = group_keys(select, table)?;
     let statistics = crabka_pgcatalog::statistics::list(catalog_kv)
         .ok()?
         .into_iter()
         .filter(|object| object.table_id == table.id)
         .collect::<Vec<_>>();
-    if let Some(rows) = statistics.iter().find_map(|object| {
-        let positions = statistics_positions(&object, &keys, table)?;
-        statistics_data(object, inherited)
-            .and_then(|data| data.ndistinct.as_deref())
-            .and_then(|data| ndistinct_for_keys(&data, &positions))
-    }) {
-        return Some(rows);
-    }
     let mut remaining = keys.clone();
     let mut distincts = Vec::new();
     loop {
@@ -258,11 +288,7 @@ fn estimate_group_rows(
         .collect::<Vec<_>>();
     attnums.sort_unstable();
     attnums.dedup();
-    let relation_rows = crate::relstats::of(catalog_kv, &table.name)
-        .ok()
-        .map(|stats| f64::from(stats.reltuples))
-        .filter(|rows| *rows > 0.0)
-        .unwrap_or(input_rows);
+    let relation_rows = relation_rows(catalog_kv, &table.name).max(input_rows);
     let attribute_distincts = attnums
         .iter()
         .filter_map(|attnum| {
@@ -289,6 +315,43 @@ fn estimate_group_rows(
     distincts.extend(attribute_distincts);
     has_all_attribute_distincts
         .then(|| crate::plan::selfuncs::estimate_num_groups(input_rows, relation_rows, &distincts))
+}
+
+fn group_keys(
+    select: &crabka_pgparser::ast::SelectStmt,
+    table: &crabka_pgcatalog::Table,
+) -> Option<Vec<GroupKey>> {
+    if select.group_by.is_empty() {
+        return None;
+    }
+    let mut keys = select
+        .group_by
+        .iter()
+        .map(|expr| group_key(expr, &select.projection, table))
+        .collect::<Option<Vec<_>>>()?;
+    keys.sort_unstable();
+    keys.dedup();
+    Some(keys)
+}
+
+fn extended_group_estimate(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    inherited: bool,
+    select: &crabka_pgparser::ast::SelectStmt,
+) -> Option<f64> {
+    let keys = group_keys(select, table)?;
+    let statistics = crabka_pgcatalog::statistics::list(catalog_kv)
+        .ok()?
+        .into_iter()
+        .filter(|object| object.table_id == table.id)
+        .collect::<Vec<_>>();
+    statistics.iter().find_map(|object| {
+        let positions = statistics_positions(&object, &keys, table)?;
+        statistics_data(object, inherited)
+            .and_then(|data| data.ndistinct.as_deref())
+            .and_then(|data| ndistinct_for_keys(&data, &positions))
+    })
 }
 
 fn statistics_data(
