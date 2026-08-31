@@ -84,6 +84,52 @@ fn expression_text(expr: &Expr) -> String {
     )
 }
 
+fn statistic_column_ordinal(
+    table: &crabka_pgcatalog::Table,
+    name: &str,
+) -> Result<usize, ExecError> {
+    if matches!(
+        name,
+        "ctid" | "oid" | "tableoid" | "xmin" | "cmin" | "xmax" | "cmax"
+    ) {
+        return Err(ExecError::Unsupported(
+            "statistics creation on system columns is not supported".into(),
+        ));
+    }
+    let ordinal = table
+        .column_index(name)
+        .ok_or_else(|| ExecError::UndefinedTableColumn {
+            column: name.into(),
+            table: table.name.name.clone(),
+        })?;
+    if table.columns[ordinal]
+        .generated
+        .as_ref()
+        .is_some_and(|generated| generated.kind == crabka_pgcatalog::GeneratedKind::Virtual)
+    {
+        return Err(ExecError::Unsupported(
+            "statistics creation on virtual generated columns is not supported".into(),
+        ));
+    }
+    Ok(ordinal)
+}
+
+fn validate_expression_columns(
+    expr: &Expr,
+    table: &crabka_pgcatalog::Table,
+) -> Result<(), ExecError> {
+    let mut error = None;
+    crate::grouping::visit_expr(expr, &mut |node| {
+        if error.is_none()
+            && let Expr::Column { table: None, name } = node
+            && let Err(problem) = statistic_column_ordinal(table, name)
+        {
+            error = Some(problem);
+        }
+    });
+    error.map_or(Ok(()), Err)
+}
+
 fn definition(
     stats: &ast::CreateStatistics,
     table: &crabka_pgcatalog::Table,
@@ -97,6 +143,7 @@ fn definition(
     let mut keys = Vec::with_capacity(stats.expressions.len());
     let mut expressions = Vec::new();
     for expr in &stats.expressions {
+        validate_expression_columns(expr, table)?;
         let text = expression_text(expr);
         if !seen.insert(text.clone()) {
             return Err(ExecError::Unsupported(
@@ -105,32 +152,7 @@ fn definition(
         }
         match expr {
             Expr::Column { table: None, name } => {
-                if matches!(
-                    name.as_str(),
-                    "ctid" | "oid" | "tableoid" | "xmin" | "cmin" | "xmax" | "cmax"
-                ) {
-                    return Err(ExecError::Unsupported(
-                        "statistics creation on system columns is not supported".into(),
-                    ));
-                }
-                let ordinal =
-                    table
-                        .column_index(name)
-                        .ok_or_else(|| ExecError::UndefinedTableColumn {
-                            column: name.clone(),
-                            table: table.name.name.clone(),
-                        })?;
-                if table.columns[ordinal]
-                    .generated
-                    .as_ref()
-                    .is_some_and(|generated| {
-                        generated.kind == crabka_pgcatalog::GeneratedKind::Virtual
-                    })
-                {
-                    return Err(ExecError::Unsupported(
-                        "statistics creation on virtual generated columns is not supported".into(),
-                    ));
-                }
+                let ordinal = statistic_column_ordinal(table, name)?;
                 keys.push(i16::try_from(ordinal + 1).map_err(|_| {
                     ExecError::Unsupported("statistics column number exceeds int2".into())
                 })?);
@@ -377,5 +399,12 @@ mod tests {
             )
             .is_err()
         );
+        let parsed = crabka_pgparser::parse("CREATE STATISTICS s ON a, (b + 1) FROM t")
+            .expect("parse expression statistics");
+        let [crabka_pgparser::ast::Statement::CreateStatistics(parsed_stats)] = parsed.as_slice()
+        else {
+            panic!("stats");
+        };
+        assert!(definition(parsed_stats, &table).is_err());
     }
 }
