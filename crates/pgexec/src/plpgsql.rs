@@ -1550,7 +1550,9 @@ impl ScalarInterpreter<'_> {
                     None => self.output_value(),
                 }))
             }
-            PlPgSqlStatement::Raise(raise) => self.raise(raise),
+            PlPgSqlStatement::Raise(raise) => self.raise(raise).map_err(|error| {
+                plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
+            }),
             PlPgSqlStatement::Assert { condition, message } => {
                 if self.truth(condition)? {
                     Ok(ScalarFlow::Next)
@@ -1986,8 +1988,7 @@ impl ScalarInterpreter<'_> {
                 ))
             })
             .collect::<Result<Vec<_>, ExecError>>()?;
-        let diagnostic =
-            build_raise_diagnostic(raise, &values, options)?.with_context(self.context.clone());
+        let diagnostic = build_raise_diagnostic(raise, &values, options)?;
         Err(ExecError::Remote(diagnostic))
     }
 }
@@ -2247,7 +2248,9 @@ impl Interpreter<'_> {
                     };
                     Ok(Flow::Return(value))
                 }
-                PlPgSqlStatement::Raise(raise) => self.raise(raise).await,
+                PlPgSqlStatement::Raise(raise) => self.raise(raise).await.map_err(|error| {
+                    plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
+                }),
                 PlPgSqlStatement::Assert { condition, message } => {
                     if self.truth_async(condition).await? {
                         Ok(Flow::Next)
@@ -3195,8 +3198,7 @@ impl Interpreter<'_> {
             let value = self.session.plpgsql_render(&value);
             options.push((name.as_str(), value));
         }
-        let diagnostic =
-            build_raise_diagnostic(raise, &values, options)?.with_context(self.context.clone());
+        let diagnostic = build_raise_diagnostic(raise, &values, options)?;
         if raise.level == PlPgSqlRaiseLevel::Exception {
             return Err(ExecError::Remote(diagnostic));
         }
@@ -3451,6 +3453,18 @@ fn sql_statement_error(error: ExecError, routine: &Routine, statement: usize) ->
     ExecError::Remote(ensure_error_context(
         error.into_pg(),
         &format!("SQL function \"{}\" statement {statement}", routine.name),
+    ))
+}
+
+fn plpgsql_statement_error(
+    error: ExecError,
+    context: &str,
+    line: usize,
+    statement: &str,
+) -> ExecError {
+    ExecError::Remote(ensure_error_context(
+        error.into_pg(),
+        &format!("{context} line {line} at {statement}"),
     ))
 }
 

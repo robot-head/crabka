@@ -821,10 +821,16 @@ impl PlParser<'_> {
     }
 
     fn parse_raise(&mut self) -> Result<PlPgSqlStatement, ParseError> {
+        let line = self.source[..self.offset()]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
         self.expect_word("raise")?;
         if matches!(self.token(), Token::Semicolon) {
             self.bump();
             return Ok(PlPgSqlStatement::Raise(PlPgSqlRaise {
+                line,
                 level: PlPgSqlRaiseLevel::Exception,
                 condition: None,
                 message: None,
@@ -889,6 +895,7 @@ impl PlParser<'_> {
         }
         self.expect_token(&Token::Semicolon)?;
         Ok(PlPgSqlStatement::Raise(PlPgSqlRaise {
+            line,
             level,
             condition,
             message,

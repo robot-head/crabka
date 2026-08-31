@@ -5347,6 +5347,7 @@ pub struct PlPgSqlExceptionHandler {
 /// A `RAISE` statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlPgSqlRaise {
+    pub line: usize,
     pub level: PlPgSqlRaiseLevel,
     pub condition: Option<String>,
     pub message: Option<String>,

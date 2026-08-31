@@ -27543,7 +27543,9 @@ mod tests {
         session
             .simple_query(
                 "CREATE FUNCTION named_errcode() RETURNS void LANGUAGE plpgsql AS $$ \
-                 BEGIN RAISE EXCEPTION USING ERRCODE = 'division_by_zero'; END $$",
+                 BEGIN\n\
+                   RAISE EXCEPTION USING ERRCODE = 'division_by_zero';\n\
+                 END $$",
             )
             .await
             .expect("create function");
@@ -27553,6 +27555,13 @@ mod tests {
             .await
             .expect_err("named SQLSTATE condition raises an error");
         assert_eq!(error.code, "22012");
+        assert_eq!(
+            error
+                .diagnostics
+                .as_deref()
+                .and_then(|diagnostics| diagnostics.context.as_deref()),
+            Some("PL/pgSQL function named_errcode() line 2 at RAISE")
+        );
     }
 
     #[tokio::test]
