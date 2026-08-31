@@ -2223,6 +2223,8 @@ fn resolve_candidates(
             coercible.push(routine.clone());
         }
     }
+    discard_expanded_variadic_candidates(&mut exact, given);
+    discard_expanded_variadic_candidates(&mut coercible, given);
     if exact.len() == 1 {
         return resolved_candidate(exact.remove(0), given);
     }
@@ -2310,6 +2312,62 @@ fn variadic_arguments_are_expanded(
     args.len() != params.len()
         || !matches!((args.get(index), param.ty.column),
             (Some(ArgType::Known(arg)), Some(target)) if *arg == target)
+}
+
+/// PostgreSQL removes an expanded variadic form when a scalar overload has
+/// the same effective argument types.
+fn discard_expanded_variadic_candidates(candidates: &mut Vec<Routine>, given: &[ArgType]) {
+    let scalar_signatures: Vec<Vec<String>> = candidates
+        .iter()
+        .filter_map(|routine| {
+            let params: Vec<&RoutineParam> = routine.input_params().collect();
+            variadic_input_index(&params).is_none().then(|| {
+                effective_argument_type_names(&params, given, false)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            })
+        })
+        .collect();
+    candidates.retain(|routine| {
+        let params: Vec<&RoutineParam> = routine.input_params().collect();
+        let Some(index) = variadic_input_index(&params) else {
+            return true;
+        };
+        !variadic_arguments_are_expanded(&params, given, index)
+            || !scalar_signatures.iter().any(|signature| {
+                signature
+                    .iter()
+                    .map(String::as_str)
+                    .eq(effective_argument_type_names(&params, given, true))
+            })
+    });
+}
+
+fn effective_argument_type_names<'a>(
+    params: &[&'a RoutineParam],
+    given: &[ArgType],
+    expand_variadic: bool,
+) -> Vec<&'a str> {
+    let variadic_index = variadic_input_index(params);
+    given
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let param = variadic_index
+                .filter(|variadic_index| expand_variadic && index >= *variadic_index)
+                .map(|variadic_index| params[variadic_index])
+                .or_else(|| params.get(index).copied())
+                .expect("arity matching supplies a parameter");
+            if variadic_index
+                .is_some_and(|variadic_index| expand_variadic && index >= variadic_index)
+            {
+                param.ty.name.strip_suffix("[]").unwrap_or(&param.ty.name)
+            } else {
+                &param.ty.name
+            }
+        })
+        .collect()
 }
 
 fn is_polymorphic_type(name: &str) -> bool {
@@ -7775,6 +7833,32 @@ mod tests {
             .expect("resolution")
             .expect("variadic routine");
         assert!(matches!(bound.args.as_slice(), [Expr::ArrayLiteral(values)] if values.len() == 3));
+    }
+
+    #[test]
+    fn non_variadic_routine_wins_over_an_expanded_variadic_overload() {
+        let kv = MemKv::default();
+        define(
+            &kv,
+            "CREATE FUNCTION prefer_scalar(VARIADIC values numeric[]) RETURNS numeric \
+             LANGUAGE sql AS 'SELECT $1[1]'",
+        )
+        .expect("variadic definition");
+        define(
+            &kv,
+            "CREATE FUNCTION prefer_scalar(value numeric) RETURNS numeric \
+             LANGUAGE sql AS 'SELECT $1'",
+        )
+        .expect("scalar definition");
+
+        let routine = resolve_call(&kv, "prefer_scalar", &[ArgType::Known(ColumnType::Int4)])
+            .expect("resolution")
+            .expect("scalar routine");
+        assert!(
+            routine
+                .input_params()
+                .all(|param| param.mode != ParamMode::Variadic)
+        );
     }
 
     #[test]
