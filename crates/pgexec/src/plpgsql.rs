@@ -2410,6 +2410,7 @@ impl Interpreter<'_> {
                             false,
                             dml_returning,
                             true,
+                            true,
                             None,
                         )
                         .await?;
@@ -2678,7 +2679,12 @@ impl Interpreter<'_> {
                     self.set_found(count > 0);
                     Ok(Flow::Next)
                 }
-                PlPgSqlStatement::Execute { query, into, using } => {
+                PlPgSqlStatement::Execute {
+                    query,
+                    into,
+                    using,
+                    line,
+                } => async {
                     let (statement, parameters, _) = self.dynamic_statement(query, using).await?;
                     let dml_returning = statement_has_dml_returning(&statement);
                     let result = Box::pin(self.session.run_one(&statement)).await?;
@@ -2689,11 +2695,14 @@ impl Interpreter<'_> {
                         true,
                         dml_returning,
                         false,
+                        false,
                         Some(&parameters),
                     )
                     .await?;
                     Ok(Flow::Next)
                 }
+                .await
+                .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "EXECUTE")),
                 PlPgSqlStatement::Open {
                     cursor,
                     scroll,
@@ -2786,8 +2795,17 @@ impl Interpreter<'_> {
                         .session
                         .fetch_cursor(cursor, direction, *move_only)
                         .await?;
-                    self.consume_sql_result(result, into.as_ref(), true, false, false, false, None)
-                        .await?;
+                    self.consume_sql_result(
+                        result,
+                        into.as_ref(),
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        None,
+                    )
+                    .await?;
                     Ok(Flow::Next)
                 }
                 PlPgSqlStatement::Close(cursor) => {
@@ -3536,6 +3554,7 @@ impl Interpreter<'_> {
         update_found: bool,
         discard_rows: bool,
         dml_returning: bool,
+        implicit_dml_strict: bool,
         too_many_rows_hint: bool,
         dynamic_parameters: Option<&[Datum]>,
     ) -> Result<(), ExecError> {
@@ -3544,7 +3563,7 @@ impl Interpreter<'_> {
         match (result, into) {
             (QueryResult::Rows { fields, rows, .. }, Some(into)) => {
                 let strict_row_count = into.strict && rows.len() != 1;
-                let implicit_strict = dml_returning && rows.len() > 1;
+                let implicit_strict = implicit_dml_strict && dml_returning && rows.len() > 1;
                 if strict_row_count || implicit_strict {
                     let (sqlstate, message) = if rows.is_empty() {
                         ("P0002", "query returned no rows")

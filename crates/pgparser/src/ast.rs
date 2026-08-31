@@ -5290,6 +5290,7 @@ pub enum PlPgSqlStatement {
         query: Expr,
         into: Option<PlPgSqlInto>,
         using: Vec<Expr>,
+        line: usize,
     },
     Open {
         cursor: String,

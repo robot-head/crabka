@@ -27627,6 +27627,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_execute_using_into_assigns_the_first_returning_row() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE plpgsql_dynamic_returning (value text); \
+                 CREATE FUNCTION plpgsql_dynamic_returning_first() RETURNS text LANGUAGE plpgsql AS $$ \
+                 DECLARE row_value record; \
+                 BEGIN \
+                   EXECUTE 'INSERT INTO plpgsql_dynamic_returning VALUES ($1), ($2) RETURNING value' \
+                   USING 'first', 'second' INTO row_value; \
+                   RETURN row_value.value; \
+                 END $$",
+            )
+            .await
+            .expect("function setup");
+
+        assert!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_dynamic_returning_first()")
+                    .await
+                    .expect("function call"),
+            ) == "first"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_perform_errors_include_sql_and_function_context() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();

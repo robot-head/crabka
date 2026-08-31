@@ -228,6 +228,7 @@ fn parses_return_raise_and_dynamic_execution() {
           return query select * from things;
           return query execute 'select * from things where id = $1' using wanted;
           execute command into strict result using argument;
+          execute command using first_argument, second_argument into strict result;
           raise sqlstate '22012' using message = 'division by zero';
           return result;
         end
@@ -254,6 +255,11 @@ fn parses_return_raise_and_dynamic_execution() {
     assert!(matches!(
         block.statements[3],
         PlPgSqlStatement::Execute { .. }
+    ));
+    assert!(matches!(
+        &block.statements[4],
+        PlPgSqlStatement::Execute { into: Some(into), using, .. }
+        if into.strict && into.targets.len() == 1 && using.len() == 2
     ));
 }
 

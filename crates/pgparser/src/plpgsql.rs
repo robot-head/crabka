@@ -951,6 +951,7 @@ impl PlParser<'_> {
     }
 
     fn parse_execute(&mut self) -> Result<PlPgSqlStatement, ParseError> {
+        let line = self.line();
         self.expect_word("execute")?;
         let query = self.parse_expr_to_words(&["into", "using"])?;
         let mut into = None;
@@ -959,13 +960,20 @@ impl PlParser<'_> {
             if self.eat_word("into") {
                 into = Some(self.parse_into()?);
             } else if self.eat_word("using") {
-                using = self.parse_expr_list_to_token(&Token::Semicolon)?;
+                let end = self.find_top_word_or_semicolon(self.pos, &["into"])?;
+                using = self.parse_expr_list_range(self.pos, end)?;
+                self.pos = end;
             } else {
                 break;
             }
         }
         self.expect_token(&Token::Semicolon)?;
-        Ok(PlPgSqlStatement::Execute { query, into, using })
+        Ok(PlPgSqlStatement::Execute {
+            query,
+            into,
+            using,
+            line,
+        })
     }
 
     fn parse_perform(&mut self) -> Result<PlPgSqlStatement, ParseError> {
