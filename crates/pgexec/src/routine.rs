@@ -3856,12 +3856,6 @@ fn validate_plpgsql_scalar(routine: &Routine) -> Result<(), ExecError> {
             routine.identity()
         )));
     }
-    if declared_output_parameter_count(routine) > 1 && routine.language != "sql" {
-        return Err(ExecError::Unsupported(format!(
-            "{} returns a record; only FROM position is supported for a routine with several OUT parameters",
-            routine.identity()
-        )));
-    }
     Ok(())
 }
 
@@ -4732,15 +4726,8 @@ pub(crate) fn inline_scalar_call(
         )));
     }
     if declared_output_parameter_count(&routine) > 1 {
-        if routine.language == "sql" {
-            // The session executor packs SQL OUT columns into one record.
-            return Ok(None);
-        }
-        return Err(ExecError::Unsupported(format!(
-            "{} returns a record; only FROM position is supported for a routine with several \
-             OUT parameters",
-            routine.identity()
-        )));
+        // The session executor packs OUT columns into one record.
+        return Ok(None);
     }
     let binding = Binding {
         routine: &routine,

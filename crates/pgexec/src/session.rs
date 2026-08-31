@@ -27614,6 +27614,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_multi_out_parameters_are_a_scalar_record() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_multi_out(IN value int, OUT next int, OUT label text) \
+                 LANGUAGE plpgsql AS $$ BEGIN next := value + 1; label := 'ok'; END $$",
+            )
+            .await
+            .expect("create function");
+
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_multi_out(42)::text")
+                    .await
+                    .expect("scalar call")
+            ),
+            "(43,ok)"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_raise_using_errcode_accepts_named_conditions() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();

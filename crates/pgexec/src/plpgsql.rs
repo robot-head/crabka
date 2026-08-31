@@ -344,7 +344,20 @@ pub(crate) async fn execute_scalar_function(
         variable_conflict: block.variable_conflict,
         routine_oid: routine.oid,
     };
-    match interpreter.exec_block(&block).await? {
+    let flow = interpreter.exec_block(&block).await?;
+    if crate::routine::declared_output_parameter_count(routine) > 1 {
+        return match flow {
+            Flow::Return(_) | Flow::Next => Ok(output_record(routine, |name| {
+                interpreter
+                    .lookup_slot(name)
+                    .map_or(Datum::Null, |slot| slot.value.clone())
+            })),
+            Flow::LoopControl { .. } => Err(ExecError::Syntax(
+                "EXIT or CONTINUE cannot be used outside a loop".into(),
+            )),
+        };
+    }
+    match flow {
         Flow::Return(value) => scalar_function_result(routine, Some(value)),
         Flow::Next if interpreter.output_slot.is_some() => {
             scalar_function_result(routine, Some(interpreter.output_value()))
@@ -908,7 +921,20 @@ pub(crate) fn eval_scalar_function(
         active_error: None,
         context: format!("PL/pgSQL function {}", routine.identity()),
     };
-    match interpreter.exec_block(&block)? {
+    let flow = interpreter.exec_block(&block)?;
+    if crate::routine::declared_output_parameter_count(routine) > 1 {
+        return match flow {
+            ScalarFlow::Return(_) | ScalarFlow::Next => Ok(output_record(routine, |name| {
+                interpreter
+                    .lookup_slot(name)
+                    .map_or(Datum::Null, |slot| slot.value.clone())
+            })),
+            ScalarFlow::LoopControl { .. } => Err(ExecError::Syntax(
+                "EXIT or CONTINUE cannot be used outside a loop".into(),
+            )),
+        };
+    }
+    match flow {
         ScalarFlow::Return(value) => scalar_function_result(routine, Some(value)),
         ScalarFlow::Next if interpreter.output_slot.is_some() => {
             scalar_function_result(routine, Some(interpreter.output_value()))
@@ -1239,6 +1265,23 @@ fn bind_scalar_parameters(
     }
     add_special_slots(&mut frame);
     Ok((frame, output_slot))
+}
+
+fn output_record(routine: &Routine, value: impl Fn(&str) -> Datum) -> Datum {
+    let names = routine
+        .params
+        .iter()
+        .filter(|param| param.mode.is_output())
+        .enumerate()
+        .map(|(index, param)| {
+            param
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("column{}", index + 1))
+        })
+        .collect::<Vec<_>>();
+    let values = names.iter().map(|name| value(name)).collect();
+    Datum::Record(RecordValue::named(None, Arc::from(names), values))
 }
 
 async fn bind_parameters(
