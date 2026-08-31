@@ -936,6 +936,38 @@ async fn analyze_warns_when_extended_statistics_cannot_be_computed() {
 }
 
 #[tokio::test]
+async fn analyze_persists_inherited_extended_statistics_separately() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    run_s(
+        &mut session,
+        "CREATE TABLE statistics_inherited (a int, b int); \
+         CREATE TABLE statistics_inherited_child () INHERITS (statistics_inherited); \
+         INSERT INTO statistics_inherited VALUES (1, 1), (2, 2); \
+         INSERT INTO statistics_inherited_child VALUES (1, 1), (3, 3); \
+         CREATE STATISTICS statistics_inherited_s ON a, b FROM statistics_inherited; \
+         ANALYZE statistics_inherited",
+    )
+    .await;
+
+    assert_eq!(
+        text_rows_of(
+            &mut session,
+            "SELECT stxdinherit::text, stxdndistinct \
+             FROM pg_statistic_ext_data d \
+             JOIN pg_statistic_ext s ON s.oid = d.stxoid \
+             WHERE s.stxname = 'statistics_inherited_s' \
+             ORDER BY stxdinherit",
+        )
+        .await,
+        vec![
+            text_row(&["false", r#"{"1, 2": 2}"#]),
+            text_row(&["true", r#"{"1, 2": 3}"#]),
+        ],
+    );
+}
+
+#[tokio::test]
 async fn statistics_ddl_rejects_unsupported_source_kinds() {
     use assert2::assert;
 

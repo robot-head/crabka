@@ -6755,6 +6755,7 @@ fn drop_statistics_referencing_column_ops(
                 }
             }
             statistics.data = None;
+            statistics.inherited_data = None;
             ops.push(crabka_pgcatalog::statistics::put_op(&statistics));
         }
     }
@@ -6772,6 +6773,7 @@ fn clear_statistics_data_referencing_column_ops(
         .filter(|statistics| statistics_references_column(statistics, table, column, index))
         .map(|mut statistics| {
             statistics.data = None;
+            statistics.inherited_data = None;
             crabka_pgcatalog::statistics::put_op(&statistics)
         })
         .collect())

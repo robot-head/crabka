@@ -682,6 +682,7 @@ mod tests {
                 kinds: vec!["d".into(), "f".into(), "m".into()],
                 expressions: Vec::new(),
                 data: None,
+                inherited_data: None,
             };
             let ops =
                 crabka_pgcatalog::statistics::create_ops(kv.as_ref(), &object).expect("statistics");

@@ -4068,6 +4068,7 @@ mod tests {
             kinds: vec!["d".into(), "f".into(), "m".into(), "e".into()],
             expressions: vec!["(b + 1)".into()],
             data: None,
+            inherited_data: None,
         };
         let ops = crabka_pgcatalog::statistics::create_ops(&kv, &object).expect("statistics");
         kv.write_batch(&ops).expect("write statistics");

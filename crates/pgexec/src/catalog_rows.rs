@@ -3523,7 +3523,6 @@ pub(crate) fn pg_stats_ext_rows(
     let tables = crabka_pgcatalog::list_tables(catalog_kv)?;
     let mut rows = Vec::new();
     for object in crabka_pgcatalog::statistics::list(catalog_kv)? {
-        let Some(data) = object.data else { continue };
         let Some(table) = tables.iter().find(|table| table.id == object.table_id) else {
             continue;
         };
@@ -3532,110 +3531,120 @@ pub(crate) fn pg_stats_ext_rows(
         {
             continue;
         }
-        let attnames = object
-            .keys
-            .iter()
-            .filter_map(|key| {
-                (*key > 0)
-                    .then(|| usize::try_from(*key - 1).ok())
-                    .flatten()
-                    .and_then(|index| table.columns.get(index))
-                    .map(|column| Datum::Text(column.name.clone()))
-            })
-            .collect::<Vec<_>>();
-        let mcv = data
-            .mcv
-            .as_deref()
-            .and_then(crabka_pgcatalog::statistics::decode_mcv);
-        let mcv_values = mcv.as_ref().and_then(|items| {
-            (!items.is_empty()).then(|| {
-                Datum::Text(format!(
-                    "{{{}}}",
-                    items
-                        .iter()
-                        .map(|item| pg_text_array(&item.values))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ))
-            })
-        });
-        let mcv_nulls = mcv.as_ref().and_then(|items| {
-            (!items.is_empty()).then(|| {
-                Datum::Text(format!(
-                    "{{{}}}",
-                    items
-                        .iter()
-                        .map(|item| format!(
-                            "{{{}}}",
-                            item.values
-                                .iter()
-                                .map(|value| if value.is_some() { "f" } else { "t" })
-                                .collect::<Vec<_>>()
-                                .join(",")
+        for data in [object.data.as_ref(), object.inherited_data.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            let attnames = object
+                .keys
+                .iter()
+                .filter_map(|key| {
+                    (*key > 0)
+                        .then(|| usize::try_from(*key - 1).ok())
+                        .flatten()
+                        .and_then(|index| table.columns.get(index))
+                        .map(|column| Datum::Text(column.name.clone()))
+                })
+                .collect::<Vec<_>>();
+            let mcv = data
+                .mcv
+                .as_deref()
+                .and_then(crabka_pgcatalog::statistics::decode_mcv);
+            let mcv_values = mcv.as_ref().and_then(|items| {
+                (!items.is_empty()).then(|| {
+                    Datum::Text(format!(
+                        "{{{}}}",
+                        items
+                            .iter()
+                            .map(|item| pg_text_array(&item.values))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ))
+                })
+            });
+            let mcv_nulls = mcv.as_ref().and_then(|items| {
+                (!items.is_empty()).then(|| {
+                    Datum::Text(format!(
+                        "{{{}}}",
+                        items
+                            .iter()
+                            .map(|item| format!(
+                                "{{{}}}",
+                                item.values
+                                    .iter()
+                                    .map(|value| if value.is_some() { "f" } else { "t" })
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ))
+                })
+            });
+            let mcv_frequencies = mcv.as_ref().and_then(|items| {
+                items
+                    .iter()
+                    .map(|item| item.frequency.parse::<f64>().ok().map(Datum::Float8))
+                    .collect::<Option<Vec<_>>>()
+                    .map(|values| {
+                        Datum::Array(crabka_pgtypes::ArrayValue::new(
+                            crabka_pgtypes::ElemType::Float8,
+                            values,
                         ))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ))
-            })
-        });
-        let mcv_frequencies = mcv.as_ref().and_then(|items| {
-            items
-                .iter()
-                .map(|item| item.frequency.parse::<f64>().ok().map(Datum::Float8))
-                .collect::<Option<Vec<_>>>()
-                .map(|values| {
-                    Datum::Array(crabka_pgtypes::ArrayValue::new(
-                        crabka_pgtypes::ElemType::Float8,
-                        values,
-                    ))
-                })
-        });
-        let mcv_base_frequencies = mcv.as_ref().and_then(|items| {
-            items
-                .iter()
-                .map(|item| item.base_frequency.parse::<f64>().ok().map(Datum::Float8))
-                .collect::<Option<Vec<_>>>()
-                .map(|values| {
-                    Datum::Array(crabka_pgtypes::ArrayValue::new(
-                        crabka_pgtypes::ElemType::Float8,
-                        values,
-                    ))
-                })
-        });
-        rows.push(vec![
-            text(&table.name.schema),
-            text(&table.name.name),
-            text(&object.name.schema),
-            text(&object.name.name),
-            text(&object.owner),
-            (!attnames.is_empty())
-                .then(|| {
-                    Datum::Array(crabka_pgtypes::ArrayValue::new(
-                        crabka_pgtypes::ElemType::Text,
-                        attnames,
-                    ))
-                })
-                .unwrap_or(Datum::Null),
-            (!object.expressions.is_empty())
-                .then(|| {
-                    Datum::Array(crabka_pgtypes::ArrayValue::new(
-                        crabka_pgtypes::ElemType::Text,
-                        object.expressions.into_iter().map(Datum::Text).collect(),
-                    ))
-                })
-                .unwrap_or(Datum::Null),
-            Datum::Array(crabka_pgtypes::ArrayValue::new(
-                crabka_pgtypes::ElemType::Text,
-                object.kinds.into_iter().map(Datum::Text).collect(),
-            )),
-            Datum::Bool(data.inherited),
-            data.ndistinct.map_or(Datum::Null, Datum::Text),
-            data.dependencies.map_or(Datum::Null, Datum::Text),
-            mcv_values.unwrap_or(Datum::Null),
-            mcv_nulls.unwrap_or(Datum::Null),
-            mcv_frequencies.unwrap_or(Datum::Null),
-            mcv_base_frequencies.unwrap_or(Datum::Null),
-        ]);
+                    })
+            });
+            let mcv_base_frequencies = mcv.as_ref().and_then(|items| {
+                items
+                    .iter()
+                    .map(|item| item.base_frequency.parse::<f64>().ok().map(Datum::Float8))
+                    .collect::<Option<Vec<_>>>()
+                    .map(|values| {
+                        Datum::Array(crabka_pgtypes::ArrayValue::new(
+                            crabka_pgtypes::ElemType::Float8,
+                            values,
+                        ))
+                    })
+            });
+            rows.push(vec![
+                text(&table.name.schema),
+                text(&table.name.name),
+                text(&object.name.schema),
+                text(&object.name.name),
+                text(&object.owner),
+                (!attnames.is_empty())
+                    .then(|| {
+                        Datum::Array(crabka_pgtypes::ArrayValue::new(
+                            crabka_pgtypes::ElemType::Text,
+                            attnames,
+                        ))
+                    })
+                    .unwrap_or(Datum::Null),
+                (!object.expressions.is_empty())
+                    .then(|| {
+                        Datum::Array(crabka_pgtypes::ArrayValue::new(
+                            crabka_pgtypes::ElemType::Text,
+                            object
+                                .expressions
+                                .iter()
+                                .cloned()
+                                .map(Datum::Text)
+                                .collect(),
+                        ))
+                    })
+                    .unwrap_or(Datum::Null),
+                Datum::Array(crabka_pgtypes::ArrayValue::new(
+                    crabka_pgtypes::ElemType::Text,
+                    object.kinds.iter().cloned().map(Datum::Text).collect(),
+                )),
+                Datum::Bool(data.inherited),
+                data.ndistinct.clone().map_or(Datum::Null, Datum::Text),
+                data.dependencies.clone().map_or(Datum::Null, Datum::Text),
+                mcv_values.unwrap_or(Datum::Null),
+                mcv_nulls.unwrap_or(Datum::Null),
+                mcv_frequencies.unwrap_or(Datum::Null),
+                mcv_base_frequencies.unwrap_or(Datum::Null),
+            ]);
+        }
     }
     Ok(rows)
 }
@@ -3655,7 +3664,6 @@ pub(crate) fn pg_stats_ext_exprs_rows(
     let tables = crabka_pgcatalog::list_tables(catalog_kv)?;
     let mut rows = Vec::new();
     for object in crabka_pgcatalog::statistics::list(catalog_kv)? {
-        let Some(data) = object.data else { continue };
         let Some(table) = tables.iter().find(|table| table.id == object.table_id) else {
             continue;
         };
@@ -3664,40 +3672,45 @@ pub(crate) fn pg_stats_ext_exprs_rows(
         {
             continue;
         }
-        for (expression, stats) in object.expressions.iter().zip(data.expression_stats.iter()) {
-            rows.push(vec![
-                text(&table.name.schema),
-                text(&table.name.name),
-                text(&object.name.schema),
-                text(&object.name.name),
-                text(&object.owner),
-                text(expression),
-                Datum::Bool(data.inherited),
-                stats
-                    .null_frac
-                    .as_deref()
-                    .and_then(|value| value.parse::<f32>().ok().map(Datum::Float4))
-                    .unwrap_or(Datum::Null),
-                stats.avg_width.map_or(Datum::Null, Datum::Int4),
-                stats
-                    .n_distinct
-                    .as_deref()
-                    .and_then(|value| value.parse::<f32>().ok().map(Datum::Float4))
-                    .unwrap_or(Datum::Null),
-                stats
-                    .most_common_vals
-                    .clone()
-                    .map_or(Datum::Null, Datum::Text),
-                stats
-                    .most_common_freqs
-                    .as_deref()
-                    .map_or(Ok(Datum::Null), float4_array)?,
-                Datum::Null,
-                Datum::Null,
-                Datum::Null,
-                Datum::Null,
-                Datum::Null,
-            ]);
+        for data in [object.data.as_ref(), object.inherited_data.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            for (expression, stats) in object.expressions.iter().zip(data.expression_stats.iter()) {
+                rows.push(vec![
+                    text(&table.name.schema),
+                    text(&table.name.name),
+                    text(&object.name.schema),
+                    text(&object.name.name),
+                    text(&object.owner),
+                    text(expression),
+                    Datum::Bool(data.inherited),
+                    stats
+                        .null_frac
+                        .as_deref()
+                        .and_then(|value| value.parse::<f32>().ok().map(Datum::Float4))
+                        .unwrap_or(Datum::Null),
+                    stats.avg_width.map_or(Datum::Null, Datum::Int4),
+                    stats
+                        .n_distinct
+                        .as_deref()
+                        .and_then(|value| value.parse::<f32>().ok().map(Datum::Float4))
+                        .unwrap_or(Datum::Null),
+                    stats
+                        .most_common_vals
+                        .clone()
+                        .map_or(Datum::Null, Datum::Text),
+                    stats
+                        .most_common_freqs
+                        .as_deref()
+                        .map_or(Ok(Datum::Null), float4_array)?,
+                    Datum::Null,
+                    Datum::Null,
+                    Datum::Null,
+                    Datum::Null,
+                    Datum::Null,
+                ]);
+            }
         }
     }
     Ok(rows)

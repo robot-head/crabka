@@ -2442,7 +2442,12 @@ fn pg_statistic_ext_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 fn pg_statistic_ext_data_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     crabka_pgcatalog::statistics::list(kv)?
         .into_iter()
-        .filter_map(|object| object.data.map(|data| (object.oid, data)))
+        .flat_map(|object| {
+            [object.data, object.inherited_data]
+                .into_iter()
+                .flatten()
+                .map(move |data| (object.oid, data))
+        })
         .map(|(oid, data)| {
             let expression_stats = (!data.expression_stats.is_empty()).then(|| {
                 text(

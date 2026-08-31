@@ -12,7 +12,7 @@ use crate::{CatalogError, CommentObject, RelationName, TableId, set_comment_op};
 pub const STATISTICS_OID_BASE: u32 = 180_000;
 const PREFIX: &[u8] = b"\0\0\0\0catalog_statistics/";
 const NEXT_OID_KEY: &[u8] = b"\0\0\0\0meta/next_statistics_oid";
-const VERSION: u8 = 4;
+const VERSION: u8 = 5;
 
 /// The derived `pg_statistic_ext_data` payload for one statistics object.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,8 +143,10 @@ pub struct Statistics {
     pub kinds: Vec<String>,
     /// Deparsed expressions in definition order.
     pub expressions: Vec<String>,
-    /// Absent until `ANALYZE` has derived the payload, or when its target is zero.
+    /// The `stxdinherit = false` payload, absent until `ANALYZE` derives it.
     pub data: Option<StatisticsData>,
+    /// The `stxdinherit = true` payload for an inherited or partitioned scan.
+    pub inherited_data: Option<StatisticsData>,
 }
 
 fn key(name: &RelationName) -> Vec<u8> {
@@ -270,18 +272,23 @@ fn encode(object: &Statistics) -> Vec<u8> {
     }
     push_strings(&mut out, &object.kinds);
     push_strings(&mut out, &object.expressions);
-    match &object.data {
+    push_data(&mut out, &object.data);
+    push_data(&mut out, &object.inherited_data);
+    out
+}
+
+fn push_data(out: &mut Vec<u8>, data: &Option<StatisticsData>) {
+    match data {
         None => out.push(0),
         Some(data) => {
             out.push(1);
             out.push(u8::from(data.inherited));
-            push_optional_string(&mut out, data.ndistinct.as_deref());
-            push_optional_string(&mut out, data.dependencies.as_deref());
-            push_optional_string(&mut out, data.mcv.as_deref());
-            push_expression_stats(&mut out, &data.expression_stats);
+            push_optional_string(out, data.ndistinct.as_deref());
+            push_optional_string(out, data.dependencies.as_deref());
+            push_optional_string(out, data.mcv.as_deref());
+            push_expression_stats(out, &data.expression_stats);
         }
     }
-    out
 }
 
 fn decode(value: &[u8]) -> Result<Statistics, CatalogError> {
@@ -302,17 +309,8 @@ fn decode(value: &[u8]) -> Result<Statistics, CatalogError> {
     }
     let kinds = take_strings(&mut input)?;
     let expressions = take_strings(&mut input)?;
-    let data = match take_u8(&mut input)? {
-        0 => None,
-        1 => Some(StatisticsData {
-            inherited: take_u8(&mut input)? != 0,
-            ndistinct: take_optional_string(&mut input)?,
-            dependencies: take_optional_string(&mut input)?,
-            mcv: take_optional_string(&mut input)?,
-            expression_stats: take_expression_stats(&mut input)?,
-        }),
-        _ => return Err(corrupt("invalid statistics data presence")),
-    };
+    let data = take_data(&mut input)?;
+    let inherited_data = take_data(&mut input)?;
     if !input.is_empty() {
         return Err(corrupt("trailing statistics record bytes"));
     }
@@ -326,7 +324,22 @@ fn decode(value: &[u8]) -> Result<Statistics, CatalogError> {
         kinds,
         expressions,
         data,
+        inherited_data,
     })
+}
+
+fn take_data(input: &mut &[u8]) -> Result<Option<StatisticsData>, CatalogError> {
+    match take_u8(input)? {
+        0 => Ok(None),
+        1 => Ok(Some(StatisticsData {
+            inherited: take_u8(input)? != 0,
+            ndistinct: take_optional_string(input)?,
+            dependencies: take_optional_string(input)?,
+            mcv: take_optional_string(input)?,
+            expression_stats: take_expression_stats(input)?,
+        })),
+        _ => return Err(corrupt("invalid statistics data presence")),
+    }
 }
 
 fn push_string(out: &mut Vec<u8>, value: &str) {
@@ -466,6 +479,7 @@ mod tests {
             kinds: vec!["d".into(), "m".into()],
             expressions: vec!["(b + 1)".into()],
             data: None,
+            inherited_data: None,
         }
     }
 
@@ -510,6 +524,13 @@ mod tests {
                 most_common_freqs: Some("{1}".into()),
             }],
         });
+        record.inherited_data = Some(StatisticsData {
+            inherited: true,
+            ndistinct: Some(r#"{"1, 2": 4}"#.into()),
+            dependencies: Some(r#"{"1 => 2": 1.000000}"#.into()),
+            mcv: None,
+            expression_stats: Vec::new(),
+        });
         kv.write_batch(&create_ops(&kv, &record).expect("create"))
             .expect("write");
         assert!(
@@ -518,6 +539,13 @@ mod tests {
                 .expect("present")
                 .data
                 == record.data
+        );
+        assert!(
+            get(&kv, &RelationName::public("s"))
+                .expect("get")
+                .expect("present")
+                .inherited_data
+                == record.inherited_data
         );
         let mut older = encode(&record);
         older[0] -= 1;

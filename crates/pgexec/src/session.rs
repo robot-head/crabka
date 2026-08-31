@@ -6640,6 +6640,8 @@ impl SqlSession {
         let Ok(objects) = crabka_pgcatalog::statistics::list(self.catalog_kv.as_ref()) else {
             return Ok(Vec::new());
         };
+        let inherited = crate::inheritance::has_children(self.catalog_kv.as_ref(), relation)?
+            || crate::partition::is_partitioned(self.catalog_kv.as_ref(), relation)?;
         let mut ops = Vec::new();
         for mut object in objects
             .into_iter()
@@ -6664,11 +6666,20 @@ impl SqlSession {
                 }
                 if columns.is_none() {
                     object.data = None;
+                    object.inherited_data = None;
                     ops.push(crabka_pgcatalog::statistics::put_op(&object));
                 }
                 continue;
             }
-            object.data = self.collect_statistics_data(relation, table, &object).await;
+            object.data = self
+                .collect_statistics_data(relation, table, &object, false)
+                .await;
+            object.inherited_data = if inherited {
+                self.collect_statistics_data(relation, table, &object, true)
+                    .await
+            } else {
+                None
+            };
             ops.push(crabka_pgcatalog::statistics::put_op(&object));
         }
         Ok(ops)
@@ -6679,6 +6690,7 @@ impl SqlSession {
         relation: &crabka_pgcatalog::RelationName,
         table: &crabka_pgcatalog::Table,
         object: &crabka_pgcatalog::statistics::Statistics,
+        inherited: bool,
     ) -> Option<crabka_pgcatalog::statistics::StatisticsData> {
         let mut expressions = object.expressions.iter();
         let selected = object
@@ -6699,8 +6711,9 @@ impl SqlSession {
             return None;
         }
         let sql = format!(
-            "SELECT {} FROM ONLY {}.{}",
+            "SELECT {} FROM {}{}.{}",
             selected.join(", "),
+            if inherited { "" } else { "ONLY " },
             crate::catalog_fn::quote_identifier(&relation.schema),
             crate::catalog_fn::quote_identifier(&relation.name),
         );
@@ -6781,7 +6794,7 @@ impl SqlSession {
             })
             .collect();
         Some(crabka_pgcatalog::statistics::StatisticsData {
-            inherited: false,
+            inherited,
             ndistinct,
             dependencies,
             mcv,

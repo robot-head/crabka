@@ -298,6 +298,7 @@ pub(crate) fn create(
         kinds,
         expressions,
         data: None,
+        inherited_data: None,
     };
     let mut ops = Vec::new();
     if let Some(schema) = temp_schema {
