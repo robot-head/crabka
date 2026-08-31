@@ -156,10 +156,7 @@ fn statistic_column_ordinal(
     }
     let ordinal = table
         .column_index(name)
-        .ok_or_else(|| ExecError::UndefinedTableColumn {
-            column: name.into(),
-            table: table.name.name.clone(),
-        })?;
+        .ok_or_else(|| ExecError::UndefinedColumn(name.into()))?;
     if table.columns[ordinal]
         .generated
         .as_ref()
@@ -210,9 +207,14 @@ fn definition(
         validate_expression_columns(expr, table)?;
         let text = expression_text(expr);
         if !seen.insert(text.clone()) {
-            return Err(ExecError::Unsupported(
-                "duplicate expression in statistics definition".into(),
-            ));
+            return Err(if matches!(expr, Expr::Column { table: None, .. }) {
+                ExecError::Remote(crabka_pgwire::error::PgError::error(
+                    "42701",
+                    "duplicate column name in statistics definition",
+                ))
+            } else {
+                ExecError::Unsupported("duplicate expression in statistics definition".into())
+            });
         }
         match expr {
             Expr::Column { table: None, name } => {
@@ -515,5 +517,42 @@ mod tests {
             error
                 == "column \"b\" cannot be used in statistics because its type xid has no default btree operator class"
         );
+    }
+
+    #[test]
+    fn definition_distinguishes_missing_and_duplicate_columns() {
+        let missing = definition(
+            &stats(vec![
+                Expr::Column {
+                    table: None,
+                    name: "a".into(),
+                },
+                Expr::Column {
+                    table: None,
+                    name: "missing".into(),
+                },
+            ]),
+            &table(),
+        )
+        .expect_err("missing column");
+        assert!(missing.into_pg().message == "column \"missing\" does not exist");
+
+        let duplicate = definition(
+            &stats(vec![
+                Expr::Column {
+                    table: None,
+                    name: "a".into(),
+                },
+                Expr::Column {
+                    table: None,
+                    name: "a".into(),
+                },
+            ]),
+            &table(),
+        )
+        .expect_err("duplicate column")
+        .into_pg();
+        assert!(duplicate.code == "42701");
+        assert!(duplicate.message == "duplicate column name in statistics definition");
     }
 }
