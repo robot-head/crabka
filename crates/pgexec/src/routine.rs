@@ -4113,6 +4113,12 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
                 .into(),
         });
     }
+    if routine.output_params().next().is_some() && plpgsql_has_return_value(&block) {
+        return Err(ExecError::FunctionError {
+            sqlstate: "42804",
+            message: "RETURN cannot have a parameter in function with OUT parameters".into(),
+        });
+    }
     Ok(block)
 }
 
@@ -8860,6 +8866,29 @@ mod tests {
                 .into_pg()
                 .message
                 .contains("p(integer) is a procedure")
+        );
+    }
+
+    #[test]
+    fn plpgsql_out_function_rejects_return_values_when_defined() {
+        let kv = MemKv::default();
+        let error = define(
+            &kv,
+            "CREATE FUNCTION bad_out_return(IN value int, OUT result int) LANGUAGE plpgsql AS \
+             $$ BEGIN IF true THEN RETURN value; END IF; END $$",
+        )
+        .expect_err("OUT function RETURN value is rejected");
+        assert!(sqlstate(&error) == "42804");
+        assert!(
+            error
+                .into_pg()
+                .message
+                .contains("RETURN cannot have a parameter in function with OUT parameters")
+        );
+        assert!(
+            routines_named(&kv, "bad_out_return")
+                .expect("catalog")
+                .is_empty()
         );
     }
 
