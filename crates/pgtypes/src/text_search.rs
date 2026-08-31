@@ -1,6 +1,6 @@
 //! PostgreSQL-compatible `tsvector` and `tsquery` values.
 
-use std::{collections::BTreeMap, fmt, str::FromStr};
+use std::{cmp::Ordering, collections::BTreeMap, fmt, str::FromStr};
 
 use crate::TypeError;
 
@@ -263,6 +263,372 @@ impl TsQuery {
         collect_terms(self, &mut terms);
         terms.into_iter().map(|term| term.text.as_str()).collect()
     }
+
+    /// Substitute every structural occurrence of `target` with `replacement`.
+    #[must_use]
+    pub fn rewrite(&self, target: &Self, replacement: &Self) -> Self {
+        if target == &Self::Empty {
+            return self.clone();
+        }
+        let Some(mut query) = Qtn::from_query(self) else {
+            return Self::Empty;
+        };
+        let Some(mut target) = Qtn::from_query(target) else {
+            return self.clone();
+        };
+        query.ternary_sort();
+        target.ternary_sort();
+        query
+            .rewrite(&target, Qtn::from_query(replacement).as_ref())
+            .map_or(Self::Empty, |mut query| {
+                query.binary();
+                query.into_query()
+            })
+    }
+}
+
+#[derive(Clone)]
+struct Qtn {
+    kind: QtnKind,
+    nochange: bool,
+}
+
+#[derive(Clone)]
+enum QtnKind {
+    Term(QueryTerm),
+    Not(Box<Qtn>),
+    And(Vec<Qtn>),
+    Or(Vec<Qtn>),
+    Phrase(Box<Qtn>, Box<Qtn>, u16),
+}
+
+impl Qtn {
+    fn from_query(query: &TsQuery) -> Option<Self> {
+        Some(Self {
+            kind: match query {
+                TsQuery::Empty => return None,
+                TsQuery::Term(term) => QtnKind::Term(term.clone()),
+                TsQuery::Not(inner) => QtnKind::Not(Box::new(Self::from_query(inner)?)),
+                TsQuery::And(left, right) => {
+                    QtnKind::And(vec![Self::from_query(right)?, Self::from_query(left)?])
+                }
+                TsQuery::Or(left, right) => {
+                    QtnKind::Or(vec![Self::from_query(right)?, Self::from_query(left)?])
+                }
+                TsQuery::Phrase(left, right, distance) => QtnKind::Phrase(
+                    Box::new(Self::from_query(right)?),
+                    Box::new(Self::from_query(left)?),
+                    *distance,
+                ),
+            },
+            nochange: false,
+        })
+    }
+
+    fn ternary_sort(&mut self) {
+        match &mut self.kind {
+            QtnKind::And(children) => {
+                for child in &mut *children {
+                    child.ternary_sort();
+                }
+                let mut flattened = Vec::new();
+                for child in std::mem::take(children) {
+                    match child.kind {
+                        QtnKind::And(children) => flattened.extend(children),
+                        _ => flattened.push(child),
+                    }
+                }
+                flattened.sort_by(Self::compare);
+                *children = flattened;
+            }
+            QtnKind::Or(children) => {
+                for child in &mut *children {
+                    child.ternary_sort();
+                }
+                let mut flattened = Vec::new();
+                for child in std::mem::take(children) {
+                    match child.kind {
+                        QtnKind::Or(children) => flattened.extend(children),
+                        _ => flattened.push(child),
+                    }
+                }
+                flattened.sort_by(Self::compare);
+                *children = flattened;
+            }
+            QtnKind::Not(child) => child.ternary_sort(),
+            QtnKind::Phrase(first, second, _) => {
+                first.ternary_sort();
+                second.ternary_sort();
+            }
+            QtnKind::Term(_) => {}
+        }
+    }
+
+    fn sort(&mut self) {
+        match &mut self.kind {
+            QtnKind::And(children) | QtnKind::Or(children) => {
+                for child in &mut *children {
+                    child.sort();
+                }
+                children.sort_by(Self::compare);
+            }
+            QtnKind::Not(child) => child.sort(),
+            QtnKind::Phrase(first, second, _) => {
+                first.sort();
+                second.sort();
+            }
+            QtnKind::Term(_) => {}
+        }
+    }
+
+    fn rewrite(mut self, target: &Self, replacement: Option<&Self>) -> Option<Self> {
+        if Self::compare(&self, target).is_eq() {
+            return replacement.cloned().map(|mut replacement| {
+                replacement.nochange = true;
+                replacement
+            });
+        }
+        if self.nochange {
+            return Some(self);
+        }
+        let matched_subset = match (&mut self.kind, &target.kind) {
+            (QtnKind::And(children), QtnKind::And(targets))
+            | (QtnKind::Or(children), QtnKind::Or(targets))
+                if children.len() > targets.len() && !targets.is_empty() =>
+            {
+                let mut matched = vec![false; children.len()];
+                let mut index = 0;
+                for target in targets {
+                    while index < children.len() && Self::compare(&children[index], target).is_lt()
+                    {
+                        index += 1;
+                    }
+                    if index == children.len() || !Self::compare(&children[index], target).is_eq() {
+                        return self.rewrite_children(target, replacement);
+                    }
+                    matched[index] = true;
+                    index += 1;
+                }
+                let mut retained = children
+                    .drain(..)
+                    .enumerate()
+                    .filter_map(|(index, child)| (!matched[index]).then_some(child))
+                    .collect::<Vec<_>>();
+                if let Some(mut replacement) = replacement.cloned() {
+                    replacement.nochange = true;
+                    retained.push(replacement);
+                }
+                *children = retained;
+                true
+            }
+            _ => false,
+        };
+        if matched_subset {
+            self.sort();
+            return Some(self);
+        }
+        self.rewrite_children(target, replacement)
+    }
+
+    fn rewrite_children(self, target: &Self, replacement: Option<&Self>) -> Option<Self> {
+        match self.kind {
+            QtnKind::Term(_) => Some(self),
+            QtnKind::Not(child) => (*child).rewrite(target, replacement).map(|child| Self {
+                kind: QtnKind::Not(Box::new(child)),
+                nochange: false,
+            }),
+            QtnKind::And(children) => {
+                Self::rewrite_associative(children, target, replacement, true)
+            }
+            QtnKind::Or(children) => {
+                Self::rewrite_associative(children, target, replacement, false)
+            }
+            QtnKind::Phrase(first, second, distance) => {
+                let first = (*first).rewrite(target, replacement)?;
+                let second = (*second).rewrite(target, replacement)?;
+                Some(Self {
+                    kind: QtnKind::Phrase(Box::new(first), Box::new(second), distance),
+                    nochange: false,
+                })
+            }
+        }
+    }
+
+    fn rewrite_associative(
+        children: Vec<Self>,
+        target: &Self,
+        replacement: Option<&Self>,
+        and: bool,
+    ) -> Option<Self> {
+        let mut children = children
+            .into_iter()
+            .filter_map(|child| child.rewrite(target, replacement))
+            .collect::<Vec<_>>();
+        if children.is_empty() {
+            None
+        } else if children.len() == 1 {
+            children.pop()
+        } else {
+            Some(Self {
+                kind: if and {
+                    QtnKind::And(children)
+                } else {
+                    QtnKind::Or(children)
+                },
+                nochange: false,
+            })
+        }
+    }
+
+    fn binary(&mut self) {
+        match &mut self.kind {
+            QtnKind::And(children) => Self::binary_children(children, true),
+            QtnKind::Or(children) => Self::binary_children(children, false),
+            QtnKind::Not(child) => child.binary(),
+            QtnKind::Phrase(first, second, _) => {
+                first.binary();
+                second.binary();
+            }
+            QtnKind::Term(_) => {}
+        }
+    }
+
+    fn binary_children(children: &mut Vec<Self>, and: bool) {
+        for child in &mut *children {
+            child.binary();
+        }
+        while children.len() > 2 {
+            let first = children.remove(0);
+            let second = children.remove(0);
+            let last = children.pop().expect("at least three children");
+            children.insert(
+                0,
+                Self {
+                    kind: if and {
+                        QtnKind::And(vec![first, second])
+                    } else {
+                        QtnKind::Or(vec![first, second])
+                    },
+                    nochange: false,
+                },
+            );
+            children.insert(1, last);
+        }
+    }
+
+    fn into_query(self) -> TsQuery {
+        match self.kind {
+            QtnKind::Term(term) => TsQuery::Term(term),
+            QtnKind::Not(child) => TsQuery::Not(Box::new(child.into_query())),
+            QtnKind::And(mut children) => {
+                let first = children.remove(0).into_query();
+                let second = children.remove(0).into_query();
+                combine_associative(vec![second, first], true)
+            }
+            QtnKind::Or(mut children) => {
+                let first = children.remove(0).into_query();
+                let second = children.remove(0).into_query();
+                combine_associative(vec![second, first], false)
+            }
+            QtnKind::Phrase(first, second, distance) => TsQuery::Phrase(
+                Box::new(second.into_query()),
+                Box::new(first.into_query()),
+                distance,
+            ),
+        }
+    }
+
+    fn compare(left: &Self, right: &Self) -> Ordering {
+        let rank = Self::rank(right).cmp(&Self::rank(left));
+        if !rank.is_eq() {
+            return rank;
+        }
+        match (&left.kind, &right.kind) {
+            (QtnKind::Term(left), QtnKind::Term(right)) => {
+                let checksum =
+                    legacy_crc32(right.text.as_bytes()).cmp(&legacy_crc32(left.text.as_bytes()));
+                if checksum.is_eq() {
+                    left.text.as_bytes().cmp(right.text.as_bytes())
+                } else {
+                    checksum
+                }
+            }
+            (QtnKind::Not(left), QtnKind::Not(right)) => Self::compare(left, right),
+            (QtnKind::And(left), QtnKind::And(right)) | (QtnKind::Or(left), QtnKind::Or(right)) => {
+                let child_count = right.len().cmp(&left.len());
+                if !child_count.is_eq() {
+                    return child_count;
+                }
+                for (left, right) in left.iter().zip(right) {
+                    let comparison = Self::compare(left, right);
+                    if !comparison.is_eq() {
+                        return comparison;
+                    }
+                }
+                Ordering::Equal
+            }
+            (
+                QtnKind::Phrase(left_first, left_second, left_distance),
+                QtnKind::Phrase(right_first, right_second, right_distance),
+            ) => Self::compare(left_first, right_first)
+                .then_with(|| Self::compare(left_second, right_second))
+                .then_with(|| right_distance.cmp(left_distance)),
+            _ => unreachable!("equal query ranks have the same variant"),
+        }
+    }
+
+    const fn rank(query: &Self) -> u8 {
+        match query.kind {
+            QtnKind::Term(_) => 1,
+            QtnKind::Not(_) => 2,
+            QtnKind::And(_) => 3,
+            QtnKind::Or(_) => 4,
+            QtnKind::Phrase(_, _, _) => 5,
+        }
+    }
+}
+
+fn combine_associative(parts: Vec<TsQuery>, and: bool) -> TsQuery {
+    let mut flattened = Vec::new();
+    for part in parts {
+        flatten_associative(part, and, &mut flattened);
+    }
+    flattened
+        .into_iter()
+        .reduce(|left, right| {
+            if and {
+                TsQuery::And(Box::new(left), Box::new(right))
+            } else {
+                TsQuery::Or(Box::new(left), Box::new(right))
+            }
+        })
+        .unwrap_or(TsQuery::Empty)
+}
+
+fn flatten_associative(query: TsQuery, and: bool, flattened: &mut Vec<TsQuery>) {
+    match (and, query) {
+        (true, TsQuery::And(left, right)) | (false, TsQuery::Or(left, right)) => {
+            flatten_associative(*left, and, flattened);
+            flatten_associative(*right, and, flattened);
+        }
+        (_, query) => flattened.push(query),
+    }
+}
+
+fn legacy_crc32(bytes: &[u8]) -> i32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        let mut table = (crc >> 24) ^ u32::from(*byte);
+        for _ in 0..8 {
+            table = if table & 1 == 0 {
+                table >> 1
+            } else {
+                (table >> 1) ^ 0xedb8_8320
+            };
+        }
+        crc = table ^ (crc << 8);
+    }
+    i32::from_ne_bytes((crc ^ u32::MAX).to_ne_bytes())
 }
 
 fn collect_terms<'a>(query: &'a TsQuery, terms: &mut Vec<&'a QueryTerm>) {
@@ -734,6 +1100,35 @@ mod tests {
         assert_eq!(
             query.to_string().parse::<TsQuery>().expect("round trip"),
             query
+        );
+    }
+
+    #[test]
+    fn query_rewrite_matches_associative_subtrees_and_removes_empty_replacements() {
+        let rewritten = "foo & bar & qq & new & york"
+            .parse::<TsQuery>()
+            .expect("query")
+            .rewrite(
+                &"york & new".parse().expect("target"),
+                &"big & apple | nyc | new & york & city"
+                    .parse()
+                    .expect("replacement"),
+            );
+        assert_eq!(
+            rewritten.to_string(),
+            "'foo' & 'bar' & 'qq' & ( 'city' & 'new' & 'york' | 'nyc' | 'big' & 'apple' )"
+        );
+
+        let removed = "5 & (6 | 5)"
+            .parse::<TsQuery>()
+            .expect("query")
+            .rewrite(&"5".parse().expect("target"), &TsQuery::Empty);
+        assert_eq!(removed.to_string(), "'6'");
+        assert_eq!(
+            "!5".parse::<TsQuery>()
+                .expect("query")
+                .rewrite(&"5".parse().expect("target"), &TsQuery::Empty),
+            TsQuery::Empty
         );
     }
 }

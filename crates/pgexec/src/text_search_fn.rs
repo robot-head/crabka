@@ -27,6 +27,7 @@ enum TextSearchFunc {
     NumNode,
     QueryTree,
     TsQueryPhrase,
+    TsRewrite,
     ArrayToTsVector,
     SetWeight,
     TsDelete,
@@ -453,6 +454,7 @@ fn text_search_func(name: &str) -> Option<TextSearchFunc> {
         "numnode" => TextSearchFunc::NumNode,
         "querytree" => TextSearchFunc::QueryTree,
         "tsquery_phrase" => TextSearchFunc::TsQueryPhrase,
+        "ts_rewrite" => TextSearchFunc::TsRewrite,
         "array_to_tsvector" => TextSearchFunc::ArrayToTsVector,
         "setweight" => TextSearchFunc::SetWeight,
         "ts_delete" => TextSearchFunc::TsDelete,
@@ -506,6 +508,10 @@ pub(crate) fn text_search_result_type(
             require_arity(fc, count == 2 || count == 3)?;
             ColumnType::TsQuery
         }
+        TextSearchFunc::TsRewrite => {
+            require_arity(fc, count == 3)?;
+            ColumnType::TsQuery
+        }
         TextSearchFunc::ArrayToTsVector => {
             require_arity(fc, count == 1)?;
             ColumnType::TsVector
@@ -549,10 +555,13 @@ pub(crate) fn eval_text_search(
 ) -> Result<Datum, ExecError> {
     let function = text_search_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
     let args = checked_args(fc)?;
-    let values = args
+    let mut values = args
         .iter()
         .map(&mut eval_child)
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(params) = tsquery_param_types(function, values.len()) {
+        crate::eval::coerce_unknown_args(args, &mut values, &params, ctx)?;
+    }
     if values.iter().any(Datum::is_null) {
         return Ok(Datum::Null);
     }
@@ -599,6 +608,7 @@ pub(crate) fn eval_text_search(
             _ => Err(undefined_function(&fc.name)),
         },
         TextSearchFunc::TsQueryPhrase => query_phrase(fc, &values),
+        TextSearchFunc::TsRewrite => ts_rewrite(fc, &values),
         TextSearchFunc::ArrayToTsVector => array_to_vector(fc, &values),
         TextSearchFunc::SetWeight => set_weight(fc, &values),
         TextSearchFunc::TsDelete => delete_terms(fc, &values),
@@ -608,6 +618,16 @@ pub(crate) fn eval_text_search(
         TextSearchFunc::TsLexize => lexize(fc, &values, catalog),
         TextSearchFunc::JsonbToTsVector => jsonb_to_vector(fc, &values, catalog),
         TextSearchFunc::JsonToTsVector => json_to_vector(fc, &values, catalog),
+    }
+}
+
+fn tsquery_param_types(function: TextSearchFunc, count: usize) -> Option<Vec<Option<ColumnType>>> {
+    let query = Some(ColumnType::TsQuery);
+    match (function, count) {
+        (TextSearchFunc::TsQueryPhrase, 2) => Some(vec![query, query]),
+        (TextSearchFunc::TsQueryPhrase, 3) => Some(vec![query, query, Some(ColumnType::Int4)]),
+        (TextSearchFunc::TsRewrite, 3) => Some(vec![query, query, query]),
+        _ => None,
     }
 }
 
@@ -1269,6 +1289,24 @@ fn query_phrase(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
     )))
 }
 
+fn ts_rewrite(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let [query, target, replacement] = values else {
+        return Err(undefined_function(&fc.name));
+    };
+    let query = tsquery_argument(query)?;
+    let target = tsquery_argument(target)?;
+    let replacement = tsquery_argument(replacement)?;
+    Ok(Datum::TsQuery(query.rewrite(&target, &replacement)))
+}
+
+fn tsquery_argument(value: &Datum) -> Result<TsQuery, ExecError> {
+    match value {
+        Datum::TsQuery(query) => Ok(query.clone()),
+        Datum::Text(text) => text.parse().map_err(Into::into),
+        other => Err(type_error("tsquery", other)),
+    }
+}
+
 fn array_to_vector(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
     let [Datum::Array(array)] = values else {
         return values.first().map_or_else(
@@ -1842,6 +1880,35 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "'cat'"
+        );
+    }
+
+    #[test]
+    fn rewrite_accepts_implicit_tsquery_arguments() {
+        let call = FuncCall {
+            sql_syntax: false,
+            name: "ts_rewrite".into(),
+            distinct: false,
+            args: FuncArgs::Exprs(Vec::new()),
+            order_by: Vec::new(),
+            within_group: false,
+            filter: None,
+        };
+        let rewritten = ts_rewrite(
+            &call,
+            &[
+                Datum::Text("foo & bar & qq & new & york".into()),
+                Datum::Text("new & york".into()),
+                Datum::Text("big & apple | nyc | new & york & city".into()),
+            ],
+        )
+        .expect("rewrite");
+        let Datum::TsQuery(rewritten) = rewritten else {
+            panic!("ts_rewrite returns tsquery");
+        };
+        assert_eq!(
+            rewritten.to_string(),
+            "'foo' & 'bar' & 'qq' & ( 'city' & 'new' & 'york' | 'nyc' | 'big' & 'apple' )"
         );
     }
 
