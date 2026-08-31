@@ -2712,7 +2712,17 @@ impl Interpreter<'_> {
                     query,
                     dynamic_query,
                     using,
-                } => {
+                    line,
+                } => async {
+                    if self
+                        .lookup_slot(cursor)
+                        .is_some_and(|slot| slot.constant && slot.value.is_null())
+                    {
+                        return Err(ExecError::FunctionError {
+                            sqlstate: "22005",
+                            message: format!("variable \"{cursor}\" is declared CONSTANT"),
+                        });
+                    }
                     let (declared_scroll, statement) = if let Some(dynamic_query) = dynamic_query {
                         if !arguments.is_empty() {
                             return Err(ExecError::Syntax(
@@ -2805,6 +2815,8 @@ impl Interpreter<'_> {
                         .await?;
                     Ok(Flow::Next)
                 }
+                .await
+                .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "OPEN")),
                 PlPgSqlStatement::Fetch {
                     cursor,
                     direction,

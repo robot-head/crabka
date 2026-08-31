@@ -1010,6 +1010,7 @@ impl PlParser<'_> {
     }
 
     fn parse_open(&mut self) -> Result<PlPgSqlStatement, ParseError> {
+        let line = self.line();
         self.expect_word("open")?;
         let cursor = self.expect_name()?;
         let mut arguments = Vec::new();
@@ -1051,6 +1052,7 @@ impl PlParser<'_> {
             query,
             dynamic_query,
             using,
+            line,
         })
     }
 

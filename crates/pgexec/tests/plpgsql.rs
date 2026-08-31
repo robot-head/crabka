@@ -1505,6 +1505,43 @@ async fn cursor_named_arguments_are_bound_and_checked_at_definition_time() {
 }
 
 #[tokio::test]
+async fn opening_a_constant_refcursor_is_rejected() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let error = session
+        .simple_query(
+            r"
+            CREATE FUNCTION pl_constant_cursor() RETURNS refcursor LANGUAGE plpgsql AS $$
+            DECLARE cursor_ CONSTANT refcursor;
+            BEGIN OPEN cursor_ FOR SELECT 1; RETURN cursor_; END
+            $$;
+            SELECT pl_constant_cursor()
+            ",
+        )
+        .await
+        .expect_err("OPEN must not assign a constant cursor");
+    assert!(
+        error
+            .to_string()
+            .contains("variable \"cursor_\" is declared CONSTANT")
+    );
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_named_constant_cursor() RETURNS refcursor LANGUAGE plpgsql AS $$
+        DECLARE cursor_ CONSTANT refcursor := 'pl_named_constant_cursor';
+        BEGIN OPEN cursor_ FOR SELECT 1; RETURN cursor_; END
+        $$;
+        ",
+    )
+    .await;
+    assert!(
+        scalar(&mut session, "SELECT pl_named_constant_cursor()").await
+            == Some("pl_named_constant_cursor".into())
+    );
+}
+
+#[tokio::test]
 async fn execute_discards_rows_and_dynamic_dml_returning_assigns_the_first_row() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

@@ -5309,6 +5309,7 @@ pub enum PlPgSqlStatement {
         query: Option<Box<Statement>>,
         dynamic_query: Option<Expr>,
         using: Vec<Expr>,
+        line: usize,
     },
     Fetch {
         cursor: String,
