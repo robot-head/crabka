@@ -24321,6 +24321,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_statistics_requires_create_on_its_target_schema() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE ROLE statistics_owner; \
+             CREATE SCHEMA statistics_source; \
+             CREATE SCHEMA statistics_target; \
+             CREATE TABLE statistics_source.source (a int4, b int4); \
+             GRANT USAGE ON SCHEMA statistics_source, statistics_target TO statistics_owner; \
+             ALTER TABLE statistics_source.source OWNER TO statistics_owner; \
+             SET SESSION AUTHORIZATION statistics_owner",
+        )
+        .await
+        .expect("statistics privilege setup");
+        assert!(
+            sqlstate(
+                &mut s,
+                "CREATE STATISTICS statistics_target.target_stats ON a, b FROM statistics_source.source",
+            )
+            .await
+                == "42501"
+        );
+        s.simple_query(
+            "RESET SESSION AUTHORIZATION; \
+             GRANT CREATE ON SCHEMA statistics_target TO statistics_owner; \
+             SET SESSION AUTHORIZATION statistics_owner; \
+             CREATE STATISTICS statistics_target.target_stats ON a, b FROM statistics_source.source",
+        )
+        .await
+        .expect("CREATE after granting schema privilege");
+    }
+
+    #[tokio::test]
     async fn create_statistics_initializes_the_temporary_schema() {
         use assert2::assert;
 

@@ -346,6 +346,19 @@ pub(crate) fn create(
             },
         )?
     };
+    if !temporary
+        && !crabka_pgcatalog::has_schema_privilege(
+            kv,
+            &name.schema,
+            fctx.effective_role(),
+            "CREATE",
+        )?
+    {
+        return Err(ExecError::Remote(crabka_pgwire::error::PgError::error(
+            "42501",
+            format!("permission denied for schema {}", name.schema),
+        )));
+    }
     if stats.if_not_exists && crabka_pgcatalog::statistics::get(kv, &name)?.is_some() {
         return Ok((command("CREATE STATISTICS"), Vec::new()));
     }
