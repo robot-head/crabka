@@ -46,6 +46,37 @@ enum TextSearchFunc {
 
 type Catalog<'a> = Option<&'a dyn crabka_pgkv::Kv>;
 
+/// The default parser's token metadata, in PostgreSQL's stable `tokid` order.
+pub(crate) const DEFAULT_PARSER_TOKEN_TYPES: &[(i32, &str, &str)] = &[
+    (1, "asciiword", "Word, all ASCII"),
+    (2, "word", "Word, all letters"),
+    (3, "numword", "Word, letters and digits"),
+    (4, "email", "Email address"),
+    (5, "url", "URL"),
+    (6, "host", "Host"),
+    (7, "sfloat", "Scientific notation"),
+    (8, "version", "Version number"),
+    (
+        9,
+        "hword_numpart",
+        "Hyphenated word part, letters and digits",
+    ),
+    (10, "hword_part", "Hyphenated word part, all letters"),
+    (11, "hword_asciipart", "Hyphenated word part, all ASCII"),
+    (12, "blank", "Space symbols"),
+    (13, "tag", "XML tag"),
+    (14, "protocol", "Protocol head"),
+    (15, "numhword", "Hyphenated word, letters and digits"),
+    (16, "asciihword", "Hyphenated word, all ASCII"),
+    (17, "hword", "Hyphenated word, all letters"),
+    (18, "url_path", "URL path"),
+    (19, "file", "File or path name"),
+    (20, "float", "Decimal notation"),
+    (21, "int", "Signed integer"),
+    (22, "uint", "Unsigned integer"),
+    (23, "entity", "XML entity"),
+];
+
 fn text_search_func(name: &str) -> Option<TextSearchFunc> {
     Some(match name {
         "to_tsvector" => TextSearchFunc::ToTsVector,

@@ -107,6 +107,7 @@ enum Srf {
     /// payload into its documented record fields.
     PgMcvListItems,
     PgShowAllSettings,
+    TsTokenType,
     /// `pg_snapshot_xip(pg_snapshot)` → `xid8`, and `txid_snapshot_xip`, which
     /// is the same expansion reported as `bigint`. One row per running
     /// transaction the snapshot lists, ascending, and no row at all for a
@@ -338,6 +339,7 @@ fn classify(name: &str) -> Option<Srf> {
         "pg_options_to_table" => Srf::PgOptionsToTable,
         "pg_mcv_list_items" => Srf::PgMcvListItems,
         "pg_show_all_settings" => Srf::PgShowAllSettings,
+        "ts_token_type" => Srf::TsTokenType,
         "pg_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Modern),
         "txid_snapshot_xip" => Srf::SnapshotXip(SnapshotFamily::Legacy),
         "pg_partition_ancestors" => Srf::PgPartitionAncestors,
@@ -606,6 +608,14 @@ pub(crate) fn plan(
                 column("pending_restart", ColumnType::Bool),
             ]
         }
+        Srf::TsTokenType => {
+            require_arity(name, &given, (1, 1))?;
+            vec![
+                column("tokid", ColumnType::Int4),
+                column("alias", ColumnType::Text),
+                column("description", ColumnType::Text),
+            ]
+        }
         Srf::PgPartitionAncestors => {
             require_arity(name, &given, (1, 1))?;
             vec![column("relid", ColumnType::Regclass)]
@@ -816,6 +826,7 @@ pub(crate) fn rows_with_memory(
         Srf::PgOptionsToTable => pg_options_to_table_rows(vals)?,
         Srf::PgMcvListItems => pg_mcv_list_item_rows(vals)?,
         Srf::PgShowAllSettings => crate::exec::catalog_rows::pg_show_all_settings_rows()?,
+        Srf::TsTokenType => token_type_rows(&vals[0])?,
         Srf::SnapshotXip(family) => snapshot_xip_rows(family, &plan.name, &vals[0], ctx)?,
         Srf::PgPartitionAncestors => partition_ancestor_rows(&vals[0], ctx)?,
         Srf::EventDdlCommands => event_ddl_command_rows(ctx)?,
@@ -873,6 +884,7 @@ fn param_types(plan: &SrfPlan) -> Vec<Option<ColumnType>> {
         Srf::PgOptionsToTable => vec![Some(ColumnType::Array(ElemType::Text))],
         Srf::PgMcvListItems => vec![text],
         Srf::PgShowAllSettings => Vec::new(),
+        Srf::TsTokenType => vec![None],
         Srf::SnapshotXip(family) => vec![Some(family.snapshot_type())],
         // `regclass`, but resolving a *name* to a relation needs the catalog and
         // the search path, which the pure cast this drives has neither of. The
@@ -3074,6 +3086,34 @@ fn ensure_expansion_fits(
     Ok(())
 }
 
+fn token_type_rows(parser: &Datum) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let default_parser = matches!(parser, Datum::Int4(3722))
+        || matches!(parser, Datum::Text(name) if name.eq_ignore_ascii_case("default"));
+    if !default_parser {
+        let name = match parser {
+            Datum::Int4(oid) => oid.to_string(),
+            Datum::Text(name) => format!("\"{name}\""),
+            value => value
+                .column_type()
+                .map_or("unknown", ColumnType::name)
+                .to_string(),
+        };
+        return Err(ExecError::UndefinedObject(format!(
+            "text search parser {name} does not exist"
+        )));
+    }
+    Ok(crate::text_search_fn::DEFAULT_PARSER_TOKEN_TYPES
+        .iter()
+        .map(|&(id, alias, description)| {
+            vec![
+                Datum::Int4(id),
+                Datum::Text(alias.into()),
+                Datum::Text(description.into()),
+            ]
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -3261,7 +3301,9 @@ mod tests {
             "pg_input_error_info",
             "pg_listening_channels",
             "pg_options_to_table",
+            "pg_mcv_list_items",
             "pg_show_all_settings",
+            "ts_token_type",
             "pg_snapshot_xip",
             "txid_snapshot_xip",
         ] {
@@ -3283,6 +3325,34 @@ mod tests {
                 "{name} should not be a set-returning function"
             );
         }
+    }
+
+    #[test]
+    fn token_type_reports_the_default_parsers_complete_metadata() {
+        let rows = call("ts_token_type", &[text("default")]).expect("token types");
+        assert!(rows.len() == 23);
+        assert!(
+            rows[0]
+                == vec![
+                    Datum::Int4(1),
+                    Datum::Text("asciiword".into()),
+                    Datum::Text("Word, all ASCII".into()),
+                ]
+        );
+        assert!(
+            rows[22]
+                == vec![
+                    Datum::Int4(23),
+                    Datum::Text("entity".into()),
+                    Datum::Text("XML entity".into()),
+                ]
+        );
+        assert!(call("ts_token_type", &[int4(3722)]).expect("parser oid") == rows);
+        let error = call("ts_token_type", &[int4(5)])
+            .expect_err("unknown parser")
+            .into_pg();
+        assert!(error.code == "42704");
+        assert!(error.message == "text search parser 5 does not exist");
     }
 
     #[test]
@@ -3432,6 +3502,15 @@ mod tests {
                 "txid_snapshot_xip",
                 vec![snapshot_arg(ColumnType::TxidSnapshot)],
                 vec![("txid_snapshot_xip", ColumnType::Int8)],
+            ),
+            (
+                "ts_token_type",
+                vec![text("default")],
+                vec![
+                    ("tokid", ColumnType::Int4),
+                    ("alias", ColumnType::Text),
+                    ("description", ColumnType::Text),
+                ],
             ),
         ];
 

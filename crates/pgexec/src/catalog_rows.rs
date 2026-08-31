@@ -2535,10 +2535,6 @@ pub(crate) fn text_search_catalog_rows(
         .collect())
 }
 
-const TEXT_SEARCH_TOKEN_TYPES: &[i32] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18, 19, 20, 21, 22,
-];
-
 fn pg_ts_parser_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(vec![vec![
         Datum::Int4(3722),
@@ -2596,14 +2592,22 @@ fn pg_ts_config_map_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         let config_oid = crate::text_search_catalog::object_oid(&config);
         for dictionary in crate::text_search_catalog::config_dictionaries(Some(kv), &config)? {
             let dictionary_oid = crate::text_search_catalog::object_oid(&dictionary);
-            rows.extend(TEXT_SEARCH_TOKEN_TYPES.iter().map(|&token_type| {
-                vec![
-                    Datum::Int4(config_oid),
-                    Datum::Int4(token_type),
-                    Datum::Int4(1),
-                    Datum::Int4(dictionary_oid),
-                ]
-            }));
+            rows.extend(
+                crate::text_search_fn::DEFAULT_PARSER_TOKEN_TYPES
+                    .iter()
+                    .filter_map(|&(token_type, _, _)| {
+                        ((1..=11).contains(&token_type) || (15..=22).contains(&token_type)).then(
+                            || {
+                                vec![
+                                    Datum::Int4(config_oid),
+                                    Datum::Int4(token_type),
+                                    Datum::Int4(1),
+                                    Datum::Int4(dictionary_oid),
+                                ]
+                            },
+                        )
+                    }),
+            );
         }
     }
     Ok(rows)
@@ -5595,7 +5599,7 @@ mod tests {
                 .any(|row| row[1] == Datum::Text("simple".into()))
         );
         let mappings = pg_ts_config_map_rows(&kv).expect("config map rows");
-        assert!(mappings.len() == TEXT_SEARCH_TOKEN_TYPES.len() * 2);
+        assert!(mappings.len() == 19 * 2);
         assert!(mappings.iter().all(|row| {
             row[0] != Datum::Int4(0)
                 && row[1] != Datum::Int4(0)
