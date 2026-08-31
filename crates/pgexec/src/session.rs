@@ -23733,9 +23733,17 @@ mod tests {
         let engine = SqlEngine::new();
         let mut s = engine.connect();
         s.simple_query(
-            "CREATE TABLE group_expression_estimate (a int4, b int4, c int4); \
-             INSERT INTO group_expression_estimate \
-             SELECT mod(i, 13), mod(i, 17), mod(i, 19) FROM generate_series(1, 1000) s(i); \
+            "CREATE TABLE group_expression_estimate (filler1 text, filler2 numeric, a int4, b int4, filler3 date, c int4, d int4); \
+             INSERT INTO group_expression_estimate (a, b, c, filler1) \
+             SELECT i / 100, i / 100, i / 100, (i / 100)::text FROM generate_series(1, 1000) s(i); \
+             ANALYZE group_expression_estimate; \
+             CREATE STATISTICS group_expression_estimate_stats ON a, b, c FROM group_expression_estimate; \
+             ANALYZE group_expression_estimate; \
+             TRUNCATE group_expression_estimate; \
+             INSERT INTO group_expression_estimate (a, b, c, filler1) \
+             SELECT mod(i, 13), mod(i, 17), mod(i, 19), (mod(i, 23))::text FROM generate_series(1, 1000) s(i); \
+             ANALYZE group_expression_estimate; \
+             DROP STATISTICS group_expression_estimate_stats; \
              CREATE STATISTICS group_expression_estimate_stats (ndistinct) \
              ON (a + 1), (b + 100), (2 * c) FROM group_expression_estimate; \
              ANALYZE group_expression_estimate",
@@ -23744,11 +23752,11 @@ mod tests {
         .expect("expression ndistinct statistics setup");
         for (sql, rows) in [
             (
-                "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY a + 1, b + 100",
+                "EXPLAIN ANALYZE SELECT count(*) FROM group_expression_estimate GROUP BY (a+1), (b+100)",
                 221,
             ),
             (
-                "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY a + 1, b + 100, 2 * c",
+                "EXPLAIN ANALYZE SELECT count(*) FROM group_expression_estimate GROUP BY (a+1), (b+100), (2*c)",
                 1000,
             ),
         ] {
@@ -23756,13 +23764,38 @@ mod tests {
                 .await
                 .expect("expression ndistinct explain");
             assert!(
-                explain.first()
-                    == Some(&vec![format!(
+                explain
+                    .first()
+                    .and_then(|row| row.first())
+                    .is_some_and(|line| line.starts_with(&format!(
                         "HashAggregate (cost=0.00..0.00 rows={rows} width=0)"
-                    )]),
+                    ))),
                 "{sql}"
             );
         }
+        s.simple_query(
+            r#"CREATE FUNCTION group_expression_rows(text) RETURNS TABLE (estimated int, actual int)
+               LANGUAGE plpgsql AS $$
+               DECLARE line text;
+               BEGIN
+                   FOR line IN EXECUTE format('EXPLAIN ANALYZE %s', $1) LOOP
+                       RETURN QUERY SELECT (regexp_match(line, 'rows=(\d*) .* rows=(\d*)'))[1]::int,
+                                           (regexp_match(line, 'rows=(\d*) .* rows=(\d*)'))[2]::int;
+                       RETURN;
+                   END LOOP;
+               END;
+               $$"#,
+        )
+        .await
+        .expect("dynamic explain function setup");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "SELECT * FROM group_expression_rows('SELECT count(*) FROM group_expression_estimate GROUP BY (a+1), (b+100)')",
+            )
+            .await
+                == Ok(vec![vec!["221".into(), "221".into()]])
+        );
     }
 
     #[tokio::test]

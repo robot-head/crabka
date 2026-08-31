@@ -64,6 +64,10 @@ fn kinds(kinds: &[String], keys: &[i16]) -> Result<Vec<String>, ExecError> {
             })
             .collect::<Result<Vec<_>, _>>()?
     };
+    let mut kinds = kinds;
+    if keys.contains(&0) && !kinds.iter().any(|kind| kind == "e") {
+        kinds.push("e".into());
+    }
     let mut seen = BTreeSet::new();
     if kinds.iter().any(|kind| !seen.insert(kind)) {
         return Err(ExecError::Unsupported(
@@ -337,6 +341,7 @@ mod tests {
         assert!(kinds(&[], &[1, 2]).expect("default kinds") == ["d", "f", "m"]);
         assert!(kinds(&[], &[0]).expect("one expression kind") == ["e"]);
         assert!(kinds(&[], &[1, 0]).expect("mixed expression kinds") == ["d", "f", "m", "e"]);
+        assert!(kinds(&["ndistinct".into()], &[0, 0]).expect("expression kind") == ["d", "e"]);
         assert!(
             definition(
                 &stats(vec![Expr::Column {
