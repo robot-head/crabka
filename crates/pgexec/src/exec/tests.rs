@@ -871,6 +871,16 @@ async fn statistics_ddl_reports_missing_and_skipped_objects() {
             == "statistics object \"statistics_messages_missing\" does not exist, skipping"
     );
 
+    run_s(
+        &mut session,
+        "ALTER STATISTICS IF EXISTS statistics_messages_missing SET STATISTICS 1",
+    )
+    .await;
+    assert!(
+        notices.try_recv().expect("alter notice").message
+            == "statistics object \"statistics_messages_missing\" does not exist, skipping"
+    );
+
     let error = session
         .simple_query("ALTER STATISTICS statistics_messages_missing SET STATISTICS 1")
         .await

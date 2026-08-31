@@ -676,6 +676,20 @@ pub(crate) fn skipped_drop_notice(
         crabka_pgwire::error::PgError::notice(format!("{kind} \"{name}\" does not exist, skipping"))
     };
     match stmt {
+        Statement::AlterStatistics {
+            name,
+            if_exists: true,
+            ..
+        } => {
+            let resolution = resolution();
+            let Ok(name) = resolve_relation(kv, &resolution, name, SchemaDisposition::Utility)
+            else {
+                return Ok(None);
+            };
+            Ok(crabka_pgcatalog::statistics::get(kv, &name)?
+                .is_none()
+                .then(|| missing("statistics object", &name.name)))
+        }
         Statement::DropStatistics {
             names,
             if_exists: true,
