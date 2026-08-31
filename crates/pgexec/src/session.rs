@@ -27637,6 +27637,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_do_rejects_return_values() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let error = session
+            .simple_query("DO LANGUAGE plpgsql $$ BEGIN RETURN 1; END $$")
+            .await
+            .expect_err("DO RETURN value is rejected");
+        assert_eq!(error.code, "42804");
+        assert_eq!(
+            error.message,
+            "RETURN cannot have a parameter in function returning void"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_raise_using_errcode_accepts_named_conditions() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();

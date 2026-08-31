@@ -4119,42 +4119,67 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
             message: "RETURN cannot have a parameter in function with OUT parameters".into(),
         });
     }
+    if declared_returns_void(routine) && plpgsql_has_return_value(&block) {
+        return Err(ExecError::FunctionError {
+            sqlstate: "42804",
+            message: "RETURN cannot have a parameter in function returning void".into(),
+        });
+    }
+    if routine.kind == RoutineKind::Function
+        && !declared_returns_set(routine)
+        && !declared_returns_void(routine)
+        && routine.output_params().next().is_none()
+        && plpgsql_has_bare_return(&block)
+    {
+        return Err(ExecError::FunctionError {
+            sqlstate: "42601",
+            message: "missing expression at or near \";\"".into(),
+        });
+    }
     Ok(block)
 }
 
-fn plpgsql_has_return_value(block: &PlPgSqlBlock) -> bool {
-    fn statements_have_return_value(statements: &[PlPgSqlStatement]) -> bool {
+pub(crate) fn plpgsql_has_return_value(block: &PlPgSqlBlock) -> bool {
+    plpgsql_has_return(block, true)
+}
+
+fn plpgsql_has_bare_return(block: &PlPgSqlBlock) -> bool {
+    plpgsql_has_return(block, false)
+}
+
+fn plpgsql_has_return(block: &PlPgSqlBlock, has_value: bool) -> bool {
+    fn statements_have_return(statements: &[PlPgSqlStatement], has_value: bool) -> bool {
         statements.iter().any(|statement| match statement {
-            PlPgSqlStatement::Return(Some(_)) => true,
-            PlPgSqlStatement::Block(block) => plpgsql_has_return_value(block),
+            PlPgSqlStatement::Return(value) => value.is_some() == has_value,
+            PlPgSqlStatement::Block(block) => plpgsql_has_return(block, has_value),
             PlPgSqlStatement::If {
                 branches,
                 else_body,
             } => {
                 branches
                     .iter()
-                    .any(|(_, body)| statements_have_return_value(body))
-                    || statements_have_return_value(else_body)
+                    .any(|(_, body)| statements_have_return(body, has_value))
+                    || statements_have_return(else_body, has_value)
             }
             PlPgSqlStatement::Case {
                 arms, else_body, ..
             } => {
                 arms.iter()
-                    .any(|(_, body)| statements_have_return_value(body))
+                    .any(|(_, body)| statements_have_return(body, has_value))
                     || else_body
                         .as_deref()
-                        .is_some_and(statements_have_return_value)
+                        .is_some_and(|body| statements_have_return(body, has_value))
             }
-            PlPgSqlStatement::Loop { body, .. } => statements_have_return_value(body),
+            PlPgSqlStatement::Loop { body, .. } => statements_have_return(body, has_value),
             _ => false,
         })
     }
 
-    statements_have_return_value(&block.statements)
+    statements_have_return(&block.statements, has_value)
         || block
             .exceptions
             .iter()
-            .any(|handler| statements_have_return_value(&handler.statements))
+            .any(|handler| statements_have_return(&handler.statements, has_value))
 }
 
 /// A `LANGUAGE sql` routine's final query, the one whose result is the
@@ -8890,6 +8915,29 @@ mod tests {
                 .expect("catalog")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn plpgsql_scalar_return_forms_are_validated_when_defined() {
+        let kv = MemKv::default();
+        for (sql, code, message) in [
+            (
+                "CREATE FUNCTION bad_void_return() RETURNS void LANGUAGE plpgsql AS \
+                 $$ BEGIN RETURN 1; END $$",
+                "42804",
+                "RETURN cannot have a parameter in function returning void",
+            ),
+            (
+                "CREATE FUNCTION bad_scalar_return() RETURNS int LANGUAGE plpgsql AS \
+                 $$ BEGIN RETURN; END $$",
+                "42601",
+                "missing expression at or near \";\"",
+            ),
+        ] {
+            let error = define(&kv, sql).expect_err("invalid scalar RETURN is rejected");
+            assert!(sqlstate(&error) == code);
+            assert!(error.into_pg().message == message);
+        }
     }
 
     #[test]

@@ -160,6 +160,12 @@ pub(crate) async fn execute_do(
     }
     let block =
         crabka_pgparser::parse_plpgsql(body).map_err(|error| ExecError::Syntax(error.message))?;
+    if crate::routine::plpgsql_has_return_value(&block) {
+        return Err(ExecError::FunctionError {
+            sqlstate: "42804",
+            message: "RETURN cannot have a parameter in function returning void".into(),
+        });
+    }
     execute_invocation(session, block, root_frame(), "DO").await
 }
 
