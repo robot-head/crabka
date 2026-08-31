@@ -788,6 +788,12 @@ impl PlParser<'_> {
     }
 
     fn parse_return(&mut self) -> Result<PlPgSqlStatement, ParseError> {
+        let start = self.pos;
+        let line = self.source[..self.tokens[start].1]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
         self.expect_word("return")?;
         if self.eat_word("next") {
             if matches!(self.token(), Token::Semicolon) {
@@ -817,12 +823,21 @@ impl PlParser<'_> {
         }
         if matches!(self.token(), Token::Semicolon) {
             self.bump();
-            return Ok(PlPgSqlStatement::Return(None));
+            return Ok(PlPgSqlStatement::Return {
+                value: None,
+                source: None,
+                line,
+            });
         }
         let end = self.find_token(self.pos, &Token::Semicolon)?;
+        let source = self.slice_tokens(self.pos, end).trim().to_owned();
         let value = self.parse_expr_range(self.pos, end)?;
         self.pos = end + 1;
-        Ok(PlPgSqlStatement::Return(Some(value)))
+        Ok(PlPgSqlStatement::Return {
+            value: Some(value),
+            source: Some(source),
+            line,
+        })
     }
 
     fn parse_raise(&mut self) -> Result<PlPgSqlStatement, ParseError> {
@@ -1120,6 +1135,12 @@ impl PlParser<'_> {
     }
 
     fn parse_assignment(&mut self) -> Result<PlPgSqlStatement, ParseError> {
+        let start = self.pos;
+        let line = self.source[..self.tokens[start].1]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
         let target = self.parse_target()?;
         if !self.eat_assignment_operator() {
             return Err(self.error("expected assignment operator"));
@@ -1127,7 +1148,11 @@ impl PlParser<'_> {
         let end = self.find_token(self.pos, &Token::Semicolon)?;
         let value = self.parse_expr_range(self.pos, end)?;
         self.pos = end + 1;
-        Ok(PlPgSqlStatement::Assign { target, value })
+        Ok(PlPgSqlStatement::Assign {
+            target,
+            value,
+            line,
+        })
     }
 
     fn parse_target(&mut self) -> Result<PlPgSqlTarget, ParseError> {

@@ -5233,6 +5233,7 @@ pub enum PlPgSqlStatement {
     Assign {
         target: PlPgSqlTarget,
         value: Expr,
+        line: usize,
     },
     Sql {
         statement: Box<Statement>,
@@ -5265,7 +5266,11 @@ pub enum PlPgSqlStatement {
         label: Option<String>,
         when: Option<Expr>,
     },
-    Return(Option<Expr>),
+    Return {
+        value: Option<Expr>,
+        source: Option<String>,
+        line: usize,
+    },
     ReturnNext(Option<Expr>),
     ReturnQuery(Box<Statement>),
     ReturnQueryExecute {

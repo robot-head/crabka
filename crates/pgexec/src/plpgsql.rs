@@ -1160,14 +1160,14 @@ pub(crate) fn scalar_function_requires_session(
                 | PlPgSqlStatement::ReturnNext(_)
                 | PlPgSqlStatement::ReturnQuery(_)
                 | PlPgSqlStatement::ReturnQueryExecute { .. } => Ok(true),
-                PlPgSqlStatement::Assign { target, value } => {
+                PlPgSqlStatement::Assign { target, value, .. } => {
                     Ok(self.expressions(&target.subscripts)? || self.expression(value)?)
                 }
                 PlPgSqlStatement::Exit { when, .. } => match when {
                     Some(when) => self.expression(when),
                     None => Ok(false),
                 },
-                PlPgSqlStatement::Return(value) => match value {
+                PlPgSqlStatement::Return { value, .. } => match value {
                     Some(value) => self.expression(value),
                     None => Ok(false),
                 },
@@ -1538,11 +1538,16 @@ impl ScalarInterpreter<'_> {
     fn exec_statement(&mut self, statement: &PlPgSqlStatement) -> Result<ScalarFlow, ExecError> {
         match statement {
             PlPgSqlStatement::Block(block) => self.exec_block(block),
-            PlPgSqlStatement::Assign { target, value } => {
+            PlPgSqlStatement::Assign {
+                target,
+                value,
+                line,
+            } => (|| {
                 let value = self.eval(value)?;
                 self.assign_target(target, value)?;
                 Ok(ScalarFlow::Next)
-            }
+            })()
+            .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "assignment")),
             PlPgSqlStatement::If {
                 branches,
                 else_body,
@@ -1601,13 +1606,25 @@ impl ScalarInterpreter<'_> {
                     Ok(ScalarFlow::Next)
                 }
             }
-            PlPgSqlStatement::Return(value) => {
-                let value = value.as_ref().map(|expr| self.eval(expr)).transpose()?;
+            PlPgSqlStatement::Return {
+                value,
+                source,
+                line,
+            } => (|| {
+                let value = value
+                    .as_ref()
+                    .map(|expr| {
+                        self.eval(expr).map_err(|error| {
+                            plpgsql_expression_error(error, source.as_deref().unwrap_or_default())
+                        })
+                    })
+                    .transpose()?;
                 Ok(ScalarFlow::Return(match value {
                     Some(value) => value,
                     None => self.output_value(),
                 }))
-            }
+            })()
+            .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "RETURN")),
             PlPgSqlStatement::Raise(raise) => self.raise(raise).map_err(|error| {
                 plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
             }),
@@ -2174,11 +2191,19 @@ impl Interpreter<'_> {
         Box::pin(async move {
             match statement {
                 PlPgSqlStatement::Block(block) => self.exec_block(block).await,
-                PlPgSqlStatement::Assign { target, value } => {
+                PlPgSqlStatement::Assign {
+                    target,
+                    value,
+                    line,
+                } => async {
                     let (value, _) = self.eval_async(value).await?;
                     self.assign_target(target, value).await?;
                     Ok(Flow::Next)
                 }
+                .await
+                .map_err(|error| {
+                    plpgsql_statement_error(error, &self.context, *line, "assignment")
+                }),
                 PlPgSqlStatement::Sql {
                     statement,
                     into,
@@ -2225,12 +2250,12 @@ impl Interpreter<'_> {
                         self.context
                     );
                     let bound = self.bind_statement(query).map_err(|error| {
-                        ExecError::Remote(ensure_error_context(error.into_pg(), &context))
+                        ExecError::Remote(stack_error_context(error.into_pg(), &context))
                     })?;
                     let result = Box::pin(self.session.run_one(&bound))
                         .await
                         .map_err(|error| {
-                            ExecError::Remote(ensure_error_context(error.into_pg(), &context))
+                            ExecError::Remote(stack_error_context(error.into_pg(), &context))
                         })?;
                     self.last_row_count = result_row_count(&result);
                     self.set_found(self.last_row_count > 0);
@@ -2310,18 +2335,34 @@ impl Interpreter<'_> {
                         Ok(Flow::Next)
                     }
                 }
-                PlPgSqlStatement::Return(value) => {
+                PlPgSqlStatement::Return {
+                    value,
+                    source,
+                    line,
+                } => async {
                     if self.returns_set && value.is_some() {
                         return Err(ExecError::Syntax(
                             "RETURN cannot have a parameter in a set-returning function".into(),
                         ));
                     }
                     let value = match value {
-                        Some(expr) => self.eval_async(expr).await?.0,
+                        Some(expr) => {
+                            self.eval_async(expr)
+                                .await
+                                .map_err(|error| {
+                                    plpgsql_expression_error(
+                                        error,
+                                        source.as_deref().unwrap_or_default(),
+                                    )
+                                })?
+                                .0
+                        }
                         None => self.output_value(),
                     };
                     Ok(Flow::Return(value))
                 }
+                .await
+                .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "RETURN")),
                 PlPgSqlStatement::Raise(raise) => self.raise(raise).await.map_err(|error| {
                     plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
                 }),
@@ -3695,6 +3736,30 @@ fn ensure_error_context(error: PgError, context: &str) -> PgError {
     }
 }
 
+fn stack_error_context(error: PgError, context: &str) -> PgError {
+    let stacked = match error
+        .diagnostics
+        .as_deref()
+        .and_then(|diagnostics| diagnostics.context.as_ref())
+    {
+        Some(existing) => format!("{existing}\n{context}"),
+        None => context.to_owned(),
+    };
+    error.with_context(stacked)
+}
+
+fn plpgsql_expression_error(error: ExecError, source: &str) -> ExecError {
+    let error = error.into_pg();
+    if error.code == "22012" {
+        ExecError::Remote(stack_error_context(
+            error,
+            &format!("PL/pgSQL expression \"{source}\""),
+        ))
+    } else {
+        ExecError::Remote(error)
+    }
+}
+
 fn sql_statement_error(error: ExecError, routine: &Routine, statement: usize) -> ExecError {
     ExecError::Remote(ensure_error_context(
         error.into_pg(),
@@ -3708,7 +3773,7 @@ fn plpgsql_statement_error(
     line: usize,
     statement: &str,
 ) -> ExecError {
-    ExecError::Remote(ensure_error_context(
+    ExecError::Remote(stack_error_context(
         error.into_pg(),
         &format!("{context} line {line} at {statement}"),
     ))

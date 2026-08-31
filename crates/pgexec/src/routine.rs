@@ -4202,7 +4202,7 @@ fn plpgsql_has_bare_return(block: &PlPgSqlBlock) -> bool {
 fn plpgsql_has_return(block: &PlPgSqlBlock, has_value: bool) -> bool {
     fn statements_have_return(statements: &[PlPgSqlStatement], has_value: bool) -> bool {
         statements.iter().any(|statement| match statement {
-            PlPgSqlStatement::Return(value) => value.is_some() == has_value,
+            PlPgSqlStatement::Return { value, .. } => value.is_some() == has_value,
             PlPgSqlStatement::Block(block) => plpgsql_has_return(block, has_value),
             PlPgSqlStatement::If {
                 branches,

@@ -1734,3 +1734,61 @@ async fn a_function_that_owes_a_value_still_needs_a_return() {
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn assignment_and_return_errors_stack_plpgsql_statement_contexts() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_context_inner() RETURNS int4 LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'boom';
+        END
+        $$;
+        CREATE FUNCTION pl_context_outer() RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE value int4;
+        BEGIN
+          value := pl_context_inner();
+        END
+        $$;
+        CREATE FUNCTION pl_return_context() RETURNS int4 LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN 1 / 0;
+        END
+        $$;
+        ",
+    )
+    .await;
+
+    let assignment = session
+        .simple_query("SELECT pl_context_outer()")
+        .await
+        .expect_err("the assignment must retain both PL/pgSQL frames");
+    assert!(
+        assignment
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            == Some(
+                "PL/pgSQL function pl_context_inner() line 3 at RAISE\nPL/pgSQL function pl_context_outer() line 4 at assignment"
+            ),
+        "{assignment:?}"
+    );
+
+    let returned = session
+        .simple_query("SELECT pl_return_context()")
+        .await
+        .expect_err("the return expression must carry its PL/pgSQL frame");
+    assert!(
+        returned
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            == Some(
+                "PL/pgSQL expression \"1 / 0\"\nPL/pgSQL function pl_return_context() line 3 at RETURN"
+            ),
+        "{returned:?}"
+    );
+}
