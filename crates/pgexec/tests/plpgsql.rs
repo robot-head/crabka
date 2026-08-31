@@ -956,6 +956,7 @@ async fn out_functions_form_from_rows_and_set_functions_can_return_no_rows() {
         .await
             == vec![row(&["8", "done"])]
     );
+    assert!(query(&mut session, "SELECT (pl_out_row(4)).doubled").await == vec![row(&["8"])]);
     assert!(
         query(&mut session, "SELECT * FROM pl_no_rows()")
             .await
@@ -968,6 +969,39 @@ async fn out_functions_form_from_rows_and_set_functions_can_return_no_rows() {
     let (field, rows) = described(&mut session, "SELECT * FROM pl_out_scalar_rows(4)").await;
     assert!(field.name == "doubled", "{field:?}");
     assert!(rows == vec![row(&["8"])]);
+}
+
+#[tokio::test]
+async fn nested_plpgsql_out_record_fields_are_evaluated() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_reads_nested_out(fail bool) RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE value_ int4;
+        BEGIN
+          BEGIN
+            value_ := (pl_nested_out(fail)).error_code;
+          EXCEPTION WHEN others THEN RETURN 0;
+          END;
+          RETURN value_;
+        END
+        $$;
+        CREATE FUNCTION pl_nested_out(fail bool, OUT error_code int4, OUT new_id int4)
+        RETURNS record LANGUAGE plpgsql AS $$
+        BEGIN
+          IF fail THEN RAISE EXCEPTION 'fail'; END IF;
+          error_code := 1;
+          new_id := 2;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(scalar(&mut session, "SELECT pl_reads_nested_out(false)").await == Some("1".into()));
+    assert!(scalar(&mut session, "SELECT pl_reads_nested_out(true)").await == Some("0".into()));
 }
 
 #[tokio::test]
