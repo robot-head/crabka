@@ -889,6 +889,53 @@ async fn statistics_ddl_reports_missing_and_skipped_objects() {
 }
 
 #[tokio::test]
+async fn analyze_warns_when_extended_statistics_cannot_be_computed() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+    run_s(
+        &mut session,
+        "CREATE TABLE statistics_analyze_messages (a int, b int); \
+         INSERT INTO statistics_analyze_messages VALUES (1, 1), (2, 2); \
+         ALTER TABLE statistics_analyze_messages ALTER a SET STATISTICS 0; \
+         CREATE STATISTICS statistics_analyze_messages_s \
+             ON a, b FROM statistics_analyze_messages; \
+         ANALYZE statistics_analyze_messages",
+    )
+    .await;
+    let expected = "statistics object \"public.statistics_analyze_messages_s\" could not be \
+                    computed for relation \"public.statistics_analyze_messages\"";
+    assert!(notices.try_recv().expect("disabled-column warning").message == expected);
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT count(*)::text FROM pg_statistic_ext_data",
+        )
+        .await
+            == vec![text_row(&["0"])]
+    );
+
+    run_s(
+        &mut session,
+        "ALTER TABLE statistics_analyze_messages ALTER a SET STATISTICS -1; \
+         ANALYZE statistics_analyze_messages (a)",
+    )
+    .await;
+    assert!(notices.try_recv().expect("partial-analyze warning").message == expected);
+    run_s(&mut session, "ANALYZE statistics_analyze_messages").await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT count(*)::text FROM pg_statistic_ext_data",
+        )
+        .await
+            == vec![text_row(&["1"])]
+    );
+}
+
+#[tokio::test]
 async fn statistics_ddl_rejects_unsupported_source_kinds() {
     use assert2::assert;
 

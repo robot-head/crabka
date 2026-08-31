@@ -6412,7 +6412,7 @@ impl SqlSession {
             // statistics for. A synthesised catalog relation has no stored rows
             // to count, so it is accepted and then has nothing done to it.
             if table.is_some() {
-                collect.push((name.clone(), target.columns.is_none()));
+                collect.push((name.clone(), target.columns.clone()));
             }
             let (Some(columns), Some(table)) = (target.columns.as_ref(), table) else {
                 continue;
@@ -6439,7 +6439,7 @@ impl SqlSession {
                 collect = self
                     .database_wide_analyze_targets()?
                     .into_iter()
-                    .map(|name| (name, true))
+                    .map(|name| (name, None))
                     .collect();
             }
             Box::pin(self.collect_relation_statistics(collect.clone())).await?;
@@ -6519,10 +6519,10 @@ impl SqlSession {
     /// the heap directly and has no equivalent failure to report.
     async fn collect_relation_statistics(
         &mut self,
-        relations: Vec<(crabka_pgcatalog::RelationName, bool)>,
+        relations: Vec<(crabka_pgcatalog::RelationName, Option<Vec<String>>)>,
     ) -> Result<(), ExecError> {
         let mut ops = Vec::new();
-        for (name, collect_extended) in relations {
+        for (name, columns) in relations {
             if let Ok(table) = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name) {
                 for (index, column) in table.columns.iter().enumerate() {
                     if let Some(stats) = self
@@ -6576,9 +6576,10 @@ impl SqlSession {
                         }
                     }
                 }
-                if collect_extended {
-                    ops.extend(self.collect_extended_statistics(&name, &table).await);
-                }
+                ops.extend(
+                    self.collect_extended_statistics(&name, &table, columns.as_deref())
+                        .await?,
+                );
             }
             if let Some(reltuples) = self.count_relation_rows(&name).await {
                 ops.push(crate::relstats::set_reltuples_op(&name, reltuples));
@@ -6607,7 +6608,7 @@ impl SqlSession {
     /// heap scan is the physical boundary that supplies both page counts.
     async fn collect_vacuum_visibility(
         &mut self,
-        relations: &[(crabka_pgcatalog::RelationName, bool)],
+        relations: &[(crabka_pgcatalog::RelationName, Option<Vec<String>>)],
     ) -> Result<(), ExecError> {
         let mut ops = Vec::new();
         let catalog_kv = Arc::clone(&self.catalog_kv);
@@ -6634,23 +6635,43 @@ impl SqlSession {
         &mut self,
         relation: &crabka_pgcatalog::RelationName,
         table: &crabka_pgcatalog::Table,
-    ) -> Vec<crabka_pgkv::WriteOp> {
+        columns: Option<&[String]>,
+    ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
         let Ok(objects) = crabka_pgcatalog::statistics::list(self.catalog_kv.as_ref()) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let mut ops = Vec::new();
         for mut object in objects
             .into_iter()
             .filter(|object| object.table_id == table.id)
         {
-            object.data = if object.target == 0 {
-                None
-            } else {
-                self.collect_statistics_data(relation, table, &object).await
-            };
+            let disabled_column = object.keys.iter().any(|key| {
+                *key > 0
+                    && usize::try_from(*key - 1)
+                        .ok()
+                        .and_then(|index| table.columns.get(index))
+                        .is_some_and(|column| column.statistics_target == 0)
+            });
+            if columns.is_some() || object.target == 0 || disabled_column {
+                if object.target != 0 && (columns.is_some() || disabled_column) {
+                    self.plpgsql_notice(PgError::warning(format!(
+                        "statistics object \"{}.{}\" could not be computed for relation \"{}.{}\"",
+                        crabka_pgcatalog::displayed_schema(&object.name.schema),
+                        object.name.name,
+                        crabka_pgcatalog::displayed_schema(&relation.schema),
+                        relation.name,
+                    )))?;
+                }
+                if columns.is_none() {
+                    object.data = None;
+                    ops.push(crabka_pgcatalog::statistics::put_op(&object));
+                }
+                continue;
+            }
+            object.data = self.collect_statistics_data(relation, table, &object).await;
             ops.push(crabka_pgcatalog::statistics::put_op(&object));
         }
-        ops
+        Ok(ops)
     }
 
     async fn collect_statistics_data(
