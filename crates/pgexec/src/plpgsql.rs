@@ -2340,8 +2340,12 @@ impl Interpreter<'_> {
                     }
                 }
                 PlPgSqlStatement::Loop {
-                    label, kind, body, ..
-                } => self.exec_loop(label.as_deref(), kind, body).await,
+                    label,
+                    kind,
+                    body,
+                    line,
+                    ..
+                } => self.exec_loop(label.as_deref(), kind, body, *line).await,
                 PlPgSqlStatement::Exit {
                     continuing,
                     label,
@@ -2733,6 +2737,7 @@ impl Interpreter<'_> {
         label: Option<&'a str>,
         kind: &'a PlPgSqlLoop,
         body: &'a [PlPgSqlStatement],
+        line: usize,
     ) -> BoxFuture<'a, Result<Flow, ExecError>> {
         Box::pin(async move {
             match kind {
@@ -2810,9 +2815,20 @@ impl Interpreter<'_> {
                     Ok(Flow::Next)
                 }
                 PlPgSqlLoop::Query { targets, query } => {
-                    let statement = self.bind_statement(query)?;
+                    let statement = self.bind_statement(query).map_err(|error| {
+                        plpgsql_statement_error(error, &self.context, line, "FOR over SELECT rows")
+                    })?;
                     let QueryResult::Rows { fields, rows, .. } =
-                        Box::pin(self.session.run_one(&statement)).await?
+                        Box::pin(self.session.run_one(&statement))
+                            .await
+                            .map_err(|error| {
+                                plpgsql_statement_error(
+                                    error,
+                                    &self.context,
+                                    line,
+                                    "FOR over SELECT rows",
+                                )
+                            })?
                     else {
                         return Err(ExecError::Syntax("FOR query did not return rows".into()));
                     };

@@ -5260,6 +5260,7 @@ pub enum PlPgSqlStatement {
         kind: Box<PlPgSqlLoop>,
         body: Vec<PlPgSqlStatement>,
         end_label: Option<String>,
+        line: usize,
     },
     Exit {
         continuing: bool,

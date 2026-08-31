@@ -65,6 +65,14 @@ impl PlParser<'_> {
         self.tokens[self.pos].1
     }
 
+    fn line(&self) -> usize {
+        self.source[..self.offset()]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1
+    }
+
     fn at_eof(&self) -> bool {
         matches!(self.token(), Token::Eof)
     }
@@ -474,12 +482,13 @@ impl PlParser<'_> {
             return self.parse_case();
         }
         if self.at_word("loop") {
-            return self.parse_loop(label, PlPgSqlLoop::Unconditional);
+            return self.parse_loop(label, PlPgSqlLoop::Unconditional, self.line());
         }
         if self.at_word("while") {
+            let line = self.line();
             self.bump();
             let condition = self.parse_expr_to_word(&["loop"])?;
-            return self.parse_loop(label, PlPgSqlLoop::While(condition));
+            return self.parse_loop(label, PlPgSqlLoop::While(condition), line);
         }
         if self.at_word("for") {
             return self.parse_for(label);
@@ -604,6 +613,7 @@ impl PlParser<'_> {
         &mut self,
         label: Option<String>,
         kind: PlPgSqlLoop,
+        line: usize,
     ) -> Result<PlPgSqlStatement, ParseError> {
         self.expect_word("loop")?;
         self.scopes.push(ControlScope {
@@ -626,10 +636,12 @@ impl PlParser<'_> {
             kind: Box::new(kind),
             body,
             end_label,
+            line,
         })
     }
 
     fn parse_for(&mut self, label: Option<String>) -> Result<PlPgSqlStatement, ParseError> {
+        let line = self.line();
         self.expect_word("for")?;
         let targets = self.parse_targets_until_word("in")?;
         self.expect_word("in")?;
@@ -647,6 +659,7 @@ impl PlParser<'_> {
                     query,
                     using,
                 },
+                line,
             );
         }
         let reverse = self.eat_word("reverse");
@@ -683,6 +696,7 @@ impl PlParser<'_> {
                     upper,
                     step,
                 },
+                line,
             );
         }
         if reverse {
@@ -696,10 +710,12 @@ impl PlParser<'_> {
                 targets,
                 query: Box::new(query),
             },
+            line,
         )
     }
 
     fn parse_foreach(&mut self, label: Option<String>) -> Result<PlPgSqlStatement, ParseError> {
+        let line = self.line();
         self.expect_word("foreach")?;
         let target = self.parse_target()?;
         let slice = if self.eat_word("slice") {
@@ -725,6 +741,7 @@ impl PlParser<'_> {
                 slice,
                 array,
             },
+            line,
         )
     }
 
