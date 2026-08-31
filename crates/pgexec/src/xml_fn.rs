@@ -583,10 +583,11 @@ fn pi(values: &[Datum], fc: &FuncCall) -> Result<Datum, ExecError> {
         return Err(type_error("text", &values[0]));
     };
     if target.eq_ignore_ascii_case("xml") {
-        return Err(ExecError::Type(crabka_pgtypes::TypeError::Coded {
+        return Err(ExecError::FunctionErrorWithMessageDetail {
             sqlstate: "2200S",
             message: "invalid XML processing instruction".into(),
-        }));
+            detail: "XML processing instruction target name cannot be \"xml\".".into(),
+        });
     }
     let target = xml::sql_identifier_to_xml_name(target, false, false);
     let value = match rest {
@@ -597,10 +598,11 @@ fn pi(values: &[Datum], fc: &FuncCall) -> Result<Datum, ExecError> {
         _ => unreachable!("arity checked above"),
     };
     if value.is_some_and(|value| value.contains("?>")) {
-        return Err(ExecError::Type(crabka_pgtypes::TypeError::Coded {
+        return Err(ExecError::FunctionErrorWithMessageDetail {
             sqlstate: "2200S",
             message: "invalid XML processing instruction".into(),
-        }));
+            detail: "XML processing instruction cannot contain \"?>\".".into(),
+        });
     }
     Ok(Datum::Xml(match value {
         Some(value) => format!("<?{target} {}?>", value.trim_start_matches(' ')),
