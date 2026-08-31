@@ -528,6 +528,7 @@ enum McvExpr {
 #[derive(Debug)]
 enum McvPredicate {
     Equal(Vec<McvValue>),
+    Inequality { op: BinaryOp, value: McvValue },
     NotNull,
 }
 
@@ -604,7 +605,7 @@ fn extended_mcv_selectivity(
             }
             mcv_total += frequency;
             mcv_base_total += base_frequency;
-            if mcv_expr_matches(&expression, item, &clauses, &positions) {
+            if mcv_expr_matches(&expression, item, &clauses, &positions, table, ctx) {
                 mcv_selectivity += frequency;
                 mcv_base_selectivity += base_frequency;
             }
@@ -693,20 +694,30 @@ fn mcv_expr_matches(
     item: &crabka_pgcatalog::statistics::McvItem,
     clauses: &[&McvClause],
     positions: &[usize],
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
 ) -> bool {
     match expression {
         McvExpr::Clause(clause) => clauses
             .iter()
             .zip(positions)
             .find_map(|(candidate, position)| (candidate.key == clause.key).then_some(*position))
-            .is_some_and(|position| mcv_item_matches(item.values.get(position), &clause.predicate)),
+            .is_some_and(|position| {
+                mcv_item_matches(
+                    item.values.get(position),
+                    &clause.key,
+                    &clause.predicate,
+                    table,
+                    ctx,
+                )
+            }),
         McvExpr::And(left, right) => {
-            mcv_expr_matches(left, item, clauses, positions)
-                && mcv_expr_matches(right, item, clauses, positions)
+            mcv_expr_matches(left, item, clauses, positions, table, ctx)
+                && mcv_expr_matches(right, item, clauses, positions, table, ctx)
         }
         McvExpr::Or(left, right) => {
-            mcv_expr_matches(left, item, clauses, positions)
-                || mcv_expr_matches(right, item, clauses, positions)
+            mcv_expr_matches(left, item, clauses, positions, table, ctx)
+                || mcv_expr_matches(right, item, clauses, positions, table, ctx)
         }
     }
 }
@@ -751,6 +762,20 @@ fn scalar_mcv_clause_selectivity(
             })
             .sum::<f64>()
             .min(1.0),
+        McvPredicate::Inequality { op, value } => {
+            let inequality = match op {
+                BinaryOp::Lt => crate::plan::selfuncs::Inequality::Less,
+                BinaryOp::Le => crate::plan::selfuncs::Inequality::LessEqual,
+                BinaryOp::Gt => crate::plan::selfuncs::Inequality::Greater,
+                BinaryOp::Ge => crate::plan::selfuncs::Inequality::GreaterEqual,
+                _ => return default,
+            };
+            value
+                .scalar_value
+                .as_ref()
+                .and_then(|value| stats.scalar_inequality(value, inequality))
+                .unwrap_or(default)
+        }
         McvPredicate::NotNull => crate::plan::selfuncs::nulltestsel(stats.as_stats(), false),
     })
 }
@@ -760,6 +785,7 @@ fn default_mcv_selectivity(predicate: &McvPredicate) -> f64 {
         McvPredicate::Equal(values) => {
             (values.len() as f64 * crate::plan::selfuncs::DEFAULT_EQ_SEL).min(1.0)
         }
+        McvPredicate::Inequality { .. } => crate::plan::selfuncs::DEFAULT_INEQ_SEL,
         McvPredicate::NotNull => 1.0 - crate::plan::selfuncs::DEFAULT_EQ_SEL,
     }
 }
@@ -780,6 +806,12 @@ fn collect_mcv_clauses(
                 && collect_mcv_clauses(right, table, ctx, clauses)
         }
         _ => mcv_clause_for_expr(expr, table, ctx).is_some_and(|clause| {
+            if !matches!(
+                &clause.predicate,
+                McvPredicate::Equal(_) | McvPredicate::NotNull
+            ) {
+                return false;
+            }
             clauses.push(clause);
             true
         }),
@@ -797,6 +829,15 @@ fn mcv_clause_for_expr(
             left,
             right,
         } => mcv_clause(left, right, table, ctx).or_else(|| mcv_clause(right, left, table, ctx)),
+        Expr::Binary { op, left, right }
+            if matches!(
+                op,
+                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+            ) =>
+        {
+            mcv_inequality_clause(left, right, *op, table, ctx)
+                .or_else(|| mcv_inequality_clause(right, left, reverse_inequality(*op), table, ctx))
+        }
         Expr::Binary {
             op: BinaryOp::Or,
             left,
@@ -852,14 +893,84 @@ fn merge_mcv_or_clauses(clauses: Vec<McvClause>) -> Option<McvClause> {
     Some(combined)
 }
 
-fn mcv_item_matches(value: Option<&Option<String>>, predicate: &McvPredicate) -> bool {
+fn mcv_item_matches(
+    value: Option<&Option<String>>,
+    key: &GroupKey,
+    predicate: &McvPredicate,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> bool {
     match (value, predicate) {
         (Some(value), McvPredicate::Equal(wanted)) => wanted
             .iter()
             .any(|candidate| candidate.text.as_ref() == value.as_ref()),
+        (Some(Some(text)), McvPredicate::Inequality { op, value }) => {
+            let GroupKey::Attribute(attnum) = key else {
+                return false;
+            };
+            let Some(index) = usize::try_from(*attnum - 1).ok() else {
+                return false;
+            };
+            let Some(definition) = table.columns.get(index) else {
+                return false;
+            };
+            let Some(wanted) = value.scalar_value.as_ref() else {
+                return false;
+            };
+            let Ok(actual) = crate::eval::cast_value_in(
+                &crabka_pgtypes::Datum::Text(text.clone()),
+                definition.ty,
+                ctx.output_style(),
+            ) else {
+                return false;
+            };
+            let Some(ordering) = crabka_pgtypes::ops::compare(&actual, wanted).ok().flatten()
+            else {
+                return false;
+            };
+            matches!(
+                (op, ordering),
+                (BinaryOp::Lt, std::cmp::Ordering::Less)
+                    | (
+                        BinaryOp::Le,
+                        std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                    )
+                    | (BinaryOp::Gt, std::cmp::Ordering::Greater)
+                    | (
+                        BinaryOp::Ge,
+                        std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                    )
+            )
+        }
         (Some(Some(_)), McvPredicate::NotNull) => true,
         _ => false,
     }
+}
+
+fn reverse_inequality(op: BinaryOp) -> BinaryOp {
+    match op {
+        BinaryOp::Lt => BinaryOp::Gt,
+        BinaryOp::Le => BinaryOp::Ge,
+        BinaryOp::Gt => BinaryOp::Lt,
+        BinaryOp::Ge => BinaryOp::Le,
+        _ => unreachable!("only comparison operators are reversed"),
+    }
+}
+
+fn mcv_inequality_clause(
+    key_expr: &Expr,
+    literal: &Expr,
+    op: BinaryOp,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<McvClause> {
+    let key = mcv_key(key_expr, table, ctx)?;
+    let literal = crate::eval::eval(literal, &crate::scope::Scope::empty(), &[], ctx).ok()?;
+    let value = mcv_value(key.clone(), literal, table, ctx)?;
+    Some(McvClause {
+        key,
+        predicate: McvPredicate::Inequality { op, value },
+    })
 }
 
 fn null_mcv_clause(

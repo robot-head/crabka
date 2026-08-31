@@ -23833,6 +23833,18 @@ mod tests {
                     "Seq Scan on mcv_all_columns (cost=0.00..0.00 rows=50 width=0)".into()
                 ])
         );
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_all_columns WHERE a < 5 AND b < '1' AND c < 5",
+        )
+        .await
+        .expect("four-column MCV inequality explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_all_columns (cost=0.00..0.00 rows=50 width=0)".into()
+                ])
+        );
     }
 
     #[tokio::test]
