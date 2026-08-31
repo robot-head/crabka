@@ -334,7 +334,7 @@ impl PlParser<'_> {
             };
             let default = if self.eat_word("default") || self.eat_assignment_operator() {
                 let end = self.find_token(self.pos, &Token::Semicolon)?;
-                let expr = self.parse_expr_range(self.pos, end)?;
+                let expr = self.parse_declaration_default(self.pos, end)?;
                 self.pos = end;
                 Some(expr)
             } else {
@@ -1264,6 +1264,20 @@ impl PlParser<'_> {
             return Err(ParseError::new("expected expression", self.tokens[start].1));
         }
         parse_expression(self.slice_tokens(start, end).trim())
+    }
+
+    fn parse_declaration_default(&self, start: usize, end: usize) -> Result<Expr, ParseError> {
+        let source = self.slice_tokens(start, end).trim();
+        if self.find_top(start, |parser, pos| {
+            parser.word_at(pos).as_deref() == Some("from")
+        }) >= end
+        {
+            return parse_expression(source);
+        }
+        match parse(&format!("SELECT {source}"))?.into_iter().next() {
+            Some(Statement::Query(query)) => Ok(Expr::ScalarSubquery(Box::new(query))),
+            _ => unreachable!("SELECT parses as a query statement"),
+        }
     }
 
     fn parse_sql_range(&self, start: usize, end: usize) -> Result<Statement, ParseError> {

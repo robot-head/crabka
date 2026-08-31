@@ -27346,6 +27346,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_declaration_default_can_read_a_query() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE plpgsql_declaration_source (value int4); \
+                 INSERT INTO plpgsql_declaration_source VALUES (42); \
+                 CREATE FUNCTION plpgsql_declaration_default() RETURNS int4 LANGUAGE plpgsql AS $$ \
+                 DECLARE answer int4 := value FROM plpgsql_declaration_source; \
+                 BEGIN RETURN answer; END $$",
+            )
+            .await
+            .expect("function setup");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_declaration_default()")
+                    .await
+                    .expect("function call")
+            ),
+            "42"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_perform_errors_include_sql_and_function_context() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
