@@ -2615,11 +2615,11 @@ fn adopt_null_literal_type(
 /// PostgreSQL leaves a bare string literal `unknown` and resolves it against the
 /// other operand. This codebase types it `text` at once.
 ///
-/// Deliberately jsonb-only. An array must NOT adopt, because PostgreSQL's
+/// Deliberately jsonb/tsvector/tsquery-only. An array must NOT adopt, because PostgreSQL's
 /// `anyarray || anyelement` is what makes `ARRAY['a'] || 'b'` append `'b'` as an
-/// element rather than concatenating two arrays. `json` must not adopt either,
-/// and for the opposite reason: it has no `||` of its own, so `j || 'b'` is
-/// `anynonarray || text` and really does concatenate the document's text.
+/// element rather than concatenating two arrays. Ranges and `json` must not
+/// adopt either: they have no concatenation operator, so `r || 'b'` is
+/// `anynonarray || text` and really does render the value as text.
 fn adopt_string_literal_type(
     left: &Expr,
     right: &Expr,
@@ -2635,7 +2635,6 @@ fn adopt_string_literal_type(
                 | ColumnType::TsQuery
                 | ColumnType::Uuid
                 | ColumnType::Enum(_)
-                | ColumnType::Range(_)
         )
     };
     if untyped(left) && adopts(rt) {
@@ -7539,6 +7538,7 @@ mod tests {
         ));
         let cases: &[(&str, Datum)] = &[
             ("s || i", Datum::Text("a2".into())),
+            ("'x' || '[0,1]'::int4range", Datum::Text("x[0,2)".into())),
             (
                 r#"j || '{"c": 3}'::jsonb"#,
                 jb(r#"{"a": 1, "b": [10, 20], "c": 3}"#),
