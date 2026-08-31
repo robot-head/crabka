@@ -166,6 +166,32 @@ pub(crate) fn decode_catalog_stats(
     })
 }
 
+/// Estimate `constant = ANY(array_column)` from PostgreSQL's MCELEM slot.
+pub(crate) fn array_element_selectivity(
+    stats: &crate::attrstats::AttributeStats,
+    element_type: ColumnType,
+    constant: &Datum,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<f64> {
+    let elements = decode_stat_array(stats.most_common_elems.as_deref()?, element_type, ctx)?;
+    let frequencies = decode_frequency_array(stats.most_common_elem_freqs.as_deref()?)?;
+    if frequencies.len() != elements.len() + 3 {
+        return None;
+    }
+    let selectivity = elements
+        .iter()
+        .zip(&frequencies)
+        .find_map(|(element, frequency)| {
+            (crabka_pgtypes::ops::compare(element, constant).ok()?
+                == Some(std::cmp::Ordering::Equal))
+            .then_some(*frequency)
+        })
+        .unwrap_or_else(|| DEFAULT_MATCH_SEL.min(frequencies[elements.len()] / 2.0));
+    Some(probability(
+        selectivity * (1.0 - f64::from(stats.null_frac.unwrap_or_default())),
+    ))
+}
+
 impl<T> ColumnStats<'_, T> {
     fn null_frac(&self) -> f64 {
         probability(self.null_frac)

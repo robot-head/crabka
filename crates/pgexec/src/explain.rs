@@ -637,6 +637,11 @@ fn restriction_selectivity(
     expr: &Expr,
 ) -> f64 {
     if let Some(selectivity) =
+        quantified_array_containment_selectivity(catalog_kv, table, ctx, expr)
+    {
+        return selectivity;
+    }
+    if let Some(selectivity) =
         extended_mcv_or_selectivity(catalog_kv, table, rows, inherited, ctx, expr)
     {
         return selectivity;
@@ -1760,6 +1765,42 @@ fn quantified_all_equality_selectivity(
     Some(scalar_mcv_clause_selectivity(
         catalog_kv, table, rows, ctx, &clause,
     ))
+}
+
+fn quantified_array_containment_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+) -> Option<f64> {
+    let Expr::QuantifiedArray {
+        expr: constant,
+        op: BinaryOp::Eq,
+        all: false,
+        array,
+    } = expr
+    else {
+        return None;
+    };
+    let column = column_name(array)?;
+    let (position, definition) = table
+        .columns
+        .iter()
+        .enumerate()
+        .find(|(_, definition)| definition.name == column)?;
+    let element_type = definition.ty.array_element()?.column_type();
+    let constant = crate::eval::eval(constant, &crate::scope::Scope::empty(), &[], ctx).ok()?;
+    let constant = crate::eval::cast_value_in(&constant, element_type, ctx.output_style()).ok()?;
+    let stats = crate::attrstats::get(
+        catalog_kv,
+        &crate::attrstats::AttributeStatsKey {
+            relation: table.name.clone(),
+            attnum: i16::try_from(position + 1).ok()?,
+            inherited: false,
+        },
+    )
+    .ok()??;
+    crate::plan::selfuncs::array_element_selectivity(&stats, element_type, &constant, ctx)
 }
 
 fn quantified_inequality_selectivity(

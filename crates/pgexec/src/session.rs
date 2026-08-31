@@ -24515,6 +24515,18 @@ mod tests {
                     "Seq Scan on mcv_all_columns (cost=0.00..0.00 rows=150 width=0)".into()
                 ])
         );
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_all_columns WHERE a = ANY (ARRAY[4, 5]) AND 4 = ANY(ia)",
+        )
+        .await
+        .expect("array MCV explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_all_columns (cost=0.00..0.00 rows=4 width=0)".into()
+                ])
+        );
     }
 
     #[tokio::test]
