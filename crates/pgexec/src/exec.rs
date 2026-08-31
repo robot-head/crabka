@@ -138,7 +138,7 @@ mod shared;
 use shared::*;
 pub(crate) use shared::{
     DEFAULT_DATABASE, INFORMATION_SCHEMA_NAMESPACE_OID, PG_CATALOG_NAMESPACE_OID,
-    PUBLIC_NAMESPACE_OID, column_mapping, permuted_row, read_seq_kv,
+    PG_TOAST_NAMESPACE_OID, PUBLIC_NAMESPACE_OID, column_mapping, permuted_row, read_seq_kv,
 };
 
 #[cfg(test)]

@@ -402,11 +402,26 @@ pub(crate) fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exec
         // holds none here at all, so neither carries a store. Every other
         // stored kind — an ordinary relation, a partition, a materialized
         // view — is measured.
-        if matches!(relkind, "r" | "m") && needs_toast_relation(&table) {
+        let has_toast = table_has_toast_relation(catalog_kv, &table)?;
+        if has_toast {
             row.reltoastrelid = toast_relation_oid(table.id)?;
         }
         table_owner_oids.insert(table.name.clone(), row.relowner);
         rows.push(row.build()?);
+        if has_toast {
+            let toast_oid = toast_relation_oid(table.id)?;
+            let toast_name = toast_relation_name(table.id)?;
+            let mut toast = PgClassRow::new(
+                toast_oid,
+                &toast_name.name,
+                "t",
+                crate::exec::PG_TOAST_NAMESPACE_OID,
+            );
+            toast.relnatts = 3;
+            toast.relowner = table_owner_oids[&table.name];
+            toast.relpersistence = crabka_pgcatalog::relpersistence_of(&table.name.schema);
+            rows.push(toast.build()?);
+        }
     }
     for view in crabka_pgcatalog::list_views(catalog_kv)? {
         let oid = crate::catalog_rel::view_oids(catalog_kv)?
@@ -587,18 +602,14 @@ pub(crate) fn virtual_pg_class_properties(name: &str, oid: i32) -> (&'static str
     }
 }
 
+/// Schema that holds automatically-created TOAST relations.
+pub(crate) const PG_TOAST_SCHEMA: &str = "pg_toast";
+
 /// First `pg_class` oid of the band reserved for TOAST relations.
 ///
-/// The band sits above every other one [`crate::catalog_rel`] hands out, and is
-/// the same 9,000 wide, so a table's TOAST oid is its catalog id offset by this
-/// base — stable across restarts, and distinct per relation.
-///
-/// No `pg_class` row carries one of these oids. crabka stores wide values
-/// inline, so the TOAST relation the oid names does not exist; the oid records
-/// only that `PostgreSQL` would have built one. A query that joins
-/// `reltoastrelid` back to `pg_class.oid` therefore finds nothing — which is
-/// the same nothing the zero it replaces found.
-const TOAST_OID_BASE: i32 = 160_000;
+/// The band follows the composite-relation and composite-array bands, and is
+/// the same 9,000 wide, so it cannot collide with another `pg_class` kind.
+const TOAST_OID_BASE: i32 = 180_000;
 
 /// Width of the TOAST oid band, which mirrors `catalog_rel`'s.
 const TOAST_OID_BAND_WIDTH: u32 = 9_000;
@@ -625,6 +636,69 @@ pub(crate) fn toast_relation_oid(table_id: u32) -> Result<i32, ExecError> {
         .filter(|_| table_id < TOAST_OID_BAND_WIDTH)
         .and_then(|id| TOAST_OID_BASE.checked_add(id))
         .ok_or_else(|| ExecError::Unsupported("toast oid leaves its band".into()))
+}
+
+/// The catalog name PostgreSQL gives a table's automatically-created TOAST
+/// relation. Its suffix is the owning table's `pg_class` oid, not the TOAST
+/// relation's own oid.
+pub(crate) fn toast_relation_name(
+    table_id: u32,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
+    Ok(crabka_pgcatalog::RelationName::new(
+        PG_TOAST_SCHEMA,
+        format!(
+            "pg_toast_{}",
+            crate::catalog_rel::table_relation_oid(table_id)?
+        ),
+    ))
+}
+
+/// Whether `table` has the TOAST relation that its `pg_class.reltoastrelid`
+/// reports. Partitions and foreign tables have no local storage to toast.
+pub(crate) fn table_has_toast_relation(
+    catalog_kv: &dyn Kv,
+    table: &Table,
+) -> Result<bool, ExecError> {
+    Ok(table.foreign.is_none()
+        && !crate::partition::is_partitioned(catalog_kv, &table.name)?
+        && needs_toast_relation(table))
+}
+
+/// Resolve a live synthetic TOAST relation oid to its catalog name.
+pub(crate) fn toast_relation_for_oid(
+    catalog_kv: &dyn Kv,
+    oid: i32,
+) -> Result<Option<crabka_pgcatalog::RelationName>, ExecError> {
+    let Some(table_id) = oid
+        .checked_sub(TOAST_OID_BASE)
+        .filter(|id| (0..i32::try_from(TOAST_OID_BAND_WIDTH).unwrap_or_default()).contains(id))
+        .map(i32::unsigned_abs)
+    else {
+        return Ok(None);
+    };
+    let Ok(table) = crabka_pgcatalog::table_by_id(catalog_kv, table_id) else {
+        return Ok(None);
+    };
+    table_has_toast_relation(catalog_kv, &table)?
+        .then(|| toast_relation_name(table.id))
+        .transpose()
+}
+
+/// Resolve a live synthetic TOAST relation name to its owning table.
+pub(crate) fn toast_relation_for_name(
+    catalog_kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<Option<Table>, ExecError> {
+    if name.schema != PG_TOAST_SCHEMA {
+        return Ok(None);
+    }
+    for table in crabka_pgcatalog::list_tables(catalog_kv)? {
+        if table_has_toast_relation(catalog_kv, &table)? && toast_relation_name(table.id)? == *name
+        {
+            return Ok(Some(table));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether a relation of this shape gets a TOAST relation, which is

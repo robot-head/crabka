@@ -27801,18 +27801,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plpgsql_declaration_default_can_query_catalog_with_regclass() {
+    async fn plpgsql_declaration_default_can_query_catalog_with_toast_regclass() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
         session
             .simple_query(
-                "CREATE TABLE plpgsql_declaration_catalog_source (value int4); \
+                "CREATE TABLE plpgsql_declaration_catalog_source (value int4, detail text); \
                  DO $$ DECLARE relation_name text := reltoastrelid::regclass FROM pg_class \
                  WHERE oid = 'plpgsql_declaration_catalog_source'::regclass; \
                  BEGIN RAISE NOTICE 'catalog query succeeded'; END $$",
             )
             .await
             .expect("catalog declaration query");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query(
+                        "SELECT reltoastrelid::regclass::text FROM pg_class \
+                         WHERE oid = 'plpgsql_declaration_catalog_source'::regclass",
+                    )
+                    .await
+                    .expect("TOAST regclass"),
+            ),
+            "pg_toast.pg_toast_20001"
+        );
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query(
+                        "SELECT relkind FROM pg_class WHERE oid = (SELECT reltoastrelid \
+                         FROM pg_class WHERE oid = 'plpgsql_declaration_catalog_source'::regclass)",
+                    )
+                    .await
+                    .expect("TOAST pg_class row"),
+            ),
+            "t"
+        );
+        session
+            .simple_query(
+                "DO $$ DECLARE relation_name text := reltoastrelid::regclass FROM pg_class \
+                 WHERE oid = 'plpgsql_declaration_catalog_source'::regclass; \
+                 BEGIN EXECUTE 'CREATE STATISTICS toast_statistics ON value, detail FROM ' || relation_name; \
+                 EXCEPTION WHEN wrong_object_type THEN RAISE NOTICE 'toast rejected'; END $$",
+            )
+            .await
+            .expect("TOAST statistics wrong-kind error");
     }
 
     #[tokio::test]

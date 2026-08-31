@@ -470,7 +470,7 @@ fn fnv1a(value: &str) -> u32 {
 
 /// `pg_namespace.oid` of a schema by name.
 ///
-/// The three schemas `PostgreSQL` itself bootstraps keep their real oids, so a
+/// The four schemas `PostgreSQL` itself bootstraps keep their real oids, so a
 /// client that hard-codes 2200 for `public` still matches. A user-created
 /// schema gets a stable hashed slot in its own reserved band, exactly as views
 /// and sequences do.
@@ -478,6 +478,7 @@ pub(crate) fn namespace_oid(schema: &str) -> i32 {
     match schema {
         "public" => crate::exec::PUBLIC_NAMESPACE_OID,
         "pg_catalog" => crate::exec::PG_CATALOG_NAMESPACE_OID,
+        "pg_toast" => crate::exec::PG_TOAST_NAMESPACE_OID,
         "information_schema" => crate::exec::INFORMATION_SCHEMA_NAMESPACE_OID,
         other => {
             let slot =
@@ -916,6 +917,9 @@ fn band_slot(base: i32, oid: i32) -> Option<u32> {
 pub(crate) fn relation_for_oid(kv: &dyn Kv, oid: i32) -> Result<Option<RelationName>, ExecError> {
     if let Some(id) = band_slot(TABLE_OID_BASE, oid) {
         return Ok(crabka_pgcatalog::relation_name_of(kv, id)?);
+    }
+    if let Some(name) = crate::exec::catalog_rows::toast_relation_for_oid(kv, oid)? {
+        return Ok(Some(name));
     }
     if band_slot(INDEX_OID_BASE, oid).is_some() {
         return Ok(crabka_pgcatalog::list_indexes(kv)?

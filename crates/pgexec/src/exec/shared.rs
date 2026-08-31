@@ -179,6 +179,7 @@ pub(super) fn route_row_to_leaf(
 }
 
 pub(crate) const PG_CATALOG_NAMESPACE_OID: i32 = 11;
+pub(crate) const PG_TOAST_NAMESPACE_OID: i32 = 99;
 pub(crate) const INFORMATION_SCHEMA_NAMESPACE_OID: i32 = 13_370;
 pub(crate) const PUBLIC_NAMESPACE_OID: i32 = 2200;
 /// The database name a session falls back to when nothing told it one.

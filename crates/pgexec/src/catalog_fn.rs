@@ -2912,6 +2912,9 @@ pub(crate) fn relation_oid(kv: &dyn Kv, name: &RelationName) -> Result<Option<i3
         Err(ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(_))) => {}
         Err(other) => return Err(other),
     }
+    if let Some(table) = crate::exec::catalog_rows::toast_relation_for_name(kv, name)? {
+        return crate::exec::catalog_rows::toast_relation_oid(table.id).map(Some);
+    }
     if let Some(oid) = crate::catalog_rel::view_oids(kv)?.get(name) {
         return Ok(Some(*oid));
     }

@@ -1322,7 +1322,7 @@ fn builtin_role(name: &str) -> Option<Role> {
 /// owner `PostgreSQL` bootstraps it under.
 ///
 /// The catalog stores none of them. A fresh catalog holds no schema rows at
-/// all, and [`list_schemas`] synthesises these three until a stored row
+/// all, and [`list_schemas`] synthesises these four until a stored row
 /// supersedes one or a tombstone removes it. `public` is an ordinary schema
 /// that merely happens to exist already, so it can be dropped and created
 /// again. The [`SYSTEM_SCHEMAS`] cannot be dropped and cannot be created,
@@ -1330,6 +1330,7 @@ fn builtin_role(name: &str) -> Option<Role> {
 /// already taken.
 pub const BOOTSTRAP_SCHEMAS: &[(&str, &str)] = &[
     ("pg_catalog", BOOTSTRAP_ROLE),
+    ("pg_toast", BOOTSTRAP_ROLE),
     ("information_schema", BOOTSTRAP_ROLE),
     ("public", PUBLIC_SCHEMA_OWNER),
 ];
@@ -1337,7 +1338,7 @@ pub const BOOTSTRAP_SCHEMAS: &[(&str, &str)] = &[
 /// The bootstrap schemas the database system itself needs.
 ///
 /// `DROP SCHEMA` refuses them with 2BP01 even when they are empty.
-pub const SYSTEM_SCHEMAS: &[&str] = &["pg_catalog", "information_schema"];
+pub const SYSTEM_SCHEMAS: &[&str] = &["pg_catalog", "pg_toast", "information_schema"];
 
 /// The schema-name prefix `PostgreSQL` reserves for system schemas.
 ///
@@ -7207,7 +7208,10 @@ pub fn has_schema_privilege(
     // so no stored grant carries that, and it has to be answered here. Only
     // `USAGE`: `PostgreSQL` 15 removed `PUBLIC`'s `CREATE` on `public`, and
     // `CREATE` was never granted on the two system schemas.
-    if privilege == "USAGE" && BOOTSTRAP_SCHEMAS.iter().any(|(name, _)| *name == schema) {
+    if privilege == "USAGE"
+        && schema != "pg_toast"
+        && BOOTSTRAP_SCHEMAS.iter().any(|(name, _)| *name == schema)
+    {
         return Ok(true);
     }
     if kv
@@ -9055,9 +9059,9 @@ mod tests {
         );
     }
 
-    /// A catalog nobody has written to still reports three schemas, each with
+    /// A catalog nobody has written to still reports four schemas, each with
     /// the owner `PostgreSQL` bootstraps it under. The catalog stores nothing
-    /// for them, so [`list_schemas`] synthesises all three.
+    /// for them, so [`list_schemas`] synthesises all four.
     #[test]
     fn a_fresh_catalog_reports_the_bootstrap_schemas() {
         use assert2::assert;
@@ -9067,10 +9071,11 @@ mod tests {
                 == vec![
                     schema("information_schema", "postgres"),
                     schema("pg_catalog", "postgres"),
+                    schema("pg_toast", "postgres"),
                     schema("public", "pg_database_owner"),
                 ]
         );
-        for name in ["public", "pg_catalog", "information_schema"] {
+        for name in ["public", "pg_catalog", "pg_toast", "information_schema"] {
             assert!(schema_exists(&kv, name).expect("exists"), "{name}");
         }
         assert!(!schema_exists(&kv, "nosuch").expect("exists"));
@@ -9098,6 +9103,7 @@ mod tests {
                 == vec![
                     schema("information_schema", "postgres"),
                     schema("pg_catalog", "postgres"),
+                    schema("pg_toast", "postgres"),
                 ]
         );
         assert!(matches!(
@@ -9114,6 +9120,7 @@ mod tests {
                 == vec![
                     schema("information_schema", "postgres"),
                     schema("pg_catalog", "postgres"),
+                    schema("pg_toast", "postgres"),
                     schema("public", "alice"),
                 ]
         );
@@ -9144,6 +9151,7 @@ mod tests {
                 == vec![
                     schema("information_schema", "postgres"),
                     schema("pg_catalog", "alice"),
+                    schema("pg_toast", "postgres"),
                     schema("public", "pg_database_owner"),
                 ]
         );

@@ -8077,6 +8077,10 @@ pub(crate) fn relation_kind(
         Some("index")
     } else if crabka_pgcatalog::get_sequence(kv, name).is_ok() {
         Some("sequence")
+    } else if crate::exec::catalog_rows::toast_relation_for_name(kv, name)
+        .is_ok_and(|table| table.is_some())
+    {
+        Some("toast table")
     } else {
         virtual_relation_kind(name)
     }
@@ -8171,6 +8175,7 @@ pub(crate) fn relkind_plural(kind: &str) -> &'static str {
         "index" => "indexes",
         "materialized view" => "materialized views",
         "foreign table" => "foreign tables",
+        "toast table" => "toast tables",
         _ => "tables",
     }
 }
