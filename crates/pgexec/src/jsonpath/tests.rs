@@ -750,6 +750,12 @@ fn like_regex_is_validated_when_the_path_is_parsed() {
     ] {
         let error = JsonPath::parse(path).expect_err(path).into_pg();
         assert!(error.code == code, "{path}: {error:?}");
+        if code == "2201B" {
+            assert_eq!(
+                error.message,
+                "invalid regular expression: parentheses () not balanced"
+            );
+        }
     }
     let path = JsonPath::parse(r#"$ ? (@ like_regex "a b" flag "smixq")"#).expect("x flag");
     assert_eq!(path.to_string(), r#"$?(@ like_regex "a b" flag "ismxq")"#);

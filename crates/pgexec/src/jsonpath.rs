@@ -3203,10 +3203,13 @@ fn compile_regex(pattern: &str, flags: &str) -> PathResult<regex::Regex> {
         format!("(?{builder}){body}")
     };
     regex::Regex::new(&source).map_err(|e| {
-        PathError::new(
-            "2201B",
-            format!("invalid regular expression: {}", first_line(&e.to_string())),
-        )
+        let detail = e.to_string();
+        let detail = if detail.contains("unclosed group") {
+            "parentheses () not balanced".into()
+        } else {
+            first_line(&detail)
+        };
+        PathError::new("2201B", format!("invalid regular expression: {detail}"))
     })
 }
 
