@@ -211,7 +211,7 @@ fn estimate_group_rows(
             if matched.len() >= 2
                 && best
                     .as_ref()
-                    .is_none_or(|(best, _)| matched.len() > best.len())
+                    .is_none_or(|(best, _)| statistics_match_is_better(&matched, best))
             {
                 best = Some((matched, rows));
             }
@@ -222,7 +222,7 @@ fn estimate_group_rows(
         remaining.retain(|wanted| {
             !matched
                 .iter()
-                .any(|(key, _)| group_keys_match(key, wanted, table))
+                .any(|(key, _)| statistic_key_matches_group_key(key, wanted, table))
         });
         distincts.push(rows);
     }
@@ -333,7 +333,7 @@ fn statistics_positions(
     let covered = keys.iter().all(|wanted| {
         object_keys
             .iter()
-            .any(|(key, _)| group_keys_match(key, wanted, table))
+            .any(|(key, _)| statistic_key_matches_group_key(key, wanted, table))
             || matches!(wanted, GroupKey::Expression(expression)
                 if statistic_expression_is_grouped_by_attributes(expression, keys, table))
     });
@@ -373,17 +373,29 @@ fn matching_statistics_keys(
         .iter()
         .filter(|(key, _)| {
             keys.iter()
-                .any(|wanted| group_keys_match(key, wanted, table))
+                .any(|wanted| statistic_key_matches_group_key(key, wanted, table))
         })
         .cloned()
         .collect()
 }
 
-fn group_keys_match(left: &GroupKey, right: &GroupKey, table: &crabka_pgcatalog::Table) -> bool {
-    left == right
-        || group_key_attribute(left, table)
-            .zip(group_key_attribute(right, table))
-            .is_some_and(|(left, right)| left == right)
+fn statistic_key_matches_group_key(
+    statistic_key: &GroupKey,
+    group_key: &GroupKey,
+    table: &crabka_pgcatalog::Table,
+) -> bool {
+    statistic_key == group_key
+        || matches!(statistic_key, GroupKey::Attribute(_))
+            && group_key_attribute(group_key, table) == group_key_attribute(statistic_key, table)
+}
+
+fn statistics_match_is_better(candidate: &[(GroupKey, i16)], best: &[(GroupKey, i16)]) -> bool {
+    let expression_matches = |keys: &[(GroupKey, i16)]| {
+        keys.iter()
+            .filter(|(key, _)| matches!(key, GroupKey::Expression(_)))
+            .count()
+    };
+    (expression_matches(candidate), candidate.len()) > (expression_matches(best), best.len())
 }
 
 fn group_key_attribute(key: &GroupKey, table: &crabka_pgcatalog::Table) -> Option<i16> {
@@ -3029,6 +3041,51 @@ mod tests {
         assert!(row_estimate(0.25) == 1);
         assert!(row_estimate(200.000_001) == 200);
         assert!(row_estimate(200.6) == 201);
+    }
+
+    #[test]
+    fn statistics_columns_match_group_expressions_but_not_the_reverse() {
+        let table = crabka_pgcatalog::Table {
+            id: 1,
+            name: crabka_pgcatalog::RelationName::public("t"),
+            owner: crabka_pgcatalog::BOOTSTRAP_ROLE.into(),
+            columns: vec![
+                crabka_pgcatalog::Column::new("a", crabka_pgtypes::ColumnType::Int4),
+                crabka_pgcatalog::Column::new("b", crabka_pgtypes::ColumnType::Int4),
+            ],
+            sharded: false,
+            row_security: false,
+            force_row_security: false,
+            sharding: None,
+            foreign: None,
+            materialized: None,
+            checks: Vec::new(),
+        };
+        let column = GroupKey::Attribute(2);
+        let expression = GroupKey::Expression("(b + 1)".into());
+
+        assert!(statistic_key_matches_group_key(
+            &column,
+            &expression,
+            &table
+        ));
+        assert!(!statistic_key_matches_group_key(
+            &expression,
+            &column,
+            &table
+        ));
+    }
+
+    #[test]
+    fn exact_expression_statistics_win_equal_width_matches() {
+        let attributes = vec![(GroupKey::Attribute(1), 1), (GroupKey::Attribute(2), 2)];
+        let expression = vec![
+            (GroupKey::Attribute(1), 1),
+            (GroupKey::Expression("(c * 10)".into()), -1),
+        ];
+
+        assert!(statistics_match_is_better(&expression, &attributes));
+        assert!(!statistics_match_is_better(&attributes, &expression));
     }
 
     /// The deparser is two mutually recursive functions. An expression form
