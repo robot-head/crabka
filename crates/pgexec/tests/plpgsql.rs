@@ -1856,14 +1856,44 @@ async fn composite_functions_reject_scalar_return_values() {
     )
     .await;
 
-    let error = session
-        .simple_query("SELECT pl_return_scalar()")
-        .await
-        .expect_err("a composite function must reject a scalar return value");
-    assert!(error.code == "42804", "{error:?}");
+    for sql in [
+        "SELECT pl_return_scalar()",
+        "SELECT * FROM pl_return_scalar()",
+    ] {
+        let error = session
+            .simple_query(sql)
+            .await
+            .expect_err("a composite function must reject a scalar return value");
+        assert!(error.code == "42804", "{error:?}");
+        assert!(
+            error.message
+                == "cannot return non-composite value from function returning composite type",
+            "{error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn set_functions_expand_composite_return_next_values() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TYPE pl_return_pair AS (id int4, label text);
+        CREATE FUNCTION pl_return_pairs() RETURNS SETOF pl_return_pair LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN NEXT (1, 'one'::text);
+          RETURN NEXT NULL::pl_return_pair;
+        END
+        $$
+        ",
+    )
+    .await;
+
     assert!(
-        error.message == "cannot return non-composite value from function returning composite type",
-        "{error:?}"
+        query(&mut session, "SELECT * FROM pl_return_pairs()").await
+            == vec![row(&["1", "one"]), vec![None, None]]
     );
 }
 

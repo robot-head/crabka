@@ -5010,6 +5010,14 @@ pub(crate) fn declared_scalar_result_type(routine: &Routine) -> Option<ColumnTyp
     }
 }
 
+/// The element type a set-returning routine carries, when Gres models it.
+pub(crate) fn declared_set_result_type(routine: &Routine) -> Option<ColumnType> {
+    match &routine.result {
+        RoutineResult::Type { ty, setof: true } => ty.column,
+        _ => None,
+    }
+}
+
 fn resolved_scalar_result_type(routine: &Routine, given: &[ArgType]) -> Option<ColumnType> {
     declared_scalar_result_type(routine).or_else(|| {
         let name = match &routine.result {

@@ -613,7 +613,8 @@ pub(crate) async fn execute_table_function(
         cursor_declarations: HashMap::new(),
         last_row_count: 0,
         output_slot,
-        return_type: crate::routine::declared_scalar_result_type(routine),
+        return_type: crate::routine::declared_scalar_result_type(routine)
+            .or_else(|| crate::routine::declared_set_result_type(routine)),
         set_results: Some(SetResultCollector {
             columns: columns.clone(),
             rows: Vec::new(),
@@ -2473,7 +2474,7 @@ impl Interpreter<'_> {
                     match value {
                         Some(expr) => {
                             let value = self.eval_async(expr).await?.0;
-                            self.push_set_value(value)?;
+                            self.push_set_value(self.coerce_return(value)?)?;
                         }
                         None => self.push_current_output_row()?,
                     }
@@ -3317,6 +3318,15 @@ impl Interpreter<'_> {
     }
 
     fn push_set_value(&mut self, value: Datum) -> Result<(), ExecError> {
+        if value.is_null() {
+            let width = self
+                .set_results
+                .as_ref()
+                .ok_or_else(|| ExecError::Syntax("not a set-returning function".into()))?
+                .columns
+                .len();
+            return self.push_set_row(vec![Datum::Null; width]);
+        }
         let row = match value {
             Datum::Record(record) => record.values,
             value => vec![value],
