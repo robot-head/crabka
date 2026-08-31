@@ -5405,6 +5405,13 @@ impl SqlSession {
 
     // ---- S2: cursors ----------------------------------------------------
 
+    pub(crate) fn fresh_cursor_name(&self) -> String {
+        (1..)
+            .map(|index| format!("<unnamed cursor {index}>"))
+            .find(|name| !self.cursors.contains_key(name))
+            .expect("unbounded cursor-name iterator always yields a free name")
+    }
+
     /// `DECLARE … CURSOR FOR <query>`: open the cursor without executing its
     /// query. PostgreSQL reports query errors at the first fetch and lets the
     /// query observe writes made after declaration.

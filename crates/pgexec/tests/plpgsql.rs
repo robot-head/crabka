@@ -1542,6 +1542,61 @@ async fn opening_a_constant_refcursor_is_rejected() {
 }
 
 #[tokio::test]
+async fn opening_null_refcursors_uses_fresh_portal_names() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_refcursor_input (value int4);
+        INSERT INTO pl_refcursor_input VALUES (5);
+        CREATE FUNCTION pl_unnamed_refcursor() RETURNS refcursor LANGUAGE plpgsql AS $$
+        DECLARE cursor_ refcursor;
+        BEGIN OPEN cursor_ FOR SELECT value FROM pl_refcursor_input; RETURN cursor_; END
+        $$;
+        CREATE FUNCTION pl_use_refcursor() RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE cursor_ refcursor; result record;
+        BEGIN
+          cursor_ := pl_unnamed_refcursor();
+          FETCH NEXT FROM cursor_ INTO result;
+          RETURN result.value;
+        END
+        $$;
+        CREATE FUNCTION pl_fetch_refcursor(cursor_ refcursor) RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE result record;
+        BEGIN FETCH NEXT FROM cursor_ INTO result; RETURN result.value; END
+        $$;
+        CREATE FUNCTION pl_shadow_refcursor(cursor_ refcursor) RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE cursor_ refcursor; result record;
+        BEGIN
+          cursor_ := pl_unnamed_refcursor();
+          FETCH NEXT FROM cursor_ INTO result;
+          RETURN result.value;
+        END
+        $$;
+        ",
+    )
+    .await;
+    assert!(scalar(&mut session, "SELECT pl_use_refcursor()").await == Some("5".into()));
+    assert!(
+        scalar(
+            &mut session,
+            "SELECT pl_fetch_refcursor(pl_unnamed_refcursor())"
+        )
+        .await
+            == Some("5".into())
+    );
+    assert!(
+        scalar(
+            &mut session,
+            "SELECT pl_shadow_refcursor(pl_unnamed_refcursor())"
+        )
+        .await
+            == Some("5".into())
+    );
+}
+
+#[tokio::test]
 async fn execute_discards_rows_and_dynamic_dml_returning_assigns_the_first_row() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

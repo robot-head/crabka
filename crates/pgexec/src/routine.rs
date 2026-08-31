@@ -3049,8 +3049,8 @@ fn procedure_arguments(
 /// This is the implicit graph restricted to the types Gres models.
 pub(crate) fn implicitly_coercible(source: ColumnType, target: ColumnType) -> bool {
     use ColumnType::{
-        Char, Float4, Float8, Int2, Int4, Int8, Numeric, Oid, Regclass, Regnamespace, Regprocedure,
-        Regtype, Text, Timestamp, Timestamptz, Varchar,
+        Char, Float4, Float8, Int2, Int4, Int8, Numeric, Oid, Refcursor, Regclass, Regnamespace,
+        Regprocedure, Regtype, Text, Timestamp, Timestamptz, Varchar,
     };
     if source == target {
         return true;
@@ -3063,7 +3063,7 @@ pub(crate) fn implicitly_coercible(source: ColumnType, target: ColumnType) -> bo
             | (Float4, Float8)
             | (Numeric(_), Float8)
             | (Timestamp, Timestamptz)
-            | (Text | Varchar(_) | Char(_), Text | Varchar(_) | Char(_))
+            | (Text | Varchar(_) | Char(_), Text | Varchar(_) | Char(_) | Refcursor)
             | (Numeric(_), Numeric(_))
             // `pg_cast` marks every integer width implicitly coercible to
             // `oid`, which is what lets `binary_coercible(23, 23)` — the

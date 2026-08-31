@@ -2054,6 +2054,9 @@ impl ScalarInterpreter<'_> {
             if let Some(target) = frame.aliases.get(&current) {
                 current = target.clone();
             }
+            if frame.slots.contains_key(&current) {
+                return current;
+            }
         }
         current
     }
@@ -2714,15 +2717,24 @@ impl Interpreter<'_> {
                     using,
                     line,
                 } => async {
-                    if self
-                        .lookup_slot(cursor)
-                        .is_some_and(|slot| slot.constant && slot.value.is_null())
-                    {
-                        return Err(ExecError::FunctionError {
-                            sqlstate: "22005",
-                            message: format!("variable \"{cursor}\" is declared CONSTANT"),
-                        });
-                    }
+                    let cursor_name = match self.lookup_slot(cursor) {
+                        Some(slot) if slot.constant && slot.value.is_null() => {
+                            return Err(ExecError::FunctionError {
+                                sqlstate: "22005",
+                                message: format!("variable \"{cursor}\" is declared CONSTANT"),
+                            });
+                        }
+                        Some(slot) if slot.value.is_null() => {
+                            let name = self.session.fresh_cursor_name();
+                            self.assign_name(cursor, Datum::Text(name.clone()))?;
+                            name
+                        }
+                        Some(slot) => match &slot.value {
+                            Datum::Text(name) => name.clone(),
+                            _ => cursor.clone(),
+                        },
+                        None => cursor.clone(),
+                    };
                     let (declared_scroll, statement) = if let Some(dynamic_query) = dynamic_query {
                         if !arguments.is_empty() {
                             return Err(ExecError::Syntax(
@@ -2805,7 +2817,7 @@ impl Interpreter<'_> {
                     };
                     self.session
                         .declare_cursor(
-                            cursor,
+                            &cursor_name,
                             false,
                             scroll.or(declared_scroll),
                             false,
@@ -2824,9 +2836,10 @@ impl Interpreter<'_> {
                     move_only,
                 } => {
                     let direction = parse_cursor_direction(direction)?;
+                    let cursor_name = self.cursor_name(cursor);
                     let result = self
                         .session
-                        .fetch_cursor(cursor, direction, *move_only)
+                        .fetch_cursor(&cursor_name, direction, *move_only)
                         .await?;
                     self.consume_sql_result(
                         result,
@@ -2842,8 +2855,9 @@ impl Interpreter<'_> {
                     Ok(Flow::Next)
                 }
                 PlPgSqlStatement::Close(cursor) => {
+                    let cursor_name = self.cursor_name(cursor);
                     self.session
-                        .close_cursor(&CursorTarget::Name(cursor.clone()))?;
+                        .close_cursor(&CursorTarget::Name(cursor_name))?;
                     Ok(Flow::Next)
                 }
                 PlPgSqlStatement::GetDiagnostics {
@@ -3381,11 +3395,23 @@ impl Interpreter<'_> {
         None
     }
 
+    fn cursor_name(&self, cursor: &str) -> String {
+        self.lookup_slot(cursor)
+            .and_then(|slot| match &slot.value {
+                Datum::Text(name) => Some(name.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| cursor.to_string())
+    }
+
     fn resolve_alias(&self, name: &str) -> String {
         let mut current = name.to_string();
         for frame in self.frames.iter().rev() {
             if let Some(target) = frame.aliases.get(&current) {
                 current = target.clone();
+            }
+            if frame.slots.contains_key(&current) {
+                return current;
             }
         }
         current
