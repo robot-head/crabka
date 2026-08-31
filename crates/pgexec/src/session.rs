@@ -24530,6 +24530,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_mcv_for_or_of_conjunctions() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE mcv_partial (a int, b int, c int); \
+             INSERT INTO mcv_partial SELECT mod(i, 10), mod(i, 10), mod(i, 10) FROM generate_series(0, 999) s(i); \
+             INSERT INTO mcv_partial SELECT i, i, i FROM generate_series(0, 99) s(i); \
+             INSERT INTO mcv_partial SELECT i, i, i FROM generate_series(0, 3999) s(i); \
+             CREATE STATISTICS mcv_partial_stats (mcv) ON a, b, c FROM mcv_partial; \
+             ANALYZE mcv_partial",
+        )
+        .await
+        .expect("partial MCV setup");
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_partial WHERE (a = 0 AND b = 0) OR (a = 0 AND c = 0) OR (b = 0 AND c = 0)",
+        )
+        .await
+        .expect("partial MCV OR explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_partial (cost=0.00..0.00 rows=108 width=0)".into()
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_text_mcv_for_inequalities() {
         use assert2::assert;
 

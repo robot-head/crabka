@@ -861,19 +861,29 @@ fn extended_mcv_or_selectivity(
     ctx: &crate::clock::EvalCtx,
     expr: &Expr,
 ) -> Option<f64> {
-    let mut clauses = Vec::new();
-    if !collect_mcv_or_clauses(expr, table, ctx, &mut clauses) || clauses.len() < 2 {
+    let mut expressions = Vec::new();
+    if !collect_mcv_or_expressions(expr, table, ctx, &mut expressions) || expressions.len() < 2 {
         return None;
     }
-    let scalar = clauses
+    let scalar = expressions
         .iter()
-        .map(|clause| scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, clause))
+        .map(|expression| mcv_expr_scalar(catalog_kv, table, rows, ctx, expression))
         .collect::<Vec<_>>();
+    let mut clauses = Vec::new();
+    for expression in &expressions {
+        mcv_expr_clauses(expression, &mut clauses);
+    }
+    let mut keys = Vec::new();
+    for clause in clauses {
+        if !keys.iter().any(|key: &&McvClause| key.key == clause.key) {
+            keys.push(clause);
+        }
+    }
     for object in crabka_pgcatalog::statistics::list(catalog_kv).ok()? {
         if object.table_id != table.id {
             continue;
         }
-        let Some(positions) = clauses
+        let Some(positions) = keys
             .iter()
             .map(|clause| statistics_key_positions(&object, &clause.key))
             .collect::<Option<Vec<_>>>()
@@ -910,11 +920,11 @@ fn extended_mcv_or_selectivity(
         }
         let mut prior_matches = vec![false; items.len()];
         let (mut simple_or, mut selectivity) = (0.0, 0.0);
-        for ((clause, position), scalar) in clauses.iter().zip(&positions).zip(&scalar) {
+        for (expression, scalar) in expressions.iter().zip(&scalar) {
             let overlap_simple = simple_or * scalar;
             simple_or = (simple_or + scalar - overlap_simple).clamp(0.0, 1.0);
             let mut clause_matches = Vec::with_capacity(items.len());
-            let (mut overlap, mut overlap_base) = (0.0, 0.0);
+            let (mut mcv, mut mcv_base, mut overlap, mut overlap_base) = (0.0, 0.0, 0.0, 0.0);
             for ((item, (frequency, base_frequency)), prior_match) in
                 items.iter().zip(&frequencies).zip(&prior_matches)
             {
@@ -925,22 +935,24 @@ fn extended_mcv_or_selectivity(
                 {
                     return None;
                 }
-                let matches = mcv_item_matches(
-                    item.values.get(*position),
-                    &clause.key,
-                    &clause.expr,
-                    &clause.predicate,
-                    table,
-                    ctx,
-                );
-                if matches && *prior_match {
-                    overlap += frequency;
-                    overlap_base += base_frequency;
+                let matches = mcv_expr_matches(expression, item, &keys, &positions, table, ctx);
+                if matches {
+                    mcv += frequency;
+                    mcv_base += base_frequency;
+                    if *prior_match {
+                        overlap += frequency;
+                        overlap_base += base_frequency;
+                    }
                 }
                 clause_matches.push(matches);
             }
             let overlap = mcv_combine_selectivities(overlap_simple, overlap, overlap_base, total);
-            selectivity = (selectivity + scalar - overlap).clamp(0.0, 1.0);
+            let clause = if matches!(expression, McvExpr::Clause(_)) {
+                *scalar
+            } else {
+                mcv_combine_selectivities(*scalar, mcv, mcv_base, total)
+            };
+            selectivity = (selectivity + clause - overlap).clamp(0.0, 1.0);
             for (prior_match, matches) in prior_matches.iter_mut().zip(clause_matches) {
                 *prior_match |= matches;
             }
@@ -1364,11 +1376,11 @@ fn collect_mcv_clauses(
     }
 }
 
-fn collect_mcv_or_clauses(
+fn collect_mcv_or_expressions(
     expr: &Expr,
     table: &crabka_pgcatalog::Table,
     ctx: &crate::clock::EvalCtx,
-    clauses: &mut Vec<McvClause>,
+    expressions: &mut Vec<McvExpr>,
 ) -> bool {
     match expr {
         Expr::Binary {
@@ -1376,11 +1388,11 @@ fn collect_mcv_or_clauses(
             left,
             right,
         } => {
-            collect_mcv_or_clauses(left, table, ctx, clauses)
-                && collect_mcv_or_clauses(right, table, ctx, clauses)
+            collect_mcv_or_expressions(left, table, ctx, expressions)
+                && collect_mcv_or_expressions(right, table, ctx, expressions)
         }
-        _ => mcv_clause_for_expr(expr, table, ctx).is_some_and(|clause| {
-            clauses.push(clause);
+        _ => mcv_expr_for_expr(expr, table, ctx).is_some_and(|expression| {
+            expressions.push(expression);
             true
         }),
     }
