@@ -23919,6 +23919,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_combines_separate_extended_mcv_objects() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE mcv_separate_estimate (a int4, b int4, c int4, d int4); \
+             INSERT INTO mcv_separate_estimate \
+             SELECT 1, 1, 1, 1 FROM generate_series(1, 50); \
+             INSERT INTO mcv_separate_estimate \
+             SELECT 2, 2, 2, 2 FROM generate_series(1, 50); \
+             CREATE STATISTICS mcv_separate_estimate_ab (mcv) ON a, b FROM mcv_separate_estimate; \
+             CREATE STATISTICS mcv_separate_estimate_cd (mcv) ON c, d FROM mcv_separate_estimate; \
+             ANALYZE mcv_separate_estimate",
+        )
+        .await
+        .expect("statistics setup");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT * FROM mcv_separate_estimate \
+                 WHERE a = 1 AND b = 1 AND c = 1 AND d = 1",
+            )
+            .await
+                == Ok(vec![
+                    vec![
+                        "Seq Scan on mcv_separate_estimate (cost=0.00..0.00 rows=25 width=0)"
+                            .into(),
+                    ],
+                    vec!["  Filter: ((((a = 1) AND (b = 1)) AND (c = 1)) AND (d = 1))".into()],
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_extended_mcv_for_function_expressions() {
         use assert2::assert;
 

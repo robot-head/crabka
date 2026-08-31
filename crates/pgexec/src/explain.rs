@@ -828,7 +828,135 @@ fn extended_mcv_selectivity(
         };
         return Some((mcv_selectivity + (1.0 - mcv_total).max(0.0) * remainder).clamp(0.0, 1.0));
     }
-    None
+    extended_mcv_conjunction_selectivity(catalog_kv, table, rows, ctx, expr)
+}
+
+/// Combine independent MCV objects for a conjunction when no single object
+/// covers every clause.
+fn extended_mcv_conjunction_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+) -> Option<f64> {
+    let mut clauses = Vec::new();
+    if !collect_mcv_clauses(expr, table, ctx, &mut clauses) || clauses.len() < 2 {
+        return None;
+    }
+    let scalar = clauses
+        .iter()
+        .map(|clause| scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, clause))
+        .collect::<Vec<_>>();
+    let mut selectivity = scalar.iter().product::<f64>();
+    let mut estimated = vec![false; clauses.len()];
+    let mut applied = false;
+    let objects = crabka_pgcatalog::statistics::list(catalog_kv).ok()?;
+
+    loop {
+        let mut best = None;
+        for object in &objects {
+            if object.table_id != table.id
+                || object
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.mcv.as_deref())
+                    .is_none()
+            {
+                continue;
+            }
+            let positions = clauses
+                .iter()
+                .enumerate()
+                .filter_map(|(index, clause)| {
+                    (!estimated[index]).then(|| {
+                        statistics_key_positions(object, &clause.key)
+                            .map(|position| (index, position))
+                    })?
+                })
+                .collect::<Vec<_>>();
+            if positions.len() >= 2
+                && best
+                    .as_ref()
+                    .is_none_or(|(_, best_positions): &(_, Vec<(usize, usize)>)| {
+                        positions.len() > best_positions.len()
+                    })
+            {
+                best = Some((object, positions));
+            }
+        }
+        let Some((object, positions)) = best else {
+            break;
+        };
+        let Some(items) = object
+            .data
+            .as_ref()
+            .and_then(|data| data.mcv.as_deref())
+            .and_then(crabka_pgcatalog::statistics::decode_mcv)
+        else {
+            break;
+        };
+        let Some(frequencies) = items
+            .iter()
+            .map(|item| {
+                Some((
+                    item.frequency.parse::<f64>().ok()?,
+                    item.base_frequency.parse::<f64>().ok()?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            break;
+        };
+        let (mut matched, mut matched_base, mut total, mut base_total) = (0.0, 0.0, 0.0, 0.0);
+        for (item, (frequency, base_frequency)) in items.iter().zip(frequencies) {
+            if !frequency.is_finite()
+                || !base_frequency.is_finite()
+                || !(0.0..=1.0).contains(&frequency)
+                || !(0.0..=1.0).contains(&base_frequency)
+            {
+                total = f64::NAN;
+                break;
+            }
+            total += frequency;
+            base_total += base_frequency;
+            if positions.iter().all(|(index, position)| {
+                mcv_item_matches(
+                    item.values.get(*position),
+                    &clauses[*index].key,
+                    &clauses[*index].predicate,
+                    table,
+                    ctx,
+                )
+            }) {
+                matched += frequency;
+                matched_base += base_frequency;
+            }
+        }
+        if !total.is_finite() || total > 1.0 + 1e-12 || base_total > 1.0 + 1e-12 {
+            break;
+        }
+        let base_selectivity = positions
+            .iter()
+            .map(|(index, _)| scalar[*index])
+            .product::<f64>();
+        if base_selectivity <= f64::EPSILON {
+            break;
+        }
+        let remaining_base = (1.0 - base_total.min(1.0)).max(0.0);
+        let remainder = if remaining_base > f64::EPSILON {
+            ((base_selectivity - matched_base) / remaining_base).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let corrected = matched + (1.0 - total.min(1.0)).max(0.0) * remainder;
+        selectivity = selectivity / base_selectivity * corrected;
+        for (index, _) in positions {
+            estimated[index] = true;
+        }
+        applied = true;
+    }
+    applied.then_some(selectivity.clamp(0.0, 1.0))
 }
 
 fn mcv_expr_for_expr(
