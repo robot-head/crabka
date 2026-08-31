@@ -23727,6 +23727,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_expression_ndistinct_for_stats_ext_group_rows() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE group_expression_estimate (a int4, b int4, c int4); \
+             INSERT INTO group_expression_estimate \
+             SELECT mod(i, 13), mod(i, 17), mod(i, 19) FROM generate_series(1, 1000) s(i); \
+             CREATE STATISTICS group_expression_estimate_stats (ndistinct) \
+             ON (a + 1), (b + 100), (2 * c) FROM group_expression_estimate; \
+             ANALYZE group_expression_estimate",
+        )
+        .await
+        .expect("expression ndistinct statistics setup");
+        for (sql, rows) in [
+            (
+                "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY a + 1, b + 100",
+                221,
+            ),
+            (
+                "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY a + 1, b + 100, 2 * c",
+                1000,
+            ),
+        ] {
+            let explain = rows_or_sqlstate(&mut s, sql)
+                .await
+                .expect("expression ndistinct explain");
+            assert!(
+                explain.first()
+                    == Some(&vec![format!(
+                        "HashAggregate (cost=0.00..0.00 rows={rows} width=0)"
+                    )]),
+                "{sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn explain_uses_extended_mcv_for_equality_conjunctions() {
         use assert2::assert;
 
