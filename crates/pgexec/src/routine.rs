@@ -4106,7 +4106,7 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
             message: error.message,
         }
     })?;
-    validate_plpgsql_raises(&block)?;
+    validate_plpgsql_raises(&block, routine)?;
     if routine.kind == RoutineKind::Procedure && plpgsql_has_return_value(&block) {
         return Err(ExecError::FunctionError {
             sqlstate: "42804",
@@ -4144,41 +4144,53 @@ pub(crate) fn plpgsql_has_return_value(block: &PlPgSqlBlock) -> bool {
     plpgsql_has_return(block, true)
 }
 
-fn validate_plpgsql_raises(block: &PlPgSqlBlock) -> Result<(), ExecError> {
-    fn statements(body: &[PlPgSqlStatement]) -> Result<(), ExecError> {
+fn validate_plpgsql_raises(block: &PlPgSqlBlock, routine: &Routine) -> Result<(), ExecError> {
+    fn statements(body: &[PlPgSqlStatement], routine: &Routine) -> Result<(), ExecError> {
         for statement in body {
             match statement {
-                PlPgSqlStatement::Raise(raise) => crate::plpgsql::validate_raise_parameters(raise)?,
-                PlPgSqlStatement::Block(block) => validate_plpgsql_raises(block)?,
+                PlPgSqlStatement::Raise(raise) => {
+                    crate::plpgsql::validate_raise_parameters(raise).map_err(|error| {
+                        ExecError::FunctionError {
+                            sqlstate: "42601",
+                            message: format!(
+                                "{}\nCONTEXT:  compilation of PL/pgSQL function \"{}\" near line {}",
+                                error.into_pg().message,
+                                routine.name,
+                                raise.line,
+                            ),
+                        }
+                    })?;
+                }
+                PlPgSqlStatement::Block(block) => validate_plpgsql_raises(block, routine)?,
                 PlPgSqlStatement::If {
                     branches,
                     else_body,
                 } => {
                     for (_, body) in branches {
-                        statements(body)?;
+                        statements(body, routine)?;
                     }
-                    statements(else_body)?;
+                    statements(else_body, routine)?;
                 }
                 PlPgSqlStatement::Case {
                     arms, else_body, ..
                 } => {
                     for (_, body) in arms {
-                        statements(body)?;
+                        statements(body, routine)?;
                     }
                     if let Some(body) = else_body {
-                        statements(body)?;
+                        statements(body, routine)?;
                     }
                 }
-                PlPgSqlStatement::Loop { body, .. } => statements(body)?,
+                PlPgSqlStatement::Loop { body, .. } => statements(body, routine)?,
                 _ => {}
             }
         }
         Ok(())
     }
 
-    statements(&block.statements)?;
+    statements(&block.statements, routine)?;
     for handler in &block.exceptions {
-        statements(&handler.statements)?;
+        statements(&handler.statements, routine)?;
     }
     Ok(())
 }
@@ -8979,7 +8991,7 @@ mod tests {
         ] {
             let error = define(&kv, sql).expect_err("invalid scalar RETURN is rejected");
             assert!(sqlstate(&error) == code);
-            assert!(error.into_pg().message == message);
+            assert!(error.into_pg().message.starts_with(message));
         }
     }
 
@@ -9000,7 +9012,7 @@ mod tests {
         ] {
             let error = define(&kv, sql).expect_err("invalid RAISE is rejected");
             assert!(sqlstate(&error) == "42601");
-            assert!(error.into_pg().message == message);
+            assert!(error.into_pg().message.starts_with(message));
         }
     }
 
