@@ -2567,9 +2567,14 @@ fn collapse_projection(plan: &SrfPlan, produced: Vec<Vec<Datum>>) -> Vec<Datum> 
         return if plan.columns.len() == 1 {
             take_first(produced)
         } else {
+            let names: std::sync::Arc<[String]> = plan
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect();
             produced
                 .into_iter()
-                .map(|row| Datum::Record(RecordValue::anonymous(row)))
+                .map(|row| Datum::Record(RecordValue::named(None, names.clone(), row)))
                 .collect()
         };
     };
@@ -3519,6 +3524,29 @@ mod tests {
             .into_pg();
         assert!(error.code == "42704");
         assert!(error.message == "text search parser 5 does not exist");
+    }
+
+    #[test]
+    fn select_list_token_type_records_keep_declared_field_names() {
+        let args = [text("default")];
+        let plan = plan(
+            "ts_token_type",
+            &args,
+            CallSite::Projection,
+            &Scope::empty(),
+        )
+        .expect("plan");
+        let mut values = vec![Datum::Text("default".into())];
+        let statement_memory =
+            crate::scanner::StatementMemory::new(crate::scanner::BLOCKING_QUERY_MEMORY);
+        let rows = rows_with_memory(&plan, &args, &mut values, &ctx(), &statement_memory)
+            .expect("token types");
+        let projected = collapse_projection(&plan, rows);
+        let Datum::Record(record) = &projected[0] else {
+            panic!("select-list SRF is a record");
+        };
+
+        assert!(record.field("tokid") == Some(&Datum::Int4(1)));
     }
 
     #[test]
