@@ -1792,3 +1792,23 @@ async fn assignment_and_return_errors_stack_plpgsql_statement_contexts() {
         "{returned:?}"
     );
 }
+
+#[tokio::test]
+async fn get_stacked_diagnostics_errors_name_the_statement_line() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let error = session
+        .simple_query("DO $$\nBEGIN\n  GET STACKED DIAGNOSTICS ignored = MESSAGE_TEXT;\nEND\n$$")
+        .await
+        .expect_err("GET STACKED DIAGNOSTICS needs an exception handler");
+
+    assert!(error.code == "0Z002", "{error:?}");
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            == Some("PL/pgSQL DO line 3 at GET STACKED DIAGNOSTICS"),
+        "{error:?}"
+    );
+}

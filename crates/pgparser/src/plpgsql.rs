@@ -1051,6 +1051,12 @@ impl PlParser<'_> {
     }
 
     fn parse_get_diagnostics(&mut self) -> Result<PlPgSqlStatement, ParseError> {
+        let start = self.pos;
+        let line = self.source[..self.tokens[start].1]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            + 1;
         self.expect_word("get")?;
         let stacked = if self.eat_word("stacked") {
             true
@@ -1074,7 +1080,11 @@ impl PlParser<'_> {
             }
         }
         self.expect_token(&Token::Semicolon)?;
-        Ok(PlPgSqlStatement::GetDiagnostics { stacked, items })
+        Ok(PlPgSqlStatement::GetDiagnostics {
+            stacked,
+            items,
+            line,
+        })
     }
 
     fn parse_assert(&mut self) -> Result<PlPgSqlStatement, ParseError> {

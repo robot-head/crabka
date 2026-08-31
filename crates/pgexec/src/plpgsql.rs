@@ -2556,7 +2556,11 @@ impl Interpreter<'_> {
                         .close_cursor(&CursorTarget::Name(cursor.clone()))?;
                     Ok(Flow::Next)
                 }
-                PlPgSqlStatement::GetDiagnostics { stacked, items } => {
+                PlPgSqlStatement::GetDiagnostics {
+                    stacked,
+                    items,
+                    line,
+                } => async {
                     if *stacked && self.active_error.is_none() {
                         return Err(ExecError::FunctionError {
                             sqlstate: "0Z002",
@@ -2633,6 +2637,19 @@ impl Interpreter<'_> {
                     }
                     Ok(Flow::Next)
                 }
+                .await
+                .map_err(|error| {
+                    plpgsql_statement_error(
+                        error,
+                        &self.context,
+                        *line,
+                        if *stacked {
+                            "GET STACKED DIAGNOSTICS"
+                        } else {
+                            "GET CURRENT DIAGNOSTICS"
+                        },
+                    )
+                }),
             }
         })
     }

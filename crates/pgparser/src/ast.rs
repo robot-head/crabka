@@ -5301,6 +5301,7 @@ pub enum PlPgSqlStatement {
     GetDiagnostics {
         stacked: bool,
         items: Vec<(PlPgSqlTarget, String)>,
+        line: usize,
     },
     Assert {
         condition: Expr,
