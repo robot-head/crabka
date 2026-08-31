@@ -5346,6 +5346,7 @@ pub enum PlPgSqlLoop {
     Query {
         targets: Vec<PlPgSqlTarget>,
         query: Box<Statement>,
+        source: String,
     },
     Dynamic {
         targets: Vec<PlPgSqlTarget>,

@@ -2994,16 +2994,25 @@ impl Interpreter<'_> {
                     self.set_found(found);
                     Ok(Flow::Next)
                 }
-                PlPgSqlLoop::Query { targets, query } => {
+                PlPgSqlLoop::Query {
+                    targets,
+                    query,
+                    source,
+                } => {
                     let statement = self.bind_statement(query).map_err(|error| {
-                        plpgsql_statement_error(error, &self.context, line, "FOR over SELECT rows")
+                        plpgsql_statement_error(
+                            plpgsql_internal_query_error(error, source),
+                            &self.context,
+                            line,
+                            "FOR over SELECT rows",
+                        )
                     })?;
                     let QueryResult::Rows { fields, rows, .. } =
                         Box::pin(self.session.run_one(&statement))
                             .await
                             .map_err(|error| {
                                 plpgsql_statement_error(
-                                    error,
+                                    plpgsql_internal_query_error(error, source),
                                     &self.context,
                                     line,
                                     "FOR over SELECT rows",
@@ -4154,11 +4163,9 @@ fn plpgsql_expression_error(error: ExecError, source: &str) -> ExecError {
 
 fn plpgsql_internal_query_error(error: ExecError, source: &str) -> ExecError {
     let error = error.into_pg();
-    if error
-        .diagnostics
-        .as_deref()
-        .is_some_and(|diagnostics| diagnostics.position.is_some() || diagnostics.context.is_some())
-    {
+    if error.diagnostics.as_deref().is_some_and(|diagnostics| {
+        diagnostics.position.is_some() || diagnostics.internal_query.is_some()
+    }) {
         ExecError::Remote(error)
     } else {
         let position = internal_query_position(&error, source);
@@ -4171,7 +4178,12 @@ fn plpgsql_internal_query_error(error: ExecError, source: &str) -> ExecError {
 }
 
 fn internal_query_position(error: &PgError, source: &str) -> usize {
-    if error.message.starts_with("operator does not exist:") {
+    if let Some((_, rest)) = error.message.split_once('"')
+        && let Some((name, _)) = rest.split_once('"')
+        && let Some(offset) = source.find(name)
+    {
+        source[..offset].chars().count() + 1
+    } else if error.message.starts_with("operator does not exist:") {
         source
             .char_indices()
             .find(|(_, character)| "=<>!~+-*/%^|&".contains(*character))

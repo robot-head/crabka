@@ -714,6 +714,7 @@ impl PlParser<'_> {
         if reverse {
             return Err(self.error("REVERSE is only valid for an integer FOR loop"));
         }
+        let source = self.slice_tokens(self.pos, loop_at).trim().to_owned();
         let query = self.parse_sql_range(self.pos, loop_at)?;
         self.pos = loop_at;
         self.parse_loop(
@@ -721,6 +722,7 @@ impl PlParser<'_> {
             PlPgSqlLoop::Query {
                 targets,
                 query: Box::new(query),
+                source,
             },
             line,
         )

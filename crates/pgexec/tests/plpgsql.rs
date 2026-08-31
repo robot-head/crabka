@@ -1313,6 +1313,39 @@ async fn foreach_slices_require_array_targets_and_unpack_records() {
 }
 
 #[tokio::test]
+async fn plpgsql_for_errors_keep_the_internal_query() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION plpgsql_for_error_context() RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE row_value record;
+        BEGIN
+          FOR row_value IN SELECT missing_column LOOP
+          END LOOP;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    let error = session
+        .simple_query("SELECT plpgsql_for_error_context()")
+        .await
+        .expect_err("missing FOR column");
+    let diagnostics = error.diagnostics.as_deref().expect("diagnostics");
+    assert!(diagnostics.internal_query.as_deref() == Some("SELECT missing_column"));
+    assert!(diagnostics.internal_position == Some(8));
+    assert!(
+        diagnostics.context.as_deref()
+            == Some("PL/pgSQL function plpgsql_for_error_context() line 4 at FOR over SELECT rows")
+    );
+}
+
+#[tokio::test]
 async fn record_fields_can_be_read_and_assigned() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
