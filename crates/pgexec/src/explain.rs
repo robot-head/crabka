@@ -1018,6 +1018,7 @@ fn extended_mcv_conjunction_selectivity(
                 mcv_item_matches(
                     item.values.get(*position),
                     &clauses[*index].key,
+                    &clauses[*index].expr,
                     &clauses[*index].predicate,
                     table,
                     ctx,
@@ -1133,6 +1134,7 @@ fn mcv_expr_matches(
                 mcv_item_matches(
                     item.values.get(position),
                     &clause.key,
+                    &clause.expr,
                     &clause.predicate,
                     table,
                     ctx,
@@ -1339,6 +1341,7 @@ fn merge_mcv_or_clauses(clauses: Vec<McvClause>) -> Option<McvClause> {
 fn mcv_item_matches(
     value: Option<&Option<String>>,
     key: &GroupKey,
+    expr: &Expr,
     predicate: &McvPredicate,
     table: &crabka_pgcatalog::Table,
     ctx: &crate::clock::EvalCtx,
@@ -1348,26 +1351,39 @@ fn mcv_item_matches(
             .iter()
             .any(|candidate| candidate.text.as_ref() == value.as_ref()),
         (Some(Some(text)), McvPredicate::Inequality { op, value }) => {
-            let GroupKey::Attribute(attnum) = key else {
-                return false;
+            let ty = match key {
+                GroupKey::Attribute(attnum) => {
+                    let Some(index) = usize::try_from(*attnum - 1).ok() else {
+                        return false;
+                    };
+                    let Some(definition) = table.columns.get(index) else {
+                        return false;
+                    };
+                    definition.ty
+                }
+                GroupKey::Expression(_) => {
+                    let Ok(ty) = crate::eval::infer_type(
+                        expr,
+                        &crate::scope::Scope::single(table, &table.name.name),
+                    ) else {
+                        return false;
+                    };
+                    ty
+                }
             };
-            let Some(index) = usize::try_from(*attnum - 1).ok() else {
-                return false;
-            };
-            let Some(definition) = table.columns.get(index) else {
-                return false;
-            };
-            let Some(wanted) = value.scalar_value.as_ref() else {
+            let Some(wanted) = mcv_scalar_value(value, expr, table, ctx) else {
                 return false;
             };
             let Ok(actual) = crate::eval::cast_value_in(
                 &crabka_pgtypes::Datum::Text(text.clone()),
-                definition.ty,
+                ty,
                 ctx.output_style(),
             ) else {
                 return false;
             };
-            let Some(ordering) = crabka_pgtypes::ops::compare(&actual, wanted).ok().flatten()
+            let Some(ordering) = crabka_pgtypes::ops::compare(&actual, &wanted)
+                .ok()
+                .flatten()
             else {
                 return false;
             };
