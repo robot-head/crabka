@@ -356,6 +356,15 @@ impl Parser {
         self.toks[self.pos].1
     }
 
+    fn syntax_error_at_current(&self) -> ParseError {
+        let start = self.peek_pos();
+        let end = self
+            .toks
+            .get(self.pos + 1)
+            .map_or(self.source.len(), |(_, position)| *position);
+        ParseError::syntax_error_at(self.source[start..end].trim(), start)
+    }
+
     fn bump(&mut self) -> Token {
         let t = self.toks[self.pos].0.clone();
         if self.pos + 1 < self.toks.len() {
@@ -5187,7 +5196,9 @@ impl Parser {
             });
         }
         let privileges = self.privilege_list_until_on()?;
-        self.expect(&Token::Keyword(Keyword::On))?;
+        if !self.eat_keyword(Keyword::On) {
+            return Err(self.syntax_error_at_current());
+        }
         // `SCHEMA` is unreserved, so `GRANT SELECT ON schema TO r` names a
         // *table* called `schema`. Only a name after the word makes it the
         // object-type keyword, exactly as `SCHEMA name_list` reads in
@@ -7200,12 +7211,16 @@ impl Parser {
         } else {
             Vec::new()
         };
-        self.expect(&Token::Keyword(Keyword::On))?;
+        if !self.eat_keyword(Keyword::On) {
+            return Err(self.syntax_error_at_current());
+        }
         let mut expressions = Vec::new();
         loop {
             expressions.push(if self.eat_token(&Token::LParen) {
                 let expression = self.expr(0)?;
-                self.expect(&Token::RParen)?;
+                if !self.eat_token(&Token::RParen) {
+                    return Err(self.syntax_error_at_current());
+                }
                 expression
             } else {
                 let name = self.expect_col_id()?;
@@ -7216,7 +7231,9 @@ impl Parser {
             }
             break;
         }
-        self.expect(&Token::Keyword(Keyword::From))?;
+        if !self.eat_keyword(Keyword::From) {
+            return Err(self.syntax_error_at_current());
+        }
         Ok(crate::ast::Statement::CreateStatistics(
             crate::ast::CreateStatistics {
                 name,
@@ -20880,6 +20897,23 @@ mod tests {
         }
         assert!(crate::parse("CREATE STATISTICS s ON a, (b + 1) FROM t").is_ok());
         assert!(crate::parse("CREATE STATISTICS s ON date_trunc('day', a) FROM t").is_ok());
+    }
+
+    #[test]
+    fn statistics_syntax_errors_name_the_current_token() {
+        use assert2::assert;
+
+        for (sql, expected) in [
+            ("CREATE STATISTICS tst;", ";"),
+            ("CREATE STATISTICS tst ON a, b;", ";"),
+            ("CREATE STATISTICS tst FROM sometab;", "FROM"),
+            ("CREATE STATISTICS tst ON y + z FROM t;", "+"),
+            ("CREATE STATISTICS tst ON (x, y) FROM t;", ","),
+        ] {
+            let error = crate::parse(sql).expect_err("syntax error");
+            assert!(error.to_string() == format!("syntax error at or near \"{expected}\""));
+            assert!(error.reported_position(sql).is_some());
+        }
     }
 
     #[test]

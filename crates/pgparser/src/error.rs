@@ -33,6 +33,17 @@ pub struct ParseError {
 }
 
 impl ParseError {
+    pub(crate) fn syntax_error_at(token: &str, position: usize) -> Self {
+        Self {
+            message: format!("syntax error at or near \"{token}\""),
+            position,
+            sqlstate: "42601",
+            detail: None,
+            hint: None,
+            reports_position: true,
+        }
+    }
+
     pub fn new(message: impl Into<String>, position: usize) -> Self {
         Self {
             message: format!("syntax error at position {position}: {}", message.into()),
