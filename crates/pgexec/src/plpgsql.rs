@@ -14,10 +14,10 @@ use std::{
 use crabka_pgcatalog::routine::{Routine, RoutineKind, RoutineResult};
 use crabka_pgparser::ast::{
     ArraySubscript, AssignmentValue, BinaryOp, CteBody, CursorTarget, Expr, FetchCount,
-    FetchDirection, FuncArgs, JoinConstraint, PlPgSqlBlock, PlPgSqlDeclaration, PlPgSqlInto,
-    PlPgSqlLoop, PlPgSqlRaise, PlPgSqlRaiseLevel, PlPgSqlStatement, PlPgSqlTarget,
-    PlPgSqlVariableConflict, QueryBody, QueryExpr, RoutineType, SelectItem, SetExpr, Statement,
-    TableExpr,
+    FetchDirection, FuncArgs, JoinConstraint, PlPgSqlBlock, PlPgSqlCursorArgument,
+    PlPgSqlDeclaration, PlPgSqlInto, PlPgSqlLoop, PlPgSqlRaise, PlPgSqlRaiseLevel,
+    PlPgSqlStatement, PlPgSqlTarget, PlPgSqlVariableConflict, QueryBody, QueryExpr, RoutineType,
+    SelectItem, SetExpr, Statement, TableExpr,
 };
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, RecordValue};
 use crabka_pgwire::{
@@ -2741,20 +2741,39 @@ impl Interpreter<'_> {
                             .get(cursor)
                             .cloned()
                             .ok_or_else(|| ExecError::UndefinedCursor(cursor.clone()))?;
-                        if arguments.len() != declaration.arguments.len() {
-                            return Err(ExecError::Syntax(format!(
-                                "cursor \"{cursor}\" has {} arguments, but {} were supplied",
-                                declaration.arguments.len(),
-                                arguments.len()
-                            )));
-                        }
+                        let parameter_names = declaration
+                            .arguments
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect::<Vec<_>>();
+                        let positions = crate::routine::cursor_argument_positions(
+                            cursor,
+                            &parameter_names,
+                            arguments,
+                        )?;
                         let mut frame = Frame::default();
-                        for ((name, ty), expression) in declaration.arguments.iter().zip(arguments)
-                        {
+                        let mut values = vec![None; declaration.arguments.len()];
+                        for (argument, position) in arguments.iter().zip(positions) {
+                            let expression = match argument {
+                                PlPgSqlCursorArgument::Positional(expression)
+                                | PlPgSqlCursorArgument::Named {
+                                    value: expression, ..
+                                } => expression,
+                            };
+                            let (_, ty) = &declaration.arguments[position];
                             let ty = ty.resolved.unwrap_or(ColumnType::Text);
                             let value = self.eval_async(expression).await?.0;
                             let ctx = self.session.plpgsql_eval_context();
                             let value = cast_value(&value, ty, &ctx)?;
+                            values[position] = Some(value);
+                        }
+                        for ((name, ty), value) in declaration.arguments.iter().zip(values) {
+                            let ty = ty.resolved.unwrap_or(ColumnType::Text);
+                            let value = value.ok_or_else(|| {
+                                ExecError::Syntax(format!(
+                                    "not enough arguments for cursor \"{cursor}\""
+                                ))
+                            })?;
                             frame.slots.insert(
                                 name.clone(),
                                 Slot {

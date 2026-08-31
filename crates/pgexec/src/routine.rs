@@ -14,7 +14,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     sync::Arc,
 };
@@ -28,10 +28,10 @@ use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgparser::ast::{
     AlterRoutineAction, ArraySubscript, Assignment, AssignmentValue, CreateRoutineStmt, Expr,
     FuncArgs, FuncCall, InsertOverride, MergeAction, MergeMatchKind, MergeSource, PlPgSqlBlock,
-    PlPgSqlStatement, QueryExpr, RelationRef, Returning, RoutineArg, RoutineArgMode, RoutineBody,
-    RoutineObject, RoutineOption, RoutineParallel, RoutineReturn, RoutineSignature,
-    RoutineVolatility, SelectItem, SelectStmt, Statement, TableFuncCall, TableFuncColumnDef,
-    TargetIndirection,
+    PlPgSqlCursorArgument, PlPgSqlDeclaration, PlPgSqlStatement, QueryExpr, RelationRef, Returning,
+    RoutineArg, RoutineArgMode, RoutineBody, RoutineObject, RoutineOption, RoutineParallel,
+    RoutineReturn, RoutineSignature, RoutineVolatility, SelectItem, SelectStmt, Statement,
+    TableFuncCall, TableFuncColumnDef, TargetIndirection,
 };
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum};
 use crabka_pgwire::engine::QueryResult;
@@ -4229,6 +4229,7 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
         }
     })?;
     validate_plpgsql_raises(&block, routine)?;
+    validate_cursor_opens(&block)?;
     if routine.kind == RoutineKind::Procedure && plpgsql_has_return_value(&block) {
         return Err(ExecError::FunctionError {
             sqlstate: "42804",
@@ -4260,6 +4261,118 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
         });
     }
     Ok(block)
+}
+
+pub(crate) fn cursor_argument_positions(
+    cursor: &str,
+    parameters: &[String],
+    arguments: &[PlPgSqlCursorArgument],
+) -> Result<Vec<usize>, ExecError> {
+    let mut positions = Vec::with_capacity(arguments.len());
+    let mut assigned = vec![false; parameters.len()];
+    for (argument_index, argument) in arguments.iter().enumerate() {
+        let position = match argument {
+            PlPgSqlCursorArgument::Positional(_) => argument_index,
+            PlPgSqlCursorArgument::Named { name, .. } => parameters
+                .iter()
+                .position(|parameter| parameter.eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    ExecError::Syntax(format!("cursor \"{cursor}\" has no parameter \"{name}\""))
+                })?,
+        };
+        let Some(already_assigned) = assigned.get_mut(position) else {
+            return Err(ExecError::Syntax(format!(
+                "cursor \"{cursor}\" has {} arguments, but {} were supplied",
+                parameters.len(),
+                arguments.len()
+            )));
+        };
+        if *already_assigned {
+            return Err(ExecError::Syntax(format!(
+                "value for parameter \"{}\" of cursor \"{cursor}\" specified more than once",
+                parameters[position]
+            )));
+        }
+        *already_assigned = true;
+        positions.push(position);
+    }
+    if assigned.iter().any(|assigned| !assigned) {
+        return Err(ExecError::Syntax(format!(
+            "not enough arguments for cursor \"{cursor}\""
+        )));
+    }
+    Ok(positions)
+}
+
+fn validate_cursor_opens(block: &PlPgSqlBlock) -> Result<(), ExecError> {
+    fn statements(
+        body: &[PlPgSqlStatement],
+        cursors: &HashMap<String, Vec<String>>,
+    ) -> Result<(), ExecError> {
+        for statement in body {
+            match statement {
+                PlPgSqlStatement::Block(block) => block_with_parent(block, cursors)?,
+                PlPgSqlStatement::If {
+                    branches,
+                    else_body,
+                } => {
+                    for (_, body) in branches {
+                        statements(body, cursors)?;
+                    }
+                    statements(else_body, cursors)?;
+                }
+                PlPgSqlStatement::Case {
+                    arms, else_body, ..
+                } => {
+                    for (_, body) in arms {
+                        statements(body, cursors)?;
+                    }
+                    if let Some(body) = else_body {
+                        statements(body, cursors)?;
+                    }
+                }
+                PlPgSqlStatement::Loop { body, .. } => statements(body, cursors)?,
+                PlPgSqlStatement::Open {
+                    cursor,
+                    arguments,
+                    query: None,
+                    dynamic_query: None,
+                    ..
+                } => {
+                    if let Some(parameters) = cursors.get(cursor) {
+                        cursor_argument_positions(cursor, parameters, arguments)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn block_with_parent(
+        block: &PlPgSqlBlock,
+        parent: &HashMap<String, Vec<String>>,
+    ) -> Result<(), ExecError> {
+        let mut cursors = parent.clone();
+        for declaration in &block.declarations {
+            if let PlPgSqlDeclaration::Cursor {
+                name, arguments, ..
+            } = declaration
+            {
+                cursors.insert(
+                    name.clone(),
+                    arguments.iter().map(|(name, _, _)| name.clone()).collect(),
+                );
+            }
+        }
+        statements(&block.statements, &cursors)?;
+        for handler in &block.exceptions {
+            statements(&handler.statements, &cursors)?;
+        }
+        Ok(())
+    }
+
+    block_with_parent(block, &HashMap::new())
 }
 
 /// Names in a PL/pgSQL declaration which hide a routine parameter or outer

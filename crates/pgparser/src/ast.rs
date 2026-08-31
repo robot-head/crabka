@@ -5231,6 +5231,13 @@ pub struct PlPgSqlInto {
     pub targets: Vec<PlPgSqlTarget>,
 }
 
+/// One argument passed while opening a declared PL/pgSQL cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlPgSqlCursorArgument {
+    Positional(Expr),
+    Named { name: String, value: Expr },
+}
+
 /// One executable PL/pgSQL statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlPgSqlStatement {
@@ -5298,7 +5305,7 @@ pub enum PlPgSqlStatement {
     Open {
         cursor: String,
         scroll: Option<bool>,
-        arguments: Vec<Expr>,
+        arguments: Vec<PlPgSqlCursorArgument>,
         query: Option<Box<Statement>>,
         dynamic_query: Option<Expr>,
         using: Vec<Expr>,

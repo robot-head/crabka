@@ -9,9 +9,9 @@ use std::collections::HashSet;
 
 use crate::{
     ast::{
-        Expr, PlPgSqlBlock, PlPgSqlDeclaration, PlPgSqlExceptionHandler, PlPgSqlInto, PlPgSqlLoop,
-        PlPgSqlRaise, PlPgSqlRaiseLevel, PlPgSqlStatement, PlPgSqlTarget, PlPgSqlVariableConflict,
-        RoutineType, Statement,
+        Expr, PlPgSqlBlock, PlPgSqlCursorArgument, PlPgSqlDeclaration, PlPgSqlExceptionHandler,
+        PlPgSqlInto, PlPgSqlLoop, PlPgSqlRaise, PlPgSqlRaiseLevel, PlPgSqlStatement, PlPgSqlTarget,
+        PlPgSqlVariableConflict, RoutineType, Statement,
     },
     error::ParseError,
     lexer::lex,
@@ -1015,7 +1015,9 @@ impl PlParser<'_> {
         let mut arguments = Vec::new();
         if matches!(self.token(), Token::LParen) {
             self.bump();
-            arguments = self.parse_expr_list_to_token(&Token::RParen)?;
+            let end = self.find_token(self.pos, &Token::RParen)?;
+            arguments = self.parse_cursor_argument_list_range(self.pos, end)?;
+            self.pos = end;
             self.expect_token(&Token::RParen)?;
         }
         let scroll = if self.eat_word("no") {
@@ -1382,6 +1384,64 @@ impl PlParser<'_> {
         }
         values.push(self.parse_expr_range(item_start, end)?);
         Ok(values)
+    }
+
+    fn parse_cursor_argument_list_range(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<PlPgSqlCursorArgument>, ParseError> {
+        if start == end {
+            return Ok(Vec::new());
+        }
+        let mut arguments = Vec::new();
+        let mut item_start = start;
+        for comma in self.top_level_commas(start, end) {
+            arguments.push(self.parse_cursor_argument_range(item_start, comma)?);
+            item_start = comma + 1;
+        }
+        arguments.push(self.parse_cursor_argument_range(item_start, end)?);
+        Ok(arguments)
+    }
+
+    fn parse_cursor_argument_range(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Result<PlPgSqlCursorArgument, ParseError> {
+        let separator = self.find_top(start, |parser, pos| {
+            pos < end
+                && (matches!(parser.tokens[pos].0, Token::NamedArg)
+                    || (matches!(parser.tokens[pos].0, Token::Colon)
+                        && matches!(parser.tokens.get(pos + 1), Some((Token::Eq, _)))))
+        });
+        if separator >= end {
+            return Ok(PlPgSqlCursorArgument::Positional(
+                self.parse_expr_range(start, end)?,
+            ));
+        }
+        let Some(name) = self.word_at(start) else {
+            return Err(ParseError::new(
+                "expected cursor parameter name",
+                self.tokens[start].1,
+            ));
+        };
+        if separator != start + 1 {
+            return Err(ParseError::new(
+                "expected cursor parameter name",
+                self.tokens[start].1,
+            ));
+        }
+        let value_start = separator
+            + if matches!(self.tokens[separator].0, Token::NamedArg) {
+                1
+            } else {
+                2
+            };
+        Ok(PlPgSqlCursorArgument::Named {
+            name,
+            value: self.parse_expr_range(value_start, end)?,
+        })
     }
 
     fn parse_expr_range(&self, start: usize, end: usize) -> Result<Expr, ParseError> {

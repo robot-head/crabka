@@ -1468,6 +1468,43 @@ async fn cursor_arguments_and_dynamic_open_using_are_bound() {
 }
 
 #[tokio::test]
+async fn cursor_named_arguments_are_bound_and_checked_at_definition_time() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_named_cursor(first_ int4, second_ int4) RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE
+          cursor_ CURSOR(first_arg int4, second_arg int4) FOR
+            SELECT first_arg * 10 + second_arg;
+          result int4;
+        BEGIN
+          OPEN cursor_(second_arg => second_, first_arg := first_);
+          FETCH NEXT FROM cursor_ INTO result;
+          RETURN result;
+        END
+        $$;
+        ",
+    )
+    .await;
+    assert!(scalar(&mut session, "SELECT pl_named_cursor(1, 2)").await == Some("12".into()));
+
+    let error = session
+        .simple_query(
+            r"
+            CREATE FUNCTION pl_duplicate_cursor_argument() RETURNS void LANGUAGE plpgsql AS $$
+            DECLARE cursor_ CURSOR(first_arg int4, second_arg int4) FOR SELECT 1;
+            BEGIN OPEN cursor_(second_arg := 2, 1); END
+            $$
+            ",
+        )
+        .await
+        .expect_err("duplicate cursor argument must be rejected");
+    assert!(error.to_string().contains("specified more than once"));
+}
+
+#[tokio::test]
 async fn execute_discards_rows_and_dynamic_dml_returning_assigns_the_first_row() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

@@ -1,8 +1,8 @@
 use assert2::assert;
 use crabka_pgparser::{
     ast::{
-        PlPgSqlDeclaration, PlPgSqlLoop, PlPgSqlRaiseLevel, PlPgSqlStatement,
-        PlPgSqlVariableConflict, Statement,
+        PlPgSqlCursorArgument, PlPgSqlDeclaration, PlPgSqlLoop, PlPgSqlRaiseLevel,
+        PlPgSqlStatement, PlPgSqlVariableConflict, Statement,
     },
     parse_plpgsql,
 };
@@ -278,7 +278,7 @@ fn parses_cursor_and_diagnostics_statements() {
           rows_cur scroll cursor(limit_rows int) for select * from things limit limit_rows;
           dynamic_cur refcursor;
         begin
-          open rows_cur(10);
+          open rows_cur(limit_rows := 10);
           open dynamic_cur no scroll for execute query_text using argument;
           fetch next from rows_cur into row_value;
           move backward 2 from rows_cur;
@@ -294,7 +294,13 @@ fn parses_cursor_and_diagnostics_statements() {
         block.declarations[0],
         PlPgSqlDeclaration::Cursor { .. }
     ));
-    assert!(matches!(block.statements[0], PlPgSqlStatement::Open { .. }));
+    let PlPgSqlStatement::Open { arguments, .. } = &block.statements[0] else {
+        panic!("expected OPEN");
+    };
+    assert!(matches!(
+        arguments[0],
+        PlPgSqlCursorArgument::Named { ref name, .. } if name == "limit_rows"
+    ));
     assert!(matches!(
         block.statements[2],
         PlPgSqlStatement::Fetch { .. }
