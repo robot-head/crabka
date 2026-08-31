@@ -59,34 +59,64 @@ impl DecodedColumnStats {
         }
     }
 
-    /// Estimate a numeric inequality from typed scalar slots when every value
-    /// can be represented as a finite `f64`.
+    /// Estimate an inequality from typed scalar slots.
+    ///
+    /// Numeric slots retain their interpolated histogram estimate. Other
+    /// orderable types still use their exact MCV mass, which is especially
+    /// important when the MCV list covers the relation.
     pub(crate) fn scalar_inequality(
         &self,
         constant: &Datum,
         inequality: Inequality,
     ) -> Option<f64> {
-        let constant = numeric_datum(constant)?;
+        if let Some(constant) = numeric_datum(constant)
+            && let Some(mcv) = self
+                .mcv
+                .iter()
+                .map(|(value, frequency)| Some((numeric_datum(value)?, *frequency)))
+                .collect::<Option<Vec<_>>>()
+            && let Some(histogram) = self
+                .histogram
+                .iter()
+                .map(numeric_datum)
+                .collect::<Option<Vec<_>>>()
+        {
+            return Some(scalarineqsel(
+                ColumnStats {
+                    rows: self.rows,
+                    null_frac: self.null_frac,
+                    n_distinct: self.n_distinct,
+                    mcv: &mcv,
+                    histogram: &histogram,
+                },
+                Some(constant),
+                inequality,
+            ));
+        }
+
         let mcv = self
             .mcv
             .iter()
-            .map(|(value, frequency)| Some((numeric_datum(value)?, *frequency)))
-            .collect::<Option<Vec<_>>>()?;
-        let histogram = self
-            .histogram
-            .iter()
-            .map(numeric_datum)
-            .collect::<Option<Vec<_>>>()?;
-        Some(scalarineqsel(
-            ColumnStats {
-                rows: self.rows,
-                null_frac: self.null_frac,
-                n_distinct: self.n_distinct,
-                mcv: &mcv,
-                histogram: &histogram,
-            },
-            Some(constant),
-            inequality,
+            .try_fold(0.0, |selectivity, (value, frequency)| {
+                let ordering = crabka_pgtypes::ops::compare(value, constant).ok()??;
+                let selected = matches!(
+                    (inequality, ordering),
+                    (Inequality::Less, std::cmp::Ordering::Less)
+                        | (
+                            Inequality::LessEqual,
+                            std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                        )
+                        | (Inequality::Greater, std::cmp::Ordering::Greater)
+                        | (
+                            Inequality::GreaterEqual,
+                            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                        )
+                );
+                Some(selectivity + if selected { *frequency } else { 0.0 })
+            })?;
+        let common = self.mcv.iter().map(|(_, frequency)| frequency).sum::<f64>();
+        Some(probability(
+            mcv + (1.0 - probability(self.null_frac) - probability(common)).max(0.0) * 0.5,
         ))
     }
 }

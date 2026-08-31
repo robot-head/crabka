@@ -24440,6 +24440,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_text_mcv_for_inequalities() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE text_mcv_inequality (a int4, b text); \
+             INSERT INTO text_mcv_inequality \
+             SELECT mod(i, 100), mod(i, 50) FROM generate_series(1, 5000) s(i); \
+             ANALYZE text_mcv_inequality",
+        )
+        .await
+        .expect("text MCV setup");
+
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT * FROM text_mcv_inequality WHERE a < 1 AND b < '1'",
+            )
+            .await
+                == Ok(vec![
+                    vec!["Seq Scan on text_mcv_inequality (cost=0.00..0.00 rows=1 width=0)".into()],
+                    vec!["  Filter: ((a < 1) AND (b < '1'::text))".into()],
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_extended_mcv_for_boolean_conjunctions() {
         use assert2::assert;
 
