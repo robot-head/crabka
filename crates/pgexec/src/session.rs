@@ -24152,6 +24152,24 @@ mod tests {
                 "{sql}"
             );
         }
+        s.simple_query(
+            "CREATE STATISTICS dependency_expression_estimate (dependencies) \
+             ON (a * 2), upper(b) FROM dependency_estimate; ANALYZE dependency_estimate",
+        )
+        .await
+        .expect("expression dependency setup");
+        let expression = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM dependency_estimate WHERE (a * 2) = 2 AND upper(b) = '1'",
+        )
+        .await
+        .expect("expression dependency explain");
+        assert!(
+            expression.first()
+                == Some(&vec![
+                    "Seq Scan on dependency_estimate (cost=0.00..0.00 rows=50 width=0)".into()
+                ])
+        );
     }
 
     #[tokio::test]

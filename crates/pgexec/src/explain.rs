@@ -606,6 +606,7 @@ fn decode_dependencies(data: &str) -> Option<Vec<(Vec<i16>, i16, f64)>> {
 #[derive(Debug)]
 struct McvClause {
     key: GroupKey,
+    expr: Expr,
     predicate: McvPredicate,
 }
 
@@ -821,53 +822,57 @@ fn scalar_mcv_clause_selectivity(
     clause: &McvClause,
 ) -> f64 {
     let default = default_mcv_selectivity(&clause.predicate);
-    let GroupKey::Attribute(attnum) = &clause.key else {
-        return default;
-    };
-    crate::attrstats::get(
-        catalog_kv,
-        &crate::attrstats::AttributeStatsKey {
-            relation: table.name.clone(),
-            attnum: *attnum,
-            inherited: false,
-        },
-    )
-    .ok()
-    .flatten()
-    .and_then(|stats| {
-        table
-            .columns
-            .get(usize::try_from(*attnum - 1).ok()?)
-            .and_then(|definition| {
-                crate::plan::selfuncs::decode_catalog_stats(&stats, definition.ty, rows, ctx)
-            })
-    })
-    .map_or(default, |stats| match &clause.predicate {
-        McvPredicate::Equal(values) => values
-            .iter()
-            .map(|value| {
-                value.scalar_value.as_ref().map_or_else(
-                    || crate::plan::selfuncs::nulltestsel(stats.as_stats(), true),
-                    |value| crate::plan::selfuncs::eqsel(stats.as_stats(), Some(value)),
-                )
-            })
-            .sum::<f64>()
-            .min(1.0),
-        McvPredicate::Inequality { op, value } => {
-            let inequality = match op {
-                BinaryOp::Lt => crate::plan::selfuncs::Inequality::Less,
-                BinaryOp::Le => crate::plan::selfuncs::Inequality::LessEqual,
-                BinaryOp::Gt => crate::plan::selfuncs::Inequality::Greater,
-                BinaryOp::Ge => crate::plan::selfuncs::Inequality::GreaterEqual,
-                _ => return default,
-            };
-            value
-                .scalar_value
-                .as_ref()
-                .and_then(|value| stats.scalar_inequality(value, inequality))
-                .unwrap_or(default)
+    column_statistics(catalog_kv, table, rows, &clause.expr, ctx).map_or(default, |stats| {
+        match &clause.predicate {
+            McvPredicate::Equal(values) => values
+                .iter()
+                .map(|value| {
+                    mcv_scalar_value(value, &clause.expr, table, ctx)
+                        .as_ref()
+                        .map_or_else(
+                            || crate::plan::selfuncs::nulltestsel(stats.as_stats(), true),
+                            |value| crate::plan::selfuncs::eqsel(stats.as_stats(), Some(value)),
+                        )
+                })
+                .sum::<f64>()
+                .min(1.0),
+            McvPredicate::Inequality { op, value } => {
+                let inequality = match op {
+                    BinaryOp::Lt => crate::plan::selfuncs::Inequality::Less,
+                    BinaryOp::Le => crate::plan::selfuncs::Inequality::LessEqual,
+                    BinaryOp::Gt => crate::plan::selfuncs::Inequality::Greater,
+                    BinaryOp::Ge => crate::plan::selfuncs::Inequality::GreaterEqual,
+                    _ => return default,
+                };
+                mcv_scalar_value(value, &clause.expr, table, ctx)
+                    .as_ref()
+                    .and_then(|value| stats.scalar_inequality(value, inequality))
+                    .unwrap_or(default)
+            }
+            McvPredicate::NotNull => crate::plan::selfuncs::nulltestsel(stats.as_stats(), false),
         }
-        McvPredicate::NotNull => crate::plan::selfuncs::nulltestsel(stats.as_stats(), false),
+    })
+}
+
+fn mcv_scalar_value(
+    value: &McvValue,
+    expr: &Expr,
+    table: &crabka_pgcatalog::Table,
+    ctx: &crate::clock::EvalCtx,
+) -> Option<crabka_pgtypes::Datum> {
+    value.scalar_value.clone().or_else(|| {
+        crate::eval::infer_type(expr, &crate::scope::Scope::single(table, &table.name.name))
+            .ok()
+            .and_then(|ty| {
+                value.text.as_ref().and_then(|text| {
+                    crate::eval::cast_value_in(
+                        &crabka_pgtypes::Datum::Text(text.clone()),
+                        ty,
+                        ctx.output_style(),
+                    )
+                    .ok()
+                })
+            })
     })
 }
 
@@ -1060,6 +1065,7 @@ fn mcv_inequality_clause(
     let value = mcv_value(key.clone(), literal, table, ctx)?;
     Some(McvClause {
         key,
+        expr: key_expr.clone(),
         predicate: McvPredicate::Inequality { op, value },
     })
 }
@@ -1071,6 +1077,7 @@ fn null_mcv_clause(
 ) -> Option<McvClause> {
     Some(McvClause {
         key: GroupKey::Attribute(column_attnum(expr, table)?),
+        expr: expr.clone(),
         predicate: if negated {
             McvPredicate::NotNull
         } else {
@@ -1099,6 +1106,7 @@ fn bool_mcv_clause(
     .ok()?;
     Some(McvClause {
         key: GroupKey::Attribute(attnum),
+        expr: expr.clone(),
         predicate: McvPredicate::Equal(vec![McvValue {
             text: Some(text),
             scalar_value: Some(value),
@@ -1117,6 +1125,7 @@ fn mcv_clause(
     let value = mcv_value(key.clone(), literal, table, ctx)?;
     Some(McvClause {
         key,
+        expr: key_expr.clone(),
         predicate: McvPredicate::Equal(vec![value]),
     })
 }
@@ -1138,6 +1147,7 @@ fn mcv_list_clause(
         .collect::<Vec<_>>();
     (!values.is_empty()).then_some(McvClause {
         key,
+        expr: key_expr.clone(),
         predicate: McvPredicate::Equal(values),
     })
 }
@@ -1161,6 +1171,7 @@ fn mcv_array_clause(
         .collect::<Vec<_>>();
     (!values.is_empty()).then_some(McvClause {
         key,
+        expr: key_expr.clone(),
         predicate: McvPredicate::Equal(values),
     })
 }
@@ -1203,6 +1214,7 @@ fn quantified_all_equality_selectivity(
     }
     let clause = McvClause {
         key,
+        expr: *expr.clone(),
         predicate: McvPredicate::Equal(vec![first]),
     };
     Some(scalar_mcv_clause_selectivity(
