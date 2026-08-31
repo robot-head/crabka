@@ -68,6 +68,13 @@ pub(crate) fn cast_value(
     Ok(value)
 }
 
+fn is_reraise(raise: &PlPgSqlRaise) -> bool {
+    raise.message.is_none()
+        && raise.condition.is_none()
+        && raise.parameters.is_empty()
+        && raise.options.is_empty()
+}
+
 #[derive(Default)]
 struct Frame {
     label: Option<String>,
@@ -1656,9 +1663,17 @@ impl ScalarInterpreter<'_> {
                 })?))
             })()
             .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "RETURN")),
-            PlPgSqlStatement::Raise(raise) => self.raise(raise).map_err(|error| {
-                plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
-            }),
+            PlPgSqlStatement::Raise(raise) => {
+                let rethrow = is_reraise(raise) && self.active_error.is_some();
+                let result = self.raise(raise);
+                if rethrow {
+                    result
+                } else {
+                    result.map_err(|error| {
+                        plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
+                    })
+                }
+            }
             PlPgSqlStatement::Assert {
                 condition,
                 message,
@@ -2422,9 +2437,17 @@ impl Interpreter<'_> {
                 }
                 .await
                 .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "RETURN")),
-                PlPgSqlStatement::Raise(raise) => self.raise(raise).await.map_err(|error| {
-                    plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
-                }),
+                PlPgSqlStatement::Raise(raise) => {
+                    let rethrow = is_reraise(raise) && self.active_error.is_some();
+                    let result = self.raise(raise).await;
+                    if rethrow {
+                        result
+                    } else {
+                        result.map_err(|error| {
+                            plpgsql_statement_error(error, &self.context, raise.line, "RAISE")
+                        })
+                    }
+                }
                 PlPgSqlStatement::Assert {
                     condition,
                     message,

@@ -1840,6 +1840,39 @@ async fn assignment_and_return_errors_stack_plpgsql_statement_contexts() {
 }
 
 #[tokio::test]
+async fn reraise_preserves_the_original_statement_context() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_reraise() RETURNS void LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'boom';
+        EXCEPTION WHEN OTHERS THEN
+          RAISE;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    let error = session
+        .simple_query("SELECT pl_reraise()")
+        .await
+        .expect_err("the original exception must be rethrown");
+    assert!(error.code == "P0001", "{error:?}");
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            == Some("PL/pgSQL function pl_reraise() line 3 at RAISE"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn composite_functions_reject_scalar_return_values() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
