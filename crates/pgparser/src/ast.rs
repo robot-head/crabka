@@ -5353,7 +5353,7 @@ pub enum PlPgSqlLoop {
         using: Vec<Expr>,
     },
     Foreach {
-        target: PlPgSqlTarget,
+        targets: Vec<PlPgSqlTarget>,
         slice: Option<u32>,
         array: Expr,
     },

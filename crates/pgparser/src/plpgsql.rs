@@ -729,7 +729,7 @@ impl PlParser<'_> {
     fn parse_foreach(&mut self, label: Option<String>) -> Result<PlPgSqlStatement, ParseError> {
         let line = self.line();
         self.expect_word("foreach")?;
-        let target = self.parse_target()?;
+        let targets = self.parse_target_list()?;
         let slice = if self.eat_word("slice") {
             let position = self.offset();
             match self.bump() {
@@ -749,7 +749,7 @@ impl PlParser<'_> {
         self.parse_loop(
             label,
             PlPgSqlLoop::Foreach {
-                target,
+                targets,
                 slice,
                 array,
             },
@@ -1249,6 +1249,14 @@ impl PlParser<'_> {
     }
 
     fn parse_targets_until_word(&mut self, stop: &str) -> Result<Vec<PlPgSqlTarget>, ParseError> {
+        let targets = self.parse_target_list()?;
+        if !self.at_word(stop) {
+            return Err(self.error(format!("expected {stop} after target list")));
+        }
+        Ok(targets)
+    }
+
+    fn parse_target_list(&mut self) -> Result<Vec<PlPgSqlTarget>, ParseError> {
         let mut targets = Vec::new();
         loop {
             targets.push(self.parse_target()?);
@@ -1257,9 +1265,6 @@ impl PlParser<'_> {
             } else {
                 break;
             }
-        }
-        if !self.at_word(stop) {
-            return Err(self.error(format!("expected {stop} after target list")));
         }
         Ok(targets)
     }

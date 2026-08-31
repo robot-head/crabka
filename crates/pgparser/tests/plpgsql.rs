@@ -131,7 +131,7 @@ fn parses_if_case_and_all_loop_sources() {
           for i in reverse 10..1 by 2 loop continue when i = 4; end loop;
           for r in select * from things loop exit; end loop;
           for r in execute 'select * from things' using n loop exit; end loop;
-          foreach item slice 1 in array values_array loop exit; end loop;
+          foreach item, value slice 1 in array values_array loop exit; end loop;
         end
         ",
     )
@@ -154,6 +154,13 @@ fn parses_if_case_and_all_loop_sources() {
         panic!("expected dynamic loop");
     };
     assert!(matches!(kind.as_ref(), PlPgSqlLoop::Dynamic { .. }));
+    let PlPgSqlStatement::Loop { kind, .. } = &block.statements[7] else {
+        panic!("expected foreach loop");
+    };
+    let PlPgSqlLoop::Foreach { targets, slice, .. } = kind.as_ref() else {
+        panic!("expected foreach source");
+    };
+    assert!(targets.len() == 2 && *slice == Some(1));
 }
 
 #[test]

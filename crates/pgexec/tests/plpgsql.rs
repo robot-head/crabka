@@ -1254,6 +1254,65 @@ async fn foreach_iterates_arrays_and_sets_found() {
 }
 
 #[tokio::test]
+async fn foreach_slices_require_array_targets_and_unpack_records() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let error = session
+        .simple_query(
+            "DO $$\n\
+             DECLARE value int;\n\
+             BEGIN\n\
+               FOREACH value SLICE 1 IN ARRAY ARRAY[1, 2] LOOP\n\
+               END LOOP;\n\
+             END\n\
+             $$",
+        )
+        .await
+        .expect_err("slice target must be an array");
+    assert!(error.code == "42804");
+    assert!(error.message == "FOREACH ... SLICE loop variable must be of an array type");
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            == Some("PL/pgSQL function inline_code_block line 4 at FOREACH over array")
+    );
+
+    execute(
+        &mut session,
+        r"
+        CREATE TYPE pl_foreach_pair AS (left_value int4, right_value int4);
+        CREATE TABLE pl_foreach_slice_result (value text);
+        DO $$
+        DECLARE slice_value int4[]; left_value int4; right_value int4;
+        BEGIN
+          FOREACH slice_value SLICE 1 IN ARRAY ARRAY[[2, 3], [5, 7]] LOOP
+            INSERT INTO pl_foreach_slice_result VALUES (slice_value::text);
+          END LOOP;
+          FOREACH left_value, right_value IN ARRAY
+              ARRAY[(2, 3)::pl_foreach_pair, (5, 7)::pl_foreach_pair] LOOP
+            INSERT INTO pl_foreach_slice_result VALUES ((left_value + right_value)::text);
+          END LOOP;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT value FROM pl_foreach_slice_result ORDER BY value"
+        )
+        .await
+            == vec![row(&["12"]), row(&["5"]), row(&["{2,3}"]), row(&["{5,7}"])]
+    );
+}
+
+#[tokio::test]
 async fn record_fields_can_be_read_and_assigned() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
@@ -2048,8 +2107,8 @@ async fn composite_functions_reject_scalar_return_values() {
     execute(
         &mut session,
         r"
-        CREATE TYPE pl_return_pair AS (id int4, label text);
-        CREATE FUNCTION pl_return_scalar() RETURNS pl_return_pair LANGUAGE plpgsql AS $$
+        CREATE TYPE pl_return_pair_scalar AS (id int4, label text);
+        CREATE FUNCTION pl_return_scalar() RETURNS pl_return_pair_scalar LANGUAGE plpgsql AS $$
         BEGIN
           RETURN 7;
         END
@@ -2090,8 +2149,8 @@ async fn composite_returns_require_exact_row_field_types() {
     execute(
         &mut session,
         r"
-        CREATE TYPE pl_return_pair AS (id int4, label varchar);
-        CREATE FUNCTION pl_return_pair_value() RETURNS pl_return_pair LANGUAGE plpgsql AS $$
+        CREATE TYPE pl_return_pair_varchar AS (id int4, label varchar);
+        CREATE FUNCTION pl_return_pair_value() RETURNS pl_return_pair_varchar LANGUAGE plpgsql AS $$
         BEGIN
           RETURN (1, 'ready'::varchar);
         END
@@ -2106,7 +2165,7 @@ async fn composite_returns_require_exact_row_field_types() {
     execute(
         &mut session,
         r"
-        CREATE OR REPLACE FUNCTION pl_return_pair_value() RETURNS pl_return_pair LANGUAGE plpgsql AS $$
+        CREATE OR REPLACE FUNCTION pl_return_pair_value() RETURNS pl_return_pair_varchar LANGUAGE plpgsql AS $$
         BEGIN
           RETURN (1, 'ready');
         END
@@ -2144,9 +2203,9 @@ async fn scalar_returns_use_composite_text_input() {
     execute(
         &mut session,
         r"
-        CREATE TYPE pl_return_pair AS (id int4, label text);
+        CREATE TYPE pl_return_pair_cast AS (id int4, label text);
         CREATE FUNCTION pl_return_composite_as_int() RETURNS int4 LANGUAGE plpgsql AS $$
-        DECLARE value pl_return_pair;
+        DECLARE value pl_return_pair_cast;
         BEGIN
           value := (1, 'ready');
           RETURN value;
@@ -2184,11 +2243,11 @@ async fn set_functions_expand_composite_return_next_values() {
     execute(
         &mut session,
         r"
-        CREATE TYPE pl_return_pair AS (id int4, label text);
-        CREATE FUNCTION pl_return_pairs() RETURNS SETOF pl_return_pair LANGUAGE plpgsql AS $$
+        CREATE TYPE pl_return_pair_set AS (id int4, label text);
+        CREATE FUNCTION pl_return_pairs() RETURNS SETOF pl_return_pair_set LANGUAGE plpgsql AS $$
         BEGIN
           RETURN NEXT (1, 'one'::text);
-          RETURN NEXT NULL::pl_return_pair;
+          RETURN NEXT NULL::pl_return_pair_set;
         END
         $$
         ",

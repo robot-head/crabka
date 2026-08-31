@@ -3046,30 +3046,58 @@ impl Interpreter<'_> {
                     Ok(Flow::Next)
                 }
                 PlPgSqlLoop::Foreach {
-                    target,
+                    targets,
                     slice,
                     array,
                 } => {
                     let Datum::Array(array) = self.eval_async(array).await?.0 else {
-                        return Err(ExecError::TypeMismatch(
-                            "FOREACH expression must yield an array".into(),
+                        return Err(plpgsql_statement_error(
+                            ExecError::TypeMismatch(
+                                "FOREACH expression must yield an array".into(),
+                            ),
+                            &self.context,
+                            line,
+                            "FOREACH over array",
                         ));
                     };
                     let slice = usize::try_from(slice.unwrap_or(0)).unwrap_or(usize::MAX);
                     if slice > array.ndims() {
-                        return Err(ExecError::FunctionError {
-                            sqlstate: "2202E",
-                            message: format!(
-                                "slice dimension ({slice}) is out of the valid range 0..{}",
-                                array.ndims()
+                        return Err(plpgsql_statement_error(
+                            ExecError::FunctionError {
+                                sqlstate: "2202E",
+                                message: format!(
+                                    "slice dimension ({slice}) is out of the valid range 0..{}",
+                                    array.ndims()
+                                ),
+                            },
+                            &self.context,
+                            line,
+                            "FOREACH over array",
+                        ));
+                    }
+                    if slice > 0
+                        && !targets.iter().all(|target| {
+                            target.path.len() == 1
+                                && target.subscripts.is_empty()
+                                && self.lookup_slot(&target.path[0]).is_some_and(|slot| {
+                                    slot.ty.storage_type().array_element().is_some()
+                                })
+                        })
+                    {
+                        return Err(plpgsql_statement_error(
+                            ExecError::TypeMismatch(
+                                "FOREACH ... SLICE loop variable must be of an array type".into(),
                             ),
-                        });
+                            &self.context,
+                            line,
+                            "FOREACH over array",
+                        ));
                     }
                     let mut found = false;
                     if slice == 0 {
                         for value in array.elems {
                             found = true;
-                            self.assign_target(target, value).await?;
+                            self.assign_foreach_targets(targets, value).await?;
                             if let Some(flow) = self.loop_iteration(label, body).await? {
                                 self.set_found(found);
                                 return Ok(flow);
@@ -3083,8 +3111,8 @@ impl Interpreter<'_> {
                             .product::<usize>();
                         for values in array.elems.chunks(chunk_size.max(1)) {
                             found = true;
-                            self.assign_target(
-                                target,
+                            self.assign_foreach_targets(
+                                targets,
                                 Datum::Array(ArrayValue::with_dims(
                                     array.elem,
                                     values.to_vec(),
@@ -3391,6 +3419,30 @@ impl Interpreter<'_> {
         Err(ExecError::Syntax(
             "invalid PL/pgSQL assignment target".into(),
         ))
+    }
+
+    async fn assign_foreach_targets(
+        &mut self,
+        targets: &[PlPgSqlTarget],
+        value: Datum,
+    ) -> Result<(), ExecError> {
+        if let [target] = targets {
+            return self.assign_target(target, value).await;
+        }
+        let Datum::Record(record) = value else {
+            return Err(ExecError::TypeMismatch(
+                "cannot assign non-composite value to a row variable".into(),
+            ));
+        };
+        if record.values.len() != targets.len() {
+            return Err(ExecError::TypeMismatch(
+                "returned record type does not match expected record type".into(),
+            ));
+        }
+        for (target, value) in targets.iter().zip(record.values) {
+            self.assign_target(target, value).await?;
+        }
+        Ok(())
     }
 
     fn assign_name(&mut self, name: &str, value: Datum) -> Result<(), ExecError> {
