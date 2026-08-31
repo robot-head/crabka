@@ -8628,6 +8628,7 @@ pub fn create_foreign_table_ops(
         catalog_by_id_op(next, name),
     ];
     batch.extend(bump);
+    batch.extend(creation_order_ops(kv, name)?);
     Ok((next, batch))
 }
 

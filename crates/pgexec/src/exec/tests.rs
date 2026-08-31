@@ -2961,6 +2961,9 @@ async fn dropping_a_schema_reports_direct_members_in_creation_order() {
     for sql in [
         "CREATE SCHEMA cascade_order",
         "CREATE TYPE cascade_order.ty AS (i int)",
+        "CREATE FOREIGN DATA WRAPPER cascade_order_w",
+        "CREATE SERVER cascade_order_s FOREIGN DATA WRAPPER cascade_order_w",
+        "CREATE FOREIGN TABLE cascade_order.f (i int) SERVER cascade_order_s",
         "CREATE TABLE cascade_order.t (i int)",
         "CREATE TABLE cascade_order.parent (i int) PARTITION BY RANGE (i)",
         "CREATE TABLE cascade_order.child PARTITION OF cascade_order.parent FOR VALUES FROM (0) TO (10)",
@@ -2974,7 +2977,7 @@ async fn dropping_a_schema_reports_direct_members_in_creation_order() {
     let mut notices = session.take_notices().expect("notice receiver");
     run_s(&mut session, "DROP SCHEMA cascade_order CASCADE").await;
     let notice = notices.try_recv().expect("cascade notice");
-    assert!(notice.message == "drop cascades to 6 other objects");
+    assert!(notice.message == "drop cascades to 7 other objects");
     assert!(
         notice
             .diagnostics
@@ -2982,6 +2985,7 @@ async fn dropping_a_schema_reports_direct_members_in_creation_order() {
             .and_then(|fields| fields.detail.as_deref())
             == Some(
                 "drop cascades to type cascade_order.ty\n\
+                 drop cascades to foreign table cascade_order.f\n\
                  drop cascades to table cascade_order.t\n\
                  drop cascades to table cascade_order.parent\n\
                  drop cascades to sequence cascade_order.s\n\
