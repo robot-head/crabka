@@ -153,6 +153,18 @@ fn return_cast_input(
     ))
 }
 
+fn stacked_exception_context(error: Option<&PgError>) -> String {
+    let context = error
+        .and_then(|error| error.diagnostics.as_deref())
+        .and_then(|fields| fields.context.as_deref())
+        .unwrap_or_default();
+    context
+        .strip_prefix("PL/pgSQL expression ")
+        .and_then(|_| context.split_once('\n').map(|(_, rest)| rest))
+        .unwrap_or(context)
+        .into()
+}
+
 enum Flow {
     Next,
     Return(Datum),
@@ -2830,11 +2842,9 @@ impl Interpreter<'_> {
                                     .and_then(|fields| fields.hint.clone())
                                     .unwrap_or_default(),
                             ),
-                            "pg_exception_context" if *stacked => Datum::Text(
-                                fields
-                                    .and_then(|fields| fields.context.clone())
-                                    .unwrap_or_default(),
-                            ),
+                            "pg_exception_context" if *stacked => {
+                                Datum::Text(stacked_exception_context(error))
+                            }
                             _ => {
                                 return Err(ExecError::Unsupported(format!(
                                     "PL/pgSQL diagnostic item {item} is not supported"

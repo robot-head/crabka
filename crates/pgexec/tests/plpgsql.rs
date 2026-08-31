@@ -1547,6 +1547,46 @@ async fn diagnostics_include_plpgsql_context() {
 }
 
 #[tokio::test]
+async fn stacked_exception_context_omits_the_expression_frame() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_exception_context_result (value text);
+        CREATE FUNCTION pl_exception_context_inner() RETURNS int4 LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN 1 / 0;
+        END
+        $$;
+        CREATE FUNCTION pl_exception_context_outer() RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE value text;
+        BEGIN
+          PERFORM pl_exception_context_inner();
+        EXCEPTION WHEN division_by_zero THEN
+          GET STACKED DIAGNOSTICS value = PG_EXCEPTION_CONTEXT;
+          INSERT INTO pl_exception_context_result VALUES (value);
+        END
+        $$;
+        ",
+    )
+    .await;
+
+    execute(&mut session, "SELECT pl_exception_context_outer()").await;
+    let context = scalar(
+        &mut session,
+        "SELECT value FROM pl_exception_context_result",
+    )
+    .await
+    .expect("captured exception context");
+    assert!(
+        context
+            == "PL/pgSQL function pl_exception_context_inner() line 3 at RETURN\nSQL statement \"SELECT pl_exception_context_inner()\"\nPL/pgSQL function pl_exception_context_outer() line 4 at PERFORM",
+        "{context}"
+    );
+}
+
+#[tokio::test]
 async fn current_diagnostics_includes_nested_call_frames() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
