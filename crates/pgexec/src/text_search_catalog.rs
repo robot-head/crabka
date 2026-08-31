@@ -227,6 +227,15 @@ pub(crate) fn config_dictionaries(
     kv: Option<&dyn Kv>,
     name: &str,
 ) -> Result<Vec<String>, ExecError> {
+    config_token_dictionaries(kv, name, "word")
+}
+
+/// Dictionaries assigned to one parser token type by a configuration mapping.
+pub(crate) fn config_token_dictionaries(
+    kv: Option<&dyn Kv>,
+    name: &str,
+    token_type: &str,
+) -> Result<Vec<String>, ExecError> {
     let mut current = canonical(name);
     let mut seen = BTreeSet::new();
     loop {
@@ -236,11 +245,7 @@ pub(crate) fn config_dictionaries(
             ));
         }
         if let Some(object) = builtin(TextSearchObjectKind::Configuration, &current) {
-            return Ok(vec![if canonical(&object.base) == "simple" {
-                "simple".into()
-            } else {
-                "english_stem".into()
-            }]);
+            return Ok(builtin_token_dictionaries(&object.base, token_type));
         }
         let kv = kv.ok_or_else(|| {
             ExecError::UndefinedObject(format!(
@@ -252,20 +257,45 @@ pub(crate) fn config_dictionaries(
                 "text search configuration \"{current}\" does not exist"
             ))
         })?;
-        if let Some((_, dictionaries)) = object
-            .options
-            .iter()
-            .find(|(token_type, _)| token_type == "__mapping_word")
-            .or_else(|| {
-                object
-                    .options
-                    .iter()
-                    .find(|(token_type, _)| token_type.starts_with("__mapping_"))
-            })
-        {
+        let key = format!("__mapping_{token_type}");
+        if let Some((_, dictionaries)) = object.options.iter().find(|(name, _)| name == &key) {
             return Ok(dictionaries.split('\u{1f}').map(str::to_owned).collect());
         }
         current = canonical(&object.base);
+    }
+}
+
+fn builtin_token_dictionaries(config: &str, token_type: &str) -> Vec<String> {
+    const SIMPLE: &[&str] = &[
+        "email",
+        "url",
+        "url_path",
+        "host",
+        "file",
+        "version",
+        "sfloat",
+        "float",
+        "int",
+        "uint",
+        "numword",
+        "hword_numpart",
+        "numhword",
+    ];
+    const STEM: &[&str] = &[
+        "asciiword",
+        "hword_asciipart",
+        "asciihword",
+        "word",
+        "hword_part",
+        "hword",
+    ];
+    match canonical(config).as_str() {
+        "simple" if SIMPLE.contains(&token_type) || STEM.contains(&token_type) => {
+            vec!["simple".into()]
+        }
+        "english" if SIMPLE.contains(&token_type) => vec!["simple".into()],
+        "english" if STEM.contains(&token_type) => vec!["english_stem".into()],
+        _ => Vec::new(),
     }
 }
 
@@ -413,12 +443,6 @@ pub(crate) fn execute(
             for (name, value) in options {
                 let name = if *kind == TextSearchObjectKind::Configuration {
                     if let Some(token_type) = name.strip_prefix("__mapping_add_") {
-                        // ponytail: `config_dictionaries` models only ordinary
-                        // words; add token-specific lexing when other parser
-                        // token classes become observable.
-                        if token_type != "word" {
-                            continue;
-                        }
                         format!("__mapping_{token_type}")
                     } else {
                         name.clone()
@@ -753,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn added_non_word_mapping_keeps_the_copied_word_dictionary() {
+    fn added_non_word_mapping_overrides_only_its_token_type() {
         let kv = MemKv::new();
         let create = TextSearchDdl::Create {
             kind: TextSearchObjectKind::Configuration,
@@ -775,6 +799,11 @@ mod tests {
         assert!(
             config_dictionaries(Some(&kv), "custom").expect("word dictionaries")
                 == ["english_stem"]
+        );
+        assert!(
+            config_token_dictionaries(Some(&kv), "custom", "asciiword")
+                .expect("asciiword dictionaries")
+                == ["simple"]
         );
     }
 }

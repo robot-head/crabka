@@ -1485,22 +1485,12 @@ pub(crate) fn debug_token(
     token: &DefaultParserToken,
     catalog: Catalog<'_>,
 ) -> Result<DebugToken, ExecError> {
-    let configured_dictionaries = crate::text_search_catalog::config_dictionaries(catalog, config)?;
-    let config_name = config
-        .strip_prefix("pg_catalog.")
-        .unwrap_or(config)
-        .to_ascii_lowercase();
-    let dictionaries = if matches!(token.id, 12 | 13 | 14 | 23) {
-        Vec::new()
-    } else if config_name == "english" {
-        vec![if matches!(token.id, 1 | 2 | 10 | 11 | 16 | 17) {
-            "english_stem".into()
-        } else {
-            "simple".into()
-        }]
-    } else {
-        configured_dictionaries
-    };
+    let (_, token_type, _) = DEFAULT_PARSER_TOKEN_TYPES
+        .iter()
+        .find(|&&(id, _, _)| id == token.id)
+        .expect("the default parser only returns its declared token IDs");
+    let dictionaries =
+        crate::text_search_catalog::config_token_dictionaries(catalog, config, token_type)?;
     for index in 0..dictionaries.len() {
         let dictionary = dictionaries[index].clone();
         if let Some(lexemes) = lexize_dictionary(&dictionary, &token.text, catalog)? {

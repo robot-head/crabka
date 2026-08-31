@@ -2590,24 +2590,22 @@ fn pg_ts_config_map_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for (config, _) in configs {
         let config_oid = crate::text_search_catalog::object_oid(&config);
-        for dictionary in crate::text_search_catalog::config_dictionaries(Some(kv), &config)? {
-            let dictionary_oid = crate::text_search_catalog::object_oid(&dictionary);
-            rows.extend(
-                crate::text_search_fn::DEFAULT_PARSER_TOKEN_TYPES
-                    .iter()
-                    .filter_map(|&(token_type, _, _)| {
-                        ((1..=11).contains(&token_type) || (15..=22).contains(&token_type)).then(
-                            || {
-                                vec![
-                                    Datum::Int4(config_oid),
-                                    Datum::Int4(token_type),
-                                    Datum::Int4(1),
-                                    Datum::Int4(dictionary_oid),
-                                ]
-                            },
-                        )
-                    }),
-            );
+        for &(token_type, token_name, _) in crate::text_search_fn::DEFAULT_PARSER_TOKEN_TYPES {
+            for (sequence, dictionary) in crate::text_search_catalog::config_token_dictionaries(
+                Some(kv),
+                &config,
+                token_name,
+            )?
+            .into_iter()
+            .enumerate()
+            {
+                rows.push(vec![
+                    Datum::Int4(config_oid),
+                    Datum::Int4(token_type),
+                    Datum::Int4(i32::try_from(sequence + 1).expect("mapping sequence fits i32")),
+                    Datum::Int4(crate::text_search_catalog::object_oid(&dictionary)),
+                ]);
+            }
         }
     }
     Ok(rows)
@@ -5605,6 +5603,23 @@ mod tests {
                 && row[1] != Datum::Int4(0)
                 && row[2] == Datum::Int4(1)
                 && row[3] != Datum::Int4(0)
+        }));
+        let english = crate::text_search_catalog::object_oid("english");
+        assert!(mappings.iter().any(|row| {
+            row == &vec![
+                Datum::Int4(english),
+                Datum::Int4(1),
+                Datum::Int4(1),
+                Datum::Int4(crate::text_search_catalog::object_oid("english_stem")),
+            ]
+        }));
+        assert!(mappings.iter().any(|row| {
+            row == &vec![
+                Datum::Int4(english),
+                Datum::Int4(5),
+                Datum::Int4(1),
+                Datum::Int4(crate::text_search_catalog::object_oid("simple")),
+            ]
         }));
     }
 
