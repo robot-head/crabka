@@ -282,16 +282,22 @@ pub(crate) fn eqjoinsel<T: PartialEq>(left: ColumnStats<'_, T>, right: ColumnSta
     probability(mcv + left_other * right_other / distinct)
 }
 
-/// Estimate groups produced by independent grouping expressions, capped at
-/// the available input rows. Empty grouping produces exactly one group.
-pub(crate) fn estimate_num_groups(input_rows: f64, distincts: &[f64]) -> f64 {
+/// Estimate groups produced by independent grouping expressions. PostgreSQL
+/// treats multiple keys as likely correlated, capping their product at ten
+/// percent of the relation cardinality but never below the largest key.
+pub(crate) fn estimate_num_groups(input_rows: f64, relation_rows: f64, distincts: &[f64]) -> f64 {
     if distincts.is_empty() {
         return 1.0;
     }
     let groups = distincts
         .iter()
         .fold(1.0, |groups, distinct| groups * distinct.max(1.0));
-    groups.clamp(1.0, input_rows.max(1.0))
+    let groups = if distincts.len() > 1 {
+        groups.min((relation_rows * 0.1).max(distincts.iter().copied().fold(1.0_f64, f64::max)))
+    } else {
+        groups
+    };
+    groups.ceil().clamp(1.0, input_rows.max(1.0))
 }
 
 /// Hash-table load estimates for a single hash key.
@@ -467,8 +473,11 @@ mod tests {
 
     #[test]
     fn cardinality_helpers_bound_their_results() {
-        assert!((estimate_num_groups(100.0, &[3.0, 40.0]) - 100.0).abs() < f64::EPSILON);
-        assert!((estimate_num_groups(0.0, &[]) - 1.0).abs() < f64::EPSILON);
+        assert!((estimate_num_groups(100.0, 100.0, &[3.0, 40.0]) - 40.0).abs() < f64::EPSILON);
+        assert!(
+            (estimate_num_groups(1_000.0, 1_000.0, &[11.0, 11.0]) - 100.0).abs() < f64::EPSILON
+        );
+        assert!((estimate_num_groups(0.0, 0.0, &[]) - 1.0).abs() < f64::EPSILON);
         let buckets = estimate_hash_bucket_stats(integer_stats(&[(1, 0.6)]), 10.0);
         assert!((buckets.average_bucket_rows - 9.0).abs() < f64::EPSILON);
         assert!((buckets.mcv_frequency - 0.6).abs() < f64::EPSILON);

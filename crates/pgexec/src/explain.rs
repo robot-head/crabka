@@ -190,6 +190,11 @@ fn estimate_group_rows(
         .iter()
         .map(GroupKey::attnum)
         .collect::<Option<Vec<_>>>()?;
+    let relation_rows = crate::relstats::of(catalog_kv, &table.name)
+        .ok()
+        .map(|stats| f64::from(stats.reltuples))
+        .filter(|rows| *rows > 0.0)
+        .unwrap_or(input_rows);
     let distincts = attnums
         .iter()
         .filter_map(|attnum| {
@@ -203,11 +208,6 @@ fn estimate_group_rows(
             )
             .ok()??;
             let n_distinct = f64::from(stats.n_distinct?);
-            let relation_rows = crate::relstats::of(catalog_kv, &table.name)
-                .ok()
-                .map(|stats| f64::from(stats.reltuples))
-                .filter(|rows| *rows > 0.0)
-                .unwrap_or(input_rows);
             Some(if n_distinct < 0.0 {
                 -n_distinct * relation_rows
             } else {
@@ -216,7 +216,7 @@ fn estimate_group_rows(
         })
         .collect::<Vec<_>>();
     (distincts.len() == attnums.len())
-        .then(|| crate::plan::selfuncs::estimate_num_groups(input_rows, &distincts))
+        .then(|| crate::plan::selfuncs::estimate_num_groups(input_rows, relation_rows, &distincts))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
