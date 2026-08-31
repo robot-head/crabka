@@ -1655,18 +1655,17 @@ impl ScalarInterpreter<'_> {
                 source,
                 line,
             } => (|| {
-                let value = value
-                    .as_ref()
-                    .map(|expr| {
-                        self.eval(expr).map_err(|error| {
+                let value = match value {
+                    Some(expr) => {
+                        let expr = self.bind_expr(expr)?;
+                        let value = self.eval_bound(&expr).map_err(|error| {
                             plpgsql_expression_error(error, source.as_deref().unwrap_or_default())
-                        })
-                    })
-                    .transpose()?;
-                Ok(ScalarFlow::Return(self.coerce_return(match value {
-                    Some(value) => value,
-                    None => self.output_value(),
-                })?))
+                        })?;
+                        self.coerce_return(Some(&expr), value)?
+                    }
+                    None => self.coerce_return(None, self.output_value())?,
+                };
+                Ok(ScalarFlow::Return(value))
             })()
             .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "RETURN")),
             PlPgSqlStatement::Raise(raise) => {
@@ -1893,35 +1892,38 @@ impl ScalarInterpreter<'_> {
     }
 
     fn eval(&self, expr: &Expr) -> Result<Datum, ExecError> {
-        crate::eval::eval(
-            &rewrite_expr_with(
-                expr,
-                &|table, name| {
-                    if let Some(label) = table
-                        && let Some(slot) = labeled_slot(&self.frames, label, name)
-                    {
-                        return Ok(Some(SqlBinder::slot_expr(slot)));
-                    }
-                    match table {
-                        None => Ok(self.lookup_slot(name).map(SqlBinder::slot_expr)),
-                        Some(record) => rewrite_record_field(
-                            record,
-                            name,
-                            self.lookup_slot(record),
-                            self.lookup_slot("tg_relid"),
-                        ),
-                    }
-                },
-                &|_| {
-                    Err(ExecError::Unsupported(
-                        "subqueries require the async session executor".into(),
-                    ))
-                },
-            )?,
-            &crate::scope::Scope::empty(),
-            &[],
-            self.ctx,
+        self.eval_bound(&self.bind_expr(expr)?)
+    }
+
+    fn bind_expr(&self, expr: &Expr) -> Result<Expr, ExecError> {
+        rewrite_expr_with(
+            expr,
+            &|table, name| {
+                if let Some(label) = table
+                    && let Some(slot) = labeled_slot(&self.frames, label, name)
+                {
+                    return Ok(Some(SqlBinder::slot_expr(slot)));
+                }
+                match table {
+                    None => Ok(self.lookup_slot(name).map(SqlBinder::slot_expr)),
+                    Some(record) => rewrite_record_field(
+                        record,
+                        name,
+                        self.lookup_slot(record),
+                        self.lookup_slot("tg_relid"),
+                    ),
+                }
+            },
+            &|_| {
+                Err(ExecError::Unsupported(
+                    "subqueries require the async session executor".into(),
+                ))
+            },
         )
+    }
+
+    fn eval_bound(&self, expr: &Expr) -> Result<Datum, ExecError> {
+        crate::eval::eval(expr, &crate::scope::Scope::empty(), &[], self.ctx)
     }
 
     fn truth(&self, expr: &Expr) -> Result<bool, ExecError> {
@@ -2067,8 +2069,8 @@ impl ScalarInterpreter<'_> {
             .map_or(Datum::Null, |slot| slot.value.clone())
     }
 
-    fn coerce_return(&self, value: Datum) -> Result<Datum, ExecError> {
-        match self.return_type {
+    fn coerce_return(&self, expr: Option<&Expr>, value: Datum) -> Result<Datum, ExecError> {
+        (|| match self.return_type {
             Some(ColumnType::Record(Some(_)))
                 if !value.is_null() && !matches!(value, Datum::Record(_)) =>
             {
@@ -2079,9 +2081,24 @@ impl ScalarInterpreter<'_> {
                             .into(),
                 })
             }
-            Some(ty) => cast_value(&value, ty, self.ctx),
+            Some(ty) => {
+                if crabka_pgtypes::usercast::any_declared()
+                    && let Some(expr) = expr
+                    && let Some(value) = crate::usercast::coerce_declared(
+                        expr,
+                        ty,
+                        &value,
+                        &crate::scope::Scope::empty(),
+                        self.ctx,
+                    )?
+                {
+                    return Ok(value);
+                }
+                cast_value(&value, ty, self.ctx)
+            }
             None => Ok(value),
-        }
+        })()
+        .map_err(|error| return_cast_error(error, &self.context))
     }
 
     fn raise(&mut self, raise: &PlPgSqlRaise) -> Result<ScalarFlow, ExecError> {
@@ -3997,14 +4014,31 @@ fn sql_statement_error(error: ExecError, routine: &Routine, statement: usize) ->
     ))
 }
 
+fn return_cast_error(error: ExecError, context: &str) -> ExecError {
+    ExecError::Remote(stack_error_context(
+        error.into_pg(),
+        &format!("{context} while casting return value to function's return type"),
+    ))
+}
+
 fn plpgsql_statement_error(
     error: ExecError,
     context: &str,
     line: usize,
     statement: &str,
 ) -> ExecError {
+    let error = error.into_pg();
+    if statement == "RETURN"
+        && error.diagnostics.as_deref().is_some_and(|diagnostics| {
+            diagnostics.context.as_deref().is_some_and(|context| {
+                context.contains(" while casting return value to function's return type")
+            })
+        })
+    {
+        return ExecError::Remote(error);
+    }
     ExecError::Remote(stack_error_context(
-        error.into_pg(),
+        error,
         &format!("{context} line {line} at {statement}"),
     ))
 }

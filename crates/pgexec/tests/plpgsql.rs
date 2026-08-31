@@ -641,6 +641,44 @@ async fn return_expression_errors_include_the_internal_query() {
 }
 
 #[tokio::test]
+async fn scalar_returns_use_declared_function_casts() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE FUNCTION pl_int_to_date(value int4) RETURNS date LANGUAGE sql AS \
+         'SELECT $1::text::date'; \
+         CREATE CAST (int4 AS date) WITH FUNCTION pl_int_to_date(int4) AS ASSIGNMENT; \
+         CREATE FUNCTION pl_cast_invoker(value int4) RETURNS date LANGUAGE plpgsql AS $$ \
+         BEGIN RETURN value; END $$",
+    )
+    .await;
+
+    assert!(
+        scalar(&mut session, "SELECT pl_cast_invoker(20150717)::text").await
+            == Some("2015-07-17".into())
+    );
+    let error = session
+        .simple_query("SELECT pl_cast_invoker(-1)")
+        .await
+        .expect_err("cast function must reject an invalid date");
+    assert!(error.code == "22007", "{error:?}");
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            .is_some_and(
+                |context| context.contains("SQL function \"pl_int_to_date\" statement 1")
+                    && context.contains(
+                        "PL/pgSQL function pl_cast_invoker(integer) while casting return value"
+                    )
+            ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn raise_notice_preserves_message_code_detail_and_hint() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();
