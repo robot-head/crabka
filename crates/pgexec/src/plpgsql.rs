@@ -168,7 +168,14 @@ pub(crate) async fn execute_do(
             message: "RETURN cannot have a parameter in function returning void".into(),
         });
     }
-    execute_invocation(session, block, root_frame(), "DO").await
+    execute_invocation(
+        session,
+        block,
+        root_frame(),
+        "DO",
+        "function inline_code_block",
+    )
+    .await
 }
 
 pub(crate) async fn execute_call(
@@ -1388,6 +1395,7 @@ async fn execute_invocation(
     block: PlPgSqlBlock,
     root: Frame,
     tag: &str,
+    context: &str,
 ) -> Result<QueryResult, ExecError> {
     let owns_transaction = session.plpgsql_is_idle();
     if owns_transaction {
@@ -1406,7 +1414,7 @@ async fn execute_invocation(
             output_slot: None,
             set_results: None,
             returns_set: false,
-            context: format!("PL/pgSQL {tag}"),
+            context: format!("PL/pgSQL {context}"),
             variable_conflict: block.variable_conflict,
             print_strict_params: block.print_strict_params,
             routine_oid: 0,

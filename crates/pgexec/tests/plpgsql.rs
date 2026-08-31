@@ -1408,8 +1408,8 @@ async fn diagnostics_include_plpgsql_context() {
         )
         .await
             == vec![row(&[
-                "PL/pgSQL DO line 4 at GET DIAGNOSTICS",
-                "PL/pgSQL DO line 6 at RAISE",
+                "PL/pgSQL function inline_code_block line 4 at GET DIAGNOSTICS",
+                "PL/pgSQL function inline_code_block line 6 at RAISE",
             ])]
     );
 }
@@ -1633,7 +1633,7 @@ async fn a_null_reaching_a_raise_is_rendered_rather_than_fatal() {
             .diagnostics
             .as_deref()
             .and_then(|diagnostics| diagnostics.context.as_deref())
-            == Some("PL/pgSQL DO line 1 at ASSERT"),
+            == Some("PL/pgSQL function inline_code_block line 1 at ASSERT"),
         "{error:?}"
     );
 
@@ -1854,7 +1854,7 @@ async fn get_stacked_diagnostics_errors_name_the_statement_line() {
             .diagnostics
             .as_deref()
             .and_then(|diagnostics| diagnostics.context.as_deref())
-            == Some("PL/pgSQL DO line 3 at GET STACKED DIAGNOSTICS"),
+            == Some("PL/pgSQL function inline_code_block line 3 at GET STACKED DIAGNOSTICS"),
         "{error:?}"
     );
 }
