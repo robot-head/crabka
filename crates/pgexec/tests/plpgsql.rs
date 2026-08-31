@@ -557,6 +557,34 @@ async fn stacked_diagnostics_exposes_the_caught_error() {
 }
 
 #[tokio::test]
+async fn exception_variables_are_scoped_to_the_handler() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let error = session
+        .simple_query(
+            "CREATE FUNCTION pl_no_exception_variables() RETURNS void LANGUAGE plpgsql AS $$ \
+             BEGIN RAISE NOTICE '%', SQLSTATE; END $$; \
+             SELECT pl_no_exception_variables()",
+        )
+        .await
+        .expect_err("SQLSTATE is unavailable outside an exception handler");
+    assert!(error.code == "42703", "{error:?}");
+
+    execute(
+        &mut session,
+        "CREATE FUNCTION pl_exception_variables() RETURNS text LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'caught'; \
+         EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE || ':' || SQLERRM; END $$",
+    )
+    .await;
+
+    assert!(
+        scalar(&mut session, "SELECT pl_exception_variables()").await
+            == Some("P0001:caught".into())
+    );
+}
+
+#[tokio::test]
 async fn raise_notice_preserves_message_code_detail_and_hint() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

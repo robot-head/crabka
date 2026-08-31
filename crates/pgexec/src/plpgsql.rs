@@ -1308,7 +1308,7 @@ fn bind_scalar_parameters(
             }
         }
     }
-    add_special_slots(&mut frame);
+    add_found_slot(&mut frame);
     Ok((frame, output_slot))
 }
 
@@ -1364,17 +1364,17 @@ async fn bind_parameters(
             frame.aliases.insert(name.clone(), positional);
         }
     }
-    add_special_slots(&mut frame);
+    add_found_slot(&mut frame);
     Ok(frame)
 }
 
 fn root_frame() -> Frame {
     let mut frame = Frame::default();
-    add_special_slots(&mut frame);
+    add_found_slot(&mut frame);
     frame
 }
 
-fn add_special_slots(frame: &mut Frame) {
+fn add_found_slot(frame: &mut Frame) {
     frame.slots.insert(
         "found".into(),
         Slot {
@@ -1385,10 +1385,14 @@ fn add_special_slots(frame: &mut Frame) {
             not_null: true,
         },
     );
+}
+
+fn exception_frame(error: &PgError) -> Frame {
+    let mut frame = Frame::default();
     frame.slots.insert(
         "sqlstate".into(),
         Slot {
-            value: Datum::Text("00000".into()),
+            value: Datum::Text(error.code.clone()),
             ty: ColumnType::Text,
             record_types: None,
             constant: false,
@@ -1398,13 +1402,14 @@ fn add_special_slots(frame: &mut Frame) {
     frame.slots.insert(
         "sqlerrm".into(),
         Slot {
-            value: Datum::Text(String::new()),
+            value: Datum::Text(error.message.clone()),
             ty: ColumnType::Text,
             record_types: None,
             constant: false,
             not_null: true,
         },
     );
+    frame
 }
 
 async fn execute_invocation(
@@ -1529,16 +1534,17 @@ impl ScalarInterpreter<'_> {
             Ok(flow) => Ok(flow),
             Err(error) if !block.exceptions.is_empty() => {
                 let pg = ensure_error_context(error.clone().into_pg(), &self.context);
-                self.set_special_error(&pg);
                 let handler = block.exceptions.iter().find(|handler| {
                     handler.conditions.iter().any(|condition| {
                         crate::plpgsql_sqlstate::condition_matches(condition, &pg.code)
                     })
                 });
                 if let Some(handler) = handler {
+                    self.frames.push(exception_frame(&pg));
                     let previous = self.active_error.replace(pg);
                     let outcome = self.exec_statements(&handler.statements);
                     self.active_error = previous;
+                    self.frames.pop();
                     outcome
                 } else {
                     Err(error)
@@ -2078,11 +2084,6 @@ impl ScalarInterpreter<'_> {
         }
     }
 
-    fn set_special_error(&mut self, error: &PgError) {
-        let _ = self.assign_name("sqlstate", Datum::Text(error.code.clone()));
-        let _ = self.assign_name("sqlerrm", Datum::Text(error.message.clone()));
-    }
-
     fn raise(&mut self, raise: &PlPgSqlRaise) -> Result<ScalarFlow, ExecError> {
         if raise.message.is_none() && raise.condition.is_none() && raise.options.is_empty() {
             let error = self
@@ -2203,20 +2204,11 @@ impl Interpreter<'_> {
                         })
                     });
                     if let Some(handler) = handler {
-                        let previous_state =
-                            self.lookup_slot("sqlstate").map(|slot| slot.value.clone());
-                        let previous_message =
-                            self.lookup_slot("sqlerrm").map(|slot| slot.value.clone());
-                        self.set_special_error(&pg);
+                        self.frames.push(exception_frame(&pg));
                         let previous_error = self.active_error.replace(pg);
                         let outcome = self.exec_statements(&handler.statements).await;
                         self.active_error = previous_error;
-                        if let Some(value) = previous_state {
-                            let _ = self.assign_name("sqlstate", value);
-                        }
-                        if let Some(value) = previous_message {
-                            let _ = self.assign_name("sqlerrm", value);
-                        }
+                        self.frames.pop();
                         outcome
                     } else {
                         Err(error)
@@ -3333,11 +3325,6 @@ impl Interpreter<'_> {
 
     fn set_found(&mut self, found: bool) {
         let _ = self.assign_name("found", Datum::Bool(found));
-    }
-
-    fn set_special_error(&mut self, error: &PgError) {
-        let _ = self.assign_name("sqlstate", Datum::Text(error.code.clone()));
-        let _ = self.assign_name("sqlerrm", Datum::Text(error.message.clone()));
     }
 
     fn push_set_value(&mut self, value: Datum) -> Result<(), ExecError> {
