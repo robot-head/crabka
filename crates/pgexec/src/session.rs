@@ -23995,9 +23995,27 @@ mod tests {
             assert!(
                 rows.first()
                     == Some(&vec![
-                        "Seq Scan on inequality_estimate (cost=0.00..0.00 rows=20 width=0)".into()
+                        "Seq Scan on inequality_estimate (cost=0.00..0.00 rows=19 width=0)".into()
                     ])
             );
+        }
+        for (quantified_sql, direct_sql) in [
+            (
+                "EXPLAIN SELECT * FROM inequality_estimate WHERE a < ANY (ARRAY[10, 20])",
+                "EXPLAIN SELECT * FROM inequality_estimate WHERE a < 20",
+            ),
+            (
+                "EXPLAIN SELECT * FROM inequality_estimate WHERE a > ALL (ARRAY[10, 20])",
+                "EXPLAIN SELECT * FROM inequality_estimate WHERE a > 20",
+            ),
+        ] {
+            let quantified = rows_or_sqlstate(&mut s, quantified_sql)
+                .await
+                .expect("quantified inequality explain");
+            let direct = rows_or_sqlstate(&mut s, direct_sql)
+                .await
+                .expect("direct inequality explain");
+            assert!(quantified.first() == direct.first(), "{quantified_sql}");
         }
     }
 

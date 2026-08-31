@@ -360,6 +360,10 @@ fn restriction_selectivity(
     {
         return selectivity;
     }
+    if let Some(selectivity) = quantified_inequality_selectivity(catalog_kv, table, rows, ctx, expr)
+    {
+        return selectivity;
+    }
     if let Some(clause) = mcv_clause_for_expr(expr, table, ctx) {
         return scalar_mcv_clause_selectivity(catalog_kv, table, rows, ctx, &clause);
     }
@@ -911,6 +915,72 @@ fn quantified_all_equality_selectivity(
     ))
 }
 
+fn quantified_inequality_selectivity(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    expr: &Expr,
+) -> Option<f64> {
+    let Expr::QuantifiedArray {
+        expr,
+        op,
+        all,
+        array,
+    } = expr
+    else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    ) {
+        return None;
+    }
+    let column = column_name(expr)?;
+    let definition = table
+        .columns
+        .iter()
+        .find(|definition| definition.name == column)?;
+    let crabka_pgtypes::Datum::Array(array) =
+        crate::eval::eval(array, &crate::scope::Scope::empty(), &[], ctx).ok()?
+    else {
+        return None;
+    };
+    if *all && array.elems.iter().any(crabka_pgtypes::Datum::is_null) {
+        return Some(0.0);
+    }
+    let values = array
+        .elems
+        .iter()
+        .filter(|value| !value.is_null())
+        .map(|value| crate::eval::cast_value_in(value, definition.ty, ctx.output_style()).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let Some(mut boundary) = values.first().cloned() else {
+        return Some(if *all { 1.0 } else { 0.0 });
+    };
+    let use_maximum = matches!(
+        (*op, *all),
+        (BinaryOp::Lt | BinaryOp::Le, false) | (BinaryOp::Gt | BinaryOp::Ge, true)
+    );
+    for value in &values[1..] {
+        let ordering = crabka_pgtypes::ops::compare(&boundary, value).ok()??;
+        if (use_maximum && ordering.is_lt()) || (!use_maximum && ordering.is_gt()) {
+            boundary = value.clone();
+        }
+    }
+    Some(estimate_column_restriction(
+        catalog_kv,
+        table,
+        rows,
+        ctx,
+        *op,
+        column,
+        Some(boundary),
+        false,
+    ))
+}
+
 fn mcv_key(
     key_expr: &Expr,
     table: &crabka_pgcatalog::Table,
@@ -969,7 +1039,7 @@ fn estimate_binary_restriction(
         (None, Some(column)) => (column, left, true),
         _ => return crate::plan::selfuncs::DEFAULT_INEQ_SEL,
     };
-    let Some((position, definition)) = table
+    let Some((_, definition)) = table
         .columns
         .iter()
         .enumerate()
@@ -978,6 +1048,27 @@ fn estimate_binary_restriction(
         return crate::plan::selfuncs::DEFAULT_INEQ_SEL;
     };
     let constant = literal_for_type(constant, definition.ty, ctx);
+    estimate_column_restriction(catalog_kv, table, rows, ctx, op, column, constant, reversed)
+}
+
+fn estimate_column_restriction(
+    catalog_kv: &dyn crabka_pgkv::Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: f64,
+    ctx: &crate::clock::EvalCtx,
+    op: BinaryOp,
+    column: &str,
+    constant: Option<crabka_pgtypes::Datum>,
+    reversed: bool,
+) -> f64 {
+    let Some((position, definition)) = table
+        .columns
+        .iter()
+        .enumerate()
+        .find(|(_, definition)| definition.name == column)
+    else {
+        return crate::plan::selfuncs::DEFAULT_INEQ_SEL;
+    };
     let Some(stats) = crate::attrstats::get(
         catalog_kv,
         &crate::attrstats::AttributeStatsKey {
