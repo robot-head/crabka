@@ -149,7 +149,11 @@ fn set_estimated_rows(node: &mut PlanNode, rows: f64, child_rows: f64) {
 }
 
 fn row_estimate(rows: f64) -> u64 {
-    rows.max(1.0).ceil() as u64
+    if !rows.is_finite() || rows <= 1.0 {
+        1
+    } else {
+        rows.round() as u64
+    }
 }
 
 fn estimate_group_rows(
@@ -2419,6 +2423,14 @@ mod tests {
             decode_dependencies(r#"{"1 => 2": 1.000000, "1, 2 => 3": 0.500000}"#)
                 == Some(vec![(vec![1], 2, 1.0), (vec![1, 2], 3, 0.5)])
         );
+    }
+
+    #[test]
+    fn row_estimates_round_like_postgres() {
+        assert!(row_estimate(f64::NAN) == 1);
+        assert!(row_estimate(0.25) == 1);
+        assert!(row_estimate(200.000_001) == 200);
+        assert!(row_estimate(200.6) == 201);
     }
 
     /// The deparser is two mutually recursive functions. An expression form
