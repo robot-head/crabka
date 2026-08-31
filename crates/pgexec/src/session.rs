@@ -23758,7 +23758,7 @@ mod tests {
         .expect("attribute statistics setup");
         let attribute_statistics = rows_or_sqlstate(
             &mut s,
-            "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY (a + 1), (b + 100)",
+            "EXPLAIN SELECT count(*) FROM group_expression_estimate GROUP BY (a + 1), (b + 100), (2 * c)",
         )
         .await
         .expect("attribute statistics explain");

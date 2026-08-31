@@ -429,6 +429,12 @@ fn statistic_expression_inverts_attribute(
         {
             column_attnum(right.as_ref(), table)
         }
+        (BinaryOp::Mul, Expr::Column { .. }, Expr::IntLiteral(value)) if value != "0" => {
+            column_attnum(left.as_ref(), table)
+        }
+        (BinaryOp::Mul, Expr::IntLiteral(value), Expr::Column { .. }) if value != "0" => {
+            column_attnum(right.as_ref(), table)
+        }
         _ => None,
     }
 }
