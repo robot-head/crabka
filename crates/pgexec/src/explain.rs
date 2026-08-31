@@ -177,7 +177,7 @@ fn estimate_group_rows(
         .into_iter()
         .filter(|object| object.table_id == table.id)
         .find_map(|object| {
-            let positions = statistics_positions(&object, &keys)?;
+            let positions = statistics_positions(&object, &keys, table)?;
             object
                 .data
                 .and_then(|data| data.ndistinct)
@@ -283,12 +283,13 @@ fn ndistinct_for_keys(data: &str, keys: &[i16]) -> Option<f64> {
 fn statistics_positions(
     object: &crabka_pgcatalog::statistics::Statistics,
     keys: &[GroupKey],
+    table: &crabka_pgcatalog::Table,
 ) -> Option<Vec<i16>> {
     let mut expression = 0_i16;
-    let positions = object
+    let object_keys = object
         .keys
         .iter()
-        .filter_map(|attnum| {
+        .map(|attnum| {
             let key = if *attnum == 0 {
                 expression -= 1;
                 GroupKey::Expression(
@@ -300,11 +301,99 @@ fn statistics_positions(
             } else {
                 GroupKey::Attribute(*attnum)
             };
-            keys.contains(&key)
-                .then_some(if *attnum == 0 { expression } else { *attnum })
+            Some((key, if *attnum == 0 { expression } else { *attnum }))
         })
-        .collect::<Vec<_>>();
-    (positions.len() == keys.len()).then_some(positions)
+        .collect::<Option<Vec<_>>>()?;
+    let mut positions = Vec::new();
+    for (key, position) in &object_keys {
+        let relevant = keys.contains(key)
+            || matches!(key, GroupKey::Expression(expression)
+                if statistic_expression_inverts_attribute(expression, table)
+                    .is_some_and(|attnum| keys.contains(&GroupKey::Attribute(attnum))));
+        if relevant && !positions.contains(position) {
+            positions.push(*position);
+        }
+    }
+    let covered = keys.iter().all(|wanted| {
+        object_keys.iter().any(|(key, _)| key == wanted)
+            || matches!(wanted, GroupKey::Attribute(attnum)
+                if object_keys.iter().any(|(key, _)| matches!(key, GroupKey::Expression(expression)
+                    if statistic_expression_inverts_attribute(expression, table) == Some(*attnum))))
+            || matches!(wanted, GroupKey::Expression(expression)
+                if statistic_expression_is_grouped_by_attributes(expression, keys, table))
+    });
+    (covered && !positions.is_empty()).then_some(positions)
+}
+
+fn statistic_expression_inverts_attribute(
+    expression: &str,
+    table: &crabka_pgcatalog::Table,
+) -> Option<i16> {
+    let Expr::Binary { op, left, right } =
+        crabka_pgparser::parser::parse_expression(expression).ok()?
+    else {
+        return None;
+    };
+    match (op, left.as_ref(), right.as_ref()) {
+        (BinaryOp::Add, Expr::Column { .. }, literal)
+        | (BinaryOp::Sub, Expr::Column { .. }, literal)
+            if matches!(literal, Expr::IntLiteral(_) | Expr::NumericLiteral(_)) =>
+        {
+            column_attnum(left.as_ref(), table)
+        }
+        (BinaryOp::Add, literal, Expr::Column { .. })
+            if matches!(literal, Expr::IntLiteral(_) | Expr::NumericLiteral(_)) =>
+        {
+            column_attnum(right.as_ref(), table)
+        }
+        _ => None,
+    }
+}
+
+fn statistic_expression_is_grouped_by_attributes(
+    expression: &str,
+    keys: &[GroupKey],
+    table: &crabka_pgcatalog::Table,
+) -> bool {
+    let expression = match crabka_pgparser::parser::parse_expression(expression) {
+        Ok(expression) => expression,
+        Err(_) => return false,
+    };
+    let mut attributes = Vec::new();
+    expression_group_attributes(&expression, table, &mut attributes)
+        && !attributes.is_empty()
+        && attributes
+            .into_iter()
+            .all(|attnum| keys.contains(&GroupKey::Attribute(attnum)))
+}
+
+fn expression_group_attributes(
+    expression: &Expr,
+    table: &crabka_pgcatalog::Table,
+    attributes: &mut Vec<i16>,
+) -> bool {
+    match expression {
+        Expr::Column { .. } => column_attnum(expression, table).is_some_and(|attnum| {
+            if !attributes.contains(&attnum) {
+                attributes.push(attnum);
+            }
+            true
+        }),
+        Expr::IntLiteral(_)
+        | Expr::NumericLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::BoolLiteral(_)
+        | Expr::NullLiteral
+        | Expr::Const { .. } => true,
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            expression_group_attributes(expr, table, attributes)
+        }
+        Expr::Binary { left, right, .. } => {
+            expression_group_attributes(left, table, attributes)
+                && expression_group_attributes(right, table, attributes)
+        }
+        _ => false,
+    }
 }
 
 fn statistics_key_positions(

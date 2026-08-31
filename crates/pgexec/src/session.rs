@@ -23759,6 +23759,10 @@ mod tests {
                 "EXPLAIN ANALYZE SELECT count(*) FROM group_expression_estimate GROUP BY (a+1), (b+100), (2*c)",
                 1000,
             ),
+            (
+                "EXPLAIN ANALYZE SELECT count(*) FROM group_expression_estimate GROUP BY a, (a+1), (b+100)",
+                221,
+            ),
         ] {
             let explain = rows_or_sqlstate(&mut s, sql)
                 .await
