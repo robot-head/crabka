@@ -111,6 +111,12 @@ fn statistic_column_ordinal(
             "statistics creation on virtual generated columns is not supported".into(),
         ));
     }
+    if crate::eval::has_no_btree_opclass(table.columns[ordinal].ty) {
+        return Err(ExecError::Unsupported(format!(
+            "column \"{name}\" cannot be used in statistics because its type {} has no default btree operator class",
+            table.columns[ordinal].ty.name()
+        )));
+    }
     Ok(ordinal)
 }
 
@@ -406,5 +412,24 @@ mod tests {
             panic!("stats");
         };
         assert!(definition(parsed_stats, &table).is_err());
+    }
+
+    #[test]
+    fn columns_without_btree_opclasses_cannot_back_statistics() {
+        let mut table = table();
+        table.columns[1].ty = ColumnType::Xid;
+        let Err(crate::error::ExecError::Unsupported(error)) = definition(
+            &stats(vec![Expr::Column {
+                table: None,
+                name: "b".into(),
+            }]),
+            &table,
+        ) else {
+            panic!("xid statistics should be rejected");
+        };
+        assert!(
+            error
+                == "column \"b\" cannot be used in statistics because its type xid has no default btree operator class"
+        );
     }
 }
