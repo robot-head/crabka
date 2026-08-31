@@ -2035,6 +2035,14 @@ async fn composite_functions_reject_scalar_return_values() {
                 == "cannot return non-composite value from function returning composite type",
             "{error:?}"
         );
+        assert!(
+            error
+                .diagnostics
+                .as_deref()
+                .and_then(|diagnostics| diagnostics.context.as_deref())
+                == Some("PL/pgSQL function pl_return_scalar() line 3 at RETURN"),
+            "{error:?}"
+        );
     }
 }
 

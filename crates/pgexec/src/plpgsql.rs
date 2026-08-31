@@ -2070,17 +2070,17 @@ impl ScalarInterpreter<'_> {
     }
 
     fn coerce_return(&self, expr: Option<&Expr>, value: Datum) -> Result<Datum, ExecError> {
+        if matches!(self.return_type, Some(ColumnType::Record(Some(_))))
+            && !value.is_null()
+            && !matches!(value, Datum::Record(_))
+        {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42804",
+                message: "cannot return non-composite value from function returning composite type"
+                    .into(),
+            });
+        }
         (|| match self.return_type {
-            Some(ColumnType::Record(Some(_)))
-                if !value.is_null() && !matches!(value, Datum::Record(_)) =>
-            {
-                Err(ExecError::FunctionError {
-                    sqlstate: "42804",
-                    message:
-                        "cannot return non-composite value from function returning composite type"
-                            .into(),
-                })
-            }
             Some(ty) => {
                 if crabka_pgtypes::usercast::any_declared()
                     && let Some(expr) = expr
