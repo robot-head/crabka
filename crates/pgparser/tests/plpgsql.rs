@@ -327,8 +327,10 @@ fn parses_for_over_a_declared_cursor() {
     let block = parse_plpgsql(
         r"
         declare rows_cur cursor(limit_rows int) for select * from things limit limit_rows;
+                empty_cur cursor for values (1);
         begin
           for row_ in rows_cur(limit_rows => 10) loop null; end loop;
+          for row_ in empty_cur() loop null; end loop;
         end
         ",
     )
@@ -340,6 +342,14 @@ fn parses_for_over_a_declared_cursor() {
         kind.as_ref(),
         PlPgSqlLoop::Cursor { cursor, arguments, .. }
             if cursor == "rows_cur" && arguments.len() == 1
+    ));
+    let PlPgSqlStatement::Loop { kind, .. } = &block.statements[1] else {
+        panic!("expected empty-argument cursor FOR loop");
+    };
+    assert!(matches!(
+        kind.as_ref(),
+        PlPgSqlLoop::Cursor { cursor, arguments, .. }
+            if cursor == "empty_cur" && arguments.is_empty()
     ));
 }
 

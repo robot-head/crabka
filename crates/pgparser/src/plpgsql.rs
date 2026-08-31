@@ -716,18 +716,18 @@ impl PlParser<'_> {
         }
         if let Some(cursor) = self.word_at(self.pos) {
             let arguments = if loop_at == self.pos + 1 {
-                Vec::new()
+                Some(Vec::new())
             } else if matches!(self.tokens.get(self.pos + 1), Some((Token::LParen, _))) {
                 let end = self.find_token(self.pos + 1, &Token::RParen)?;
                 if end + 1 != loop_at {
-                    Vec::new()
+                    None
                 } else {
-                    self.parse_cursor_argument_list_range(self.pos + 2, end)?
+                    Some(self.parse_cursor_argument_list_range(self.pos + 2, end)?)
                 }
             } else {
-                Vec::new()
+                None
             };
-            if loop_at == self.pos + 1 || !arguments.is_empty() {
+            if let Some(arguments) = arguments {
                 self.pos = loop_at;
                 return self.parse_loop(
                     label,

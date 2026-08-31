@@ -1657,10 +1657,18 @@ async fn declared_cursor_for_loop_opens_fetches_and_closes_the_cursor() {
           RETURN total;
         END
         $$;
+        CREATE FUNCTION pl_empty_cursor_for_loop() RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE cursor_ CURSOR FOR VALUES (4); total int4 := 0;
+        BEGIN
+          FOR row_ IN cursor_() LOOP total := total + row_.column1; END LOOP;
+          RETURN total;
+        END
+        $$;
         ",
     )
     .await;
     assert!(scalar(&mut session, "SELECT pl_cursor_for_loop(2)").await == Some("5".into()));
+    assert!(scalar(&mut session, "SELECT pl_empty_cursor_for_loop()").await == Some("4".into()));
     let error = session
         .simple_query(
             r"
