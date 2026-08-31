@@ -7199,7 +7199,14 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::On))?;
         let mut expressions = Vec::new();
         loop {
-            expressions.push(self.expr(0)?);
+            expressions.push(if self.eat_token(&Token::LParen) {
+                let expression = self.expr(0)?;
+                self.expect(&Token::RParen)?;
+                expression
+            } else {
+                let name = self.expect_col_id()?;
+                self.col_id_expr(name)?
+            });
             if self.eat_comma() {
                 continue;
             }
@@ -20829,6 +20836,18 @@ mod tests {
             [Statement::DropStatistics { names, if_exists: true }]
                 if *names == [RelationRef::qualified("audit", "s"), RelationRef::bare("other")]
         ));
+    }
+
+    #[test]
+    fn statistics_expressions_require_parentheses() {
+        for sql in [
+            "CREATE STATISTICS s ON a + b FROM t",
+            "CREATE STATISTICS s ON (a, b) FROM t",
+        ] {
+            assert!(crate::parse(sql).is_err(), "case: {sql}");
+        }
+        assert!(crate::parse("CREATE STATISTICS s ON a, (b + 1) FROM t").is_ok());
+        assert!(crate::parse("CREATE STATISTICS s ON date_trunc('day', a) FROM t").is_ok());
     }
 
     #[test]
