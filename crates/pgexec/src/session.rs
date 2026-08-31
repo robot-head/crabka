@@ -27371,6 +27371,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_declaration_default_can_query_catalog_with_regclass() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE plpgsql_declaration_catalog_source (value int4); \
+                 DO $$ DECLARE relation_name text := reltoastrelid::regclass FROM pg_class \
+                 WHERE oid = 'plpgsql_declaration_catalog_source'::regclass; \
+                 BEGIN RAISE NOTICE 'catalog query succeeded'; END $$",
+            )
+            .await
+            .expect("catalog declaration query");
+    }
+
+    #[tokio::test]
+    async fn plpgsql_if_condition_can_read_a_query() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE plpgsql_condition_source (value int4); \
+                 INSERT INTO plpgsql_condition_source VALUES (42); \
+                 CREATE FUNCTION plpgsql_query_condition() RETURNS bool LANGUAGE plpgsql AS $$ \
+                 BEGIN IF count(*) = 1 FROM plpgsql_condition_source THEN RETURN true; END IF; \
+                 RETURN false; END $$",
+            )
+            .await
+            .expect("function setup");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT plpgsql_query_condition()")
+                    .await
+                    .expect("function call")
+            ),
+            "t"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_perform_errors_include_sql_and_function_context() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
