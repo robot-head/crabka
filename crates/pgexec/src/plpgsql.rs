@@ -3033,21 +3033,23 @@ impl Interpreter<'_> {
     }
 
     fn push_current_output_row(&mut self) -> Result<(), ExecError> {
-        let names = self
+        let columns = self
             .set_results
             .as_ref()
             .ok_or_else(|| ExecError::Syntax("not a set-returning function".into()))?
             .columns
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        let row = names
-            .iter()
-            .map(|name| {
-                self.lookup_slot(name)
-                    .map_or(Datum::Null, |slot| slot.value.clone())
-            })
-            .collect();
+            .clone();
+        let row = if columns.len() == 1 && self.output_slot.is_some() {
+            vec![self.output_value()]
+        } else {
+            columns
+                .iter()
+                .map(|(name, _)| {
+                    self.lookup_slot(name)
+                        .map_or(Datum::Null, |slot| slot.value.clone())
+                })
+                .collect()
+        };
         self.push_set_row(row)
     }
 

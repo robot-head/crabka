@@ -1621,7 +1621,7 @@ fn validate_output_result(
     };
     if matches!(result, RoutineResult::Unspecified)
         || (outputs.len() == 1
-            && matches!(result, RoutineResult::Type { ty, setof: false } if ty == &first.ty))
+            && matches!(result, RoutineResult::Type { ty, .. } if ty == &first.ty))
         || (outputs.len() > 1
             && matches!(result, RoutineResult::Type { ty, .. } if is_record_type(ty)))
     {

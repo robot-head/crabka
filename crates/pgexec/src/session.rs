@@ -27591,6 +27591,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_single_out_parameter_can_return_a_set() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_set_out(IN value int, OUT result int) RETURNS SETOF int \
+                 LANGUAGE plpgsql AS $$ BEGIN result := value; RETURN NEXT; END $$",
+            )
+            .await
+            .expect("create function");
+
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SELECT * FROM plpgsql_set_out(42)")
+                    .await
+                    .expect("function call")
+            ),
+            "42"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_raise_using_errcode_accepts_named_conditions() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
