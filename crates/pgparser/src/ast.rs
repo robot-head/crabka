@@ -5234,8 +5234,15 @@ pub struct PlPgSqlInto {
 /// One argument passed while opening a declared PL/pgSQL cursor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlPgSqlCursorArgument {
-    Positional(Expr),
-    Named { name: String, value: Expr },
+    Positional {
+        value: Expr,
+        source: String,
+    },
+    Named {
+        name: String,
+        value: Expr,
+        source: String,
+    },
 }
 
 /// One executable PL/pgSQL statement.

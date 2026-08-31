@@ -1446,9 +1446,10 @@ impl PlParser<'_> {
                         && matches!(parser.tokens.get(pos + 1), Some((Token::Eq, _)))))
         });
         if separator >= end {
-            return Ok(PlPgSqlCursorArgument::Positional(
-                self.parse_expr_range(start, end)?,
-            ));
+            return Ok(PlPgSqlCursorArgument::Positional {
+                value: self.parse_expr_range(start, end)?,
+                source: self.slice_tokens(start, end).trim().to_owned(),
+            });
         }
         let Some(name) = self.word_at(start) else {
             return Err(ParseError::new(
@@ -1471,6 +1472,7 @@ impl PlParser<'_> {
         Ok(PlPgSqlCursorArgument::Named {
             name,
             value: self.parse_expr_range(value_start, end)?,
+            source: self.slice_tokens(value_start, end).trim().to_owned(),
         })
     }
 

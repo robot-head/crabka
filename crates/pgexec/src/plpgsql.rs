@@ -2779,16 +2779,43 @@ impl Interpreter<'_> {
                         )?;
                         let mut frame = Frame::default();
                         let mut values = vec![None; declaration.arguments.len()];
+                        let mut sources = vec![None; declaration.arguments.len()];
+                        for (argument, position) in arguments.iter().zip(&positions) {
+                            sources[*position] = Some(match argument {
+                                PlPgSqlCursorArgument::Positional { source, .. }
+                                | PlPgSqlCursorArgument::Named { source, .. } => source.as_str(),
+                            });
+                        }
+                        let expression_source = declaration
+                            .arguments
+                            .iter()
+                            .zip(sources)
+                            .map(|((name, _), source)| {
+                                format!("{} AS {name}", source.unwrap_or_default())
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         for (argument, position) in arguments.iter().zip(positions) {
                             let expression = match argument {
-                                PlPgSqlCursorArgument::Positional(expression)
+                                PlPgSqlCursorArgument::Positional {
+                                    value: expression, ..
+                                }
                                 | PlPgSqlCursorArgument::Named {
                                     value: expression, ..
                                 } => expression,
                             };
                             let (_, ty) = &declaration.arguments[position];
                             let ty = ty.resolved.unwrap_or(ColumnType::Text);
-                            let value = self.eval_async(expression).await?.0;
+                            let value = self
+                                .eval_async_with_context(
+                                    expression,
+                                    self.statement_context(*line, "OPEN"),
+                                )
+                                .await
+                                .map_err(|error| {
+                                    plpgsql_expression_error(error, &expression_source)
+                                })?
+                                .0;
                             let ctx = self.session.plpgsql_eval_context();
                             let value = cast_value(&value, ty, &ctx)?;
                             values[position] = Some(value);

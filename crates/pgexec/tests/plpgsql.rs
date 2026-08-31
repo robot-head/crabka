@@ -1502,6 +1502,32 @@ async fn cursor_named_arguments_are_bound_and_checked_at_definition_time() {
         .await
         .expect_err("duplicate cursor argument must be rejected");
     assert!(error.to_string().contains("specified more than once"));
+
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_cursor_argument_error() RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE cursor_ CURSOR(first_arg int4, second_arg int4) FOR SELECT 1;
+        BEGIN OPEN cursor_(second_arg := 2, first_arg := 1 / 0); END
+        $$
+        ",
+    )
+    .await;
+    let error = session
+        .simple_query("SELECT pl_cursor_argument_error()")
+        .await
+        .expect_err("cursor argument expression must fail");
+    assert!(error.code == "22012", "{error:?}");
+    assert!(
+        error
+            .diagnostics
+            .as_deref()
+            .and_then(|diagnostics| diagnostics.context.as_deref())
+            == Some(
+                "PL/pgSQL expression \"1 / 0 AS first_arg, 2 AS second_arg\"\nPL/pgSQL function pl_cursor_argument_error() line 3 at OPEN"
+            ),
+        "{error:?}"
+    );
 }
 
 #[tokio::test]

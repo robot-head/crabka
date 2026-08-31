@@ -4272,7 +4272,7 @@ pub(crate) fn cursor_argument_positions(
     let mut assigned = vec![false; parameters.len()];
     for (argument_index, argument) in arguments.iter().enumerate() {
         let position = match argument {
-            PlPgSqlCursorArgument::Positional(_) => argument_index,
+            PlPgSqlCursorArgument::Positional { .. } => argument_index,
             PlPgSqlCursorArgument::Named { name, .. } => parameters
                 .iter()
                 .position(|parameter| parameter.eq_ignore_ascii_case(name))
