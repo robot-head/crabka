@@ -23824,6 +23824,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_uses_extended_mcv_for_null_conjunctions() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE mcv_null_estimate (a int4, b text); \
+             INSERT INTO mcv_null_estimate SELECT NULL, NULL FROM generate_series(1, 50); \
+             INSERT INTO mcv_null_estimate SELECT 1, 'x' FROM generate_series(1, 50); \
+             CREATE STATISTICS mcv_null_estimate_ab (mcv) ON a, b FROM mcv_null_estimate; \
+             ANALYZE mcv_null_estimate",
+        )
+        .await
+        .expect("statistics setup");
+        let rows = rows_or_sqlstate(
+            &mut s,
+            "EXPLAIN SELECT * FROM mcv_null_estimate WHERE a IS NULL AND b IS NULL",
+        )
+        .await
+        .expect("null MCV explain");
+        assert!(
+            rows.first()
+                == Some(&vec![
+                    "Seq Scan on mcv_null_estimate (cost=0.00..0.00 rows=50 width=0)".into()
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_the_target_and_conflict_clause_of_an_instead_rule() {
         use assert2::assert;
 

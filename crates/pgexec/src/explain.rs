@@ -378,7 +378,13 @@ fn restriction_selectivity(
 struct McvClause {
     key: GroupKey,
     value: Option<crabka_pgtypes::Datum>,
-    text: String,
+    predicate: McvPredicate,
+}
+
+#[derive(Debug)]
+enum McvPredicate {
+    Equal(Option<String>),
+    NotNull,
 }
 
 /// Estimate a complete equality conjunction from a matching extended MCV
@@ -449,7 +455,7 @@ fn extended_mcv_selectivity(
             mcv_total += frequency;
             mcv_base_total += base_frequency;
             if positions.iter().zip(&clauses).all(|(position, clause)| {
-                item.values.get(*position).and_then(Option::as_deref) == Some(&clause.text)
+                mcv_item_matches(item.values.get(*position), &clause.predicate)
             }) {
                 mcv_selectivity += frequency;
                 mcv_base_selectivity += base_frequency;
@@ -476,8 +482,9 @@ fn scalar_mcv_clause_selectivity(
     ctx: &crate::clock::EvalCtx,
     clause: &McvClause,
 ) -> f64 {
-    let (GroupKey::Attribute(attnum), Some(value)) = (&clause.key, &clause.value) else {
-        return crate::plan::selfuncs::DEFAULT_EQ_SEL;
+    let default = default_mcv_selectivity(&clause.predicate);
+    let GroupKey::Attribute(attnum) = &clause.key else {
+        return default;
     };
     crate::attrstats::get(
         catalog_kv,
@@ -497,9 +504,22 @@ fn scalar_mcv_clause_selectivity(
                 crate::plan::selfuncs::decode_catalog_stats(&stats, definition.ty, rows, ctx)
             })
     })
-    .map_or(crate::plan::selfuncs::DEFAULT_EQ_SEL, |stats| {
-        crate::plan::selfuncs::eqsel(stats.as_stats(), Some(value))
+    .map_or(default, |stats| match &clause.predicate {
+        McvPredicate::Equal(Some(_)) => clause.value.as_ref().map_or(default, |value| {
+            crate::plan::selfuncs::eqsel(stats.as_stats(), Some(value))
+        }),
+        McvPredicate::Equal(None) => crate::plan::selfuncs::nulltestsel(stats.as_stats(), true),
+        McvPredicate::NotNull => crate::plan::selfuncs::nulltestsel(stats.as_stats(), false),
     })
+}
+
+fn default_mcv_selectivity(predicate: &McvPredicate) -> f64 {
+    match predicate {
+        McvPredicate::Equal(None) | McvPredicate::Equal(Some(_)) => {
+            crate::plan::selfuncs::DEFAULT_EQ_SEL
+        }
+        McvPredicate::NotNull => 1.0 - crate::plan::selfuncs::DEFAULT_EQ_SEL,
+    }
 }
 
 fn collect_mcv_clauses(
@@ -538,8 +558,39 @@ fn collect_mcv_clauses(
             clauses.push(clause);
             true
         }),
+        Expr::IsNull { expr, negated } => {
+            null_mcv_clause(expr, *negated, table).is_some_and(|clause| {
+                clauses.push(clause);
+                true
+            })
+        }
         _ => false,
     }
+}
+
+fn mcv_item_matches(value: Option<&Option<String>>, predicate: &McvPredicate) -> bool {
+    match (value, predicate) {
+        (Some(Some(value)), McvPredicate::Equal(Some(wanted))) => value == wanted,
+        (Some(None), McvPredicate::Equal(None)) => true,
+        (Some(Some(_)), McvPredicate::NotNull) => true,
+        _ => false,
+    }
+}
+
+fn null_mcv_clause(
+    expr: &Expr,
+    negated: bool,
+    table: &crabka_pgcatalog::Table,
+) -> Option<McvClause> {
+    Some(McvClause {
+        key: GroupKey::Attribute(column_attnum(expr, table)?),
+        value: None,
+        predicate: if negated {
+            McvPredicate::NotNull
+        } else {
+            McvPredicate::Equal(None)
+        },
+    })
 }
 
 fn bool_mcv_clause(
@@ -560,7 +611,7 @@ fn bool_mcv_clause(
     Some(McvClause {
         key: GroupKey::Attribute(attnum),
         value: Some(value),
-        text,
+        predicate: McvPredicate::Equal(Some(text)),
     })
 }
 
@@ -599,7 +650,7 @@ fn mcv_clause(
     Some(McvClause {
         key,
         value: scalar_value,
-        text,
+        predicate: McvPredicate::Equal(Some(text)),
     })
 }
 
