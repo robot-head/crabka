@@ -23811,8 +23811,9 @@ mod tests {
         let engine = SqlEngine::new();
         let mut s = engine.connect();
         s.simple_query(
-            "CREATE TABLE mcv_all_columns (a int4, b varchar, c int4, ia int4[]); \
-             INSERT INTO mcv_all_columns \
+            "CREATE TABLE mcv_all_columns (\
+               filler1 text, filler2 numeric, a int4, b varchar, filler3 date, c int4, d text, ia int4[]); \
+             INSERT INTO mcv_all_columns (a, b, c, ia) \
              SELECT mod(i, 100), mod(i, 50), mod(i, 25), ARRAY[mod(i, 25)] \
              FROM generate_series(1, 5000) s(i); \
              CREATE STATISTICS mcv_all_columns_stats (mcv) \
