@@ -3398,12 +3398,12 @@ fn build_raise_diagnostic<'a>(
         },
     };
     if let Some(value) = options.get("errcode") {
-        if !crate::plpgsql_sqlstate::is_valid_sqlstate(value) || value == "00000" {
+        code = condition_sqlstate(value)?;
+        if code == "00000" {
             return Err(ExecError::Syntax(format!(
                 "invalid SQLSTATE code \"{value}\""
             )));
         }
-        code.clone_from(value);
     }
     let mut diagnostic = match raise.level {
         PlPgSqlRaiseLevel::Debug => PgError::debug(message),

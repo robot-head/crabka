@@ -855,7 +855,7 @@ impl PlParser<'_> {
         } else if let Token::StringLit(text) = self.token().clone() {
             self.bump();
             message = Some(text);
-        } else if self.word_at(self.pos).is_some() {
+        } else if self.word_at(self.pos).is_some_and(|word| word != "using") {
             condition = Some(self.expect_name()?);
         }
         let mut parameters = Vec::new();

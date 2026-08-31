@@ -27537,6 +27537,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_raise_using_errcode_accepts_named_conditions() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE FUNCTION named_errcode() RETURNS void LANGUAGE plpgsql AS $$ \
+                 BEGIN RAISE EXCEPTION USING ERRCODE = 'division_by_zero'; END $$",
+            )
+            .await
+            .expect("create function");
+
+        let error = session
+            .simple_query("SELECT named_errcode()")
+            .await
+            .expect_err("named SQLSTATE condition raises an error");
+        assert_eq!(error.code, "22012");
+    }
+
+    #[tokio::test]
     async fn function_guc_options_scope_and_propagate_plpgsql_changes() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();
