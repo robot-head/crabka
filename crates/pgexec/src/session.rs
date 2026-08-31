@@ -27665,6 +27665,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plpgsql_out_parameters_keep_polymorphic_families_separate() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE FUNCTION plpgsql_mixed_poly( \
+                 a anyelement, b anyarray, c anycompatible, d anycompatible, \
+                 OUT x anyarray, OUT y anycompatiblearray) LANGUAGE plpgsql AS $$ \
+                 BEGIN x := a || b; y := array[c, d]; END $$",
+            )
+            .await
+            .expect("function setup");
+
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query(
+                        "SELECT x::text || ':' || pg_typeof(x)::text || ':' || \
+                         y::text || ':' || pg_typeof(y)::text \
+                         FROM plpgsql_mixed_poly(11, array[1, 2], 42, 34.5)",
+                    )
+                    .await
+                    .expect("function call")
+            ),
+            "{11,1,2}:integer[]:{42,34.5}:numeric[]"
+        );
+    }
+
+    #[tokio::test]
     async fn plpgsql_do_rejects_return_values() {
         let engine = SqlEngine::new();
         let mut session = engine.connect();

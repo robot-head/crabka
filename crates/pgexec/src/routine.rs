@@ -5151,23 +5151,38 @@ fn single_set_result_column(routine: &Routine, given: &[ArgType]) -> Option<(Str
     }
 }
 
-fn resolved_polymorphic_type(
+pub(crate) fn resolved_polymorphic_type(
     routine: &Routine,
     given: &[ArgType],
     result_name: &str,
 ) -> Option<ColumnType> {
     let inputs = routine.input_params().zip(given);
-    let mut base = None;
-    let mut range = None;
-    let mut array = None;
-    let mut multirange = None;
+    let mut traditional_base = None;
+    let mut traditional_range = None;
+    let mut traditional_multirange = None;
+    let mut compatible_base = None;
+    let mut compatible_range = None;
+    let mut compatible_multirange = None;
     for (param, arg) in inputs {
         let Some(candidate) = polymorphic_base_type(&param.ty.name, *arg) else {
             continue;
         };
-        base = match base {
+        let (base, range, multirange) = if param.ty.name.starts_with("anycompatible") {
+            (
+                &mut compatible_base,
+                &mut compatible_range,
+                &mut compatible_multirange,
+            )
+        } else {
+            (
+                &mut traditional_base,
+                &mut traditional_range,
+                &mut traditional_multirange,
+            )
+        };
+        *base = match *base {
             None => Some(candidate),
-            Some(current) if result_name.starts_with("anycompatible") => {
+            Some(current) if param.ty.name.starts_with("anycompatible") => {
                 if implicitly_coercible(current, candidate) {
                     Some(candidate)
                 } else {
@@ -5178,24 +5193,28 @@ fn resolved_polymorphic_type(
         };
         let ArgType::Known(ty) = arg else { continue };
         match ty {
-            ColumnType::Array(_) => array = Some(*ty),
-            ColumnType::Range(found) => range = Some(*found),
+            ColumnType::Array(_) => {}
+            ColumnType::Range(found) => *range = Some(*found),
             ColumnType::Multirange(found) => {
-                range = Some(found.range);
-                multirange = Some(*found);
+                *range = Some(found.range);
+                *multirange = Some(*found);
             }
             _ => {}
         }
     }
     match result_name {
-        "anyelement" | "anyenum" | "anynonarray" | "anycompatible" | "anycompatiblenonarray" => {
-            base
-        }
-        "anyarray" | "anycompatiblearray" => array.or_else(|| ColumnType::array_of(base?)),
-        "anyrange" | "anycompatiblerange" => range.map(ColumnType::Range),
-        "anymultirange" | "anycompatiblemultirange" => multirange
+        "anyelement" | "anyenum" | "anynonarray" => traditional_base,
+        "anyarray" => ColumnType::array_of(traditional_base?),
+        "anyrange" => traditional_range.map(ColumnType::Range),
+        "anymultirange" => traditional_multirange
             .map(ColumnType::Multirange)
-            .or_else(|| ColumnType::multirange_for_range(range?)),
+            .or_else(|| ColumnType::multirange_for_range(traditional_range?)),
+        "anycompatible" | "anycompatiblenonarray" => compatible_base,
+        "anycompatiblearray" => ColumnType::array_of(compatible_base?),
+        "anycompatiblerange" => compatible_range.map(ColumnType::Range),
+        "anycompatiblemultirange" => compatible_multirange
+            .map(ColumnType::Multirange)
+            .or_else(|| ColumnType::multirange_for_range(compatible_range?)),
         _ => None,
     }
 }

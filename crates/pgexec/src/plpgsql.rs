@@ -25,7 +25,7 @@ use crabka_pgwire::{
     error::PgError,
 };
 
-use crate::{error::ExecError, session::SqlSession};
+use crate::{error::ExecError, eval::ArgType, session::SqlSession};
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -1310,10 +1310,15 @@ fn bind_scalar_parameters(
         label: Some(routine.name.clone()),
         ..Frame::default()
     };
+    let given = values
+        .iter()
+        .map(|value| value.column_type().map_or(ArgType::Unknown, ArgType::Known))
+        .collect::<Vec<_>>();
     for (index, (param, value)) in inputs.iter().zip(values).enumerate() {
         let ty = param
             .ty
             .column
+            .or_else(|| crate::routine::resolved_polymorphic_type(routine, &given, &param.ty.name))
             .or_else(|| value.column_type())
             .unwrap_or(ColumnType::Text);
         let value = cast_value(value, ty, ctx)?;
@@ -1355,7 +1360,17 @@ fn bind_scalar_parameters(
                 name.clone(),
                 Slot {
                     value: Datum::Null,
-                    ty: param.ty.column.unwrap_or(ColumnType::Text),
+                    ty: param
+                        .ty
+                        .column
+                        .or_else(|| {
+                            crate::routine::resolved_polymorphic_type(
+                                routine,
+                                &given,
+                                &param.ty.name,
+                            )
+                        })
+                        .unwrap_or(ColumnType::Text),
                     record_types: None,
                     constant: false,
                     not_null: false,
