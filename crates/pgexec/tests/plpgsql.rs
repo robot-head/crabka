@@ -1840,6 +1840,34 @@ async fn assignment_and_return_errors_stack_plpgsql_statement_contexts() {
 }
 
 #[tokio::test]
+async fn composite_functions_reject_scalar_return_values() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TYPE pl_return_pair AS (id int4, label text);
+        CREATE FUNCTION pl_return_scalar() RETURNS pl_return_pair LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN 7;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    let error = session
+        .simple_query("SELECT pl_return_scalar()")
+        .await
+        .expect_err("a composite function must reject a scalar return value");
+    assert!(error.code == "42804", "{error:?}");
+    assert!(
+        error.message == "cannot return non-composite value from function returning composite type",
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn get_stacked_diagnostics_errors_name_the_statement_line() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

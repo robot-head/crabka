@@ -108,6 +108,7 @@ enum ScalarFlow {
 struct ScalarInterpreter<'a> {
     frames: Vec<Frame>,
     output_slot: Option<String>,
+    return_type: Option<ColumnType>,
     ctx: &'a crate::clock::EvalCtx,
     steps: usize,
     active_error: Option<PgError>,
@@ -126,6 +127,7 @@ struct Interpreter<'a> {
     cursor_declarations: HashMap<String, CursorDeclaration>,
     last_row_count: usize,
     output_slot: Option<String>,
+    return_type: Option<ColumnType>,
     set_results: Option<SetResultCollector>,
     returns_set: bool,
     context: String,
@@ -282,6 +284,7 @@ async fn execute_call_body(
             cursor_declarations: HashMap::new(),
             last_row_count: 0,
             output_slot: None,
+            return_type: None,
             set_results: None,
             returns_set: false,
             context: format!("SQL procedure {}", routine.identity()),
@@ -356,6 +359,7 @@ pub(crate) async fn execute_scalar_function(
         cursor_declarations: HashMap::new(),
         last_row_count: 0,
         output_slot,
+        return_type: crate::routine::declared_scalar_result_type(routine),
         set_results: None,
         returns_set: false,
         context: format!("PL/pgSQL function {}", routine.identity()),
@@ -406,6 +410,7 @@ pub(crate) async fn execute_sql_scalar_function(
         cursor_declarations: HashMap::new(),
         last_row_count: 0,
         output_slot,
+        return_type: crate::routine::declared_scalar_result_type(routine),
         set_results: None,
         returns_set: false,
         context: format!("SQL function {}", routine.identity()),
@@ -567,6 +572,7 @@ pub(crate) async fn execute_trigger_function(
         cursor_declarations: HashMap::new(),
         last_row_count: 0,
         output_slot: None,
+        return_type: None,
         set_results: None,
         returns_set: false,
         context: format!("PL/pgSQL function {}", routine.identity()),
@@ -607,6 +613,7 @@ pub(crate) async fn execute_table_function(
         cursor_declarations: HashMap::new(),
         last_row_count: 0,
         output_slot,
+        return_type: crate::routine::declared_scalar_result_type(routine),
         set_results: Some(SetResultCollector {
             columns: columns.clone(),
             rows: Vec::new(),
@@ -666,6 +673,7 @@ pub(crate) async fn execute_sql_table_function(
         cursor_declarations: HashMap::new(),
         last_row_count: 0,
         output_slot,
+        return_type: crate::routine::declared_scalar_result_type(routine),
         set_results: None,
         returns_set: false,
         context: format!("SQL function {}", routine.identity()),
@@ -944,6 +952,7 @@ pub(crate) fn eval_scalar_function(
     let mut interpreter = ScalarInterpreter {
         frames: vec![frame],
         output_slot,
+        return_type: crate::routine::declared_scalar_result_type(routine),
         ctx,
         steps: 0,
         active_error: None,
@@ -1412,6 +1421,7 @@ async fn execute_invocation(
             cursor_declarations: HashMap::new(),
             last_row_count: 0,
             output_slot: None,
+            return_type: None,
             set_results: None,
             returns_set: false,
             context: format!("PL/pgSQL {context}"),
@@ -1449,6 +1459,7 @@ async fn execute_procedure_invocation(
         cursor_declarations: HashMap::new(),
         last_row_count: 0,
         output_slot: None,
+        return_type: None,
         set_results: None,
         returns_set: false,
         context: format!("PL/pgSQL procedure {}", routine.identity()),
@@ -1638,10 +1649,10 @@ impl ScalarInterpreter<'_> {
                         })
                     })
                     .transpose()?;
-                Ok(ScalarFlow::Return(match value {
+                Ok(ScalarFlow::Return(self.coerce_return(match value {
                     Some(value) => value,
                     None => self.output_value(),
-                }))
+                })?))
             })()
             .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "RETURN")),
             PlPgSqlStatement::Raise(raise) => self.raise(raise).map_err(|error| {
@@ -2034,6 +2045,23 @@ impl ScalarInterpreter<'_> {
             .map_or(Datum::Null, |slot| slot.value.clone())
     }
 
+    fn coerce_return(&self, value: Datum) -> Result<Datum, ExecError> {
+        match self.return_type {
+            Some(ColumnType::Record(Some(_)))
+                if !value.is_null() && !matches!(value, Datum::Record(_)) =>
+            {
+                Err(ExecError::FunctionError {
+                    sqlstate: "42804",
+                    message:
+                        "cannot return non-composite value from function returning composite type"
+                            .into(),
+                })
+            }
+            Some(ty) => cast_value(&value, ty, self.ctx),
+            None => Ok(value),
+        }
+    }
+
     fn set_special_error(&mut self, error: &PgError) {
         let _ = self.assign_name("sqlstate", Datum::Text(error.code.clone()));
         let _ = self.assign_name("sqlerrm", Datum::Text(error.message.clone()));
@@ -2389,7 +2417,7 @@ impl Interpreter<'_> {
                         }
                         None => self.output_value(),
                     };
-                    Ok(Flow::Return(value))
+                    Ok(Flow::Return(self.coerce_return(value)?))
                 }
                 .await
                 .map_err(|error| plpgsql_statement_error(error, &self.context, *line, "RETURN")),
@@ -3260,6 +3288,23 @@ impl Interpreter<'_> {
             .as_deref()
             .and_then(|name| self.lookup_slot(name))
             .map_or(Datum::Null, |slot| slot.value.clone())
+    }
+
+    fn coerce_return(&self, value: Datum) -> Result<Datum, ExecError> {
+        match self.return_type {
+            Some(ColumnType::Record(Some(_)))
+                if !value.is_null() && !matches!(value, Datum::Record(_)) =>
+            {
+                Err(ExecError::FunctionError {
+                    sqlstate: "42804",
+                    message:
+                        "cannot return non-composite value from function returning composite type"
+                            .into(),
+                })
+            }
+            Some(ty) => cast_value(&value, ty, &self.session.plpgsql_eval_context()),
+            None => Ok(value),
+        }
     }
 
     fn set_found(&mut self, found: bool) {
