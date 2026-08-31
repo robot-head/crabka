@@ -1847,6 +1847,25 @@ async fn current_diagnostics_reports_the_routine_oid() {
         .await
             == Some("t".into())
     );
+
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_current_regprocedure(input text) RETURNS regprocedure LANGUAGE plpgsql AS $$
+        DECLARE result regprocedure;
+        BEGIN
+          GET DIAGNOSTICS result = PG_ROUTINE_OID;
+          RETURN result;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        scalar(&mut session, "SELECT pl_current_regprocedure('anything')",).await
+            == Some("pl_current_regprocedure(text)".into())
+    );
 }
 
 /// A NULL reaching a `RAISE` is a rendering question, not an abort.

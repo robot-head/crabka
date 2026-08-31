@@ -63,9 +63,7 @@ pub(crate) fn cast_value(
     ty: ColumnType,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Datum, ExecError> {
-    let value = crate::eval::cast_value(value, ty, &ctx.time_zone)?;
-    crate::usertype::check_domain(ty, &value, ctx)?;
-    Ok(value)
+    crate::eval::cast_operand(value, ty, ctx)
 }
 
 fn is_reraise(raise: &PlPgSqlRaise) -> bool {
