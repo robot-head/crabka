@@ -40,6 +40,35 @@ fn source_table(stats: &ast::CreateStatistics) -> Result<&ast::RelationRef, Exec
     }
 }
 
+fn generated_name(
+    kv: &dyn Kv,
+    source: &RelationName,
+    expressions: &[Expr],
+) -> Result<RelationName, ExecError> {
+    let keys = expressions
+        .iter()
+        .map(|expression| match expression {
+            Expr::Column { table: None, name } => name.as_str(),
+            _ => "expr",
+        })
+        .collect::<Vec<_>>();
+    let base = format!("{}_{}_stat", source.name, keys.join("_"));
+    for suffix in 0_u64.. {
+        let name = RelationName::new(
+            source.schema.clone(),
+            if suffix == 0 {
+                base.clone()
+            } else {
+                format!("{base}{suffix}")
+            },
+        );
+        if crabka_pgcatalog::statistics::get(kv, &name)?.is_none() {
+            return Ok(name);
+        }
+    }
+    unreachable!("statistic name suffix overflow")
+}
+
 fn kinds(kinds: &[String], keys: &[i16]) -> Result<Vec<String>, ExecError> {
     let kinds = if kinds.is_empty() {
         if keys == [0] {
@@ -196,12 +225,16 @@ pub(crate) fn create(
         RelationKind::Table,
         fctx.effective_role(),
     )?;
-    let name = resolve_relation(
-        kv,
-        fctx.resolution,
-        &stats.name,
-        SchemaDisposition::Creation,
-    )?;
+    let name = if stats.name.name.is_empty() {
+        generated_name(kv, &source, &stats.expressions)?
+    } else {
+        resolve_relation(
+            kv,
+            fctx.resolution,
+            &stats.name,
+            SchemaDisposition::Creation,
+        )?
+    };
     if stats.if_not_exists && crabka_pgcatalog::statistics::get(kv, &name)?.is_some() {
         return Ok((command("CREATE STATISTICS"), Vec::new()));
     }

@@ -23954,6 +23954,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_statistics_generates_unique_names() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE generated_stats (a int4, b int4); \
+             CREATE STATISTICS (mcv) ON a, b FROM generated_stats; \
+             CREATE STATISTICS (mcv) ON a, b FROM generated_stats",
+        )
+        .await
+        .expect("statistics setup");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "SELECT stxname FROM pg_statistic_ext ORDER BY stxname",
+            )
+            .await
+                == Ok(vec![
+                    vec!["generated_stats_a_b_stat".into()],
+                    vec!["generated_stats_a_b_stat1".into()],
+                ])
+        );
+    }
+
+    #[tokio::test]
     async fn explain_uses_extended_mcv_for_function_expressions() {
         use assert2::assert;
 

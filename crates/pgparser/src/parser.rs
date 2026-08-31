@@ -7190,7 +7190,11 @@ impl Parser {
         } else {
             false
         };
-        let name = self.relation_ref()?;
+        let name = if matches!(self.peek(), Token::LParen | Token::Keyword(Keyword::On)) {
+            crate::ast::RelationRef::bare("")
+        } else {
+            self.relation_ref()?
+        };
         let kinds = if *self.peek() == Token::LParen {
             self.parse_ident_list()?
         } else {
@@ -20848,6 +20852,22 @@ mod tests {
         }
         assert!(crate::parse("CREATE STATISTICS s ON a, (b + 1) FROM t").is_ok());
         assert!(crate::parse("CREATE STATISTICS s ON date_trunc('day', a) FROM t").is_ok());
+    }
+
+    #[test]
+    fn statistics_name_is_optional() {
+        use assert2::assert;
+
+        for sql in [
+            "CREATE STATISTICS ON a, b FROM t",
+            "CREATE STATISTICS (mcv) ON a, b FROM t",
+        ] {
+            let statements = crate::parse(sql).expect("parse");
+            let [Statement::CreateStatistics(stats)] = statements.as_slice() else {
+                panic!("statistics");
+            };
+            assert!(stats.name.name.is_empty(), "case: {sql}");
+        }
     }
 
     #[test]
