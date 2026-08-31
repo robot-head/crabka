@@ -161,24 +161,32 @@ fn estimate_group_rows(
     if select.group_by.is_empty() {
         return None;
     }
-    let keys = select
+    let mut keys = select
         .group_by
         .iter()
-        .map(|expr| group_key_attnum(expr, &select.projection, table))
+        .map(|expr| group_key(expr, &select.projection, table))
         .collect::<Option<Vec<_>>>()?;
-    let mut normalized = keys.clone();
-    normalized.sort_unstable();
-    normalized.dedup();
+    keys.sort_unstable();
+    keys.dedup();
     if let Some(rows) = crabka_pgcatalog::statistics::list(catalog_kv)
         .ok()?
         .into_iter()
         .filter(|object| object.table_id == table.id)
-        .filter_map(|object| object.data.and_then(|data| data.ndistinct))
-        .find_map(|data| ndistinct_for_keys(&data, &normalized))
+        .find_map(|object| {
+            let positions = statistics_positions(&object, &keys)?;
+            object
+                .data
+                .and_then(|data| data.ndistinct)
+                .and_then(|data| ndistinct_for_keys(&data, &positions))
+        })
     {
         return Some(rows.min(input_rows.max(1.0)));
     }
-    let distincts = normalized
+    let attnums = keys
+        .iter()
+        .map(GroupKey::attnum)
+        .collect::<Option<Vec<_>>>()?;
+    let distincts = attnums
         .iter()
         .filter_map(|attnum| {
             let stats = crate::attrstats::get(
@@ -203,23 +211,42 @@ fn estimate_group_rows(
             })
         })
         .collect::<Vec<_>>();
-    (distincts.len() == normalized.len())
+    (distincts.len() == attnums.len())
         .then(|| crate::plan::selfuncs::estimate_num_groups(input_rows, &distincts))
 }
 
-fn group_key_attnum(
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum GroupKey {
+    Attribute(i16),
+    Expression(String),
+}
+
+impl GroupKey {
+    fn attnum(&self) -> Option<i16> {
+        match self {
+            Self::Attribute(attnum) => Some(*attnum),
+            Self::Expression(_) => None,
+        }
+    }
+}
+
+fn group_key(
     expr: &Expr,
     projection: &[SelectItem],
     table: &crabka_pgcatalog::Table,
-) -> Option<i16> {
+) -> Option<GroupKey> {
     match expr {
         Expr::IntLiteral(position) => {
             match projection.get(position.parse::<usize>().ok()?.checked_sub(1)?)? {
-                SelectItem::Expr { expr, .. } => column_attnum(expr, table),
+                SelectItem::Expr { expr, .. } => group_key(expr, projection, table),
                 SelectItem::Wildcard | SelectItem::QualifiedWildcard(_) => None,
             }
         }
-        expr => column_attnum(expr, table),
+        Expr::Column { .. } => column_attnum(expr, table).map(GroupKey::Attribute),
+        expr => Some(GroupKey::Expression(crate::viewdef::expression_text(
+            expr,
+            crabka_pgtypes::encoding::OutputStyle::with_zone(&jiff::tz::TimeZone::UTC),
+        ))),
     }
 }
 
@@ -247,6 +274,33 @@ fn ndistinct_for_keys(data: &str, keys: &[i16]) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .filter(|value| value.is_finite() && *value >= 1.0)
+}
+
+fn statistics_positions(
+    object: &crabka_pgcatalog::statistics::Statistics,
+    keys: &[GroupKey],
+) -> Option<Vec<i16>> {
+    let mut expression = 0_i16;
+    let positions = object
+        .keys
+        .iter()
+        .filter_map(|attnum| {
+            let key = if *attnum == 0 {
+                expression -= 1;
+                GroupKey::Expression(
+                    object
+                        .expressions
+                        .get(usize::try_from(-expression - 1).ok()?)?
+                        .clone(),
+                )
+            } else {
+                GroupKey::Attribute(*attnum)
+            };
+            keys.contains(&key)
+                .then_some(if *attnum == 0 { expression } else { *attnum })
+        })
+        .collect::<Vec<_>>();
+    (positions.len() == keys.len()).then_some(positions)
 }
 
 fn restriction_selectivity(

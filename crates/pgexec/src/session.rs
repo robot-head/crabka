@@ -23690,6 +23690,40 @@ mod tests {
                     ],
                 ])
         );
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT count(*) FROM group_estimate GROUP BY a, b",
+            )
+            .await
+                == Ok(vec![
+                    vec!["HashAggregate (cost=0.00..0.00 rows=2 width=0)".into()],
+                    vec!["  Group Key: a, b".into()],
+                    vec![
+                        "  ->  Seq Scan on group_estimate (cost=0.00..0.00 rows=3 width=0)".into()
+                    ],
+                ])
+        );
+        s.simple_query(
+            "CREATE STATISTICS group_estimate_expr (ndistinct) \
+             ON (a + 1), (b + 1) FROM group_estimate; ANALYZE group_estimate",
+        )
+        .await
+        .expect("expression statistics setup");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "EXPLAIN SELECT count(*) FROM group_estimate GROUP BY a + 1, b + 1",
+            )
+            .await
+                == Ok(vec![
+                    vec!["HashAggregate (cost=0.00..0.00 rows=2 width=0)".into()],
+                    vec!["  Group Key: (a + 1), (b + 1)".into()],
+                    vec![
+                        "  ->  Seq Scan on group_estimate (cost=0.00..0.00 rows=3 width=0)".into()
+                    ],
+                ])
+        );
     }
 
     #[tokio::test]
