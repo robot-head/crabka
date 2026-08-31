@@ -1597,6 +1597,28 @@ async fn opening_null_refcursors_uses_fresh_portal_names() {
 }
 
 #[tokio::test]
+async fn fetch_backward_without_a_count_moves_one_row() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_fetch_backward() RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE cursor_ refcursor; value_ int4;
+        BEGIN
+          OPEN cursor_ SCROLL FOR VALUES (1), (2), (3);
+          FETCH LAST FROM cursor_ INTO value_;
+          FETCH BACKWARD FROM cursor_ INTO value_;
+          RETURN value_;
+        END
+        $$;
+        ",
+    )
+    .await;
+    assert!(scalar(&mut session, "SELECT pl_fetch_backward()").await == Some("2".into()));
+}
+
+#[tokio::test]
 async fn execute_discards_rows_and_dynamic_dml_returning_assigns_the_first_row() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

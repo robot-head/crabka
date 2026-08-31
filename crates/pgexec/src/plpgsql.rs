@@ -4392,6 +4392,7 @@ fn parse_cursor_direction(direction: &str) -> Result<FetchDirection, ExecError> 
     Ok(match words.as_slice() {
         [] | ["next"] => FetchDirection::Relative(FetchCount::Rows(1)),
         ["prior"] => FetchDirection::Relative(FetchCount::Rows(-1)),
+        ["backward"] => FetchDirection::Relative(FetchCount::Rows(-1)),
         ["first"] => FetchDirection::Absolute(1),
         ["last"] => FetchDirection::Absolute(-1),
         ["all"] | ["forward", "all"] => FetchDirection::Relative(FetchCount::AllForward),
