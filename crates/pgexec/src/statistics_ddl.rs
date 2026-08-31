@@ -225,6 +225,11 @@ pub(crate) fn create(
         RelationKind::Table,
         fctx.effective_role(),
     )?;
+    let temporary = stats
+        .name
+        .schema
+        .as_deref()
+        .is_some_and(|schema| schema == crabka_pgcatalog::PG_TEMP_ALIAS);
     let name = if stats.name.name.is_empty() {
         generated_name(kv, &source, &stats.expressions)?
     } else {
@@ -232,12 +237,18 @@ pub(crate) fn create(
             kv,
             fctx.resolution,
             &stats.name,
-            SchemaDisposition::Creation,
+            if temporary {
+                SchemaDisposition::TemporaryCreation
+            } else {
+                SchemaDisposition::Creation
+            },
         )?
     };
     if stats.if_not_exists && crabka_pgcatalog::statistics::get(kv, &name)?.is_some() {
         return Ok((command("CREATE STATISTICS"), Vec::new()));
     }
+    let temp_schema = (temporary && !crabka_pgcatalog::schema_exists(kv, &name.schema)?)
+        .then(|| name.schema.clone());
     let (keys, expressions) = definition(stats, &table)?;
     let kinds = kinds(&stats.kinds, &keys)?;
     let record = Statistics {
@@ -251,10 +262,12 @@ pub(crate) fn create(
         expressions,
         data: None,
     };
-    Ok((
-        command("CREATE STATISTICS"),
-        crabka_pgcatalog::statistics::create_ops(kv, &record)?,
-    ))
+    let mut ops = Vec::new();
+    if let Some(schema) = temp_schema {
+        ops.push(crabka_pgcatalog::create_temp_schema_op(&schema));
+    }
+    ops.extend(crabka_pgcatalog::statistics::create_ops(kv, &record)?);
+    Ok((command("CREATE STATISTICS"), ops))
 }
 
 pub(crate) fn require_statistics_owner(
@@ -329,7 +342,11 @@ pub(crate) fn drop(
 ) -> DdlResult {
     let mut ops = Vec::new();
     for written in names {
-        let name = resolve_relation(kv, fctx.resolution, written, SchemaDisposition::Utility)?;
+        let name = if written.schema.as_deref() == Some(crabka_pgcatalog::PG_TEMP_ALIAS) {
+            RelationName::new(fctx.resolution.temp_schema(), written.name.clone())
+        } else {
+            resolve_relation(kv, fctx.resolution, written, SchemaDisposition::Utility)?
+        };
         match crabka_pgcatalog::statistics::get(kv, &name)? {
             Some(object) => {
                 require_statistics_owner(kv, &object, fctx.effective_role())?;

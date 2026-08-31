@@ -23980,6 +23980,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_statistics_initializes_the_temporary_schema() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query(
+            "CREATE TABLE temporary_stats_source (a int4, b int4); \
+             CREATE STATISTICS pg_temp.temporary_stats ON a, b FROM temporary_stats_source",
+        )
+        .await
+        .expect("statistics setup");
+        assert!(
+            rows_or_sqlstate(
+                &mut s,
+                "SELECT stxname FROM pg_statistic_ext WHERE stxname = 'temporary_stats'",
+            )
+            .await
+                == Ok(vec![vec!["temporary_stats".into()]])
+        );
+        s.simple_query("DROP STATISTICS pg_temp.temporary_stats")
+            .await
+            .expect("drop temporary statistics");
+    }
+
+    #[tokio::test]
     async fn explain_uses_extended_mcv_for_function_expressions() {
         use assert2::assert;
 
