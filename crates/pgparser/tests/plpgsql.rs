@@ -323,6 +323,27 @@ fn parses_cursor_and_diagnostics_statements() {
 }
 
 #[test]
+fn parses_for_over_a_declared_cursor() {
+    let block = parse_plpgsql(
+        r"
+        declare rows_cur cursor(limit_rows int) for select * from things limit limit_rows;
+        begin
+          for row_ in rows_cur(limit_rows => 10) loop null; end loop;
+        end
+        ",
+    )
+    .expect("cursor FOR loop");
+    let PlPgSqlStatement::Loop { kind, .. } = &block.statements[0] else {
+        panic!("expected cursor FOR loop");
+    };
+    assert!(matches!(
+        kind.as_ref(),
+        PlPgSqlLoop::Cursor { cursor, arguments, .. }
+            if cursor == "rows_cur" && arguments.len() == 1
+    ));
+}
+
+#[test]
 fn parses_transaction_control() {
     let block = parse_plpgsql("begin commit and chain; rollback and no chain; null; end")
         .expect("transaction control");

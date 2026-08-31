@@ -1237,7 +1237,8 @@ pub(crate) fn scalar_function_requires_session(
                                     None => false,
                                 }
                         }
-                        PlPgSqlLoop::Query { .. }
+                        PlPgSqlLoop::Cursor { .. }
+                        | PlPgSqlLoop::Query { .. }
                         | PlPgSqlLoop::Dynamic { .. }
                         | PlPgSqlLoop::Foreach { .. } => true,
                     };
@@ -1890,6 +1891,9 @@ impl ScalarInterpreter<'_> {
                 self.frames.pop();
                 Ok(ScalarFlow::Next)
             }
+            PlPgSqlLoop::Cursor { .. } => Err(ExecError::Unsupported(
+                "cursor FOR loops require the async session executor".into(),
+            )),
             PlPgSqlLoop::Query { .. }
             | PlPgSqlLoop::Dynamic { .. }
             | PlPgSqlLoop::Foreach { .. } => Err(ExecError::Unsupported(
@@ -3040,6 +3044,90 @@ impl Interpreter<'_> {
                     self.set_found(found);
                     Ok(Flow::Next)
                 }
+                PlPgSqlLoop::Cursor {
+                    targets,
+                    cursor,
+                    arguments,
+                } => {
+                    let open = PlPgSqlStatement::Open {
+                        cursor: cursor.clone(),
+                        scroll: None,
+                        arguments: arguments.clone(),
+                        query: None,
+                        dynamic_query: None,
+                        using: Vec::new(),
+                        line,
+                    };
+                    let reset_cursor = self
+                        .lookup_slot(cursor)
+                        .is_some_and(|slot| slot.value.is_null());
+                    self.exec_statement(&open).await?;
+                    let cursor_name = self.cursor_name(cursor);
+                    let implicit_targets = targets
+                        .iter()
+                        .filter(|target| {
+                            target.path.len() == 1
+                                && target.subscripts.is_empty()
+                                && self.lookup_slot(&target.path[0]).is_none()
+                        })
+                        .map(|target| target.path[0].clone())
+                        .collect::<Vec<_>>();
+                    if !implicit_targets.is_empty() {
+                        let mut frame = Frame::default();
+                        for target in &implicit_targets {
+                            frame.slots.insert(
+                                target.clone(),
+                                Slot {
+                                    value: Datum::Null,
+                                    ty: ColumnType::Record(None),
+                                    record_types: None,
+                                    constant: false,
+                                    not_null: false,
+                                },
+                            );
+                        }
+                        self.frames.push(frame);
+                    }
+                    let result = async {
+                        let mut found = false;
+                        loop {
+                            let QueryResult::Rows { fields, rows, .. } = self
+                                .session
+                                .fetch_cursor(
+                                    &cursor_name,
+                                    FetchDirection::Relative(FetchCount::Rows(1)),
+                                    false,
+                                )
+                                .await?
+                            else {
+                                return Err(ExecError::Syntax(
+                                    "cursor fetch did not return rows".into(),
+                                ));
+                            };
+                            let Some(row) = rows.first() else {
+                                self.set_found(found);
+                                return Ok(Flow::Next);
+                            };
+                            found = true;
+                            self.assign_row(targets, &fields, Some(row)).await?;
+                            if let Some(flow) = self.loop_iteration(label, body).await? {
+                                self.set_found(found);
+                                return Ok(flow);
+                            }
+                        }
+                    }
+                    .await;
+                    let close = self.session.close_cursor(&CursorTarget::Name(cursor_name));
+                    if !implicit_targets.is_empty() {
+                        self.frames.pop();
+                    }
+                    result?;
+                    close?;
+                    if reset_cursor {
+                        self.assign_name(cursor, Datum::Null)?;
+                    }
+                    Ok(Flow::Next)
+                }
                 PlPgSqlLoop::Query {
                     targets,
                     query,
@@ -3297,11 +3385,11 @@ impl Interpreter<'_> {
                 self.frames.last_mut().unwrap().slots.insert(
                     name.clone(),
                     Slot {
-                        value: Datum::Text(name.clone()),
-                        ty: ColumnType::Text,
+                        value: Datum::Null,
+                        ty: ColumnType::Refcursor,
                         record_types: None,
                         constant: false,
-                        not_null: true,
+                        not_null: false,
                     },
                 );
                 Ok(())

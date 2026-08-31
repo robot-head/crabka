@@ -1619,6 +1619,44 @@ async fn fetch_backward_without_a_count_moves_one_row() {
 }
 
 #[tokio::test]
+async fn declared_cursor_for_loop_opens_fetches_and_closes_the_cursor() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_cursor_for_loop(lower_ int4) RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE cursor_ CURSOR(limit_ int4) FOR VALUES (1), (2), (3); total int4 := 0;
+        BEGIN
+          FOR row_ IN cursor_(limit_ := lower_) LOOP
+            IF row_.column1 >= lower_ THEN total := total + row_.column1; END IF;
+          END LOOP;
+          RETURN total;
+        END
+        $$;
+        ",
+    )
+    .await;
+    assert!(scalar(&mut session, "SELECT pl_cursor_for_loop(2)").await == Some("5".into()));
+    let error = session
+        .simple_query(
+            r"
+            CREATE FUNCTION pl_unbound_cursor_for_loop() RETURNS void LANGUAGE plpgsql AS $$
+            DECLARE cursor_ refcursor;
+            BEGIN FOR row_ IN cursor_ LOOP NULL; END LOOP; END
+            $$
+            ",
+        )
+        .await
+        .expect_err("unbound cursor FOR loop must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("cursor FOR loop must use a bound cursor variable")
+    );
+}
+
+#[tokio::test]
 async fn execute_discards_rows_and_dynamic_dml_returning_assigns_the_first_row() {
     let engine = SqlEngine::new();
     let mut session = engine.connect();

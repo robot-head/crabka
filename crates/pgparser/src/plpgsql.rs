@@ -714,6 +714,32 @@ impl PlParser<'_> {
         if reverse {
             return Err(self.error("REVERSE is only valid for an integer FOR loop"));
         }
+        if let Some(cursor) = self.word_at(self.pos) {
+            let arguments = if loop_at == self.pos + 1 {
+                Vec::new()
+            } else if matches!(self.tokens.get(self.pos + 1), Some((Token::LParen, _))) {
+                let end = self.find_token(self.pos + 1, &Token::RParen)?;
+                if end + 1 != loop_at {
+                    Vec::new()
+                } else {
+                    self.parse_cursor_argument_list_range(self.pos + 2, end)?
+                }
+            } else {
+                Vec::new()
+            };
+            if loop_at == self.pos + 1 || !arguments.is_empty() {
+                self.pos = loop_at;
+                return self.parse_loop(
+                    label,
+                    PlPgSqlLoop::Cursor {
+                        targets,
+                        cursor,
+                        arguments,
+                    },
+                    line,
+                );
+            }
+        }
         let source = self.slice_tokens(self.pos, loop_at).trim().to_owned();
         let query = self.parse_sql_range(self.pos, loop_at)?;
         self.pos = loop_at;

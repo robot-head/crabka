@@ -28,10 +28,10 @@ use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgparser::ast::{
     AlterRoutineAction, ArraySubscript, Assignment, AssignmentValue, CreateRoutineStmt, Expr,
     FuncArgs, FuncCall, InsertOverride, MergeAction, MergeMatchKind, MergeSource, PlPgSqlBlock,
-    PlPgSqlCursorArgument, PlPgSqlDeclaration, PlPgSqlStatement, QueryExpr, RelationRef, Returning,
-    RoutineArg, RoutineArgMode, RoutineBody, RoutineObject, RoutineOption, RoutineParallel,
-    RoutineReturn, RoutineSignature, RoutineVolatility, SelectItem, SelectStmt, Statement,
-    TableFuncCall, TableFuncColumnDef, TargetIndirection,
+    PlPgSqlCursorArgument, PlPgSqlDeclaration, PlPgSqlLoop, PlPgSqlStatement, QueryExpr,
+    RelationRef, Returning, RoutineArg, RoutineArgMode, RoutineBody, RoutineObject, RoutineOption,
+    RoutineParallel, RoutineReturn, RoutineSignature, RoutineVolatility, SelectItem, SelectStmt,
+    Statement, TableFuncCall, TableFuncColumnDef, TargetIndirection,
 };
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum};
 use crabka_pgwire::engine::QueryResult;
@@ -4331,7 +4331,23 @@ fn validate_cursor_opens(block: &PlPgSqlBlock) -> Result<(), ExecError> {
                         statements(body, cursors)?;
                     }
                 }
-                PlPgSqlStatement::Loop { body, .. } => statements(body, cursors)?,
+                PlPgSqlStatement::Loop { kind, body, .. } => {
+                    if let PlPgSqlLoop::Cursor {
+                        cursor, arguments, ..
+                    } = kind.as_ref()
+                    {
+                        let parameters =
+                            cursors
+                                .get(cursor)
+                                .ok_or_else(|| ExecError::FunctionError {
+                                    sqlstate: "42P11",
+                                    message: "cursor FOR loop must use a bound cursor variable"
+                                        .into(),
+                                })?;
+                        cursor_argument_positions(cursor, parameters, arguments)?;
+                    }
+                    statements(body, cursors)?;
+                }
                 PlPgSqlStatement::Open {
                     cursor,
                     arguments,

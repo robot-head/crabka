@@ -5351,6 +5351,11 @@ pub enum PlPgSqlLoop {
         upper: Expr,
         step: Option<Expr>,
     },
+    Cursor {
+        targets: Vec<PlPgSqlTarget>,
+        cursor: String,
+        arguments: Vec<PlPgSqlCursorArgument>,
+    },
     Query {
         targets: Vec<PlPgSqlTarget>,
         query: Box<Statement>,
