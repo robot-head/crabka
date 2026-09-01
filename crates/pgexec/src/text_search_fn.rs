@@ -1789,30 +1789,28 @@ fn normalized_terms(
     source: &str,
     catalog: Catalog<'_>,
 ) -> Result<Vec<(String, u16)>, ExecError> {
-    let dictionaries = crate::text_search_catalog::config_dictionaries(catalog, config)?;
-    let thesaurus = dictionaries.iter().find_map(|dictionary| {
-        match crate::text_search_catalog::dictionary_template(catalog, dictionary).ok()? {
-            crate::text_search_catalog::DictionaryTemplate::Thesaurus {
-                dict_file,
-                dictionary,
-            } => Some((dict_file, dictionary)),
-            _ => None,
-        }
-    });
     let source_words = words(source).collect::<Vec<_>>();
     let mut terms = Vec::new();
     let mut index = 0;
     let mut output_position = 1_u16;
     while index < source_words.len() {
         let word = source_words[index];
+        let dictionaries = dictionaries_for_word(config, word, catalog)?;
         let position = output_position.min(MAX_POSITION);
-        if let Some((dict_file, dictionary)) = &thesaurus
-            && let Some((consumed, lexemes)) =
-                crate::text_search_thesaurus::lexize_phrase(&source_words[index..], dict_file)
+        if let Some((dict_file, dictionary)) = dictionaries.iter().find_map(|dictionary| {
+            match crate::text_search_catalog::dictionary_template(catalog, dictionary).ok()? {
+                crate::text_search_catalog::DictionaryTemplate::Thesaurus {
+                    dict_file,
+                    dictionary,
+                } => Some((dict_file, dictionary)),
+                _ => None,
+            }
+        }) && let Some((consumed, lexemes)) =
+            crate::text_search_thesaurus::lexize_phrase(&source_words[index..], &dict_file)
         {
             let mut produced = 0_u16;
             for lexeme in lexemes {
-                let lexeme = lexize_dictionary(dictionary, &lexeme, catalog)?
+                let lexeme = lexize_dictionary(&dictionary, &lexeme, catalog)?
                     .unwrap_or_else(|| vec![lexeme]);
                 for lexeme in lexeme {
                     terms.push((lexeme, position.saturating_add(produced).min(MAX_POSITION)));
@@ -1833,6 +1831,29 @@ fn normalized_terms(
         output_position = output_position.saturating_add(1);
     }
     Ok(terms)
+}
+
+fn dictionaries_for_word(
+    config: &str,
+    word: &str,
+    catalog: Catalog<'_>,
+) -> Result<Vec<String>, ExecError> {
+    let Some(token_type) = default_parser_tokens(word)
+        .into_iter()
+        .find(|token| token.id != 12)
+        .and_then(|token| {
+            DEFAULT_PARSER_TOKEN_TYPES
+                .iter()
+                .find(|&&(id, _, _)| id == token.id)
+                .map(|&(_, token_type, _)| token_type)
+        })
+    else {
+        return crate::text_search_catalog::config_dictionaries(catalog, config);
+    };
+    if crate::text_search_catalog::config_has_token_mapping(catalog, config, token_type)? {
+        return crate::text_search_catalog::config_token_dictionaries(catalog, config, token_type);
+    }
+    crate::text_search_catalog::config_dictionaries(catalog, config)
 }
 
 fn words(source: &str) -> impl Iterator<Item = &str> {

@@ -238,6 +238,9 @@ pub(crate) fn config_token_dictionaries(
 ) -> Result<Vec<String>, ExecError> {
     let mut current = canonical(name);
     let mut seen = BTreeSet::new();
+    let mapping_key = format!("__mapping_{token_type}");
+    let addition_key = format!("__mapping_add_{token_type}");
+    let mut additions = Vec::new();
     loop {
         if !seen.insert(current.clone()) {
             return Err(ExecError::Unsupported(
@@ -245,7 +248,9 @@ pub(crate) fn config_token_dictionaries(
             ));
         }
         if let Some(object) = builtin(TextSearchObjectKind::Configuration, &current) {
-            return Ok(builtin_token_dictionaries(&object.base, token_type));
+            let mut dictionaries = builtin_token_dictionaries(&object.base, token_type);
+            dictionaries.extend(additions);
+            return Ok(dictionaries);
         }
         let kv = kv.ok_or_else(|| {
             ExecError::UndefinedObject(format!(
@@ -257,9 +262,63 @@ pub(crate) fn config_token_dictionaries(
                 "text search configuration \"{current}\" does not exist"
             ))
         })?;
-        let key = format!("__mapping_{token_type}");
-        if let Some((_, dictionaries)) = object.options.iter().find(|(name, _)| name == &key) {
-            return Ok(dictionaries.split('\u{1f}').map(str::to_owned).collect());
+        if let Some((_, dictionaries)) =
+            object.options.iter().find(|(name, _)| name == &mapping_key)
+        {
+            let mut dictionaries = dictionaries
+                .split('\u{1f}')
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            dictionaries.extend(additions);
+            return Ok(dictionaries);
+        }
+        if let Some((_, dictionaries)) = object
+            .options
+            .iter()
+            .find(|(name, _)| name == &addition_key)
+        {
+            additions.splice(0..0, dictionaries.split('\u{1f}').map(str::to_owned));
+        }
+        current = canonical(&object.base);
+    }
+}
+
+/// Whether `token_type` has an explicit mapping in this configuration or one
+/// of its user-defined parents.
+pub(crate) fn config_has_token_mapping(
+    kv: Option<&dyn Kv>,
+    name: &str,
+    token_type: &str,
+) -> Result<bool, ExecError> {
+    let mut current = canonical(name);
+    let mut seen = BTreeSet::new();
+    let key = format!("__mapping_{token_type}");
+    let addition_key = format!("__mapping_add_{token_type}");
+    loop {
+        if !seen.insert(current.clone()) {
+            return Err(ExecError::Unsupported(
+                "text search configuration COPY cycle".into(),
+            ));
+        }
+        if builtin(TextSearchObjectKind::Configuration, &current).is_some() {
+            return Ok(false);
+        }
+        let kv = kv.ok_or_else(|| {
+            ExecError::UndefinedObject(format!(
+                "text search configuration \"{current}\" does not exist"
+            ))
+        })?;
+        let object = find(kv, TextSearchObjectKind::Configuration, &current)?.ok_or_else(|| {
+            ExecError::UndefinedObject(format!(
+                "text search configuration \"{current}\" does not exist"
+            ))
+        })?;
+        if object
+            .options
+            .iter()
+            .any(|(name, _)| name == &key || name == &addition_key)
+        {
+            return Ok(true);
         }
         current = canonical(&object.base);
     }
@@ -441,15 +500,7 @@ pub(crate) fn execute(
                 validate_mapping_options(options)?;
             }
             for (name, value) in options {
-                let name = if *kind == TextSearchObjectKind::Configuration {
-                    if let Some(token_type) = name.strip_prefix("__mapping_add_") {
-                        format!("__mapping_{token_type}")
-                    } else {
-                        name.clone()
-                    }
-                } else {
-                    name.clone()
-                };
+                let name = name.clone();
                 if *kind == TextSearchObjectKind::Configuration && name == "__mapping_drop" {
                     let Some((if_exists, token_types)) = value.split_once('\u{1e}') else {
                         return Err(ExecError::Unsupported(
@@ -458,8 +509,14 @@ pub(crate) fn execute(
                     };
                     let token_types = token_types.split('\u{1f}').collect::<BTreeSet<_>>();
                     for token_type in token_types {
-                        let key = format!("__mapping_{token_type}");
-                        let Some(index) = object.options.iter().position(|(name, _)| name == &key)
+                        let keys = [
+                            format!("__mapping_{token_type}"),
+                            format!("__mapping_add_{token_type}"),
+                        ];
+                        let Some(index) = object
+                            .options
+                            .iter()
+                            .position(|(name, _)| keys.contains(name))
                         else {
                             if if_exists == "1" {
                                 continue;
@@ -777,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn added_non_word_mapping_overrides_only_its_token_type() {
+    fn added_non_word_mapping_appends_to_its_inherited_token_type() {
         let kv = MemKv::new();
         let create = TextSearchDdl::Create {
             kind: TextSearchObjectKind::Configuration,
@@ -803,7 +860,7 @@ mod tests {
         assert!(
             config_token_dictionaries(Some(&kv), "custom", "asciiword")
                 .expect("asciiword dictionaries")
-                == ["simple"]
+                == ["english_stem", "simple"]
         );
     }
 }
