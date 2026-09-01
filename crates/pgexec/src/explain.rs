@@ -2589,6 +2589,9 @@ fn plan_select(select: &SelectStmt) -> PlanNode {
         }
         node = aggregate.with_child(node);
     }
+    if crate::srf::projection_contains_srf(&select.projection) {
+        node = PlanNode::new("ProjectSet").with_child(node);
+    }
     match &select.distinct {
         DistinctClause::All => {}
         DistinctClause::Distinct => {
@@ -3987,6 +3990,10 @@ mod tests {
     fn costs_off_text_matches_the_postgres_oracle_for_interpreter_shapes() {
         let cases: &[(&str, &[&str])] = &[
             ("SELECT * FROM d1", &["Seq Scan on d1"]),
+            (
+                "SELECT generate_series(1, 3)",
+                &["ProjectSet", "  ->  Result"],
+            ),
             (
                 "SELECT * FROM d1 WHERE id = 1",
                 &["Seq Scan on d1", "  Filter: (id = 1)"],
