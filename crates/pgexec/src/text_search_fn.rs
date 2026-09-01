@@ -1406,13 +1406,18 @@ fn array_to_vector(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> 
     let mut entries = Vec::with_capacity(array.elems.len());
     for value in &array.elems {
         match value {
+            Datum::Text(text) if text.is_empty() => {
+                return Err(ExecError::InvalidParameterValueMessage(
+                    "lexeme array may not contain empty strings".into(),
+                ));
+            }
             Datum::Text(text) => entries.push(Lexeme {
                 text: text.clone(),
                 positions: Vec::new(),
             }),
             Datum::Null => {
-                return Err(ExecError::InvalidParameterValue(
-                    "text array must not contain nulls".into(),
+                return Err(ExecError::InvalidParameterValueMessage(
+                    "lexeme array may not contain nulls".into(),
                 ));
             }
             got => return Err(type_error("text", got)),

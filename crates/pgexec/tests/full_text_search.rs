@@ -268,6 +268,32 @@ async fn functions_and_operators_match_postgres_shapes() {
 }
 
 #[tokio::test]
+async fn array_to_tsvector_rejects_null_and_empty_lexemes() {
+    let client = connect().await;
+    for (sql, expected) in [
+        (
+            "SELECT array_to_tsvector(ARRAY['base', NULL])",
+            "lexeme array may not contain nulls",
+        ),
+        (
+            "SELECT array_to_tsvector(ARRAY['base', ''])",
+            "lexeme array may not contain empty strings",
+        ),
+    ] {
+        assert_eq!(
+            client
+                .simple_query(sql)
+                .await
+                .expect_err(sql)
+                .as_db_error()
+                .expect("database error")
+                .message(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
 async fn gin_index_backfills_tracks_writes_and_drives_exact_query_scans() {
     let engine = SqlEngine::new();
     let client = connect_to(&engine).await;
