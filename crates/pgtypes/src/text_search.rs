@@ -1300,7 +1300,9 @@ fn display_query(query: &TsQuery, out: &mut fmt::Formatter<'_>, parent: u8) -> f
             } else {
                 format!("<{distance}>")
             };
-            binary_query(left, right, &operator, precedence, out)?;
+            display_query(left, out, precedence)?;
+            write!(out, " {operator} ")?;
+            display_query(right, out, precedence + 1)?;
         }
     }
     if needs_parentheses {
@@ -1593,6 +1595,13 @@ mod tests {
                 message: "distance in phrase operator must be an integer value between zero and 16384 inclusive".into(),
             })
         );
+    }
+
+    #[test]
+    fn query_parenthesizes_a_right_nested_phrase() {
+        let query: TsQuery = "(a & g) <-> (b <-> d)".parse().expect("query");
+
+        assert_eq!(query.to_string(), "( 'a' & 'g' ) <-> ( 'b' <-> 'd' )");
     }
 
     #[test]
