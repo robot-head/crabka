@@ -868,7 +868,7 @@ fn vector_from_pieces(
                 weight: Weight::D,
             });
         }
-        let words = u16::try_from(words(piece).count()).unwrap_or(MAX_POSITION);
+        let words = parser_position_count(config, piece, catalog)?;
         offset = offset
             .saturating_add(words)
             .saturating_add(1)
@@ -1789,13 +1789,23 @@ fn normalized_terms(
     source: &str,
     catalog: Catalog<'_>,
 ) -> Result<Vec<(String, u16)>, ExecError> {
-    let source_words = words(source).collect::<Vec<_>>();
+    let source_tokens = default_parser_tokens(source)
+        .into_iter()
+        .map(|token| {
+            let dictionaries = dictionaries_for_token(config, &token, catalog)?;
+            Ok((token.text, dictionaries))
+        })
+        .collect::<Result<Vec<_>, ExecError>>()
+        .map_err(ExecError::from)?;
+    let source_tokens = source_tokens
+        .into_iter()
+        .filter(|(_, dictionaries)| !dictionaries.is_empty())
+        .collect::<Vec<_>>();
     let mut terms = Vec::new();
     let mut index = 0;
     let mut output_position = 1_u16;
-    while index < source_words.len() {
-        let word = source_words[index];
-        let dictionaries = dictionaries_for_word(config, word, catalog)?;
+    while index < source_tokens.len() {
+        let (word, dictionaries) = &source_tokens[index];
         let position = output_position.min(MAX_POSITION);
         if let Some((dict_file, dictionary)) = dictionaries.iter().find_map(|dictionary| {
             match crate::text_search_catalog::dictionary_template(catalog, dictionary).ok()? {
@@ -1805,9 +1815,13 @@ fn normalized_terms(
                 } => Some((dict_file, dictionary)),
                 _ => None,
             }
-        }) && let Some((consumed, lexemes)) =
-            crate::text_search_thesaurus::lexize_phrase(&source_words[index..], &dict_file)
-        {
+        }) && let Some((consumed, lexemes)) = crate::text_search_thesaurus::lexize_phrase(
+            &source_tokens[index..]
+                .iter()
+                .map(|(word, _)| word.as_str())
+                .collect::<Vec<_>>(),
+            &dict_file,
+        ) {
             let mut produced = 0_u16;
             for lexeme in lexemes {
                 let lexeme = lexize_dictionary(&dictionary, &lexeme, catalog)?
@@ -1821,7 +1835,7 @@ fn normalized_terms(
             output_position = output_position.saturating_add(produced.max(1));
             continue;
         }
-        for dictionary in &dictionaries {
+        for dictionary in dictionaries {
             if let Some(lexemes) = lexize_dictionary(dictionary, word, catalog)? {
                 terms.extend(lexemes.into_iter().map(|lexeme| (lexeme, position)));
                 break;
@@ -1833,27 +1847,58 @@ fn normalized_terms(
     Ok(terms)
 }
 
-fn dictionaries_for_word(
+fn parser_position_count(
     config: &str,
-    word: &str,
+    source: &str,
+    catalog: Catalog<'_>,
+) -> Result<u16, ExecError> {
+    let count = default_parser_tokens(source)
+        .into_iter()
+        .map(|token| dictionaries_for_token(config, &token, catalog))
+        .collect::<Result<Vec<_>, ExecError>>()
+        .map_err(ExecError::from)?
+        .into_iter()
+        .filter(|dictionaries| !dictionaries.is_empty())
+        .count();
+    Ok(u16::try_from(count).unwrap_or(MAX_POSITION))
+}
+
+fn dictionaries_for_token(
+    config: &str,
+    token: &DefaultParserToken,
     catalog: Catalog<'_>,
 ) -> Result<Vec<String>, ExecError> {
-    let Some(token_type) = default_parser_tokens(word)
-        .into_iter()
-        .find(|token| token.id != 12)
-        .and_then(|token| {
-            DEFAULT_PARSER_TOKEN_TYPES
-                .iter()
-                .find(|&&(id, _, _)| id == token.id)
-                .map(|&(_, token_type, _)| token_type)
-        })
+    let Some((_, token_type, _)) = DEFAULT_PARSER_TOKEN_TYPES
+        .iter()
+        .find(|&&(id, _, _)| id == token.id)
     else {
-        return crate::text_search_catalog::config_dictionaries(catalog, config);
+        return Ok(Vec::new());
     };
     if crate::text_search_catalog::config_has_token_mapping(catalog, config, token_type)? {
         return crate::text_search_catalog::config_token_dictionaries(catalog, config, token_type);
     }
-    crate::text_search_catalog::config_dictionaries(catalog, config)
+    if is_word_token_type(token_type)
+        && *token_type != "word"
+        && crate::text_search_catalog::config_has_token_mapping(catalog, config, "word")?
+    {
+        return crate::text_search_catalog::config_dictionaries(catalog, config);
+    }
+    crate::text_search_catalog::config_token_dictionaries(catalog, config, token_type)
+}
+
+fn is_word_token_type(token_type: &str) -> bool {
+    matches!(
+        token_type,
+        "asciiword"
+            | "word"
+            | "numword"
+            | "hword_numpart"
+            | "hword_part"
+            | "hword_asciipart"
+            | "numhword"
+            | "asciihword"
+            | "hword"
+    )
 }
 
 fn words(source: &str) -> impl Iterator<Item = &str> {
@@ -2022,6 +2067,16 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "'fat':2 'rat':3"
+        );
+    }
+
+    #[test]
+    fn english_vector_uses_the_parser_token_stream() {
+        assert_eq!(
+            to_tsvector("english", "foo-bar http://example.com/a", None)
+                .unwrap()
+                .to_string(),
+            "'/a':6 'bar':3 'example.com':5 'example.com/a':4 'foo':2 'foo-bar':1"
         );
     }
 
