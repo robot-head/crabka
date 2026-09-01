@@ -205,6 +205,15 @@ async fn functions_and_operators_match_postgres_shapes() {
     assert_eq!(
         scalar(
             &client,
+            "SELECT ts_rank_cd('''a'':1 ''b'':2'::tsvector, 'a & b')",
+        )
+        .await
+        .as_deref(),
+        Some("0.1")
+    );
+    assert_eq!(
+        scalar(
+            &client,
             "SELECT ts_headline('english', 'The fat rats ran', plainto_tsquery('english', 'rat'))",
         )
         .await

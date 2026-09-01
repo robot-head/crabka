@@ -197,6 +197,81 @@ impl TsVector {
         score / (1.0 + f32::from(document_len))
     }
 
+    #[must_use]
+    pub fn rank_cd(&self, query: &TsQuery) -> f32 {
+        let mut terms = Vec::new();
+        collect_terms(query, &mut terms);
+        let terms = &terms;
+        let mut document = self
+            .0
+            .iter()
+            .enumerate()
+            .flat_map(|(entry, lexeme)| {
+                lexeme
+                    .positions
+                    .iter()
+                    .copied()
+                    .filter_map(move |position| {
+                        terms
+                            .iter()
+                            .any(|term| {
+                                (if term.prefix {
+                                    lexeme.text.starts_with(&term.text)
+                                } else {
+                                    lexeme.text == term.text
+                                }) && (term.weights.is_empty()
+                                    || term.weights.contains(&position.weight))
+                            })
+                            .then_some((entry, position))
+                    })
+            })
+            .collect::<Vec<_>>();
+        document
+            .sort_unstable_by_key(|(entry, position)| (position.position, position.weight, *entry));
+
+        let mut rank = 0.0;
+        let mut start = 0;
+        while let Some(end) =
+            (start..document.len()).find(|&end| self.cover_matches(&document[start..=end], query))
+        {
+            let begin = (start..=end)
+                .rev()
+                .find(|&begin| self.cover_matches(&document[begin..=end], query))
+                .expect("a matching cover has a lower bound");
+            let cover = &document[begin..=end];
+            let inverse_weights = cover
+                .iter()
+                .map(|(_, position)| match position.weight {
+                    Weight::D => 1.0 / f64::from(0.1_f32),
+                    Weight::C => 1.0 / f64::from(0.2_f32),
+                    Weight::B => 1.0 / f64::from(0.4_f32),
+                    Weight::A => 1.0,
+                })
+                .sum::<f64>();
+            let density =
+                f64::from(u32::try_from(cover.len()).unwrap_or(u32::MAX)) / inverse_weights;
+            let positions = i32::from(cover.last().expect("nonempty cover").1.position)
+                - i32::from(cover.first().expect("nonempty cover").1.position);
+            let noise = positions - i32::try_from(cover.len() - 1).unwrap_or(i32::MAX);
+            let noise = if noise < 0 {
+                i32::try_from(cover.len() - 1).unwrap_or(i32::MAX) / 2
+            } else {
+                noise
+            };
+            rank += density / f64::from(1 + noise);
+            start = begin + 1;
+        }
+        rank as f32
+    }
+
+    fn cover_matches(&self, cover: &[(usize, Position)], query: &TsQuery) -> bool {
+        Self::new(cover.iter().map(|(entry, position)| Lexeme {
+            text: self.0[*entry].text.clone(),
+            positions: vec![*position],
+        }))
+        .matches(query)
+    }
+
     fn positions(&self, term: &QueryTerm) -> Vec<u16> {
         self.0
             .iter()
@@ -1370,6 +1445,25 @@ mod tests {
 
         let distant_right: TsVector = "'qt':3".parse().expect("vector");
         assert!(distant_right.matches(&"!qe <2> qt".parse().expect("query")));
+    }
+
+    #[test]
+    fn cover_density_rank_uses_minimal_positioned_covers() {
+        let query: TsQuery = "a & b".parse().expect("query");
+        let adjacent: TsVector = "'a':1 'b':2".parse().expect("vector");
+        let gapped: TsVector = "'a':1 'b':3".parse().expect("vector");
+        let repeated: TsVector = "'a':1,5 'b':2".parse().expect("vector");
+        let stripped: TsVector = "'a' 'b':2".parse().expect("vector");
+        let same_position: TsVector = "'a':1 'sa':2A 'sb':2D".parse().expect("vector");
+
+        assert!((adjacent.rank_cd(&query) - 0.1).abs() < f32::EPSILON);
+        assert!((gapped.rank_cd(&query) - 0.05).abs() < f32::EPSILON);
+        assert!((repeated.rank_cd(&query) - 0.133_333_34).abs() < f32::EPSILON);
+        assert!(stripped.rank_cd(&query) == 0.0);
+        assert!(
+            (same_position.rank_cd(&"a <-> s:*".parse().expect("prefix phrase")) - 0.1).abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]

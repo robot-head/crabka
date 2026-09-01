@@ -565,7 +565,7 @@ pub(crate) fn eval_text_search(
         .iter()
         .map(&mut eval_child)
         .collect::<Result<Vec<_>, _>>()?;
-    if let Some(params) = tsquery_param_types(function, values.len()) {
+    if let Some(params) = text_search_param_types(function, &values) {
         crate::eval::coerce_unknown_args(args, &mut values, &params, ctx)?;
     }
     if values.iter().any(Datum::is_null) {
@@ -619,7 +619,8 @@ pub(crate) fn eval_text_search(
         TextSearchFunc::SetWeight => set_weight(fc, &values),
         TextSearchFunc::TsDelete => delete_terms(fc, &values),
         TextSearchFunc::TsFilter => filter_weights(fc, &values),
-        TextSearchFunc::TsRank | TextSearchFunc::TsRankCd => rank(fc, &values),
+        TextSearchFunc::TsRank => rank(fc, &values, false),
+        TextSearchFunc::TsRankCd => rank(fc, &values, true),
         TextSearchFunc::TsHeadline => headline(fc, &values, catalog),
         TextSearchFunc::TsLexize => lexize(fc, &values, catalog),
         TextSearchFunc::JsonbToTsVector => jsonb_to_vector(fc, &values, catalog),
@@ -627,13 +628,36 @@ pub(crate) fn eval_text_search(
     }
 }
 
-fn tsquery_param_types(function: TextSearchFunc, count: usize) -> Option<Vec<Option<ColumnType>>> {
+fn text_search_param_types(
+    function: TextSearchFunc,
+    values: &[Datum],
+) -> Option<Vec<Option<ColumnType>>> {
+    let count = values.len();
     let query = Some(ColumnType::TsQuery);
     match (function, count) {
         (TextSearchFunc::TsQueryPhrase, 2) => Some(vec![query, query]),
         (TextSearchFunc::TsQueryPhrase, 3) => Some(vec![query, query, Some(ColumnType::Int4)]),
         (TextSearchFunc::TsRewrite, 2) => Some(vec![query, Some(ColumnType::Text)]),
         (TextSearchFunc::TsRewrite, 3) => Some(vec![query, query, query]),
+        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 2) => {
+            Some(vec![Some(ColumnType::TsVector), query])
+        }
+        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 3)
+            if matches!(values.first(), Some(Datum::Array(_))) =>
+        {
+            Some(vec![None, Some(ColumnType::TsVector), query])
+        }
+        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 3) => Some(vec![
+            Some(ColumnType::TsVector),
+            query,
+            Some(ColumnType::Int4),
+        ]),
+        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 4) => Some(vec![
+            None,
+            Some(ColumnType::TsVector),
+            query,
+            Some(ColumnType::Int4),
+        ]),
         _ => None,
     }
 }
@@ -1414,7 +1438,7 @@ fn filter_weights(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
     Ok(Datum::TsVector(vector.filter_weights(&weights)))
 }
 
-fn rank(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+fn rank(fc: &FuncCall, values: &[Datum], cover_density: bool) -> Result<Datum, ExecError> {
     let (vector, query) = match values {
         [Datum::TsVector(vector), Datum::TsQuery(query)]
         | [
@@ -1436,7 +1460,11 @@ fn rank(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
         [got, ..] => return Err(type_error("tsvector", got)),
         _ => return Err(undefined_function(&fc.name)),
     };
-    Ok(Datum::Float4(vector.rank(query)))
+    Ok(Datum::Float4(if cover_density {
+        vector.rank_cd(query)
+    } else {
+        vector.rank(query)
+    }))
 }
 
 fn headline(fc: &FuncCall, values: &[Datum], catalog: Catalog<'_>) -> Result<Datum, ExecError> {
