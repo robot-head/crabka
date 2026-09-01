@@ -1,6 +1,11 @@
 //! PostgreSQL-compatible `tsvector` and `tsquery` values.
 
-use std::{cmp::Ordering, collections::BTreeMap, fmt, str::FromStr};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::BTreeMap,
+    fmt,
+    str::FromStr,
+};
 
 use crate::TypeError;
 
@@ -26,6 +31,7 @@ impl Weight {
             'B' => Self::B,
             'C' => Self::C,
             'D' => Self::D,
+            '*' => Self::A,
             _ => return None,
         })
     }
@@ -72,8 +78,10 @@ impl TsVector {
             merged
                 .into_iter()
                 .map(|(text, mut positions)| {
-                    positions.sort_unstable();
-                    positions.dedup();
+                    positions.sort_unstable_by_key(|position| {
+                        (position.position, Reverse(position.weight))
+                    });
+                    positions.dedup_by_key(|position| position.position);
                     Lexeme { text, positions }
                 })
                 .collect(),
@@ -1537,6 +1545,13 @@ mod tests {
             vector.to_string(),
             r#"'AB\\c' '\\as' 'ab\\\\c' 'ab\\c' 'abc'"#
         );
+    }
+
+    #[test]
+    fn vector_normalizes_star_and_duplicate_position_weights() {
+        let vector: TsVector = "w:12B w:13* w:12,5,6 a:1,3* a:3".parse().expect("vector");
+
+        assert_eq!(vector.to_string(), "'a':1,3A 'w':5,6,12B,13A");
     }
 
     #[test]
