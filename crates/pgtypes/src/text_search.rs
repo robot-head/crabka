@@ -1486,14 +1486,19 @@ impl<'a> Cursor<'a> {
             }
             return Some(text);
         }
-        let start = self.offset;
+        let mut text = String::new();
         while self
             .peek()
             .is_some_and(|character| !character.is_whitespace() && !"()!&|:<>".contains(character))
         {
-            self.bump();
+            let character = self.bump()?;
+            if character == '\\' {
+                text.push(self.bump()?);
+            } else {
+                text.push(character);
+            }
         }
-        (start != self.offset).then(|| self.input[start..self.offset].to_string())
+        (!text.is_empty()).then_some(text)
     }
 }
 
@@ -1521,6 +1526,16 @@ mod tests {
                 type_name: "tsvector",
                 value: "''".into(),
             })
+        );
+    }
+
+    #[test]
+    fn vector_unquoted_lexemes_consume_backslash_escapes() {
+        let vector: TsVector = r#"'\\as' ab\c ab\\c AB\\\c ab\\\\c"#.parse().expect("vector");
+
+        assert_eq!(
+            vector.to_string(),
+            r#"'AB\\c' '\\as' 'ab\\\\c' 'ab\\c' 'abc'"#
         );
     }
 
