@@ -232,6 +232,15 @@ async fn functions_and_operators_match_postgres_shapes() {
     assert_eq!(
         scalar(
             &client,
+            "SELECT tsvectorin(tsvectorout('base:7'::tsvector))"
+        )
+        .await
+        .as_deref(),
+        Some("'base':7")
+    );
+    assert_eq!(
+        scalar(
+            &client,
             "SELECT ts_headline('english', 'The fat rats ran', plainto_tsquery('english', 'rat'))",
         )
         .await
