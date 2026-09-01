@@ -341,6 +341,15 @@ async fn functions_and_operators_match_postgres_shapes() {
     assert_eq!(
         scalar(
             &client,
+            "SELECT ts_headline('simple', 'alpha bravo charlie delta echo foxtrot golf', 'delta', 'MaxFragments=1, MaxWords=5, MinWords=1')",
+        )
+        .await
+        .as_deref(),
+        Some("bravo charlie <b>delta</b> echo foxtrot")
+    );
+    assert_eq!(
+        scalar(
+            &client,
             "SELECT ts_headline('simple', 'one two.', 'one', 'StartSel=<i>,StopSel=</i>')",
         )
         .await

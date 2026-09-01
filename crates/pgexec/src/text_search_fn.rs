@@ -1737,13 +1737,11 @@ fn headline_fragments(
     if options.highlight_all {
         return vec![(0, words.len() - 1)];
     }
-    let mut covers = headline_covers(words, query)
-        .into_iter()
-        .map(|(start, end)| headline_fragment_bounds(words, query, options, start, end))
-        .collect::<Vec<_>>();
+    let covers = headline_covers(words, query);
     if options.max_fragments == 0 {
         let selected = covers
-            .drain(..)
+            .into_iter()
+            .map(|(start, end)| headline_fragment_bounds(words, query, options, start, end))
             .max_by_key(|&(start, end)| {
                 let interesting = words[start..=end]
                     .iter()
@@ -1759,30 +1757,131 @@ fn headline_fragments(
             selected
         };
     }
-    covers.sort_unstable_by_key(|&(start, end)| {
-        let interesting = words[start..=end]
-            .iter()
-            .filter(|word| headline_interesting(word, query))
-            .count();
-        (usize::MAX - interesting, end - start, start)
-    });
+    let mut covers = covers
+        .into_iter()
+        .flat_map(|(start, end)| headline_split_cover(words, query, options, start, end))
+        .collect::<Vec<_>>();
     let mut selected = Vec::new();
-    for cover in covers {
-        if selected.len() == options.max_fragments {
-            break;
-        }
-        if selected
+    while selected.len() < options.max_fragments {
+        let Some((index, cover)) = covers
             .iter()
-            .all(|&(start, end)| cover.1 < start || cover.0 > end)
-        {
-            selected.push(cover);
-        }
+            .enumerate()
+            .filter(|(_, cover)| {
+                selected
+                    .iter()
+                    .all(|&(start, end)| cover.1 < start || cover.0 > end)
+            })
+            .min_by_key(|&(_, &(start, end))| {
+                let interesting = words[start..=end]
+                    .iter()
+                    .filter(|word| headline_interesting(word, query))
+                    .count();
+                (
+                    usize::MAX - interesting,
+                    headline_word_count(words, start, end),
+                    start,
+                )
+            })
+        else {
+            break;
+        };
+        let cover = headline_expand_fragment(words, query, options, *cover, &selected);
+        selected.push(cover);
+        covers.remove(index);
     }
     if selected.is_empty() {
         selected.push(headline_fallback(words, options));
     }
     selected.sort_unstable();
     selected
+}
+
+fn headline_split_cover(
+    words: &[HeadlineWord<'_>],
+    query: &TsQuery,
+    options: &HeadlineOptions,
+    start: usize,
+    end: usize,
+) -> Vec<(usize, usize)> {
+    let mut fragments = Vec::new();
+    let mut start = start;
+    while start <= end {
+        let Some(begin) = (start..=end).find(|&index| headline_interesting(&words[index], query))
+        else {
+            break;
+        };
+        let mut count = 0;
+        let mut finish = begin;
+        let mut index = begin;
+        while index <= end && count < options.max_words {
+            if !words[index].word.is_empty() {
+                count += 1;
+            }
+            finish = index;
+            index += 1;
+        }
+        if index <= end {
+            while finish > begin && !headline_interesting(&words[finish], query) {
+                finish -= 1;
+            }
+        }
+        fragments.push((begin, finish));
+        start = finish + 1;
+    }
+    fragments
+}
+
+fn headline_expand_fragment(
+    words: &[HeadlineWord<'_>],
+    query: &TsQuery,
+    options: &HeadlineOptions,
+    (start, end): (usize, usize),
+    selected: &[(usize, usize)],
+) -> (usize, usize) {
+    let mut begin = start;
+    let mut finish = end;
+    let mut count = headline_word_count(words, begin, finish);
+    let max_stretch = (options.max_words.saturating_sub(count)) / 2;
+    let mut stretch = 0;
+    while begin > 0 && stretch < max_stretch && !headline_overlaps(begin - 1, selected) {
+        begin -= 1;
+        if !words[begin].word.is_empty() {
+            count += 1;
+            stretch += 1;
+        }
+    }
+    while begin < start && headline_bad_endpoint(&words[begin], query, options) {
+        if !words[begin].word.is_empty() {
+            count -= 1;
+        }
+        begin += 1;
+    }
+    while finish + 1 < words.len()
+        && count < options.max_words
+        && !headline_overlaps(finish + 1, selected)
+    {
+        finish += 1;
+        if !words[finish].word.is_empty() {
+            count += 1;
+        }
+    }
+    while finish > end && headline_bad_endpoint(&words[finish], query, options) {
+        finish -= 1;
+    }
+    (begin, finish)
+}
+
+fn headline_word_count(words: &[HeadlineWord<'_>], start: usize, end: usize) -> usize {
+    words[start..=end]
+        .iter()
+        .filter(|word| !word.word.is_empty())
+        .count()
+}
+
+fn headline_overlaps(index: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges
+        .iter()
+        .any(|&(start, end)| (start..=end).contains(&index))
 }
 
 fn headline_covers(words: &[HeadlineWord<'_>], query: &TsQuery) -> Vec<(usize, usize)> {
@@ -2531,6 +2630,24 @@ mod tests {
         assert_eq!(
             headline_fallback(&words, &HeadlineOptions::default()),
             (0, 1)
+        );
+    }
+
+    #[test]
+    fn headline_fragments_center_context_on_the_cover() {
+        let words = headline_words(
+            "simple",
+            "alpha bravo charlie delta echo foxtrot golf",
+            None,
+        )
+        .unwrap();
+        let query = "delta".parse::<TsQuery>().unwrap();
+        let options = headline_options(Some("MaxFragments=1, MaxWords=5, MinWords=1")).unwrap();
+        let fragments = headline_fragments(&words, &query, &options);
+        assert_eq!(fragments, vec![(1, 5)]);
+        assert_eq!(
+            render_headline_fragment(&words, fragments[0], &query, &options, false),
+            "bravo charlie <b>delta</b> echo foxtrot"
         );
     }
 
