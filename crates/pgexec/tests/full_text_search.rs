@@ -257,11 +257,45 @@ async fn functions_and_operators_match_postgres_shapes() {
         Some("'rat':2")
     );
     assert_eq!(
+        scalar(
+            &client,
+            "SELECT ts_delete('base hidden rebel spaceship strike'::tsvector, ARRAY['spaceship', 'leya', 'rebel', 'rebel'])",
+        )
+        .await
+        .as_deref(),
+        Some("'base' 'hidden' 'strike'")
+    );
+    assert_eq!(
+        scalar(
+            &client,
+            "SELECT ts_delete('base hidden rebel spaceship strike'::tsvector, ARRAY['spaceship', 'leya', 'rebel', '', NULL])",
+        )
+        .await
+        .as_deref(),
+        Some("'base' 'hidden' 'strike'")
+    );
+    assert_eq!(
+        scalar(
+            &client,
+            "SELECT setweight('a:1 b:2'::tsvector, 'A', ARRAY['a', NULL])",
+        )
+        .await
+        .as_deref(),
+        Some("'a':1A 'b':2")
+    );
+    assert_eq!(
         scalar(&client, "SELECT ts_filter('cat:1A rat:2B', '{A}')")
             .await
             .as_deref(),
         Some("'cat':1A")
     );
+    let error = client
+        .simple_query("SELECT ts_filter('cat:1A rat:2B'::tsvector, ARRAY['A', NULL])")
+        .await
+        .expect_err("NULL weight errors");
+    let error = error.as_db_error().expect("db error");
+    assert_eq!(error.code().code(), "22023");
+    assert_eq!(error.message(), "weight array may not contain nulls");
     assert_eq!(
         scalar(
             &client,

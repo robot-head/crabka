@@ -1497,6 +1497,11 @@ fn filter_weights(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
             |got| Err(type_error("tsvector", got)),
         );
     };
+    if weights.elems.iter().any(Datum::is_null) {
+        return Err(ExecError::InvalidParameterValueMessage(
+            "weight array may not contain nulls".into(),
+        ));
+    }
     let weights = text_array(weights)?
         .iter()
         .map(|weight| one_weight(weight))
@@ -1762,9 +1767,10 @@ fn text_array(array: &crabka_pgtypes::ArrayValue) -> Result<Vec<String>, ExecErr
     array
         .elems
         .iter()
-        .map(|value| match value {
-            Datum::Text(text) => Ok(text.clone()),
-            got => Err(type_error("text", got)),
+        .filter_map(|value| match value {
+            Datum::Text(text) => Some(Ok(text.clone())),
+            Datum::Null => None,
+            got => Some(Err(type_error("text", got))),
         })
         .collect()
 }
