@@ -1159,6 +1159,9 @@ impl FromStr for TsVector {
         let mut entries = Vec::new();
         while cursor.skip_space() {
             let text = cursor.lexeme().ok_or_else(|| invalid("tsvector", input))?;
+            if text.is_empty() {
+                return Err(invalid("tsvector", input));
+            }
             let mut positions = Vec::new();
             if cursor.eat(':') {
                 loop {
@@ -1508,6 +1511,11 @@ mod tests {
             vector.to_string().parse::<TsVector>().expect("round trip"),
             vector
         );
+    }
+
+    #[test]
+    fn vector_rejects_an_empty_lexeme() {
+        assert!("''".parse::<TsVector>().is_err());
     }
 
     #[test]
