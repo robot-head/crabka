@@ -314,6 +314,15 @@ async fn functions_and_operators_match_postgres_shapes() {
     assert_eq!(
         scalar(
             &client,
+            "SELECT ts_headline('english', 'The fat rats ran', 'rat', 'MaxWords=100')",
+        )
+        .await
+        .as_deref(),
+        Some("The fat <b>rats</b> ran")
+    );
+    assert_eq!(
+        scalar(
+            &client,
             "SELECT jsonb_to_tsvector('english', '{\"a\":\"The Fat Rats\",\"b\":123}'::jsonb, '[\"string\",\"numeric\"]'::jsonb)",
         )
         .await

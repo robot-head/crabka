@@ -682,6 +682,12 @@ fn text_search_param_types(
         (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 4) => {
             Some(vec![None, vector, query, Some(ColumnType::Int4)])
         }
+        (TextSearchFunc::TsHeadline, 2) => Some(vec![text, query]),
+        (TextSearchFunc::TsHeadline, 3) if matches!(values.get(1), Some(Datum::TsQuery(_))) => {
+            Some(vec![text, query, text])
+        }
+        (TextSearchFunc::TsHeadline, 3) => Some(vec![text, text, query]),
+        (TextSearchFunc::TsHeadline, 4) => Some(vec![text, text, query, text]),
         _ => None,
     }
 }
@@ -2077,6 +2083,25 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "'/a':6 'bar':3 'example.com':5 'example.com/a':4 'foo':2 'foo-bar':1"
+        );
+    }
+
+    #[test]
+    fn headline_coerces_query_and_option_literals() {
+        let values = vec![
+            Datum::Text("english".into()),
+            Datum::Text("one two".into()),
+            Datum::Text("one".into()),
+            Datum::Text("MaxWords=2".into()),
+        ];
+        assert_eq!(
+            text_search_param_types(TextSearchFunc::TsHeadline, &values),
+            Some(vec![
+                Some(ColumnType::Text),
+                Some(ColumnType::Text),
+                Some(ColumnType::TsQuery),
+                Some(ColumnType::Text),
+            ])
         );
     }
 
