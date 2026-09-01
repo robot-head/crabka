@@ -323,6 +323,53 @@ async fn functions_and_operators_match_postgres_shapes() {
     assert_eq!(
         scalar(
             &client,
+            "SELECT ts_headline('simple', '1 2 3 1 3', '1 <-> 3', 'MaxWords=2, MinWords=1')",
+        )
+        .await
+        .as_deref(),
+        Some("<b>1</b> <b>3</b>")
+    );
+    assert_eq!(
+        scalar(
+            &client,
+            "SELECT ts_headline('simple', '1 2 3 1 3', '1 & 3', 'MaxWords=4, MinWords=1')",
+        )
+        .await
+        .as_deref(),
+        Some("<b>1</b> 2 <b>3</b>")
+    );
+    assert_eq!(
+        scalar(
+            &client,
+            "SELECT ts_headline('simple', 'one two.', 'one', 'StartSel=<i>,StopSel=</i>')",
+        )
+        .await
+        .as_deref(),
+        Some("<i>one</i> two")
+    );
+    assert_eq!(
+        scalar(
+            &client,
+            "SELECT ts_headline('english', 'foo bar', to_tsquery('english', ''))",
+        )
+        .await
+        .as_deref(),
+        Some("foo bar")
+    );
+    let error = client
+        .simple_query("SELECT ts_headline('simple', 'one two', 'one', 'MinWords=2,MaxWords=2')")
+        .await
+        .expect_err("headline options validate");
+    assert_eq!(
+        error
+            .as_db_error()
+            .expect("headline option error")
+            .message(),
+        "MinWords must be less than MaxWords"
+    );
+    assert_eq!(
+        scalar(
+            &client,
             "SELECT jsonb_to_tsvector('english', '{\"a\":\"The Fat Rats\",\"b\":123}'::jsonb, '[\"string\",\"numeric\"]'::jsonb)",
         )
         .await

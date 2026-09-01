@@ -1578,42 +1578,377 @@ fn headline(fc: &FuncCall, values: &[Datum], catalog: Catalog<'_>) -> Result<Dat
         [got, ..] => return Err(type_error("text", got)),
         _ => return Err(undefined_function(&fc.name)),
     };
-    validate_headline_options(options)?;
-    let wanted = query.terms();
+    let options = headline_options(options)?;
+    let words = headline_words(&config, source, catalog)?;
+    let fragments = headline_fragments(&words, query, &options);
     let mut out = String::with_capacity(source.len() + 16);
-    for piece in source.split_inclusive(char::is_whitespace) {
-        let word = piece.trim_matches(|character: char| !character.is_alphanumeric());
-        let normalized = normalized_terms(&config, word, catalog)?;
-        if normalized
-            .first()
-            .is_some_and(|(term, _)| wanted.contains(&term.as_str()))
-        {
-            let start = piece.find(word).unwrap_or(0);
-            let end = start + word.len();
-            out.push_str(&piece[..start]);
-            out.push_str("<b>");
-            out.push_str(word);
-            out.push_str("</b>");
-            out.push_str(&piece[end..]);
-        } else {
-            out.push_str(piece);
+    for (index, fragment) in fragments.iter().enumerate() {
+        if index > 0 {
+            out.push_str(&options.fragment_delimiter);
         }
+        out.push_str(&render_headline_fragment(
+            &words,
+            *fragment,
+            query,
+            &options,
+            options.highlight_all,
+        ));
     }
     Ok(Datum::Text(out))
 }
 
-fn validate_headline_options(options: Option<&str>) -> Result<(), ExecError> {
-    for option in options.unwrap_or_default().split(',') {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeadlineOptions {
+    min_words: usize,
+    max_words: usize,
+    short_word: usize,
+    max_fragments: usize,
+    highlight_all: bool,
+    start_sel: String,
+    stop_sel: String,
+    fragment_delimiter: String,
+}
+
+impl Default for HeadlineOptions {
+    fn default() -> Self {
+        Self {
+            min_words: 15,
+            max_words: 35,
+            short_word: 3,
+            max_fragments: 0,
+            highlight_all: false,
+            start_sel: "<b>".into(),
+            stop_sel: "</b>".into(),
+            fragment_delimiter: " ... ".into(),
+        }
+    }
+}
+
+fn headline_options(input: Option<&str>) -> Result<HeadlineOptions, ExecError> {
+    let mut options = HeadlineOptions::default();
+    for option in input.unwrap_or_default().split(',') {
         let Some((name, value)) = option.trim().split_once('=') else {
             continue;
         };
-        if matches!(name, "StartSel" | "StopSel" | "FragmentDelimiter") && value.len() > 32767 {
+        let name = name.trim();
+        let value = value.trim();
+        match name.to_ascii_lowercase().as_str() {
+            "maxwords" => options.max_words = headline_option_number(name, value)?,
+            "minwords" => options.min_words = headline_option_number(name, value)?,
+            "shortword" => options.short_word = headline_option_number(name, value)?,
+            "maxfragments" => options.max_fragments = headline_option_number(name, value)?,
+            "startsel" => options.start_sel = value.into(),
+            "stopsel" => options.stop_sel = value.into(),
+            "fragmentdelimiter" => options.fragment_delimiter = value.into(),
+            "highlightall" => {
+                options.highlight_all = matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "on" | "true" | "t" | "y" | "yes"
+                );
+            }
+            _ => {
+                return Err(ExecError::InvalidParameterValueMessage(format!(
+                    "unrecognized headline parameter: \"{name}\""
+                )));
+            }
+        }
+    }
+    if !options.highlight_all {
+        if options.min_words >= options.max_words {
+            return Err(ExecError::InvalidParameterValueMessage(
+                "MinWords must be less than MaxWords".into(),
+            ));
+        }
+        if options.min_words == 0 {
+            return Err(ExecError::InvalidParameterValueMessage(
+                "MinWords must be positive".into(),
+            ));
+        }
+    }
+    for (name, value) in [
+        ("StartSel", &options.start_sel),
+        ("StopSel", &options.stop_sel),
+        ("FragmentDelimiter", &options.fragment_delimiter),
+    ] {
+        if value.len() > 32767 {
             return Err(ExecError::InvalidParameterValueMessage(format!(
                 "value for \"{name}\" is too long"
             )));
         }
     }
-    Ok(())
+    Ok(options)
+}
+
+fn headline_option_number(name: &str, value: &str) -> Result<usize, ExecError> {
+    let value = value.parse::<i32>().map_err(|_| {
+        ExecError::InvalidParameterValueMessage(format!(
+            "invalid value for \"{name}\": \"{value}\""
+        ))
+    })?;
+    usize::try_from(value).map_err(|_| {
+        let message = match name.to_ascii_lowercase().as_str() {
+            "shortword" => "ShortWord must be >= 0",
+            "maxfragments" => "MaxFragments must be >= 0",
+            _ => "MinWords must be positive",
+        };
+        ExecError::InvalidParameterValueMessage(message.into())
+    })
+}
+
+struct HeadlineWord<'a> {
+    text: &'a str,
+    word: &'a str,
+    terms: Vec<String>,
+    position: u16,
+}
+
+fn headline_words<'a>(
+    config: &str,
+    source: &'a str,
+    catalog: Catalog<'_>,
+) -> Result<Vec<HeadlineWord<'a>>, ExecError> {
+    source
+        .split_inclusive(char::is_whitespace)
+        .enumerate()
+        .map(|(index, text)| {
+            let word = text.trim_matches(|character: char| !character.is_alphanumeric());
+            let terms = normalized_terms(config, word, catalog)?
+                .into_iter()
+                .map(|(term, _)| term)
+                .collect();
+            Ok(HeadlineWord {
+                text,
+                word,
+                terms,
+                position: u16::try_from(index + 1).unwrap_or(MAX_POSITION),
+            })
+        })
+        .collect()
+}
+
+fn headline_fragments(
+    words: &[HeadlineWord<'_>],
+    query: &TsQuery,
+    options: &HeadlineOptions,
+) -> Vec<(usize, usize)> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+    if options.highlight_all {
+        return vec![(0, words.len() - 1)];
+    }
+    let mut covers = headline_covers(words, query)
+        .into_iter()
+        .map(|(start, end)| headline_fragment_bounds(words, query, options, start, end))
+        .collect::<Vec<_>>();
+    if options.max_fragments == 0 {
+        let selected = covers
+            .drain(..)
+            .max_by_key(|&(start, end)| {
+                let interesting = words[start..=end]
+                    .iter()
+                    .filter(|word| headline_interesting(word, query))
+                    .count();
+                (interesting, usize::MAX - start)
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        return if selected.is_empty() {
+            vec![headline_fallback(words, options)]
+        } else {
+            selected
+        };
+    }
+    covers.sort_unstable_by_key(|&(start, end)| {
+        let interesting = words[start..=end]
+            .iter()
+            .filter(|word| headline_interesting(word, query))
+            .count();
+        (usize::MAX - interesting, end - start, start)
+    });
+    let mut selected = Vec::new();
+    for cover in covers {
+        if selected.len() == options.max_fragments {
+            break;
+        }
+        if selected
+            .iter()
+            .all(|&(start, end)| cover.1 < start || cover.0 > end)
+        {
+            selected.push(cover);
+        }
+    }
+    if selected.is_empty() {
+        selected.push(headline_fallback(words, options));
+    }
+    selected.sort_unstable();
+    selected
+}
+
+fn headline_covers(words: &[HeadlineWord<'_>], query: &TsQuery) -> Vec<(usize, usize)> {
+    let mut covers = Vec::new();
+    for start in 0..words.len() {
+        if !headline_interesting(&words[start], query) {
+            continue;
+        }
+        for end in start..words.len() {
+            if headline_interesting(&words[end], query)
+                && headline_vector(&words[start..=end]).matches(query)
+            {
+                let mut cover_start = start;
+                while cover_start < end
+                    && headline_vector(&words[cover_start + 1..=end]).matches(query)
+                {
+                    cover_start += 1;
+                }
+                covers.push((cover_start, end));
+                break;
+            }
+        }
+    }
+    covers.sort_unstable();
+    covers.dedup();
+    covers
+}
+
+fn headline_vector(words: &[HeadlineWord<'_>]) -> TsVector {
+    TsVector::new(words.iter().flat_map(|word| {
+        word.terms.iter().cloned().map(move |text| Lexeme {
+            text,
+            positions: vec![Position {
+                position: word.position,
+                weight: Weight::D,
+            }],
+        })
+    }))
+}
+
+fn headline_interesting(word: &HeadlineWord<'_>, query: &TsQuery) -> bool {
+    word.terms
+        .iter()
+        .any(|term| headline_query_term_matches(query, term))
+}
+
+fn headline_query_term_matches(query: &TsQuery, term: &str) -> bool {
+    match query {
+        TsQuery::Empty => false,
+        TsQuery::Term(query_term) => {
+            if query_term.prefix {
+                term.starts_with(&query_term.text)
+            } else {
+                term == query_term.text
+            }
+        }
+        TsQuery::Not(inner) => headline_query_term_matches(inner, term),
+        TsQuery::And(left, right) | TsQuery::Or(left, right) | TsQuery::Phrase(left, right, _) => {
+            headline_query_term_matches(left, term) || headline_query_term_matches(right, term)
+        }
+    }
+}
+
+fn headline_fragment_bounds(
+    words: &[HeadlineWord<'_>],
+    query: &TsQuery,
+    options: &HeadlineOptions,
+    start: usize,
+    end: usize,
+) -> (usize, usize) {
+    let mut begin = start;
+    let mut finish = start;
+    let mut count = 0;
+    let mut index = start;
+    while index <= end && count < options.max_words {
+        if !words[index].word.is_empty() {
+            count += 1;
+        }
+        finish = index;
+        index += 1;
+    }
+    if count >= options.min_words && !headline_bad_endpoint(&words[finish], query, options) {
+        return (begin, finish);
+    }
+    while index < words.len() && count < options.max_words {
+        if !words[index].word.is_empty() {
+            count += 1;
+        }
+        finish = index;
+        if count >= options.min_words && !headline_bad_endpoint(&words[index], query, options) {
+            break;
+        }
+        index += 1;
+    }
+    while count < options.min_words && begin > 0 {
+        begin -= 1;
+        if !words[begin].word.is_empty() {
+            count += 1;
+        }
+    }
+    while count > options.min_words && headline_bad_endpoint(&words[finish], query, options) {
+        if !words[finish].word.is_empty() {
+            count -= 1;
+        }
+        finish = finish.saturating_sub(1);
+    }
+    (begin, finish)
+}
+
+fn headline_fallback(words: &[HeadlineWord<'_>], options: &HeadlineOptions) -> (usize, usize) {
+    let mut count = 0;
+    for (end, word) in words.iter().enumerate() {
+        if !word.word.is_empty() {
+            count += 1;
+        }
+        if count >= options.min_words || end + 1 == words.len() {
+            return (0, end);
+        }
+    }
+    (0, 0)
+}
+
+fn headline_bad_endpoint(
+    word: &HeadlineWord<'_>,
+    query: &TsQuery,
+    options: &HeadlineOptions,
+) -> bool {
+    !headline_interesting(word, query)
+        && (word.word.is_empty() || word.word.chars().count() <= options.short_word)
+}
+
+fn render_headline_fragment(
+    words: &[HeadlineWord<'_>],
+    (start, end): (usize, usize),
+    query: &TsQuery,
+    options: &HeadlineOptions,
+    preserve_whitespace: bool,
+) -> String {
+    let mut out = String::new();
+    for (index, word) in words[start..=end].iter().enumerate() {
+        let terminal = index == end - start && !preserve_whitespace;
+        let text_end = word
+            .text
+            .find(word.word)
+            .map_or(0, |start| start + word.word.len());
+        let text = if terminal {
+            &word.text[..text_end]
+        } else {
+            word.text
+        };
+        if headline_interesting(word, query) {
+            let text_start = text.find(word.word).unwrap_or(0);
+            out.push_str(&text[..text_start]);
+            out.push_str(&options.start_sel);
+            out.push_str(word.word);
+            out.push_str(&options.stop_sel);
+            out.push_str(&text[text_start + word.word.len()..]);
+        } else {
+            out.push_str(text);
+        }
+    }
+    if preserve_whitespace {
+        out
+    } else {
+        out.trim().into()
+    }
 }
 
 /// `ts_lexize(dict, token)` — the lexemes one dictionary makes of one token.
@@ -2135,16 +2470,68 @@ mod tests {
     }
 
     #[test]
-    fn headline_rejects_oversized_markup_options() {
+    fn headline_options_follow_postgres_validation() {
+        assert_eq!(
+            headline_options(Some(
+                "MaxWords=4, MinWords=1, ShortWord=2, MaxFragments=3, StartSel=<i>, StopSel=</i>, FragmentDelimiter=***, HighlightAll=on"
+            )),
+            Ok(HeadlineOptions {
+                min_words: 1,
+                max_words: 4,
+                short_word: 2,
+                max_fragments: 3,
+                highlight_all: true,
+                start_sel: "<i>".into(),
+                stop_sel: "</i>".into(),
+                fragment_delimiter: "***".into(),
+            })
+        );
+        for (options, message) in [
+            ("wat=1", "unrecognized headline parameter: \"wat\""),
+            (
+                "MinWords=2, MaxWords=2",
+                "MinWords must be less than MaxWords",
+            ),
+            ("MinWords=0, MaxWords=1", "MinWords must be positive"),
+            ("ShortWord=-1", "ShortWord must be >= 0"),
+            ("MaxFragments=-1", "MaxFragments must be >= 0"),
+        ] {
+            assert_eq!(
+                headline_options(Some(options)),
+                Err(ExecError::InvalidParameterValueMessage(message.into()))
+            );
+        }
         for name in ["StartSel", "StopSel", "FragmentDelimiter"] {
             let options = format!("{name}={}", "x".repeat(32768));
             assert_eq!(
-                validate_headline_options(Some(&options)),
+                headline_options(Some(&options)),
                 Err(ExecError::InvalidParameterValueMessage(format!(
                     "value for \"{name}\" is too long"
                 )))
             );
         }
+    }
+
+    #[test]
+    fn headline_selects_the_best_matching_cover() {
+        let words = headline_words("simple", "1 2 3 1 3", None).unwrap();
+        let query = "1 <-> 3".parse::<TsQuery>().unwrap();
+        let options = headline_options(Some("MaxWords=2, MinWords=1")).unwrap();
+        let fragments = headline_fragments(&words, &query, &options);
+        assert_eq!(fragments, vec![(3, 4)]);
+        assert_eq!(
+            render_headline_fragment(&words, fragments[0], &query, &options, false),
+            "<b>1</b> <b>3</b>"
+        );
+    }
+
+    #[test]
+    fn headline_fallback_keeps_a_short_document_in_bounds() {
+        let words = headline_words("simple", "foo bar", None).unwrap();
+        assert_eq!(
+            headline_fallback(&words, &HeadlineOptions::default()),
+            (0, 1)
+        );
     }
 
     #[test]
