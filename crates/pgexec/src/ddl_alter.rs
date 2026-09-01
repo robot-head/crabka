@@ -1160,7 +1160,6 @@ pub(crate) fn execute_ddl(
                 }
             };
             let columns = index_key_columns(keys, predicate.as_deref())?;
-            let key_options = index_key_options(keys);
             if *if_not_exists && crabka_pgcatalog::get_index(kv, &name).is_ok() {
                 return Ok((command("CREATE INDEX"), Vec::new()));
             }
@@ -1187,6 +1186,7 @@ pub(crate) fn execute_ddl(
             }
             reject_index_over_virtual_generated(&table_meta, columns, None)?;
             validate_index_opclasses(kv, resolution, &table_meta, keys, index_method)?;
+            let key_options = index_key_options(keys, index_method)?;
             validate_index_expressions(&table_meta, keys, *unique, placement, index_method)?;
             validate_index_predicate(&table_meta, predicate.as_deref())?;
             validate_index_method(&table_meta, columns, *unique, placement, index_method)?;

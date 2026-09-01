@@ -41,16 +41,71 @@ pub(crate) fn index_key_columns(
 #[must_use]
 pub(crate) fn index_key_options(
     keys: &[crabka_pgparser::ast::IndexKey],
-) -> Vec<crabka_pgcatalog::IndexKeyOptions> {
+    method: crabka_pgcatalog::IndexMethod,
+) -> Result<Vec<crabka_pgcatalog::IndexKeyOptions>, ExecError> {
     keys.iter()
-        .map(|key| crabka_pgcatalog::IndexKeyOptions {
-            descending: key.descending,
-            nulls_first: key.nulls_first.unwrap_or(key.descending),
-            opclass: key.opclass.clone(),
-            opclass_options: key.opclass_options.clone(),
-            collation: key.collation.clone(),
+        .map(|key| {
+            let opclass_options = match (&key.opclass, &key.opclass_options) {
+                (Some(opclass), Some(options))
+                    if method == crabka_pgcatalog::IndexMethod::Gist
+                        && opclass
+                            .rsplit('.')
+                            .next()
+                            .is_some_and(|name| name.eq_ignore_ascii_case("tsvector_ops")) =>
+                {
+                    Some(tsvector_opclass_options(options)?)
+                }
+                (_, options) => options.clone(),
+            };
+            Ok(crabka_pgcatalog::IndexKeyOptions {
+                descending: key.descending,
+                nulls_first: key.nulls_first.unwrap_or(key.descending),
+                opclass: key.opclass.clone(),
+                opclass_options,
+                collation: key.collation.clone(),
+            })
         })
         .collect()
+}
+
+fn tsvector_opclass_options(options: &str) -> Result<String, ExecError> {
+    let options = options
+        .strip_prefix('(')
+        .and_then(|options| options.strip_suffix(')'))
+        .unwrap_or(options);
+    let mut siglen = None;
+    for option in options.split(',') {
+        let (name, value) = option
+            .split_once('=')
+            .map_or((option.trim(), ""), |(name, value)| {
+                (name.trim(), value.trim())
+            });
+        if !name.eq_ignore_ascii_case("siglen") {
+            return Err(ExecError::InvalidParameterValueMessage(format!(
+                "unrecognized parameter \"{name}\""
+            )));
+        }
+        if siglen.is_some() {
+            return Err(ExecError::InvalidParameterValueMessage(
+                "parameter \"siglen\" specified more than once".into(),
+            ));
+        }
+        let value = value.trim_matches('\'');
+        let parsed = value.parse::<u16>().ok();
+        if !parsed.is_some_and(|value| (1..=2024).contains(&value)) {
+            return Err(ExecError::InvalidParameterValueWithDetail {
+                message: format!("value {value} out of bounds for option \"siglen\""),
+                detail: "Valid values are between \"1\" and \"2024\".".into(),
+            });
+        }
+        siglen = parsed;
+    }
+    let Some(siglen) = siglen else {
+        return Err(ExecError::InvalidParameterValueMessage(
+            "unrecognized parameter \"\"".into(),
+        ));
+    };
+    Ok(format!("(siglen='{siglen}')"))
 }
 
 pub(crate) fn validate_index_predicate(

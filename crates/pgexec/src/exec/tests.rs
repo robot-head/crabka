@@ -4590,6 +4590,38 @@ async fn create_index_resolves_and_validates_operator_classes() {
         crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("i8"))
             .expect("opclass option metadata");
     assert!(option_index.key_options[0].opclass_options.as_deref() == Some("(siglen='1000')"));
+    for (options, message) in [
+        ("foo=1", "unrecognized parameter \"foo\""),
+        ("siglen=0", "value 0 out of bounds for option \"siglen\""),
+        (
+            "siglen=100, siglen=200",
+            "parameter \"siglen\" specified more than once",
+        ),
+    ] {
+        let error = session
+            .simple_query(&format!(
+                "CREATE INDEX invalid_tsvector_options ON g USING gist \
+                 (i tsvector_ops ({options}))"
+            ))
+            .await
+            .expect_err(options);
+        assert!(error.message == message, "{options}");
+    }
+    run_s(
+        &mut session,
+        "CREATE INDEX canonical_tsvector_options ON g USING gist (i tsvector_ops (siglen=1))",
+    )
+    .await;
+    assert!(
+        text_rows_of(
+            &mut session,
+            "SELECT pg_get_indexdef('canonical_tsvector_options'::regclass)",
+        )
+        .await
+            == vec![text_row(&[
+                "CREATE INDEX canonical_tsvector_options ON public.g USING gist (i tsvector_ops (siglen='1'))"
+            ])]
+    );
     assert!(
         text_rows_of(&mut session, "SELECT pg_get_indexdef('i8'::regclass)").await
             == vec![text_row(&[
