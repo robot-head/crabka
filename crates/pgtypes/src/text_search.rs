@@ -677,19 +677,8 @@ fn query_matches(query: &TsQuery, vector: &TsVector) -> (bool, Vec<u16>) {
     match query {
         TsQuery::Empty => (false, Vec::new()),
         TsQuery::Term(term) => {
-            let positions = vector.positions(term);
-            let exists = if positions.is_empty() {
-                vector.0.iter().any(|entry| {
-                    (if term.prefix {
-                        entry.text.starts_with(&term.text)
-                    } else {
-                        entry.text == term.text
-                    }) && entry.positions.is_empty()
-                })
-            } else {
-                true
-            };
-            (exists, positions)
+            let result = phrase_term_matches(term, vector);
+            (result.matched, result.positions)
         }
         TsQuery::Not(inner) => (!query_matches(inner, vector).0, Vec::new()),
         TsQuery::And(left, right) => {
@@ -716,22 +705,259 @@ fn query_matches(query: &TsQuery, vector: &TsVector) -> (bool, Vec<u16>) {
             (left_match || right_match, positions)
         }
         TsQuery::Phrase(left, right, distance) => {
-            let (left_match, left_positions) = query_matches(left, vector);
-            let (right_match, right_positions) = query_matches(right, vector);
-            let positions = right_positions
-                .into_iter()
-                .filter(|right| {
-                    left_positions
-                        .iter()
-                        .any(|left| right.checked_sub(*left) == Some(*distance))
-                })
-                .collect::<Vec<_>>();
-            (
-                left_match && right_match && !positions.is_empty(),
-                positions,
-            )
+            let result = phrase_and(
+                phrase_matches(left, vector),
+                phrase_matches(right, vector),
+                Some(*distance),
+            );
+            (result.matched, result.positions)
         }
     }
+}
+
+#[derive(Default)]
+struct PhraseMatch {
+    matched: bool,
+    positions: Vec<u16>,
+    negated: bool,
+    width: u32,
+}
+
+fn phrase_term_matches(term: &QueryTerm, vector: &TsVector) -> PhraseMatch {
+    let positions = vector.positions(term);
+    let matched = !positions.is_empty()
+        || vector.0.iter().any(|entry| {
+            (if term.prefix {
+                entry.text.starts_with(&term.text)
+            } else {
+                entry.text == term.text
+            }) && entry.positions.is_empty()
+        });
+    PhraseMatch {
+        matched,
+        positions,
+        ..PhraseMatch::default()
+    }
+}
+
+fn phrase_matches(query: &TsQuery, vector: &TsVector) -> PhraseMatch {
+    match query {
+        TsQuery::Empty => PhraseMatch::default(),
+        TsQuery::Term(term) => phrase_term_matches(term, vector),
+        TsQuery::Not(inner) => {
+            let mut result = phrase_matches(inner, vector);
+            if !result.matched {
+                return PhraseMatch {
+                    matched: true,
+                    negated: true,
+                    ..PhraseMatch::default()
+                };
+            }
+            if result.positions.is_empty() {
+                return PhraseMatch::default();
+            }
+            result.negated = !result.negated;
+            result
+        }
+        TsQuery::And(left, right) => phrase_and(
+            phrase_matches(left, vector),
+            phrase_matches(right, vector),
+            None,
+        ),
+        TsQuery::Or(left, right) => {
+            phrase_or(phrase_matches(left, vector), phrase_matches(right, vector))
+        }
+        TsQuery::Phrase(left, right, distance) => phrase_and(
+            phrase_matches(left, vector),
+            phrase_matches(right, vector),
+            Some(*distance),
+        ),
+    }
+}
+
+fn phrase_and(left: PhraseMatch, right: PhraseMatch, distance: Option<u16>) -> PhraseMatch {
+    if !left.matched || !right.matched {
+        return PhraseMatch::default();
+    }
+
+    let (left_offset, right_offset, width) = if let Some(distance) = distance {
+        (
+            u32::from(distance) + right.width,
+            0,
+            u32::from(distance) + left.width + right.width,
+        )
+    } else {
+        let width = left.width.max(right.width);
+        (width - left.width, width - right.width, width)
+    };
+    let (positions, negated) = match (left.negated, right.negated) {
+        (true, true) => (
+            phrase_output(
+                &left.positions,
+                &right.positions,
+                left_offset,
+                right_offset,
+                true,
+                true,
+                true,
+            ),
+            true,
+        ),
+        (true, false) => (
+            phrase_output(
+                &left.positions,
+                &right.positions,
+                left_offset,
+                right_offset,
+                false,
+                true,
+                false,
+            ),
+            false,
+        ),
+        (false, true) => (
+            phrase_output(
+                &left.positions,
+                &right.positions,
+                left_offset,
+                right_offset,
+                true,
+                false,
+                false,
+            ),
+            false,
+        ),
+        (false, false) => (
+            phrase_output(
+                &left.positions,
+                &right.positions,
+                left_offset,
+                right_offset,
+                false,
+                false,
+                true,
+            ),
+            false,
+        ),
+    };
+    PhraseMatch {
+        matched: negated || !positions.is_empty(),
+        positions,
+        negated,
+        width,
+    }
+}
+
+fn phrase_or(mut left: PhraseMatch, mut right: PhraseMatch) -> PhraseMatch {
+    if !left.matched && !right.matched {
+        return PhraseMatch::default();
+    }
+    if !left.matched {
+        left.width = 0;
+    }
+    if !right.matched {
+        right.width = 0;
+    }
+
+    let width = left.width.max(right.width);
+    let left_offset = width - left.width;
+    let right_offset = width - right.width;
+    let (positions, negated) = match (left.negated, right.negated) {
+        (true, true) => (
+            phrase_output(
+                &left.positions,
+                &right.positions,
+                left_offset,
+                right_offset,
+                false,
+                false,
+                true,
+            ),
+            true,
+        ),
+        (true, false) => (
+            phrase_output(
+                &left.positions,
+                &right.positions,
+                left_offset,
+                right_offset,
+                true,
+                false,
+                false,
+            ),
+            true,
+        ),
+        (false, true) => (
+            phrase_output(
+                &left.positions,
+                &right.positions,
+                left_offset,
+                right_offset,
+                false,
+                true,
+                false,
+            ),
+            true,
+        ),
+        (false, false) => (
+            phrase_output(
+                &left.positions,
+                &right.positions,
+                left_offset,
+                right_offset,
+                true,
+                true,
+                true,
+            ),
+            false,
+        ),
+    };
+    PhraseMatch {
+        matched: negated || !positions.is_empty(),
+        positions,
+        negated,
+        width,
+    }
+}
+
+fn phrase_output(
+    left: &[u16],
+    right: &[u16],
+    left_offset: u32,
+    right_offset: u32,
+    emit_left_only: bool,
+    emit_right_only: bool,
+    emit_both: bool,
+) -> Vec<u16> {
+    let mut left_index = 0;
+    let mut right_index = 0;
+    let mut output = Vec::with_capacity(left.len() + right.len());
+    while left_index < left.len() || right_index < right.len() {
+        let left_position = left
+            .get(left_index)
+            .map_or(u32::MAX, |position| u32::from(*position) + left_offset);
+        let right_position = right
+            .get(right_index)
+            .map_or(u32::MAX, |position| u32::from(*position) + right_offset);
+        let position = if left_position < right_position {
+            left_index += 1;
+            emit_left_only.then_some(left_position)
+        } else if left_position == right_position {
+            left_index += 1;
+            right_index += 1;
+            emit_both.then_some(left_position)
+        } else {
+            right_index += 1;
+            emit_right_only.then_some(right_position)
+        };
+        if let Some(position) = position
+            && let Ok(position) = u16::try_from(position)
+            && position <= MAX_POSITION
+        {
+            output.push(position);
+        }
+    }
+    output
 }
 
 fn invalid(kind: &'static str, input: &str) -> TypeError {
@@ -1130,6 +1356,20 @@ mod tests {
         let vector: TsVector = "'a':1 'd':2 'c':10".parse().expect("vector");
         let query = "((a & b) | c) <-> d".parse().expect("query");
         assert!(!vector.matches(&query));
+    }
+
+    #[test]
+    fn phrase_matching_tracks_negated_positions() {
+        let missing_left: TsVector = "'yh':2".parse().expect("vector");
+        assert!(missing_left.matches(&"!pl <-> yh".parse().expect("query")));
+
+        let adjacent: TsVector = "'pl':1 'yh':2".parse().expect("vector");
+        assert!(!adjacent.matches(&"!pl <-> yh".parse().expect("query")));
+        assert!(adjacent.matches(&"!pl <-> !yh".parse().expect("query")));
+        assert!(adjacent.matches(&"!yh <-> pl".parse().expect("query")));
+
+        let distant_right: TsVector = "'qt':3".parse().expect("vector");
+        assert!(distant_right.matches(&"!qe <2> qt".parse().expect("query")));
     }
 
     #[test]
