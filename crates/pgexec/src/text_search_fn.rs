@@ -1545,25 +1545,40 @@ fn rank(fc: &FuncCall, values: &[Datum], cover_density: bool) -> Result<Datum, E
 }
 
 fn headline(fc: &FuncCall, values: &[Datum], catalog: Catalog<'_>) -> Result<Datum, ExecError> {
-    let (config, source, query) = match values {
-        [Datum::Text(source), Datum::TsQuery(query)]
-        | [Datum::Text(source), Datum::TsQuery(query), Datum::Text(_)] => {
-            (default_config()?, source.as_str(), query)
+    let (config, source, query, options) = match values {
+        [Datum::Text(source), Datum::TsQuery(query)] => {
+            (default_config()?, source.as_str(), query, None)
         }
+        [
+            Datum::Text(source),
+            Datum::TsQuery(query),
+            Datum::Text(options),
+        ] => (
+            default_config()?,
+            source.as_str(),
+            query,
+            Some(options.as_str()),
+        ),
         [
             Datum::Text(config),
             Datum::Text(source),
             Datum::TsQuery(query),
-        ]
-        | [
+        ] => (config.clone(), source.as_str(), query, None),
+        [
             Datum::Text(config),
             Datum::Text(source),
             Datum::TsQuery(query),
-            Datum::Text(_),
-        ] => (config.clone(), source.as_str(), query),
+            Datum::Text(options),
+        ] => (
+            config.clone(),
+            source.as_str(),
+            query,
+            Some(options.as_str()),
+        ),
         [got, ..] => return Err(type_error("text", got)),
         _ => return Err(undefined_function(&fc.name)),
     };
+    validate_headline_options(options)?;
     let wanted = query.terms();
     let mut out = String::with_capacity(source.len() + 16);
     for piece in source.split_inclusive(char::is_whitespace) {
@@ -1585,6 +1600,20 @@ fn headline(fc: &FuncCall, values: &[Datum], catalog: Catalog<'_>) -> Result<Dat
         }
     }
     Ok(Datum::Text(out))
+}
+
+fn validate_headline_options(options: Option<&str>) -> Result<(), ExecError> {
+    for option in options.unwrap_or_default().split(',') {
+        let Some((name, value)) = option.trim().split_once('=') else {
+            continue;
+        };
+        if matches!(name, "StartSel" | "StopSel" | "FragmentDelimiter") && value.len() > 32767 {
+            return Err(ExecError::InvalidParameterValueMessage(format!(
+                "value for \"{name}\" is too long"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `ts_lexize(dict, token)` — the lexemes one dictionary makes of one token.
@@ -2103,6 +2132,19 @@ mod tests {
                 Some(ColumnType::Text),
             ])
         );
+    }
+
+    #[test]
+    fn headline_rejects_oversized_markup_options() {
+        for name in ["StartSel", "StopSel", "FragmentDelimiter"] {
+            let options = format!("{name}={}", "x".repeat(32768));
+            assert_eq!(
+                validate_headline_options(Some(&options)),
+                Err(ExecError::InvalidParameterValueMessage(format!(
+                    "value for \"{name}\" is too long"
+                )))
+            );
+        }
     }
 
     #[test]
