@@ -177,24 +177,84 @@ impl TsVector {
 
     #[must_use]
     pub fn rank(&self, query: &TsQuery) -> f32 {
-        if !self.matches(query) {
-            return 0.0;
-        }
         let mut terms = Vec::new();
         collect_terms(query, &mut terms);
-        let score = terms
-            .iter()
-            .flat_map(|term| self.0.iter().filter(move |entry| entry.text == term.text))
-            .flat_map(|entry| &entry.positions)
-            .map(|position| match position.weight {
-                Weight::D => 0.1,
-                Weight::C => 0.2,
-                Weight::B => 0.4,
-                Weight::A => 1.0,
-            })
-            .sum::<f32>();
-        let document_len = u16::try_from(self.0.len()).unwrap_or(u16::MAX);
-        score / (1.0 + f32::from(document_len))
+        terms.sort_unstable_by(|left, right| left.text.cmp(&right.text));
+        terms.dedup_by(|left, right| left.text == right.text);
+        if terms.len() < 2 || !matches!(query, TsQuery::And(_, _) | TsQuery::Phrase(_, _, _)) {
+            return self.rank_or(&terms);
+        }
+        self.rank_and(&terms)
+    }
+
+    fn rank_or(&self, terms: &[&QueryTerm]) -> f32 {
+        let mut result = 0.0;
+        for term in terms {
+            for entry in self.0.iter().filter(|entry| rank_term_matches(entry, term)) {
+                let positions = entry.positions.as_slice();
+                let unpositioned = [Position {
+                    position: MAX_POSITION,
+                    weight: Weight::D,
+                }];
+                let positions = if positions.is_empty() {
+                    &unpositioned
+                } else {
+                    positions
+                };
+                let mut sum = 0.0;
+                let mut maximum = -1.0;
+                let mut maximum_index = 0;
+                for (index, position) in positions.iter().enumerate() {
+                    let weight = rank_weight(position.weight);
+                    let divisor = (index + 1) * (index + 1);
+                    sum += weight / divisor as f32;
+                    if weight > maximum {
+                        maximum = weight;
+                        maximum_index = index;
+                    }
+                }
+                let divisor = (maximum_index + 1) * (maximum_index + 1);
+                result += (maximum + sum - maximum / divisor as f32) / 1.644_934_066_85;
+            }
+        }
+        result / terms.len().max(1) as f32
+    }
+
+    fn rank_and(&self, terms: &[&QueryTerm]) -> f32 {
+        let mut previous: Vec<Option<RankPositions>> = (0..terms.len()).map(|_| None).collect();
+        let mut result = -1.0;
+        for (index, term) in terms.iter().enumerate() {
+            for entry in self.0.iter().filter(|entry| rank_term_matches(entry, term)) {
+                let positions = if entry.positions.is_empty() {
+                    RankPositions::unpositioned()
+                } else {
+                    RankPositions::positioned(entry.positions.clone())
+                };
+                for prior in previous[..index].iter().flatten() {
+                    for position in &positions.positions {
+                        for other in &prior.positions {
+                            let mut distance = position.position.abs_diff(other.position);
+                            if distance != 0 || positions.unpositioned || prior.unpositioned {
+                                if distance == 0 {
+                                    distance = MAX_POSITION;
+                                }
+                                let current = (rank_weight(position.weight)
+                                    * rank_weight(other.weight)
+                                    * rank_distance(distance))
+                                .sqrt();
+                                result = if result < 0.0 {
+                                    current
+                                } else {
+                                    1.0 - (1.0 - result) * (1.0 - current)
+                                };
+                            }
+                        }
+                    }
+                }
+                previous[index] = Some(positions);
+            }
+        }
+        if result < 0.0 { 1e-20 } else { result }
     }
 
     #[must_use]
@@ -286,6 +346,55 @@ impl TsVector {
             .filter(|position| term.weights.is_empty() || term.weights.contains(&position.weight))
             .map(|position| position.position)
             .collect()
+    }
+}
+
+struct RankPositions {
+    positions: Vec<Position>,
+    unpositioned: bool,
+}
+
+impl RankPositions {
+    fn positioned(positions: Vec<Position>) -> Self {
+        Self {
+            positions,
+            unpositioned: false,
+        }
+    }
+
+    fn unpositioned() -> Self {
+        Self {
+            positions: vec![Position {
+                position: MAX_POSITION,
+                weight: Weight::D,
+            }],
+            unpositioned: true,
+        }
+    }
+}
+
+fn rank_term_matches(entry: &Lexeme, term: &QueryTerm) -> bool {
+    if term.prefix {
+        entry.text.starts_with(&term.text)
+    } else {
+        entry.text == term.text
+    }
+}
+
+const fn rank_weight(weight: Weight) -> f32 {
+    match weight {
+        Weight::D => 0.1,
+        Weight::C => 0.2,
+        Weight::B => 0.4,
+        Weight::A => 1.0,
+    }
+}
+
+fn rank_distance(distance: u16) -> f32 {
+    if distance > 100 {
+        1e-30
+    } else {
+        1.0 / (1.005 + 0.05 * ((f32::from(distance) / 1.5) - 2.0).exp())
     }
 }
 
