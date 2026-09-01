@@ -17,6 +17,11 @@ pub enum TypeError {
         type_name: &'static str,
         value: String,
     },
+    #[error("syntax error in {type_name}: \"{value}\"")]
+    TextSearchSyntax {
+        type_name: &'static str,
+        value: String,
+    },
     #[error("{message}")]
     TypeMismatch { message: String },
     #[error("value too long for type {type_name}")]
@@ -155,6 +160,7 @@ impl TypeError {
             TypeError::Overflow => "22003",
             TypeError::DivisionByZero => "22012",
             TypeError::InvalidText { .. } => "22P02",
+            TypeError::TextSearchSyntax { .. } => "42601",
             TypeError::TypeMismatch { .. } => "42804",
             TypeError::StringDataRightTruncation { .. } => "22001",
             TypeError::InvalidEscape | TypeError::InvalidEscapeString => "22025",

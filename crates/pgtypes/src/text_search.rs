@@ -1145,7 +1145,7 @@ fn phrase_output(
 }
 
 fn invalid(kind: &'static str, input: &str) -> TypeError {
-    TypeError::InvalidText {
+    TypeError::TextSearchSyntax {
         type_name: kind,
         value: input.to_string(),
     }
@@ -1515,7 +1515,13 @@ mod tests {
 
     #[test]
     fn vector_rejects_an_empty_lexeme() {
-        assert!("''".parse::<TsVector>().is_err());
+        assert_eq!(
+            "''".parse::<TsVector>(),
+            Err(TypeError::TextSearchSyntax {
+                type_name: "tsvector",
+                value: "''".into(),
+            })
+        );
     }
 
     #[test]
