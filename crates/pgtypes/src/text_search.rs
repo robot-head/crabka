@@ -1178,15 +1178,24 @@ impl FromStr for TsVector {
                         .ok()
                         .filter(|position| (1..=MAX_POSITION).contains(position))
                         .ok_or_else(|| invalid("tsvector", input))?;
-                    let weight = cursor
-                        .peek()
-                        .and_then(Weight::parse)
-                        .inspect(|_| {
-                            cursor.bump();
-                        })
-                        .unwrap_or(Weight::D);
+                    let mut weight = Weight::D;
+                    let mut has_non_default_weight = false;
+                    while let Some(next) = cursor.peek().and_then(Weight::parse) {
+                        if has_non_default_weight {
+                            return Err(invalid("tsvector", input));
+                        }
+                        cursor.bump();
+                        has_non_default_weight = next != Weight::D;
+                        weight = next;
+                    }
                     positions.push(Position { position, weight });
                     if !cursor.eat(',') {
+                        if cursor
+                            .peek()
+                            .is_some_and(|character| !character.is_whitespace())
+                        {
+                            return Err(invalid("tsvector", input));
+                        }
                         break;
                     }
                 }
@@ -1205,7 +1214,12 @@ impl FromStr for TsQuery {
             return Ok(Self::Empty);
         }
         let mut parser = QueryParser::new(input);
-        let query = parser.or().ok_or_else(|| invalid("tsquery", input))?;
+        let query = parser.or().ok_or_else(|| {
+            parser
+                .error
+                .take()
+                .unwrap_or_else(|| invalid("tsquery", input))
+        })?;
         parser.cursor.skip_space();
         if parser.cursor.peek().is_some() {
             return Err(invalid("tsquery", input));
@@ -1323,6 +1337,7 @@ fn quoted(out: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
 struct QueryParser<'a> {
     input: &'a str,
     cursor: Cursor<'a>,
+    error: Option<TypeError>,
 }
 
 impl<'a> QueryParser<'a> {
@@ -1330,6 +1345,7 @@ impl<'a> QueryParser<'a> {
         Self {
             input,
             cursor: Cursor::new(input),
+            error: None,
         }
     }
 
@@ -1365,7 +1381,14 @@ impl<'a> QueryParser<'a> {
                 1
             } else {
                 let distance = self.cursor.number()?;
-                if !self.cursor.eat('>') || distance > u32::from(MAX_PHRASE_DISTANCE) {
+                if !self.cursor.eat('>') {
+                    return None;
+                }
+                if distance > u32::from(MAX_PHRASE_DISTANCE) {
+                    self.error = Some(TypeError::Coded {
+                        sqlstate: "22023",
+                        message: "distance in phrase operator must be an integer value between zero and 16384 inclusive".into(),
+                    });
                     return None;
                 }
                 u16::try_from(distance).ok()?
@@ -1552,6 +1575,24 @@ mod tests {
         let vector: TsVector = "w:12B w:13* w:12,5,6 a:1,3* a:3".parse().expect("vector");
 
         assert_eq!(vector.to_string(), "'a':1,3A 'w':5,6,12B,13A");
+    }
+
+    #[test]
+    fn vector_position_weights_consume_the_full_position_suffix() {
+        let vector: TsVector = "asd:1dc".parse().expect("vector");
+
+        assert_eq!(vector.to_string(), "'asd':1C");
+    }
+
+    #[test]
+    fn query_rejects_phrase_distances_above_the_postgres_limit() {
+        assert_eq!(
+            "a <100000> b".parse::<TsQuery>(),
+            Err(TypeError::Coded {
+                sqlstate: "22023",
+                message: "distance in phrase operator must be an integer value between zero and 16384 inclusive".into(),
+            })
+        );
     }
 
     #[test]

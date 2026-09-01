@@ -118,6 +118,12 @@ async fn functions_and_operators_match_postgres_shapes() {
         Some("'cat' <-> 'rat'")
     );
     assert_eq!(
+        scalar(&client, "SELECT 'a' <-> 'b & d'::tsquery")
+            .await
+            .as_deref(),
+        Some("'a' <-> ( 'b' & 'd' )")
+    );
+    assert_eq!(
         scalar(&client, "SELECT !! 'cat'::tsquery").await.as_deref(),
         Some("!'cat'")
     );

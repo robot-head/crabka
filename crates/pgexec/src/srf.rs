@@ -2704,6 +2704,13 @@ fn expand_row_values(
 // ---- unnest ----
 
 fn unnest_columns(name: &str, given: &[ArgType]) -> Result<Vec<ColumnBinding>, ExecError> {
+    if given == [ArgType::Known(ColumnType::TsVector)] {
+        return Ok(vec![
+            column("lexeme", ColumnType::Text),
+            column("positions", ColumnType::Array(ElemType::Int4)),
+            column("weights", ColumnType::Array(ElemType::Text)),
+        ]);
+    }
     if given.is_empty() {
         return Err(undefined_function(name, given));
     }
@@ -2729,6 +2736,49 @@ fn unnest_columns(name: &str, given: &[ArgType]) -> Result<Vec<ColumnBinding>, E
 /// as the longest array, shorter arrays padded with NULL. A NULL array behaves
 /// exactly as an empty one.
 fn unnest_rows(vals: &[Datum]) -> Vec<Vec<Datum>> {
+    if let [Datum::TsVector(vector)] = vals {
+        return vector
+            .0
+            .iter()
+            .map(|entry| {
+                let positions = (!entry.positions.is_empty()).then(|| {
+                    Datum::Array(ArrayValue::new(
+                        ElemType::Int4,
+                        entry
+                            .positions
+                            .iter()
+                            .map(|position| Datum::Int4(i32::from(position.position)))
+                            .collect(),
+                    ))
+                });
+                let weights = (!entry.positions.is_empty()).then(|| {
+                    Datum::Array(ArrayValue::new(
+                        ElemType::Text,
+                        entry
+                            .positions
+                            .iter()
+                            .map(|position| {
+                                Datum::Text(
+                                    match position.weight {
+                                        Weight::A => "A",
+                                        Weight::B => "B",
+                                        Weight::C => "C",
+                                        Weight::D => "D",
+                                    }
+                                    .into(),
+                                )
+                            })
+                            .collect(),
+                    ))
+                });
+                vec![
+                    Datum::Text(entry.text.clone()),
+                    positions.unwrap_or(Datum::Null),
+                    weights.unwrap_or(Datum::Null),
+                ]
+            })
+            .collect();
+    }
     if let [Datum::Multirange(multirange)] = vals {
         return multirange
             .ranges
@@ -3438,6 +3488,55 @@ mod tests {
 
     fn ints(values: &[i32]) -> Vec<Datum> {
         values.iter().copied().map(Datum::Int4).collect()
+    }
+
+    #[test]
+    fn unnest_tsvector_expands_lexemes_positions_and_weights() {
+        let vector = constant(
+            Datum::TsVector(
+                "base:7 hidden spaceship:2,33A,34B,35C,36D"
+                    .parse()
+                    .expect("valid vector"),
+            ),
+            ColumnType::TsVector,
+        );
+        assert!(
+            call("unnest", &[vector]).expect("tsvector rows")
+                == vec![
+                    vec![
+                        Datum::Text("base".into()),
+                        Datum::Array(ArrayValue::new(ElemType::Int4, vec![Datum::Int4(7)])),
+                        Datum::Array(ArrayValue::new(
+                            ElemType::Text,
+                            vec![Datum::Text("D".into())]
+                        )),
+                    ],
+                    vec![Datum::Text("hidden".into()), Datum::Null, Datum::Null],
+                    vec![
+                        Datum::Text("spaceship".into()),
+                        Datum::Array(ArrayValue::new(
+                            ElemType::Int4,
+                            vec![
+                                Datum::Int4(2),
+                                Datum::Int4(33),
+                                Datum::Int4(34),
+                                Datum::Int4(35),
+                                Datum::Int4(36),
+                            ],
+                        )),
+                        Datum::Array(ArrayValue::new(
+                            ElemType::Text,
+                            vec![
+                                Datum::Text("D".into()),
+                                Datum::Text("A".into()),
+                                Datum::Text("B".into()),
+                                Datum::Text("C".into()),
+                                Datum::Text("D".into()),
+                            ],
+                        )),
+                    ],
+                ]
+        );
     }
 
     fn texts(values: &[&str]) -> Vec<Datum> {

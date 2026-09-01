@@ -2018,6 +2018,9 @@ fn coerce_untyped_literal_operands(
         {
             return other.column_type();
         }
+        if matches!(other, Datum::TsQuery(_)) && op == BinaryOp::Phrase {
+            return Some(ColumnType::TsQuery);
+        }
         // A `json` counterpart resolves a literal for the two PATH operators
         // only. PostgreSQL gives `json` six operators and no more; of those,
         // `->` and `->>` take `text` (which the literal already is) or
@@ -4841,6 +4844,13 @@ fn infer_binary_type(
         BinaryOp::Concat => Ok(resolve_concat(left, right, scope)?.1),
         BinaryOp::Phrase => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let (lt, rt) = if lt == ColumnType::TsQuery && is_unknown_literal(right) {
+                (lt, ColumnType::TsQuery)
+            } else if rt == ColumnType::TsQuery && is_unknown_literal(left) {
+                (ColumnType::TsQuery, rt)
+            } else {
+                (lt, rt)
+            };
             if lt == ColumnType::TsQuery && rt == ColumnType::TsQuery {
                 return Ok(ColumnType::TsQuery);
             }
