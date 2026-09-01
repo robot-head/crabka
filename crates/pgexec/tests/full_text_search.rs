@@ -239,6 +239,30 @@ async fn functions_and_operators_match_postgres_shapes() {
         Some("'base':7")
     );
     assert_eq!(
+        scalar(&client, "SELECT array_to_tsvector('{base,rebel}')")
+            .await
+            .as_deref(),
+        Some("'base' 'rebel'")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT setweight('cat:1 rat:2', 'A', '{cat}')",)
+            .await
+            .as_deref(),
+        Some("'cat':1A 'rat':2")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT ts_delete('cat:1 rat:2', 'cat')")
+            .await
+            .as_deref(),
+        Some("'rat':2")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT ts_filter('cat:1A rat:2B', '{A}')")
+            .await
+            .as_deref(),
+        Some("'cat':1A")
+    );
+    assert_eq!(
         scalar(
             &client,
             "SELECT ts_headline('english', 'The fat rats ran', plainto_tsquery('english', 'rat'))",

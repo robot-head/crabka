@@ -655,33 +655,33 @@ fn text_search_param_types(
 ) -> Option<Vec<Option<ColumnType>>> {
     let count = values.len();
     let query = Some(ColumnType::TsQuery);
+    let vector = Some(ColumnType::TsVector);
+    let text = Some(ColumnType::Text);
+    let text_array = Some(ColumnType::Array(ElemType::Text));
     match (function, count) {
         (TextSearchFunc::TsQueryPhrase, 2) => Some(vec![query, query]),
         (TextSearchFunc::TsQueryPhrase, 3) => Some(vec![query, query, Some(ColumnType::Int4)]),
         (TextSearchFunc::TsRewrite, 2) => Some(vec![query, Some(ColumnType::Text)]),
         (TextSearchFunc::TsRewrite, 3) => Some(vec![query, query, query]),
-        (TextSearchFunc::TsVectorToArray, 1) => Some(vec![Some(ColumnType::TsVector)]),
-        (TextSearchFunc::TsVectorIn, 1) => Some(vec![Some(ColumnType::Text)]),
-        (TextSearchFunc::TsVectorOut, 1) => Some(vec![Some(ColumnType::TsVector)]),
-        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 2) => {
-            Some(vec![Some(ColumnType::TsVector), query])
-        }
+        (TextSearchFunc::ArrayToTsVector, 1) => Some(vec![text_array]),
+        (TextSearchFunc::TsVectorToArray | TextSearchFunc::TsVectorOut, 1) => Some(vec![vector]),
+        (TextSearchFunc::TsVectorIn, 1) => Some(vec![text]),
+        (TextSearchFunc::SetWeight, 2) => Some(vec![vector, text]),
+        (TextSearchFunc::SetWeight, 3) => Some(vec![vector, text, text_array]),
+        (TextSearchFunc::TsDelete, 2) => Some(vec![vector, text]),
+        (TextSearchFunc::TsFilter, 2) => Some(vec![vector, text_array]),
+        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 2) => Some(vec![vector, query]),
         (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 3)
             if matches!(values.first(), Some(Datum::Array(_))) =>
         {
             Some(vec![None, Some(ColumnType::TsVector), query])
         }
-        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 3) => Some(vec![
-            Some(ColumnType::TsVector),
-            query,
-            Some(ColumnType::Int4),
-        ]),
-        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 4) => Some(vec![
-            None,
-            Some(ColumnType::TsVector),
-            query,
-            Some(ColumnType::Int4),
-        ]),
+        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 3) => {
+            Some(vec![vector, query, Some(ColumnType::Int4)])
+        }
+        (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 4) => {
+            Some(vec![None, vector, query, Some(ColumnType::Int4)])
+        }
         _ => None,
     }
 }
