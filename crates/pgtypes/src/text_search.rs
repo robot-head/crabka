@@ -1248,6 +1248,9 @@ fn display_query(query: &TsQuery, out: &mut fmt::Formatter<'_>, parent: u8) -> f
             quoted(out, &term.text)?;
             if !term.weights.is_empty() || term.prefix {
                 out.write_str(":")?;
+                if term.prefix {
+                    out.write_str("*")?;
+                }
                 for weight in [Weight::A, Weight::B, Weight::C, Weight::D] {
                     if term.weights.contains(&weight) {
                         out.write_str(match weight {
@@ -1257,9 +1260,6 @@ fn display_query(query: &TsQuery, out: &mut fmt::Formatter<'_>, parent: u8) -> f
                             Weight::D => "D",
                         })?;
                     }
-                }
-                if term.prefix {
-                    out.write_str("*")?;
                 }
             }
         }
@@ -1293,7 +1293,7 @@ fn binary_query(
 ) -> fmt::Result {
     display_query(left, out, precedence)?;
     write!(out, " {operator} ")?;
-    display_query(right, out, precedence + 1)
+    display_query(right, out, precedence)
 }
 
 fn quoted(out: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
@@ -1525,6 +1525,24 @@ mod tests {
         assert!(vector.matches(&"cat:A".parse().expect("weight")));
         assert!(vector.matches(&"cat:*B".parse().expect("prefix")));
         assert!(vector.matches(&"cat & !dog".parse().expect("not")));
+    }
+
+    #[test]
+    fn query_output_flattens_associative_operators_and_orders_prefix_first() {
+        assert_eq!(
+            "1&(2&(4&(5|6)))"
+                .parse::<TsQuery>()
+                .expect("query")
+                .to_string(),
+            "'1' & '2' & '4' & ( '5' | '6' )"
+        );
+        assert_eq!(
+            "a:* & nbb:*ac | doo:a* | goo"
+                .parse::<TsQuery>()
+                .expect("query")
+                .to_string(),
+            "'a':* & 'nbb':*AC | 'doo':*A | 'goo'"
+        );
     }
 
     #[test]
