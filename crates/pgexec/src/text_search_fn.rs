@@ -1019,34 +1019,31 @@ fn normalize_query_inner(
     match query {
         TsQuery::Empty => (None, gap),
         TsQuery::Term(mut term) => {
-            let phrase = {
-                let words = words(&term.text).collect::<Vec<_>>();
-                let Some((first, rest)) = words.split_first() else {
-                    return (None, gap);
-                };
-                (!rest.is_empty()).then(|| {
-                    let mut phrase = TsQuery::Term(QueryTerm {
-                        text: (*first).into(),
-                        weights: term.weights.clone(),
-                        prefix: term.prefix,
-                    });
-                    for word in rest {
-                        phrase = TsQuery::Phrase(
-                            Box::new(phrase),
-                            Box::new(TsQuery::Term(QueryTerm {
-                                text: (*word).into(),
-                                weights: term.weights.clone(),
-                                prefix: term.prefix,
-                            })),
-                            1,
-                        );
-                    }
-                    phrase
-                })
+            let words = words(&term.text).collect::<Vec<_>>();
+            let Some((first, rest)) = words.split_first() else {
+                return (None, gap);
             };
-            if let Some(phrase) = phrase {
+            let first = (*first).to_owned();
+            if !rest.is_empty() {
+                let mut phrase = TsQuery::Term(QueryTerm {
+                    text: first.clone(),
+                    weights: term.weights.clone(),
+                    prefix: term.prefix,
+                });
+                for word in rest {
+                    phrase = TsQuery::Phrase(
+                        Box::new(phrase),
+                        Box::new(TsQuery::Term(QueryTerm {
+                            text: (*word).into(),
+                            weights: term.weights.clone(),
+                            prefix: term.prefix,
+                        })),
+                        1,
+                    );
+                }
                 return normalize_query_inner(phrase, simple, stemmer);
             }
+            term.text = first;
             // The stop-word list is consulted on the folded word, before
             // stemming, exactly as `dsnowball_lexize` does: `above` is a stop
             // word, its stem `abov` is not on any list.
@@ -1934,6 +1931,16 @@ mod tests {
                 .unwrap()
                 .to_string()
                 == "'new' <-> 'york'"
+        );
+    }
+
+    #[test]
+    fn quoted_to_tsquery_terms_trim_before_stemming() {
+        assert2::assert!(
+            to_tsquery("english", "'           sKies ':BC", None)
+                .unwrap()
+                .to_string()
+                == "'sky':BC"
         );
     }
 
