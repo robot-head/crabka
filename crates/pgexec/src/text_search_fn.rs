@@ -29,6 +29,7 @@ enum TextSearchFunc {
     TsQueryPhrase,
     TsRewrite,
     ArrayToTsVector,
+    TsVectorToArray,
     SetWeight,
     TsDelete,
     TsFilter,
@@ -462,6 +463,7 @@ fn text_search_func(name: &str) -> Option<TextSearchFunc> {
         "tsquery_phrase" => TextSearchFunc::TsQueryPhrase,
         "ts_rewrite" => TextSearchFunc::TsRewrite,
         "array_to_tsvector" => TextSearchFunc::ArrayToTsVector,
+        "tsvector_to_array" => TextSearchFunc::TsVectorToArray,
         "setweight" => TextSearchFunc::SetWeight,
         "ts_delete" => TextSearchFunc::TsDelete,
         "ts_filter" => TextSearchFunc::TsFilter,
@@ -521,6 +523,10 @@ pub(crate) fn text_search_result_type(
         TextSearchFunc::ArrayToTsVector => {
             require_arity(fc, count == 1)?;
             ColumnType::TsVector
+        }
+        TextSearchFunc::TsVectorToArray => {
+            require_arity(fc, count == 1)?;
+            ColumnType::Array(ElemType::Text)
         }
         TextSearchFunc::SetWeight => {
             require_arity(fc, count == 2 || count == 3)?;
@@ -616,6 +622,7 @@ pub(crate) fn eval_text_search(
         TextSearchFunc::TsQueryPhrase => query_phrase(fc, &values),
         TextSearchFunc::TsRewrite => ts_rewrite(fc, &values),
         TextSearchFunc::ArrayToTsVector => array_to_vector(fc, &values),
+        TextSearchFunc::TsVectorToArray => vector_to_array(fc, &values),
         TextSearchFunc::SetWeight => set_weight(fc, &values),
         TextSearchFunc::TsDelete => delete_terms(fc, &values),
         TextSearchFunc::TsFilter => filter_weights(fc, &values),
@@ -639,6 +646,7 @@ fn text_search_param_types(
         (TextSearchFunc::TsQueryPhrase, 3) => Some(vec![query, query, Some(ColumnType::Int4)]),
         (TextSearchFunc::TsRewrite, 2) => Some(vec![query, Some(ColumnType::Text)]),
         (TextSearchFunc::TsRewrite, 3) => Some(vec![query, query, query]),
+        (TextSearchFunc::TsVectorToArray, 1) => Some(vec![Some(ColumnType::TsVector)]),
         (TextSearchFunc::TsRank | TextSearchFunc::TsRankCd, 2) => {
             Some(vec![Some(ColumnType::TsVector), query])
         }
@@ -1395,6 +1403,23 @@ fn array_to_vector(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> 
         }
     }
     Ok(Datum::TsVector(TsVector::new(entries)))
+}
+
+fn vector_to_array(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let [Datum::TsVector(vector)] = values else {
+        return values.first().map_or_else(
+            || Err(undefined_function(&fc.name)),
+            |got| Err(type_error("tsvector", got)),
+        );
+    };
+    Ok(Datum::Array(ArrayValue::new(
+        ElemType::Text,
+        vector
+            .0
+            .iter()
+            .map(|entry| Datum::Text(entry.text.clone()))
+            .collect(),
+    )))
 }
 
 fn set_weight(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {

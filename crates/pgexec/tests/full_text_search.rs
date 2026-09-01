@@ -223,6 +223,15 @@ async fn functions_and_operators_match_postgres_shapes() {
     assert_eq!(
         scalar(
             &client,
+            "SELECT tsvector_to_array('base:7 hidden:6 rebel:1 spaceship:2'::tsvector)",
+        )
+        .await
+        .as_deref(),
+        Some("{base,hidden,rebel,spaceship}")
+    );
+    assert_eq!(
+        scalar(
+            &client,
             "SELECT ts_headline('english', 'The fat rats ran', plainto_tsquery('english', 'rat'))",
         )
         .await
