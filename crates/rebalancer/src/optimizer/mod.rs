@@ -1,7 +1,7 @@
 //! Optimizer. It runs an ordered list of `Goal`s over a `ClusterState`,
 //! coalesces their movements, and emits a `Proposal`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crabka_units::{ByteRate, convert::ByteRateExt as _};
 use uuid::Uuid;
@@ -23,6 +23,35 @@ pub enum OptimizeError {
         extra: usize,
         cap: usize,
     },
+    #[error("broker list must not be empty for this proposal mode")]
+    EmptyBrokerList,
+    #[error("broker list contains duplicate id {0}")]
+    DuplicateBroker(i32),
+    #[error("broker list contains unknown id {0}")]
+    UnknownBroker(i32),
+    #[error("cluster has partition reassignments in flight")]
+    ReassignmentsInFlight,
+    #[error("partition {topic}-{partition} is offline")]
+    OfflinePartition { topic: String, partition: i32 },
+    #[error("partition {topic}-{partition} is under-replicated")]
+    UnderReplicatedPartition { topic: String, partition: i32 },
+    #[error(
+        "{survivors} surviving brokers cannot preserve replication factor {replication_factor}"
+    )]
+    InsufficientSurvivors {
+        survivors: usize,
+        replication_factor: usize,
+    },
+}
+
+impl OptimizeError {
+    #[must_use]
+    pub const fn is_invalid_argument(&self) -> bool {
+        matches!(
+            self,
+            Self::EmptyBrokerList | Self::DuplicateBroker(_) | Self::UnknownBroker(_)
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -181,6 +210,222 @@ pub fn optimize(
     })
 }
 
+fn validate_broker_mode(
+    state: &ClusterState,
+    brokers: &[i32],
+) -> Result<BTreeSet<i32>, OptimizeError> {
+    if brokers.is_empty() {
+        return Err(OptimizeError::EmptyBrokerList);
+    }
+    let known = state
+        .brokers
+        .iter()
+        .map(|broker| broker.id)
+        .collect::<BTreeSet<_>>();
+    let mut requested = BTreeSet::new();
+    for broker in brokers {
+        if !requested.insert(*broker) {
+            return Err(OptimizeError::DuplicateBroker(*broker));
+        }
+        if !known.contains(broker) {
+            return Err(OptimizeError::UnknownBroker(*broker));
+        }
+    }
+    validate_stable_cluster(state, &known)?;
+    Ok(requested)
+}
+
+fn validate_stable_cluster(
+    state: &ClusterState,
+    known: &BTreeSet<i32>,
+) -> Result<(), OptimizeError> {
+    if !state.in_flight_reassignments.is_empty() {
+        return Err(OptimizeError::ReassignmentsInFlight);
+    }
+    for partition in &state.partitions {
+        if !known.contains(&partition.leader)
+            || !partition.replicas.contains(&partition.leader)
+            || partition
+                .replicas
+                .iter()
+                .any(|broker| !known.contains(broker))
+        {
+            return Err(OptimizeError::OfflinePartition {
+                topic: partition.topic.clone(),
+                partition: partition.partition,
+            });
+        }
+        let replicas = partition.replicas.iter().copied().collect::<BTreeSet<_>>();
+        let isr = partition.isr.iter().copied().collect::<BTreeSet<_>>();
+        if replicas.len() != partition.replicas.len()
+            || isr.len() != partition.isr.len()
+            || replicas != isr
+        {
+            return Err(OptimizeError::UnderReplicatedPartition {
+                topic: partition.topic.clone(),
+                partition: partition.partition,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Run the ordinary optimizer while admitting only current replica hosts and
+/// the explicitly added brokers as placement destinations.
+///
+/// # Errors
+///
+/// Returns an error for an invalid broker list or an unstable cluster, or when
+/// a hard optimizer goal cannot be satisfied within the movement cap.
+pub fn optimize_add_brokers(
+    state: &ClusterState,
+    brokers: &[i32],
+    goals: &[&dyn Goal],
+    ctx: &GoalContext,
+) -> Result<OptimizeOutput, OptimizeError> {
+    let added = validate_broker_mode(state, brokers)?;
+    let mut eligible = state
+        .partitions
+        .iter()
+        .flat_map(|partition| partition.replicas.iter().copied())
+        .collect::<BTreeSet<_>>();
+    eligible.extend(added);
+    let mut scoped = state.clone();
+    scoped
+        .brokers
+        .retain(|broker| eligible.contains(&broker.id));
+    optimize(&scoped, goals, ctx)
+}
+
+/// Produce hard movements that evacuate every replica from `brokers` while
+/// preserving each partition's replication factor.
+///
+/// # Errors
+///
+/// Returns an error for an invalid broker list, unsafe cluster state,
+/// insufficient surviving brokers, or a movement count above the hard cap.
+pub fn optimize_remove_brokers(
+    state: &ClusterState,
+    brokers: &[i32],
+    ctx: &GoalContext,
+) -> Result<OptimizeOutput, OptimizeError> {
+    let removed = validate_broker_mode(state, brokers)?;
+    let mut survivors = state
+        .brokers
+        .iter()
+        .map(|broker| broker.id)
+        .filter(|broker| !removed.contains(broker))
+        .collect::<Vec<_>>();
+    survivors.sort_unstable();
+    let max_replication_factor = state
+        .partitions
+        .iter()
+        .map(|partition| partition.replicas.len())
+        .max()
+        .unwrap_or_default();
+    if survivors.len() < max_replication_factor {
+        return Err(OptimizeError::InsufficientSurvivors {
+            survivors: survivors.len(),
+            replication_factor: max_replication_factor,
+        });
+    }
+
+    let mut replica_counts = survivors
+        .iter()
+        .map(|broker| {
+            let count = state
+                .partitions
+                .iter()
+                .filter(|partition| partition.replicas.contains(broker))
+                .count();
+            (*broker, count)
+        })
+        .collect::<HashMap<_, _>>();
+    let mut working = state.clone();
+    let mut movements = Vec::new();
+    for partition in &state.partitions {
+        if !partition
+            .replicas
+            .iter()
+            .any(|broker| removed.contains(broker))
+        {
+            continue;
+        }
+        let mut new_replicas = partition.replicas.clone();
+        for index in 0..new_replicas.len() {
+            if !removed.contains(&new_replicas[index]) {
+                continue;
+            }
+            let target = survivors
+                .iter()
+                .filter(|candidate| !new_replicas.contains(candidate))
+                .min_by_key(|candidate| {
+                    (
+                        replica_counts.get(candidate).copied().unwrap_or(0),
+                        **candidate,
+                    )
+                })
+                .copied()
+                .ok_or(OptimizeError::InsufficientSurvivors {
+                    survivors: survivors.len(),
+                    replication_factor: partition.replicas.len(),
+                })?;
+            new_replicas[index] = target;
+            *replica_counts.entry(target).or_insert(0) += 1;
+        }
+        let new_leader = if removed.contains(&partition.leader) {
+            new_replicas
+                .iter()
+                .find(|broker| partition.isr.contains(broker) && !removed.contains(broker))
+                .copied()
+                .unwrap_or(new_replicas[0])
+        } else {
+            partition.leader
+        };
+        let movement = Movement {
+            topic: partition.topic.clone(),
+            partition: partition.partition,
+            old_replicas: partition.replicas.clone(),
+            new_replicas,
+            old_leader: partition.leader,
+            new_leader,
+        };
+        debug_assert!(validate_movement(state, &movement).is_ok());
+        debug_assert!(
+            movement
+                .new_replicas
+                .iter()
+                .all(|broker| !removed.contains(broker))
+        );
+        apply_movement(&mut working, &movement);
+        movements.push(movement);
+    }
+    if movements.len() > ctx.max_movements_per_proposal {
+        return Err(OptimizeError::HardGoalUnsatisfied {
+            goal: "RemoveBrokers".to_string(),
+            extra: movements.len() - ctx.max_movements_per_proposal,
+            cap: ctx.max_movements_per_proposal,
+        });
+    }
+    movements.sort_by(|a, b| (a.topic.as_str(), a.partition).cmp(&(b.topic.as_str(), b.partition)));
+    let summary = compute_summary(state, &working, &movements);
+    Ok(OptimizeOutput {
+        proposal: Proposal {
+            id: Uuid::new_v4().to_string(),
+            status: ProposalStatus::Computed,
+            created_at_ms: now_ms(),
+            goals_applied: vec!["RemoveBrokers".to_string()],
+            summary,
+            movements,
+            started_at_ms: 0,
+            terminated_at_ms: 0,
+            failure_reason: None,
+            throttle: ByteRate::ZERO,
+        },
+        state_after: working,
+    })
+}
+
 fn apply_movement(state: &mut ClusterState, m: &Movement) {
     if let Some(p) = state
         .partitions
@@ -263,7 +508,7 @@ mod tests {
     use crate::{
         capacity::BrokerCapacities,
         goals::tests::FixedGoal,
-        model::{BrokerView, PartitionView},
+        model::{BrokerView, InFlightReassignment, PartitionView},
         scraper::UsageStore,
     };
 
@@ -907,5 +1152,162 @@ mod tests {
                     max_leaders_after: 1,
                 }
         );
+    }
+
+    fn broker_mode_state(broker_count: i32) -> ClusterState {
+        ClusterState {
+            cluster_id: Some("cluster-a".into()),
+            snapshot_at_ms: 42,
+            brokers: (1..=broker_count)
+                .map(|id| BrokerView {
+                    id,
+                    host: format!("h{id}"),
+                    port: 9092,
+                    rack: None,
+                })
+                .collect(),
+            partitions: vec![PartitionView {
+                topic: "orders".into(),
+                partition: 0,
+                replicas: vec![1, 2, 3],
+                leader: 1,
+                isr: vec![1, 2, 3],
+            }],
+            in_flight_reassignments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn remove_brokers_evacuation_is_complete_and_preserves_rf() {
+        let state = broker_mode_state(5);
+
+        let output = optimize_remove_brokers(&state, &[1, 2], &ctx()).unwrap();
+
+        assert2::assert!(
+            output.proposal.movements
+                == vec![Movement {
+                    topic: "orders".into(),
+                    partition: 0,
+                    old_replicas: vec![1, 2, 3],
+                    new_replicas: vec![4, 5, 3],
+                    old_leader: 1,
+                    new_leader: 3,
+                }]
+        );
+        assert2::assert!(output.proposal.goals_applied == ["RemoveBrokers"]);
+        assert2::assert!(output.proposal.summary.replica_movements == 1);
+        assert2::assert!(output.proposal.summary.leader_movements == 1);
+        assert2::assert!(output.state_after.partitions[0].replicas == [4, 5, 3]);
+        assert2::assert!(output.proposal.movements.iter().all(|movement| {
+            validate_movement(&state, movement).is_ok()
+                && movement.new_replicas.len() == movement.old_replicas.len()
+                && movement
+                    .new_replicas
+                    .iter()
+                    .all(|broker| ![1, 2].contains(broker))
+        }));
+    }
+
+    #[test]
+    fn remove_brokers_fails_closed_for_unsafe_cluster_states() {
+        let mut in_flight = broker_mode_state(5);
+        in_flight.in_flight_reassignments = vec![InFlightReassignment {
+            topic: "orders".into(),
+            partition: 0,
+            adding: vec![4],
+            removing: vec![1],
+        }];
+        assert2::assert!(matches!(
+            optimize_remove_brokers(&in_flight, &[1], &ctx()),
+            Err(OptimizeError::ReassignmentsInFlight)
+        ));
+
+        let mut under_replicated = broker_mode_state(5);
+        under_replicated.partitions[0].isr.pop();
+        assert2::assert!(matches!(
+            optimize_remove_brokers(&under_replicated, &[1], &ctx()),
+            Err(OptimizeError::UnderReplicatedPartition { .. })
+        ));
+
+        let mut offline = broker_mode_state(5);
+        offline.partitions[0].leader = -1;
+        assert2::assert!(matches!(
+            optimize_remove_brokers(&offline, &[1], &ctx()),
+            Err(OptimizeError::OfflinePartition { .. })
+        ));
+
+        let insufficient = broker_mode_state(4);
+        assert2::assert!(matches!(
+            optimize_remove_brokers(&insufficient, &[1, 2], &ctx()),
+            Err(OptimizeError::InsufficientSurvivors {
+                survivors: 2,
+                replication_factor: 3
+            })
+        ));
+
+        let capped = GoalContext {
+            max_movements_per_proposal: 0,
+            ..ctx()
+        };
+        assert2::assert!(matches!(
+            optimize_remove_brokers(&broker_mode_state(5), &[1], &capped),
+            Err(OptimizeError::HardGoalUnsatisfied { .. })
+        ));
+    }
+
+    #[test]
+    fn broker_modes_reject_invalid_broker_lists() {
+        let state = broker_mode_state(5);
+        assert2::assert!(matches!(
+            optimize_remove_brokers(&state, &[], &ctx()),
+            Err(OptimizeError::EmptyBrokerList)
+        ));
+        assert2::assert!(matches!(
+            optimize_remove_brokers(&state, &[1, 1], &ctx()),
+            Err(OptimizeError::DuplicateBroker(1))
+        ));
+        assert2::assert!(matches!(
+            optimize_remove_brokers(&state, &[99], &ctx()),
+            Err(OptimizeError::UnknownBroker(99))
+        ));
+    }
+
+    #[test]
+    fn add_brokers_limits_new_placements_to_the_requested_brokers() {
+        let mut state = broker_mode_state(3);
+        state.partitions[0].replicas = vec![1];
+        state.partitions[0].isr = vec![1];
+        let move_to_added = FixedGoal {
+            name: "move_to_added",
+            priority: GoalPriority::Soft,
+            movements: vec![Movement {
+                topic: "orders".into(),
+                partition: 0,
+                old_replicas: vec![1],
+                new_replicas: vec![3],
+                old_leader: 1,
+                new_leader: 3,
+            }],
+        };
+        let move_to_unlisted = FixedGoal {
+            name: "move_to_unlisted",
+            priority: GoalPriority::Soft,
+            movements: vec![Movement {
+                topic: "orders".into(),
+                partition: 0,
+                old_replicas: vec![1],
+                new_replicas: vec![2],
+                old_leader: 1,
+                new_leader: 2,
+            }],
+        };
+
+        let admitted =
+            optimize_add_brokers(&state, &[3], &[&move_to_added as &dyn Goal], &ctx()).unwrap();
+        let rejected =
+            optimize_add_brokers(&state, &[3], &[&move_to_unlisted as &dyn Goal], &ctx()).unwrap();
+
+        assert2::assert!(admitted.proposal.movements == move_to_added.movements);
+        assert2::assert!(rejected.proposal.movements.is_empty());
     }
 }

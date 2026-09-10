@@ -240,15 +240,51 @@ pub async fn create_proposal(
     let Some(snap) = (*g).as_ref() else {
         return Err(ConnectError::new(Code::Unavailable, "no snapshot yet"));
     };
-    let names = req.0.goals;
+    let request = req.0;
+    let mode = pb::ProposalMode::try_from(request.mode)
+        .map_err(|_| ConnectError::new(Code::InvalidArgument, "unknown proposal mode"))?;
+    if mode == pb::ProposalMode::Unspecified {
+        return Err(ConnectError::new(
+            Code::InvalidArgument,
+            "proposal mode must be explicit",
+        ));
+    }
+    let names = request.goals;
+    if mode == pb::ProposalMode::Full && !request.brokers.is_empty() {
+        return Err(ConnectError::new(
+            Code::InvalidArgument,
+            "full mode does not accept a broker list",
+        ));
+    }
+    if mode == pb::ProposalMode::RemoveBrokers && !names.is_empty() {
+        return Err(ConnectError::new(
+            Code::InvalidArgument,
+            "remove-brokers mode does not accept optimizer goals",
+        ));
+    }
     let goals = state
         .goal_registry
         .select(&names)
         .map_err(|e| ConnectError::new(Code::InvalidArgument, e.to_string()))?;
     let started = std::time::Instant::now();
-    let out = optimizer::optimize(snap, &goals, &state.goal_ctx).map_err(|e| {
+    let out = match mode {
+        pb::ProposalMode::Full => optimizer::optimize(snap, &goals, &state.goal_ctx),
+        pb::ProposalMode::RemoveBrokers => {
+            optimizer::optimize_remove_brokers(snap, &request.brokers, &state.goal_ctx)
+        }
+        pb::ProposalMode::AddBrokers => {
+            optimizer::optimize_add_brokers(snap, &request.brokers, &goals, &state.goal_ctx)
+        }
+        pb::ProposalMode::Unspecified => unreachable!("checked above"),
+    }
+    .map_err(|e| {
         state.metrics.record_rebalance("error");
-        ConnectError::new(Code::Internal, e.to_string())
+        let code = if e.is_invalid_argument() {
+            Code::InvalidArgument
+        } else {
+            Code::FailedPrecondition
+        };
+        ConnectError::new(code, e.to_string())
     })?;
     state
         .metrics

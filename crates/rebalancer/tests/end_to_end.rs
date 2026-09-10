@@ -272,7 +272,11 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     let proposal = unwrap_ok(
         handlers::create_proposal(
             Extension(state.clone()),
-            req(pb::CreateProposalRequest { goals: vec![] }),
+            req(pb::CreateProposalRequest {
+                goals: vec![],
+                mode: i32::from(pb::ProposalMode::Full),
+                brokers: vec![],
+            }),
         )
         .await,
     );
@@ -362,11 +366,50 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
             Extension(state.clone()),
             req(pb::CreateProposalRequest {
                 goals: vec!["GhostGoal".to_string()],
+                mode: i32::from(pb::ProposalMode::Full),
+                brokers: vec![],
             }),
         )
         .await,
     );
     assert2::assert!(bad_goal.code() == Code::InvalidArgument);
+
+    // Broker-scoped proposal modes are explicit and reject ambiguous fields.
+    for request in [
+        pb::CreateProposalRequest {
+            goals: vec![],
+            mode: i32::from(pb::ProposalMode::Unspecified),
+            brokers: vec![],
+        },
+        pb::CreateProposalRequest {
+            goals: vec![],
+            mode: i32::from(pb::ProposalMode::Full),
+            brokers: vec![1],
+        },
+        pb::CreateProposalRequest {
+            goals: vec!["ReplicaDistribution".to_string()],
+            mode: i32::from(pb::ProposalMode::RemoveBrokers),
+            brokers: vec![1],
+        },
+    ] {
+        let error =
+            unwrap_err(handlers::create_proposal(Extension(state.clone()), req(request)).await);
+        assert2::assert!(error.code() == Code::InvalidArgument);
+    }
+
+    // The only broker cannot be removed while preserving RF=1.
+    let unsafe_remove = unwrap_err(
+        handlers::create_proposal(
+            Extension(state.clone()),
+            req(pb::CreateProposalRequest {
+                goals: vec![],
+                mode: i32::from(pb::ProposalMode::RemoveBrokers),
+                brokers: vec![1],
+            }),
+        )
+        .await,
+    );
+    assert2::assert!(unsafe_remove.code() == Code::FailedPrecondition);
 
     // ExecuteProposal on a no-movements proposal → FailedPrecondition.
     // The 43b handler refuses to start an execution with an empty plan.
@@ -425,7 +468,11 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
     let cp = unwrap_err(
         handlers::create_proposal(
             Extension(state.clone()),
-            req(pb::CreateProposalRequest { goals: vec![] }),
+            req(pb::CreateProposalRequest {
+                goals: vec![],
+                mode: i32::from(pb::ProposalMode::Full),
+                brokers: vec![],
+            }),
         )
         .await,
     );

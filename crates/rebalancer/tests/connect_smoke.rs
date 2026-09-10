@@ -181,7 +181,7 @@ async fn connect_execute_proposal_and_cancel_over_http_json() {
             "http://{rebal_addr}/crabka.rebalancer.v1.Rebalancer/CreateProposal"
         ))
         .header("Content-Type", "application/json")
-        .body("{}")
+        .body(r#"{"mode":"PROPOSAL_MODE_FULL"}"#)
         .send()
         .await
         .expect("create POST");

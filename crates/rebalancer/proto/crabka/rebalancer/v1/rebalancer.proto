@@ -83,7 +83,24 @@ message Proposal {
   int64 throttle_bytes_per_sec = 10;
 }
 
-message CreateProposalRequest { repeated string goals = 1; }
+enum ProposalMode {
+  PROPOSAL_MODE_UNSPECIFIED = 0;
+  // Optimize the complete current broker set with the selected goals.
+  PROPOSAL_MODE_FULL = 1;
+  // Evacuate every listed broker; goals must be empty.
+  PROPOSAL_MODE_REMOVE_BROKERS = 2;
+  // Run selected goals while admitting only current replica hosts and the
+  // listed brokers as placement destinations.
+  PROPOSAL_MODE_ADD_BROKERS = 3;
+}
+
+message CreateProposalRequest {
+  repeated string goals = 1;
+  // Required. The unspecified value is rejected rather than defaulted.
+  ProposalMode mode = 2;
+  // Required and non-empty for add/remove modes; empty for full mode.
+  repeated int32 brokers = 3;
+}
 message DryRunProposalRequest { string id = 1; }
 message DryRunResponse {
   string id = 1;
