@@ -3901,6 +3901,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "strum 0.28.0",
+ "subtle",
  "temp-env",
  "tempfile",
  "thiserror 2.0.20",
