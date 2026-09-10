@@ -14,8 +14,9 @@ use crabka_rebalancer::{
     executor::{
         Execution, ExecutionHandle, ExecutorConfig, ExecutorState,
         client_impl::{LiveClient, ReassignmentRequestTimeout},
+        state::Phase,
     },
-    goals::GoalContext,
+    goals::{GoalContext, now_ms},
     health::{HealthState, new_registry},
     ingest::{Ingester, new_shared_snapshot},
     metrics::RebalancerMetrics,
@@ -146,6 +147,11 @@ struct Args {
         default_value = ""
     )]
     broker_evacuation_token: String,
+
+    /// File containing the bearer token authorizing broker evacuation.
+    /// The file is read per request so projected Secret updates take effect.
+    #[arg(long, env = "CRABKA_REBALANCER_BROKER_EVACUATION_TOKEN_FILE")]
+    broker_evacuation_token_file: Option<PathBuf>,
 
     /// Cluster-state snapshot cadence.
     #[arg(long, env = "CRABKA_SCRAPE_INTERVAL_SECS", default_value_t = 10)]
@@ -532,14 +538,16 @@ async fn start_state_topic(
 }
 
 fn spawn_recovery(
-    state_topic: Arc<dyn crabka_rebalancer::state_topic::StateBackend>,
-    store: Arc<ProposalStore>,
-    in_flight_slot: Arc<Mutex<Option<ExecutionHandle>>>,
     executor_state: ExecutorState,
     client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade>,
+    snapshot: crabka_rebalancer::ingest::SharedSnapshot,
+    goal_ctx: GoalContext,
     shutdown: CancellationToken,
     load_policy: (Time, Time),
 ) {
+    let state_topic = executor_state.state_topic.clone();
+    let store = executor_state.store.clone();
+    let in_flight_slot = executor_state.in_flight.clone();
     tokio::spawn(async move {
         let (load_timeout, load_poll_interval) = load_policy;
         let start = std::time::Instant::now();
@@ -572,6 +580,42 @@ fn spawn_recovery(
             let _ = state_topic.delete().await;
             return;
         };
+        if !proposal.remove_brokers.is_empty()
+            && matches!(in_flight.phase, Phase::ApplyThrottle | Phase::Submit)
+        {
+            while snapshot.load().is_none() {
+                if recovery_load_timed_out(start.elapsed().as_time(), load_timeout)
+                    || shutdown.is_cancelled()
+                {
+                    warn!(
+                        proposal_id = %proposal.id,
+                        "cluster snapshot unavailable; refusing to resume broker evacuation"
+                    );
+                    return;
+                }
+                tokio::time::sleep(load_poll_interval.to_std()).await;
+            }
+            let latest = snapshot.load();
+            let valid = crabka_rebalancer::optimizer::remove_brokers_plan_is_current(
+                latest.as_ref().as_ref().expect("snapshot checked above"),
+                &proposal,
+                &goal_ctx,
+            );
+            if !matches!(valid, Ok(true)) {
+                let reason = valid.map_or_else(
+                    |error| format!("recovery safety check failed: {error}"),
+                    |_| "broker assignments changed while the rebalancer was offline".to_string(),
+                );
+                let _ = store.mutate(&proposal.id, |proposal| {
+                    proposal.status = ProposalStatus::Failed;
+                    proposal.terminated_at_ms = now_ms();
+                    proposal.failure_reason = Some(reason.clone());
+                });
+                let _ = state_topic.delete().await;
+                warn!(proposal_id = %proposal.id, %reason, "refusing stale broker evacuation recovery");
+                return;
+            }
+        }
         let proposal = store
             .mutate(&in_flight.proposal_id, |proposal| {
                 proposal.status = ProposalStatus::Executing;
@@ -706,19 +750,6 @@ async fn main() -> anyhow::Result<()> {
         LiveClient::with_reassignment_request_timeout(client.clone(), reassignment_request_timeout),
     );
 
-    spawn_recovery(
-        state_topic.clone(),
-        store.clone(),
-        in_flight_slot.clone(),
-        executor_state.clone(),
-        live_client.clone(),
-        shutdown.clone(),
-        (
-            arg_secs(args.state_load_timeout_secs),
-            runtime_policy.recovery_load_poll_interval,
-        ),
-    );
-
     // Load broker capacity config (optional).
     let broker_capacities = if args.broker_capacity_file.is_empty() {
         std::sync::Arc::new(crabka_rebalancer::capacity::BrokerCapacities::default())
@@ -779,6 +810,18 @@ async fn main() -> anyhow::Result<()> {
         broker_usages: usage_store.clone(),
     };
 
+    spawn_recovery(
+        executor_state.clone(),
+        live_client.clone(),
+        snapshot.clone(),
+        goal_ctx.clone(),
+        shutdown.clone(),
+        (
+            arg_secs(args.state_load_timeout_secs),
+            runtime_policy.recovery_load_poll_interval,
+        ),
+    );
+
     if detector_enabled(arg_secs(args.detector_tick_interval_secs)) {
         let detector_cfg = crabka_rebalancer::detector::DetectorConfig {
             tick_interval: arg_secs(args.detector_tick_interval_secs),
@@ -830,6 +873,7 @@ async fn main() -> anyhow::Result<()> {
         cancel_drain_poll_interval: runtime_policy.cancel_drain_poll_interval,
         broker_evacuation_token: (!args.broker_evacuation_token.is_empty())
             .then(|| args.broker_evacuation_token.clone()),
+        broker_evacuation_token_file: args.broker_evacuation_token_file.clone(),
     });
 
     let connect_router = crabka_rebalancer::api::router(app_state);

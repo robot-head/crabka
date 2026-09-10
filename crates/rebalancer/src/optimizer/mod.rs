@@ -427,6 +427,19 @@ pub fn optimize_remove_brokers(
     })
 }
 
+/// Recompute an evacuation against the latest cluster state.
+///
+/// # Errors
+/// Returns the same safety errors as [`optimize_remove_brokers`].
+pub fn remove_brokers_plan_is_current(
+    state: &ClusterState,
+    proposal: &Proposal,
+    ctx: &GoalContext,
+) -> Result<bool, OptimizeError> {
+    let current = optimize_remove_brokers(state, &proposal.remove_brokers, ctx)?;
+    Ok(current.proposal.movements == proposal.movements)
+}
+
 fn apply_movement(state: &mut ClusterState, m: &Movement) {
     if let Some(p) = state
         .partitions
@@ -1209,6 +1222,18 @@ mod tests {
                     .iter()
                     .all(|broker| ![1, 2].contains(broker))
         }));
+        assert2::assert!(remove_brokers_plan_is_current(&state, &output.proposal, &ctx()).unwrap());
+        let mut changed = state.clone();
+        changed.partitions.push(PartitionView {
+            topic: "payments".into(),
+            partition: 0,
+            replicas: vec![1, 3, 4],
+            leader: 3,
+            isr: vec![1, 3, 4],
+        });
+        assert2::assert!(
+            !remove_brokers_plan_is_current(&changed, &output.proposal, &ctx()).unwrap()
+        );
     }
 
     #[test]

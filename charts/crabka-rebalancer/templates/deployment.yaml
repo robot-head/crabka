@@ -31,11 +31,8 @@ spec:
             - name: CRABKA_REBALANCER_LISTEN_ADDR
               value: {{ .Values.listenAddr | quote }}
             {{- if .Values.brokerEvacuationAuth.existingSecret }}
-            - name: CRABKA_REBALANCER_BROKER_EVACUATION_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.brokerEvacuationAuth.existingSecret | quote }}
-                  key: {{ .Values.brokerEvacuationAuth.key | quote }}
+            - name: CRABKA_REBALANCER_BROKER_EVACUATION_TOKEN_FILE
+              value: /var/run/secrets/crabka-rebalancer/broker-evacuation-token
             {{- end }}
             - name: CRABKA_SCRAPE_INTERVAL_SECS
               value: {{ .Values.scrapeIntervalSecs | quote }}
@@ -145,6 +142,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/crabka-rebalancer
+            {{- if .Values.brokerEvacuationAuth.existingSecret }}
+            - name: broker-evacuation-auth
+              mountPath: /var/run/secrets/crabka-rebalancer
+              readOnly: true
+            {{- end }}
             {{- if and .Values.brokerCapacities (not .Values.brokerCapacityFile) }}
             - name: capacity-config
               mountPath: /etc/crabka-rebalancer
@@ -157,6 +159,14 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "rebalancer.fullname" . }}
+        {{- if .Values.brokerEvacuationAuth.existingSecret }}
+        - name: broker-evacuation-auth
+          secret:
+            secretName: {{ .Values.brokerEvacuationAuth.existingSecret | quote }}
+            items:
+              - key: {{ .Values.brokerEvacuationAuth.key | quote }}
+                path: broker-evacuation-token
+        {{- end }}
         {{- if and .Values.brokerCapacities (not .Values.brokerCapacityFile) }}
         - name: capacity-config
           configMap:

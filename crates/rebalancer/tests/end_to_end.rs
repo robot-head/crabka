@@ -171,6 +171,7 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
         cancel_drain_timeout: RebalancerRuntimePolicy::default().cancel_drain_timeout,
         cancel_drain_poll_interval: RebalancerRuntimePolicy::default().cancel_drain_poll_interval,
         broker_evacuation_token: Some("test-token".into()),
+        broker_evacuation_token_file: None,
     });
     (state, registry)
 }
@@ -213,7 +214,7 @@ fn broker_mode_snapshot() -> ClusterState {
 }
 
 #[tokio::test]
-async fn broker_removal_is_authorized_terminal_when_empty_and_revalidated_before_execute() {
+async fn broker_removal_is_authorized_confirmed_when_empty_and_revalidated_before_execute() {
     let shared = new_shared_snapshot();
     shared.store(Arc::new(Some(broker_mode_snapshot())));
     let (state, _registry) = build_state(shared);
@@ -230,8 +231,22 @@ async fn broker_removal_is_authorized_terminal_when_empty_and_revalidated_before
         )
         .await,
     );
-    assert2::assert!(empty.status == i32::from(pb::ProposalStatus::Completed));
+    assert2::assert!(empty.status == i32::from(pb::ProposalStatus::Computed));
     assert2::assert!(empty.movements.is_empty());
+    let confirmed = unwrap_ok(
+        handlers::execute_proposal(
+            Extension(state.clone()),
+            evacuation_headers(),
+            req(pb::ExecuteProposalRequest {
+                id: empty.id,
+                throttle_bytes_per_sec: None,
+            }),
+        )
+        .await,
+    );
+    assert2::assert!(
+        confirmed.proposal.unwrap().status == i32::from(pb::ProposalStatus::Completed)
+    );
 
     let proposal = unwrap_ok(
         handlers::create_proposal(

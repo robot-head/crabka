@@ -47,11 +47,22 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
-            name: CRABKA_REBALANCER_BROKER_EVACUATION_TOKEN
-            valueFrom:
-              secretKeyRef:
-                name: operator-rebalancer-auth
-                key: bearer-token
+            name: CRABKA_REBALANCER_BROKER_EVACUATION_TOKEN_FILE
+            value: /var/run/secrets/crabka-rebalancer/broker-evacuation-token
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: broker-evacuation-auth
+            mountPath: /var/run/secrets/crabka-rebalancer
+            readOnly: true
+      - equal:
+          path: spec.template.spec.volumes[1].secret.secretName
+          value: operator-rebalancer-auth
+      - equal:
+          path: spec.template.spec.volumes[1].secret.items[0]
+          value:
+            key: bearer-token
+            path: broker-evacuation-token
 
   - it: mounts persistent volume at expected path
     asserts:

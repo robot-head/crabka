@@ -10,7 +10,7 @@
 //! than through typed state. That keeps the codegen S generic at `()` and
 //! avoids `FromRef` and `with_state` plumbing.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use axum::{Extension, http::HeaderMap};
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse, error::Code};
@@ -55,20 +55,26 @@ pub struct AppState {
     /// Bearer credential required for broker evacuation. When unset, the
     /// destructive proposal mode is disabled.
     pub broker_evacuation_token: Option<String>,
+    /// Projected Secret path. When configured, it is read for every protected
+    /// request so Kubernetes Secret rotation takes effect without a restart.
+    pub broker_evacuation_token_file: Option<PathBuf>,
 }
 
 fn is_remove_brokers_proposal(proposal: &crate::model::Proposal) -> bool {
     !proposal.remove_brokers.is_empty()
 }
 
-fn removal_targets(proposal: &crate::model::Proposal) -> Vec<i32> {
-    let mut targets = proposal.remove_brokers.clone();
-    targets.sort_unstable();
-    targets
-}
-
 fn broker_evacuation_is_authorized(state: &AppState, headers: &HeaderMap) -> bool {
-    let Some(expected) = state.broker_evacuation_token.as_deref() else {
+    let file_token = state
+        .broker_evacuation_token_file
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    let expected = if state.broker_evacuation_token_file.is_some() {
+        file_token.as_deref().map(str::trim_end)
+    } else {
+        state.broker_evacuation_token.as_deref()
+    };
+    let Some(expected) = expected.filter(|token| !token.is_empty()) else {
         return false;
     };
     let supplied = headers
@@ -330,11 +336,7 @@ pub async fn create_proposal(
         } else {
             "ok"
         });
-    let mut proposal = out.proposal;
-    if mode == pb::ProposalMode::RemoveBrokers && proposal.movements.is_empty() {
-        proposal.status = ProposalStatus::Completed;
-        proposal.terminated_at_ms = now_ms();
-    }
+    let proposal = out.proposal;
     state.store.insert(proposal.clone());
     state.metrics.proposals_created_total.inc();
     Ok(ConnectResponse::new(proposal_to_proto(&proposal)))
@@ -432,18 +434,30 @@ pub async fn execute_proposal(
                 "broker evacuation authorization failed or is disabled",
             ));
         }
-        let targets = removal_targets(&proposal);
         let snapshot = state.snapshot.load();
         let Some(snapshot) = (*snapshot).as_ref() else {
             return Err(ConnectError::new(Code::Unavailable, "no snapshot yet"));
         };
-        let current = optimizer::optimize_remove_brokers(snapshot, &targets, &state.goal_ctx)
-            .map_err(|error| ConnectError::new(Code::FailedPrecondition, error.to_string()))?;
-        if current.proposal.movements != proposal.movements {
+        let current =
+            optimizer::remove_brokers_plan_is_current(snapshot, &proposal, &state.goal_ctx)
+                .map_err(|error| ConnectError::new(Code::FailedPrecondition, error.to_string()))?;
+        if !current {
             return Err(ConnectError::new(
                 Code::FailedPrecondition,
                 "broker assignments changed after proposal creation; refresh the proposal",
             ));
+        }
+        if proposal.movements.is_empty() {
+            let completed = state
+                .store
+                .mutate(&id, |proposal| {
+                    proposal.status = ProposalStatus::Completed;
+                    proposal.terminated_at_ms = now_ms();
+                })
+                .ok_or_else(|| ConnectError::new(Code::Internal, "store.mutate vanished"))?;
+            return Ok(ConnectResponse(pb::ExecuteProposalResponse {
+                proposal: Some(proposal_to_proto(&completed)),
+            }));
         }
     }
     if proposal.status.is_terminal() || matches!(proposal.status, ProposalStatus::Executing) {
@@ -542,6 +556,7 @@ pub async fn execute_proposal(
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn cancel_execution(
     Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
     req: ConnectRequest<pb::CancelExecutionRequest>,
 ) -> Result<ConnectResponse<pb::CancelExecutionResponse>, ConnectError> {
     let id = req.0.id;
@@ -558,6 +573,17 @@ pub async fn cancel_execution(
                     "in-flight execution is `{}`, not `{id}`",
                     handle.proposal_id
                 ),
+            ));
+        }
+        let proposal = state.store.get(&id).ok_or_else(|| {
+            ConnectError::new(Code::NotFound, format!("proposal `{id}` not found"))
+        })?;
+        if is_remove_brokers_proposal(&proposal)
+            && !broker_evacuation_is_authorized(&state, &headers)
+        {
+            return Err(ConnectError::new(
+                Code::PermissionDenied,
+                "broker evacuation authorization failed or is disabled",
             ));
         }
         handle.cancel.clone()
@@ -718,6 +744,7 @@ mod tests {
             cancel_drain_timeout: secs(5),
             cancel_drain_poll_interval: millis(25),
             broker_evacuation_token: None,
+            broker_evacuation_token_file: None,
         })
     }
 
@@ -860,6 +887,7 @@ mod tests {
 
         let err = cancel_execution(
             Extension(state),
+            HeaderMap::new(),
             req(pb::CancelExecutionRequest {
                 id: "anything".into(),
             }),
@@ -1035,6 +1063,7 @@ mod tests {
 
         let err = cancel_execution(
             Extension(state),
+            HeaderMap::new(),
             req(pb::CancelExecutionRequest {
                 id: "different-id".into(),
             }),
@@ -1042,5 +1071,68 @@ mod tests {
         .await
         .expect_err("expected FailedPrecondition");
         assert2::assert!(err.code() == Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn broker_evacuation_secret_file_rotation_takes_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let token_file = dir.path().join("token");
+        std::fs::write(&token_file, "first\n").unwrap();
+        let mut state = build_app_state(dir.path());
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .broker_evacuation_token_file = Some(token_file.clone());
+        let first = HeaderMap::from_iter([(
+            axum::http::header::AUTHORIZATION,
+            "Bearer first".parse().unwrap(),
+        )]);
+        let second = HeaderMap::from_iter([(
+            axum::http::header::AUTHORIZATION,
+            "Bearer second".parse().unwrap(),
+        )]);
+
+        assert2::assert!(broker_evacuation_is_authorized(&state, &first));
+        std::fs::write(token_file, "second\n").unwrap();
+        assert2::assert!(!broker_evacuation_is_authorized(&state, &first));
+        assert2::assert!(broker_evacuation_is_authorized(&state, &second));
+    }
+
+    #[tokio::test]
+    async fn cancel_broker_evacuation_requires_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = build_app_state(dir.path());
+        Arc::get_mut(&mut state).unwrap().broker_evacuation_token = Some("secret".into());
+        insert_computed_proposal(&state, "remove", vec![mv("t", 0, vec![1], vec![2])]);
+        let _ = state.store.mutate("remove", |proposal| {
+            proposal.remove_brokers = vec![1];
+        });
+        let cancel = CancellationToken::new();
+        *state.executor.in_flight.lock().await = Some(ExecutionHandle {
+            proposal_id: "remove".into(),
+            task: tokio::spawn(std::future::pending()),
+            cancel: cancel.clone(),
+            started_at: std::time::Instant::now(),
+        });
+
+        let error = cancel_execution(
+            Extension(state.clone()),
+            HeaderMap::new(),
+            req(pb::CancelExecutionRequest {
+                id: "remove".into(),
+            }),
+        )
+        .await
+        .expect_err("unauthorized cancellation must fail");
+        assert2::assert!(error.code() == Code::PermissionDenied);
+        assert2::assert!(!cancel.is_cancelled());
+        state
+            .executor
+            .in_flight
+            .lock()
+            .await
+            .take()
+            .unwrap()
+            .task
+            .abort();
     }
 }
