@@ -116,7 +116,8 @@ pub mod human {
 
     human_module!(
         /// A byte count as `"512MiB"`.
-        byte_size / option_byte_size,
+        byte_size
+            / option_byte_size,
         crate::ByteSize,
         crate::parse::byte_size
     );
@@ -128,13 +129,15 @@ pub mod human {
     );
     human_module!(
         /// A byte throughput as `"10MiB/s"`.
-        byte_rate / option_byte_rate,
+        byte_rate
+            / option_byte_rate,
         crate::ByteRate,
         crate::parse::byte_rate
     );
     human_module!(
         /// An event rate as `"100/s"`.
-        frequency / option_frequency,
+        frequency
+            / option_frequency,
         crate::Frequency,
         crate::parse::frequency
     );
@@ -312,7 +315,8 @@ pub mod numeric {
     numeric_module!(
         /// A time extent as whole milliseconds. This is Kafka's unit for
         /// retention, timeout, and expiry fields.
-        millis_i64 / option_millis_i64,
+        millis_i64
+            / option_millis_i64,
         crate::Time,
         i64,
         crate::convert::TimeExt::millis_i64,
@@ -325,7 +329,8 @@ pub mod numeric {
         /// does not round, such as Tempo's `durationMs`. Reading is exact, so
         /// this module is asymmetric on purpose. See
         /// [`TimeExt::millis_i64_trunc`](crate::convert::TimeExt::millis_i64_trunc).
-        millis_i64_trunc / option_millis_i64_trunc,
+        millis_i64_trunc
+            / option_millis_i64_trunc,
         crate::Time,
         i64,
         crate::convert::TimeExt::millis_i64_trunc,
@@ -333,7 +338,8 @@ pub mod numeric {
     );
     numeric_module!(
         /// A time extent as whole seconds.
-        secs_i64 / option_secs_i64,
+        secs_i64
+            / option_secs_i64,
         crate::Time,
         i64,
         crate::convert::TimeExt::secs_i64,
@@ -341,7 +347,8 @@ pub mod numeric {
     );
     numeric_module!(
         /// A time extent as whole nanoseconds.
-        nanos_i64 / option_nanos_i64,
+        nanos_i64
+            / option_nanos_i64,
         crate::Time,
         i64,
         crate::convert::TimeExt::nanos_i64,
@@ -349,7 +356,8 @@ pub mod numeric {
     );
     numeric_module!(
         /// A byte count as an unsigned total.
-        bytes_u64 / option_bytes_u64,
+        bytes_u64
+            / option_bytes_u64,
         crate::ByteSize,
         u64,
         crate::convert::ByteSizeExt::bytes_u64,
@@ -357,7 +365,8 @@ pub mod numeric {
     );
     numeric_module!(
         /// A byte count as Kafka's `int64` byte fields.
-        bytes_i64 / option_bytes_i64,
+        bytes_i64
+            / option_bytes_i64,
         crate::ByteSize,
         i64,
         crate::convert::ByteSizeExt::bytes_i64,
@@ -365,7 +374,8 @@ pub mod numeric {
     );
     numeric_module!(
         /// A byte throughput as Kafka's `int64` quota fields.
-        bytes_per_sec_i64 / option_bytes_per_sec_i64,
+        bytes_per_sec_i64
+            / option_bytes_per_sec_i64,
         crate::ByteRate,
         i64,
         crate::convert::ByteRateExt::bytes_per_sec_i64,
