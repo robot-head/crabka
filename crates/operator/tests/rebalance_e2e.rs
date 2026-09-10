@@ -113,6 +113,7 @@ fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
             .cancel_drain_timeout,
         cancel_drain_poll_interval: crabka_rebalancer::config::RebalancerRuntimePolicy::default()
             .cancel_drain_poll_interval,
+        broker_evacuation_token: Some("test-token".into()),
     })
 }
 
