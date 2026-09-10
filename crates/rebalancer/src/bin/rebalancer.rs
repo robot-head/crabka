@@ -102,7 +102,7 @@ async fn connect_client(args: &Args) -> anyhow::Result<crabka_client_core::Clien
         .await?)
 }
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(
     name = "crabka-rebalancer",
     version,

@@ -20,6 +20,7 @@ use crabka_units::{
 };
 #[cfg(test)]
 use crabka_units::{millis, secs};
+use subtle::ConstantTimeEq as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -74,7 +75,7 @@ fn broker_evacuation_is_authorized(state: &AppState, headers: &HeaderMap) -> boo
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    supplied == Some(expected)
+    supplied.is_some_and(|supplied| expected.as_bytes().ct_eq(supplied.as_bytes()).unwrap_u8() == 1)
 }
 
 /// Convert a `ClusterState` into the proto `GetStateResponse`.
