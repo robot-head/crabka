@@ -12,6 +12,7 @@ pub struct Movement {
     pub old_replicas: Vec<i32>,
     pub new_replicas: Vec<i32>,
     pub old_leader: i32,
+    /// `-1` when Kafka, rather than the rebalancer, selects the new leader.
     pub new_leader: i32,
 }
 
@@ -60,6 +61,10 @@ pub struct Proposal {
     pub goals_applied: Vec<String>,
     pub summary: ProposalSummary,
     pub movements: Vec<Movement>,
+    /// Explicit broker ids for a destructive evacuation proposal. Empty for
+    /// ordinary optimizer and add-broker proposals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_brokers: Vec<i32>,
     /// Set on the transition to `Executing`, and 0 otherwise.
     #[serde(default)]
     pub started_at_ms: i64,
@@ -92,6 +97,7 @@ mod tests {
             goals_applied: vec!["RackAware".into()],
             summary: ProposalSummary::default(),
             movements: vec![],
+            remove_brokers: vec![],
             started_at_ms: 8,
             terminated_at_ms: 0,
             failure_reason: None,
@@ -133,6 +139,15 @@ mod tests {
     }
 
     #[test]
+    fn removal_targets_round_trip_through_json() {
+        let mut want = proposal(ByteRate::ZERO);
+        want.remove_brokers = vec![3, 7];
+        let json = serde_json::to_string(&want).unwrap();
+        let got: Proposal = serde_json::from_str(&json).unwrap();
+        assert2::assert!(got == want);
+    }
+
+    #[test]
     fn missing_throttle_defaults_to_zero() {
         let json = r#"{
             "id": "p1",
@@ -151,5 +166,6 @@ mod tests {
         }"#;
         let parsed: Proposal = serde_json::from_str(json).unwrap();
         assert2::assert!(parsed.throttle == ByteRate::ZERO);
+        assert2::assert!(parsed.remove_brokers.is_empty());
     }
 }

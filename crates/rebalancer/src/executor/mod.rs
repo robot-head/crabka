@@ -508,6 +508,7 @@ mod tests {
             goals_applied: vec![],
             summary: ProposalSummary::default(),
             movements: ms,
+            remove_brokers: vec![],
             started_at_ms: 1,
             terminated_at_ms: 0,
             failure_reason: None,

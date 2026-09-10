@@ -9,6 +9,11 @@ image:
 bootstrapServers: ""
 
 listenAddr: "0.0.0.0:9300"
+# Existing Secret containing the bearer token that authorizes destructive
+# remove-brokers proposal creation and execution. Empty disables that mode.
+brokerEvacuationAuth:
+  existingSecret: ""
+  key: token
 scrapeIntervalSecs: 10
 imbalanceThresholdPct: 10
 minTopicLeadersPerBroker: 0

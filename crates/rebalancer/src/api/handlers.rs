@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use axum::Extension;
+use axum::{Extension, http::HeaderMap};
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse, error::Code};
 use crabka_units::{
     ByteRate, Time,
@@ -51,6 +51,30 @@ pub struct AppState {
     pub state_topic: Arc<dyn crate::state_topic::StateBackend>,
     pub cancel_drain_timeout: Time,
     pub cancel_drain_poll_interval: Time,
+    /// Bearer credential required for broker evacuation. When unset, the
+    /// destructive proposal mode is disabled.
+    pub broker_evacuation_token: Option<String>,
+}
+
+fn is_remove_brokers_proposal(proposal: &crate::model::Proposal) -> bool {
+    !proposal.remove_brokers.is_empty()
+}
+
+fn removal_targets(proposal: &crate::model::Proposal) -> Vec<i32> {
+    let mut targets = proposal.remove_brokers.clone();
+    targets.sort_unstable();
+    targets
+}
+
+fn broker_evacuation_is_authorized(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = state.broker_evacuation_token.as_deref() else {
+        return false;
+    };
+    let supplied = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    supplied == Some(expected)
 }
 
 /// Convert a `ClusterState` into the proto `GetStateResponse`.
@@ -234,6 +258,7 @@ pub async fn get_state(
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn create_proposal(
     Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
     req: ConnectRequest<pb::CreateProposalRequest>,
 ) -> Result<ConnectResponse<pb::Proposal>, ConnectError> {
     let g = state.snapshot.load();
@@ -243,12 +268,13 @@ pub async fn create_proposal(
     let request = req.0;
     let mode = pb::ProposalMode::try_from(request.mode)
         .map_err(|_| ConnectError::new(Code::InvalidArgument, "unknown proposal mode"))?;
-    if mode == pb::ProposalMode::Unspecified {
-        return Err(ConnectError::new(
-            Code::InvalidArgument,
-            "proposal mode must be explicit",
-        ));
-    }
+    // Older clients omitted the field. Preserve their full-cluster behavior;
+    // destructive broker-scoped modes still require an explicit enum value.
+    let mode = if mode == pb::ProposalMode::Unspecified {
+        pb::ProposalMode::Full
+    } else {
+        mode
+    };
     let names = request.goals;
     if mode == pb::ProposalMode::Full && !request.brokers.is_empty() {
         return Err(ConnectError::new(
@@ -260,6 +286,13 @@ pub async fn create_proposal(
         return Err(ConnectError::new(
             Code::InvalidArgument,
             "remove-brokers mode does not accept optimizer goals",
+        ));
+    }
+    if mode == pb::ProposalMode::RemoveBrokers && !broker_evacuation_is_authorized(&state, &headers)
+    {
+        return Err(ConnectError::new(
+            Code::PermissionDenied,
+            "broker evacuation authorization failed or is disabled",
         ));
     }
     let goals = state
@@ -296,9 +329,14 @@ pub async fn create_proposal(
         } else {
             "ok"
         });
-    state.store.insert(out.proposal.clone());
+    let mut proposal = out.proposal;
+    if mode == pb::ProposalMode::RemoveBrokers && proposal.movements.is_empty() {
+        proposal.status = ProposalStatus::Completed;
+        proposal.terminated_at_ms = now_ms();
+    }
+    state.store.insert(proposal.clone());
     state.metrics.proposals_created_total.inc();
-    Ok(ConnectResponse::new(proposal_to_proto(&out.proposal)))
+    Ok(ConnectResponse::new(proposal_to_proto(&proposal)))
 }
 
 /// Look up a stored proposal and return its summary and estimated cost.
@@ -366,6 +404,7 @@ pub async fn list_proposals(
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn execute_proposal(
     Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
     req: ConnectRequest<pb::ExecuteProposalRequest>,
 ) -> Result<ConnectResponse<pb::ExecuteProposalResponse>, ConnectError> {
     if !state.state_topic.is_loaded() {
@@ -385,6 +424,27 @@ pub async fn execute_proposal(
         .store
         .get(&id)
         .ok_or_else(|| ConnectError::new(Code::NotFound, format!("proposal `{id}` not found")))?;
+    if is_remove_brokers_proposal(&proposal) {
+        if !broker_evacuation_is_authorized(&state, &headers) {
+            return Err(ConnectError::new(
+                Code::PermissionDenied,
+                "broker evacuation authorization failed or is disabled",
+            ));
+        }
+        let targets = removal_targets(&proposal);
+        let snapshot = state.snapshot.load();
+        let Some(snapshot) = (*snapshot).as_ref() else {
+            return Err(ConnectError::new(Code::Unavailable, "no snapshot yet"));
+        };
+        let current = optimizer::optimize_remove_brokers(snapshot, &targets, &state.goal_ctx)
+            .map_err(|error| ConnectError::new(Code::FailedPrecondition, error.to_string()))?;
+        if current.proposal.movements != proposal.movements {
+            return Err(ConnectError::new(
+                Code::FailedPrecondition,
+                "broker assignments changed after proposal creation; refresh the proposal",
+            ));
+        }
+    }
     if proposal.status.is_terminal() || matches!(proposal.status, ProposalStatus::Executing) {
         return Err(ConnectError::new(
             Code::FailedPrecondition,
@@ -656,6 +716,7 @@ mod tests {
             state_topic: Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded()),
             cancel_drain_timeout: secs(5),
             cancel_drain_poll_interval: millis(25),
+            broker_evacuation_token: None,
         })
     }
 
@@ -667,6 +728,7 @@ mod tests {
             goals_applied: vec![],
             summary: ProposalSummary::default(),
             movements,
+            remove_brokers: vec![],
             started_at_ms: 0,
             terminated_at_ms: 0,
             failure_reason: None,
@@ -697,6 +759,7 @@ mod tests {
 
         let err = execute_proposal(
             Extension(state),
+            HeaderMap::new(),
             req(pb::ExecuteProposalRequest {
                 id: "p".into(),
                 throttle_bytes_per_sec: None,
@@ -714,6 +777,7 @@ mod tests {
 
         let err = execute_proposal(
             Extension(state),
+            HeaderMap::new(),
             req(pb::ExecuteProposalRequest {
                 id: "ghost".into(),
                 throttle_bytes_per_sec: None,
@@ -735,6 +799,7 @@ mod tests {
             goals_applied: vec![],
             summary: ProposalSummary::default(),
             movements: vec![mv("t", 0, vec![1], vec![2])],
+            remove_brokers: vec![],
             started_at_ms: 1,
             terminated_at_ms: 2,
             failure_reason: None,
@@ -743,6 +808,7 @@ mod tests {
 
         let err = execute_proposal(
             Extension(state),
+            HeaderMap::new(),
             req(pb::ExecuteProposalRequest {
                 id: "done".into(),
                 throttle_bytes_per_sec: None,
@@ -762,6 +828,7 @@ mod tests {
         let before = now_ms();
         let resp = execute_proposal(
             Extension(state.clone()),
+            HeaderMap::new(),
             req(pb::ExecuteProposalRequest {
                 id: "p".into(),
                 throttle_bytes_per_sec: Some(12345),

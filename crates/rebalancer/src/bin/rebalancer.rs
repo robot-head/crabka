@@ -138,6 +138,15 @@ struct Args {
     )]
     listen_addr: SocketAddr,
 
+    /// Bearer token authorizing remove-brokers proposal creation/execution.
+    /// An empty value disables broker evacuation.
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_BROKER_EVACUATION_TOKEN",
+        default_value = ""
+    )]
+    broker_evacuation_token: String,
+
     /// Cluster-state snapshot cadence.
     #[arg(long, env = "CRABKA_SCRAPE_INTERVAL_SECS", default_value_t = 10)]
     scrape_interval_secs: u64,
@@ -819,6 +828,8 @@ async fn main() -> anyhow::Result<()> {
         state_topic: state_topic.clone(),
         cancel_drain_timeout: runtime_policy.cancel_drain_timeout,
         cancel_drain_poll_interval: runtime_policy.cancel_drain_poll_interval,
+        broker_evacuation_token: (!args.broker_evacuation_token.is_empty())
+            .then(|| args.broker_evacuation_token.clone()),
     });
 
     let connect_router = crabka_rebalancer::api::router(app_state);

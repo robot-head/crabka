@@ -39,6 +39,20 @@ tests:
             name: CRABKA_BOOTSTRAP_SERVERS
             value: kafka-bootstrap:9092
 
+  - it: reads broker evacuation credential from an existing Secret
+    set:
+      brokerEvacuationAuth.existingSecret: operator-rebalancer-auth
+      brokerEvacuationAuth.key: bearer-token
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_REBALANCER_BROKER_EVACUATION_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: operator-rebalancer-auth
+                key: bearer-token
+
   - it: mounts persistent volume at expected path
     asserts:
       - equal:

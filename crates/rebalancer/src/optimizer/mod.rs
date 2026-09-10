@@ -201,6 +201,7 @@ pub fn optimize(
             goals_applied,
             summary,
             movements,
+            remove_brokers: vec![],
             started_at_ms: 0,
             terminated_at_ms: 0,
             failure_reason: None,
@@ -374,11 +375,10 @@ pub fn optimize_remove_brokers(
             *replica_counts.entry(target).or_insert(0) += 1;
         }
         let new_leader = if removed.contains(&partition.leader) {
-            new_replicas
-                .iter()
-                .find(|broker| partition.isr.contains(broker) && !removed.contains(broker))
-                .copied()
-                .unwrap_or(new_replicas[0])
+            // AlterPartitionReassignments does not select the resulting
+            // leader. `-1` reports that outcome honestly instead of claiming
+            // a particular survivor was enforced.
+            -1
         } else {
             partition.leader
         };
@@ -390,7 +390,7 @@ pub fn optimize_remove_brokers(
             old_leader: partition.leader,
             new_leader,
         };
-        debug_assert!(validate_movement(state, &movement).is_ok());
+        debug_assert!(movement.new_leader == -1 || validate_movement(state, &movement).is_ok());
         debug_assert!(
             movement
                 .new_replicas
@@ -417,6 +417,7 @@ pub fn optimize_remove_brokers(
             goals_applied: vec!["RemoveBrokers".to_string()],
             summary,
             movements,
+            remove_brokers: removed.into_iter().collect(),
             started_at_ms: 0,
             terminated_at_ms: 0,
             failure_reason: None,
@@ -439,7 +440,7 @@ fn apply_movement(state: &mut ClusterState, m: &Movement) {
         // If the new leader isn't in ISR, add it (we assume the
         // executor has caught up the replica; the executor gates on
         // real ISR catch-up).
-        if !p.isr.contains(&p.leader) {
+        if p.leader >= 0 && !p.isr.contains(&p.leader) {
             p.isr.push(p.leader);
         }
     }
@@ -492,7 +493,9 @@ fn max_replicas_per_broker(parts: &[PartitionView]) -> usize {
 fn max_leaders_per_broker(parts: &[PartitionView]) -> usize {
     let mut counts: HashMap<i32, usize> = HashMap::new();
     for p in parts {
-        *counts.entry(p.leader).or_insert(0) += 1;
+        if p.leader >= 0 {
+            *counts.entry(p.leader).or_insert(0) += 1;
+        }
     }
     counts.values().copied().max().unwrap_or(0)
 }
@@ -1191,7 +1194,7 @@ mod tests {
                     old_replicas: vec![1, 2, 3],
                     new_replicas: vec![4, 5, 3],
                     old_leader: 1,
-                    new_leader: 3,
+                    new_leader: -1,
                 }]
         );
         assert2::assert!(output.proposal.goals_applied == ["RemoveBrokers"]);
@@ -1199,7 +1202,7 @@ mod tests {
         assert2::assert!(output.proposal.summary.leader_movements == 1);
         assert2::assert!(output.state_after.partitions[0].replicas == [4, 5, 3]);
         assert2::assert!(output.proposal.movements.iter().all(|movement| {
-            validate_movement(&state, movement).is_ok()
+            movement.new_leader == -1
                 && movement.new_replicas.len() == movement.old_replicas.len()
                 && movement
                     .new_replicas

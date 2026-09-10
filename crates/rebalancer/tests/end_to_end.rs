@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use assert2::check;
 use async_trait::async_trait;
-use axum::Extension;
+use axum::{Extension, http::HeaderMap};
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse, error::Code};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
@@ -32,7 +32,7 @@ use crabka_rebalancer::{
     health::new_registry,
     ingest::{SharedSnapshot, new_shared_snapshot, snapshot_once},
     metrics::RebalancerMetrics,
-    model::{Movement, ProposalStore},
+    model::{BrokerView, ClusterState, Movement, PartitionView, ProposalStore},
     pb,
     scraper::UsageStore,
     state_topic::StateBackend as _,
@@ -170,6 +170,7 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
         state_topic: Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded()),
         cancel_drain_timeout: RebalancerRuntimePolicy::default().cancel_drain_timeout,
         cancel_drain_poll_interval: RebalancerRuntimePolicy::default().cancel_drain_poll_interval,
+        broker_evacuation_token: Some("test-token".into()),
     });
     (state, registry)
 }
@@ -179,6 +180,176 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
 /// constructor builds one.
 fn req<T>(msg: T) -> ConnectRequest<T> {
     ConnectRequest(msg)
+}
+
+fn evacuation_headers() -> HeaderMap {
+    HeaderMap::from_iter([(
+        axum::http::header::AUTHORIZATION,
+        "Bearer test-token".parse().unwrap(),
+    )])
+}
+
+fn broker_mode_snapshot() -> ClusterState {
+    ClusterState {
+        cluster_id: Some("c".into()),
+        snapshot_at_ms: 1,
+        brokers: (1..=3)
+            .map(|id| BrokerView {
+                id,
+                host: format!("h{id}"),
+                port: 9092,
+                rack: None,
+            })
+            .collect(),
+        partitions: vec![PartitionView {
+            topic: "orders".into(),
+            partition: 0,
+            replicas: vec![1],
+            leader: 1,
+            isr: vec![1],
+        }],
+        in_flight_reassignments: vec![],
+    }
+}
+
+#[tokio::test]
+async fn broker_removal_is_authorized_terminal_when_empty_and_revalidated_before_execute() {
+    let shared = new_shared_snapshot();
+    shared.store(Arc::new(Some(broker_mode_snapshot())));
+    let (state, _registry) = build_state(shared);
+
+    let empty = unwrap_ok(
+        handlers::create_proposal(
+            Extension(state.clone()),
+            evacuation_headers(),
+            req(pb::CreateProposalRequest {
+                goals: vec![],
+                mode: i32::from(pb::ProposalMode::RemoveBrokers),
+                brokers: vec![3],
+            }),
+        )
+        .await,
+    );
+    assert2::assert!(empty.status == i32::from(pb::ProposalStatus::Completed));
+    assert2::assert!(empty.movements.is_empty());
+
+    let proposal = unwrap_ok(
+        handlers::create_proposal(
+            Extension(state.clone()),
+            evacuation_headers(),
+            req(pb::CreateProposalRequest {
+                goals: vec![],
+                mode: i32::from(pb::ProposalMode::RemoveBrokers),
+                brokers: vec![1],
+            }),
+        )
+        .await,
+    );
+    let unauthorized = unwrap_err(
+        handlers::execute_proposal(
+            Extension(state.clone()),
+            HeaderMap::new(),
+            req(pb::ExecuteProposalRequest {
+                id: proposal.id.clone(),
+                throttle_bytes_per_sec: None,
+            }),
+        )
+        .await,
+    );
+    assert2::assert!(unauthorized.code() == Code::PermissionDenied);
+
+    let mut changed = broker_mode_snapshot();
+    changed.partitions.push(PartitionView {
+        topic: "new-topic".into(),
+        partition: 0,
+        replicas: vec![1],
+        leader: 1,
+        isr: vec![1],
+    });
+    state.snapshot.store(Arc::new(Some(changed)));
+
+    let error = unwrap_err(
+        handlers::execute_proposal(
+            Extension(state),
+            evacuation_headers(),
+            req(pb::ExecuteProposalRequest {
+                id: proposal.id,
+                throttle_bytes_per_sec: None,
+            }),
+        )
+        .await,
+    );
+    assert2::assert!(error.code() == Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn proposal_modes_preserve_legacy_full_and_reject_unsafe_requests() {
+    let shared = new_shared_snapshot();
+    let mut snapshot = broker_mode_snapshot();
+    snapshot.brokers.truncate(1);
+    shared.store(Arc::new(Some(snapshot)));
+    let (state, _registry) = build_state(shared);
+
+    for request in [
+        pb::CreateProposalRequest {
+            goals: vec![],
+            mode: i32::from(pb::ProposalMode::Full),
+            brokers: vec![1],
+        },
+        pb::CreateProposalRequest {
+            goals: vec!["ReplicaDistribution".to_string()],
+            mode: i32::from(pb::ProposalMode::RemoveBrokers),
+            brokers: vec![1],
+        },
+    ] {
+        let error = unwrap_err(
+            handlers::create_proposal(Extension(state.clone()), HeaderMap::new(), req(request))
+                .await,
+        );
+        assert2::assert!(error.code() == Code::InvalidArgument);
+    }
+
+    let legacy = unwrap_ok(
+        handlers::create_proposal(
+            Extension(state.clone()),
+            HeaderMap::new(),
+            req(pb::CreateProposalRequest {
+                goals: vec![],
+                mode: i32::from(pb::ProposalMode::Unspecified),
+                brokers: vec![],
+            }),
+        )
+        .await,
+    );
+    assert2::assert!(legacy.status == i32::from(pb::ProposalStatus::Computed));
+
+    let unauthorized = unwrap_err(
+        handlers::create_proposal(
+            Extension(state.clone()),
+            HeaderMap::new(),
+            req(pb::CreateProposalRequest {
+                goals: vec![],
+                mode: i32::from(pb::ProposalMode::RemoveBrokers),
+                brokers: vec![1],
+            }),
+        )
+        .await,
+    );
+    assert2::assert!(unauthorized.code() == Code::PermissionDenied);
+
+    let unsafe_remove = unwrap_err(
+        handlers::create_proposal(
+            Extension(state),
+            evacuation_headers(),
+            req(pb::CreateProposalRequest {
+                goals: vec![],
+                mode: i32::from(pb::ProposalMode::RemoveBrokers),
+                brokers: vec![1],
+            }),
+        )
+        .await,
+    );
+    assert2::assert!(unsafe_remove.code() == Code::FailedPrecondition);
 }
 
 /// Pull the inner message out of a `ConnectResponse`. Tuple-struct field.
@@ -272,6 +443,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     let proposal = unwrap_ok(
         handlers::create_proposal(
             Extension(state.clone()),
+            HeaderMap::new(),
             req(pb::CreateProposalRequest {
                 goals: vec![],
                 mode: i32::from(pb::ProposalMode::Full),
@@ -364,6 +536,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     let bad_goal = unwrap_err(
         handlers::create_proposal(
             Extension(state.clone()),
+            HeaderMap::new(),
             req(pb::CreateProposalRequest {
                 goals: vec!["GhostGoal".to_string()],
                 mode: i32::from(pb::ProposalMode::Full),
@@ -374,48 +547,12 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     );
     assert2::assert!(bad_goal.code() == Code::InvalidArgument);
 
-    // Broker-scoped proposal modes are explicit and reject ambiguous fields.
-    for request in [
-        pb::CreateProposalRequest {
-            goals: vec![],
-            mode: i32::from(pb::ProposalMode::Unspecified),
-            brokers: vec![],
-        },
-        pb::CreateProposalRequest {
-            goals: vec![],
-            mode: i32::from(pb::ProposalMode::Full),
-            brokers: vec![1],
-        },
-        pb::CreateProposalRequest {
-            goals: vec!["ReplicaDistribution".to_string()],
-            mode: i32::from(pb::ProposalMode::RemoveBrokers),
-            brokers: vec![1],
-        },
-    ] {
-        let error =
-            unwrap_err(handlers::create_proposal(Extension(state.clone()), req(request)).await);
-        assert2::assert!(error.code() == Code::InvalidArgument);
-    }
-
-    // The only broker cannot be removed while preserving RF=1.
-    let unsafe_remove = unwrap_err(
-        handlers::create_proposal(
-            Extension(state.clone()),
-            req(pb::CreateProposalRequest {
-                goals: vec![],
-                mode: i32::from(pb::ProposalMode::RemoveBrokers),
-                brokers: vec![1],
-            }),
-        )
-        .await,
-    );
-    assert2::assert!(unsafe_remove.code() == Code::FailedPrecondition);
-
     // ExecuteProposal on a no-movements proposal → FailedPrecondition.
     // The 43b handler refuses to start an execution with an empty plan.
     let exec = unwrap_err(
         handlers::execute_proposal(
             Extension(state.clone()),
+            HeaderMap::new(),
             req(pb::ExecuteProposalRequest {
                 id: proposal.id.clone(),
                 throttle_bytes_per_sec: None,
@@ -468,6 +605,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
     let cp = unwrap_err(
         handlers::create_proposal(
             Extension(state.clone()),
+            HeaderMap::new(),
             req(pb::CreateProposalRequest {
                 goals: vec![],
                 mode: i32::from(pb::ProposalMode::Full),
@@ -499,6 +637,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
     let exec = unwrap_err(
         handlers::execute_proposal(
             Extension(state.clone()),
+            HeaderMap::new(),
             req(pb::ExecuteProposalRequest {
                 id: "irrelevant".to_string(),
                 throttle_bytes_per_sec: None,
@@ -554,6 +693,7 @@ async fn execute_proposal_settles_against_real_broker() {
             old_leader: 1,
             new_leader: 1,
         }],
+        remove_brokers: vec![],
         started_at_ms: 0,
         terminated_at_ms: 0,
         failure_reason: None,
@@ -649,6 +789,7 @@ async fn cancel_clears_throttle_and_reverts() {
             old_leader: 1,
             new_leader: 1,
         }],
+        remove_brokers: vec![],
         started_at_ms: 0,
         terminated_at_ms: 0,
         failure_reason: None,
@@ -761,6 +902,7 @@ async fn restart_resumes_in_flight_plan() {
             old_leader: 1,
             new_leader: 1,
         }],
+        remove_brokers: vec![],
         started_at_ms: 1,
         terminated_at_ms: 0,
         failure_reason: None,

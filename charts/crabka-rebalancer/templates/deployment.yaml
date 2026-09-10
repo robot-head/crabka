@@ -30,6 +30,13 @@ spec:
               value: {{ .Values.bootstrapServers | quote }}
             - name: CRABKA_REBALANCER_LISTEN_ADDR
               value: {{ .Values.listenAddr | quote }}
+            {{- if .Values.brokerEvacuationAuth.existingSecret }}
+            - name: CRABKA_REBALANCER_BROKER_EVACUATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.brokerEvacuationAuth.existingSecret | quote }}
+                  key: {{ .Values.brokerEvacuationAuth.key | quote }}
+            {{- end }}
             - name: CRABKA_SCRAPE_INTERVAL_SECS
               value: {{ .Values.scrapeIntervalSecs | quote }}
             - name: CRABKA_IMBALANCE_THRESHOLD_PCT

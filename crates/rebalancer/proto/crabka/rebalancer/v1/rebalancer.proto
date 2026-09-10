@@ -58,6 +58,8 @@ message Movement {
   repeated int32 old_replicas = 3;
   repeated int32 new_replicas = 4;
   int32 old_leader = 5;
+  // -1 means Kafka will elect the replacement and this proposal does not
+  // claim or enforce a particular leader.
   int32 new_leader = 6;
 }
 
@@ -96,7 +98,7 @@ enum ProposalMode {
 
 message CreateProposalRequest {
   repeated string goals = 1;
-  // Required. The unspecified value is rejected rather than defaulted.
+  // Unspecified preserves the legacy full-cluster operation.
   ProposalMode mode = 2;
   // Required and non-empty for add/remove modes; empty for full mode.
   repeated int32 brokers = 3;
