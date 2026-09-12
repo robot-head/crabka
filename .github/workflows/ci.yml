@@ -609,7 +609,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-range-scaling
@@ -671,7 +671,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-topology-process-nemesis
@@ -709,7 +709,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-sharded-conformance
@@ -774,7 +774,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: connect-postgres-acceptance
@@ -800,7 +800,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-core-integration
@@ -841,7 +841,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: log-integration
@@ -884,7 +884,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-consumer-integration
@@ -928,7 +928,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: client-streams-integration
@@ -983,7 +983,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: doc-examples
@@ -1005,7 +1005,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: grpc-gateway-integration
@@ -1066,7 +1066,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: schema-registry-integration
@@ -1114,7 +1114,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: traces-conformance
@@ -1171,7 +1171,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-conformance
@@ -1446,7 +1446,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-integration
@@ -1528,7 +1528,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: workspace-integration-${{ matrix.shard }}
@@ -1615,7 +1615,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: observability-differential
@@ -1695,7 +1695,7 @@ jobs:
           node-version: 24
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: admin-ui-integration
@@ -1783,7 +1783,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: broker-jvm-acceptance
@@ -1863,7 +1863,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: broker-integration
@@ -1919,7 +1919,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: operator-integration
@@ -1985,7 +1985,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: metrics-conformance
@@ -2026,7 +2026,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: metrics-differential-prometheus
@@ -2100,7 +2100,7 @@ jobs:
       - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@v2
         with:
           key: cargo-mutants
