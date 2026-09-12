@@ -8,7 +8,7 @@ component now has its own repository, and each crate is renamed `crabka-*` to
 restructured modules, more tests, and crates that do not exist here.
 
 **Send your change to the component's home repository, not here.** The table in
-the [README](README.md#repository-status-extraction-to-krabka-io-in-progress)
+the [README](README.md#this-repository-is-closing)
 gives the home of every component.
 
 This repository will be archived when the

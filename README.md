@@ -313,11 +313,11 @@ in the extracted repositories.
 
 ## Contributing
 
-Contributions are welcome. Check the table in
-[Repository Status](#repository-status-extraction-to-krabka-io-in-progress)
-first: for an extracted component, open the issue or pull request in its home
-repository under [krabka-io](https://github.com/krabka-io), because changes
-landed here will not reach it.
+This repository no longer takes changes. Find the component in the table under
+[This repository is closing](#this-repository-is-closing), then open the issue
+or pull request in its home repository under
+[krabka-io](https://github.com/krabka-io). A change landed here does not reach
+that repository.
 
 For the work still maintained here, start with
 [CONTRIBUTING.md](CONTRIBUTING.md). Open an issue for a large design or
