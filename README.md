@@ -20,40 +20,44 @@ Use Crabka when you want Kafka-compatible streaming infrastructure without a JVM
 runtime. Crabka gives you memory-safe Rust, async I/O, no ZooKeeper mode, and no
 GC pauses.
 
-## Repository Status: extraction to krabka-io in progress
+## This repository is closing
 
-This repository is the original Crabka monorepo. The project is being split into
-per-component repositories under the
-[krabka-io](https://github.com/krabka-io) organization, where each crate is
+Crabka was one monorepo. It is now sixteen repositories in the
+[krabka-io](https://github.com/krabka-io) organization, and each crate is
 renamed `crabka-*` to `krabka-*`.
 
-**Most components have already moved, and the extracted repositories are ahead
-of this one.** They carry restructured modules, additional tests, and crates that
-do not exist here. Treat `krabka-io` as the source of truth for every component
-in the table below. This repository is retained for the work that has not been
-extracted yet, and for history.
+**Every component has a home. The extracted repositories are ahead of this one.**
+They carry restructured modules, more tests, and crates that do not exist here.
+Read and change each component in its home repository. Do not send changes here.
+
+This repository will be archived. After that it is read-only and kept only for
+history.
 
 | Component | Home repository |
 | --------- | --------------- |
-| Broker, KRaft, log, tiered storage | [krabka-broker](https://github.com/krabka-io/krabka-broker) |
-| Kafka wire protocol and metadata records | [krabka-protocol](https://github.com/krabka-io/krabka-protocol) |
+| Broker, KRaft, log, tiered storage, benchmarks, verification | [krabka-broker](https://github.com/krabka-io/krabka-broker) |
+| Kafka wire protocol, metadata records, the protocol generator | [krabka-protocol](https://github.com/krabka-io/krabka-protocol) |
 | Rust producer, consumer, and admin clients | [krabka-client-rs](https://github.com/krabka-io/krabka-client-rs) |
 | Streams clients | [krabka-streams-rs](https://github.com/krabka-io/krabka-streams-rs), [krabka-streams-java](https://github.com/krabka-io/krabka-streams-java), [krabka-streams-go](https://github.com/krabka-io/krabka-streams-go) |
 | Connect runtime, Postgres CDC, replication | [krabka-connect](https://github.com/krabka-io/krabka-connect) |
 | Schema Registry | [krabka-schema-registry](https://github.com/krabka-io/krabka-schema-registry) |
 | Metrics, traces, profiles, and logs | [krabka-o11y](https://github.com/krabka-io/krabka-o11y), [krabka-o11y-demo](https://github.com/krabka-io/krabka-o11y-demo) |
 | Postgres-compatible engine (Gres) | [gres](https://github.com/krabka-io/gres) |
-| CLI | [krabka-cli](https://github.com/krabka-io/krabka-cli) |
-| Kubernetes operator | [krabka-operator](https://github.com/krabka-io/krabka-operator) |
+| gRPC gateway, the four application SDKs, CloudEvents demo | [krabka-gateway](https://github.com/krabka-io/krabka-gateway) |
+| CLI and the admin UI | [krabka-cli](https://github.com/krabka-io/krabka-cli) |
+| Kubernetes operator and the CRDs | [krabka-operator](https://github.com/krabka-io/krabka-operator) |
 | Partition rebalancer | [krabka-rebalancer](https://github.com/krabka-io/krabka-rebalancer) |
+| Website and the WASM playground | [krabka-io.github.io](https://github.com/krabka-io/krabka-io.github.io) |
+| Release tooling, base-image inputs, chart signing | [tooling](https://github.com/krabka-io/tooling) |
 
-Components that have **not** been extracted yet, and are still maintained here:
-the gRPC gateway with its four application SDKs, the admin UI, the WASM
-playground, the protocol code generator, the documentation generator, the
-benchmark harnesses, and the cross-crate integration suite.
+The Kubernetes API group changed from `crabka.io` to `krabka.io` with the
+operator. The Helm chart signing key changed too: the old
+`Crabka Charts <charts@crabka.dev>` key is revoked, and charts are signed with
+`Krabka Charts <charts@krabka.dev>`. Signatures made with the old key do not
+verify.
 
-Progress, including the remaining infrastructure and tooling moves, is tracked in
-the [Extraction to krabka-io](https://github.com/robot-head/crabka/milestone/1)
+The moves are recorded in the
+[Extraction to krabka-io](https://github.com/robot-head/crabka/milestone/1)
 milestone.
 
 ## Project Status
@@ -309,11 +313,11 @@ in the extracted repositories.
 
 ## Contributing
 
-Contributions are welcome. Check the table in
-[Repository Status](#repository-status-extraction-to-krabka-io-in-progress)
-first: for an extracted component, open the issue or pull request in its home
-repository under [krabka-io](https://github.com/krabka-io), because changes
-landed here will not reach it.
+This repository no longer takes changes. Find the component in the table under
+[This repository is closing](#this-repository-is-closing), then open the issue
+or pull request in its home repository under
+[krabka-io](https://github.com/krabka-io). A change landed here does not reach
+that repository.
 
 For the work still maintained here, start with
 [CONTRIBUTING.md](CONTRIBUTING.md). Open an issue for a large design or

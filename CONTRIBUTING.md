@@ -1,5 +1,25 @@
 # Contributing to Crabka
 
+## This repository is closing
+
+Crabka moved to the [krabka-io](https://github.com/krabka-io) organization. Each
+component now has its own repository, and each crate is renamed `crabka-*` to
+`krabka-*`. The extracted repositories are ahead of this one. They carry
+restructured modules, more tests, and crates that do not exist here.
+
+**Send your change to the component's home repository, not here.** The table in
+the [README](README.md#this-repository-is-closing)
+gives the home of every component.
+
+This repository will be archived when the
+[Extraction to krabka-io](https://github.com/robot-head/crabka/milestone/1)
+milestone closes. After that it is read-only and kept for history. Do not start
+new work here.
+
+The instructions below describe the monorepo build. They stay for reference
+while the last moves land. Each home repository has its own contributing guide,
+and that guide is the one to follow.
+
 ## Code & documentation style
 
 Code and docs follow the [style guides](docs/style_guides/README.md) in `docs/style_guides/`:
