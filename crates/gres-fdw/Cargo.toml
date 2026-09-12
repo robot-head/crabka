@@ -22,16 +22,16 @@ default = []
 roundtrip = []
 
 [dependencies]
-crabka-pgcatalog = { version = "0.4.0", path = "../pgcatalog" }
-crabka-pgtypes = { version = "0.4.0", path = "../pgtypes" }
-crabka-pgexec = { version = "0.4.0", path = "../pgexec" }
-crabka-pgkv = { version = "0.4.0", path = "../pgkv" }
+crabka-pgcatalog = { version = "0.4.1", path = "../pgcatalog" }
+crabka-pgtypes = { version = "0.4.1", path = "../pgtypes" }
+crabka-pgexec = { version = "0.4.1", path = "../pgexec" }
+crabka-pgkv = { version = "0.4.1", path = "../pgkv" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "test-util"] }
 thiserror = { workspace = true }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
-crabka-protocol = { version = "0.4.0", path = "../protocol" }
-crabka-schema-serde = { version = "0.4.0", path = "../schema-serde", features = ["avro", "json", "protobuf"] }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
+crabka-client-admin = { version = "0.4.1", path = "../client-admin" }
+crabka-protocol = { version = "0.4.1", path = "../protocol" }
+crabka-schema-serde = { version = "0.4.1", path = "../schema-serde", features = ["avro", "json", "protobuf"] }
 crabka-security = { workspace = true }
 crabka-units = { workspace = true }
 apache-avro = { workspace = true }
@@ -47,8 +47,8 @@ protox = { workspace = true }
 assert2 = { workspace = true }
 crabka-broker = { version = "0.4.0", path = "../broker" }
 crabka-schema-registry = { version = "0.4.0", path = "../schema-registry" }
-crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
-crabka-pgwire = { version = "0.4.0", path = "../pgwire" }
+crabka-client-producer = { version = "0.4.1", path = "../client-producer" }
+crabka-pgwire = { version = "0.4.1", path = "../pgwire" }
 tokio-postgres = { workspace = true }
 tokio-util = { workspace = true }
 tempfile = { workspace = true }

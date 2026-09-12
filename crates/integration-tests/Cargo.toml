@@ -15,16 +15,16 @@ bytes = { workspace = true }
 crabka-broker = { path = "../broker", version = "0.4.0", features = ["test-helpers"] }
 crabka-raft = { path = "../raft", version = "0.4.0" }
 crabka-blockstore = { path = "../blockstore", version = "0.4.0" }
-crabka-client-admin = { path = "../client-admin", version = "0.4.0" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.4.0" }
-crabka-client-producer = { path = "../client-producer", version = "0.4.0" }
-crabka-client-core = { path = "../client-core", version = "0.4.0" }
+crabka-client-admin = { path = "../client-admin", version = "0.4.1" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.4.1" }
+crabka-client-producer = { path = "../client-producer", version = "0.4.1" }
+crabka-client-core = { path = "../client-core", version = "0.4.1" }
 crabka-observability = { path = "../observability", version = "0.4.0" }
-crabka-protocol = { path = "../protocol", version = "0.4.0", default-features = false }
-crabka-security = { path = "../security", version = "0.4.0" }
+crabka-protocol = { path = "../protocol", version = "0.4.1", default-features = false }
+crabka-security = { path = "../security", version = "0.4.1" }
 crabka-units = { workspace = true }
-crabka-log = { path = "../log", version = "0.4.0" }
-crabka-metadata = { path = "../metadata", version = "0.4.0" }
+crabka-log = { path = "../log", version = "0.4.1" }
+crabka-metadata = { path = "../metadata", version = "0.4.1" }
 serde_json = { workspace = true }
 stateright = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }

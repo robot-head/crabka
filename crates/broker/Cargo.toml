@@ -36,22 +36,22 @@ path = "src/bin/broker.rs"
 
 [dependencies]
 crabka-audit = { workspace = true }
-crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
+crabka-protocol = { version = "0.4.1", path = "../protocol", default-features = false }
 crabka-telemetry = { version = "0.4.0", path = "../telemetry" }
 crabka-records-legacy = { version = "0.4.0", path = "../records-legacy" }
-crabka-log = { version = "0.4.0", path = "../log" }
-crabka-ids = { version = "0.4.0", path = "../ids" }
-crabka-compression = { version = "0.4.0", path = "../compression", default-features = false }
+crabka-log = { version = "0.4.1", path = "../log" }
+crabka-ids = { version = "0.4.1", path = "../ids" }
+crabka-compression = { version = "0.4.1", path = "../compression", default-features = false }
 crabka-raft = { version = "0.4.0", path = "../raft" }
 crabka-kraft-core = { version = "0.4.0", path = "../kraft-core" }
-crabka-verified = { version = "0.4.0", path = "../verified" }
-crabka-voters = { version = "0.4.0", path = "../voters" }
-crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-verified = { version = "0.4.1", path = "../verified" }
+crabka-voters = { version = "0.4.1", path = "../voters" }
+crabka-metadata = { version = "0.4.1", path = "../metadata" }
 crabka-authz = { version = "0.4.0", path = "../authz" }
 crabka-remote-storage = { version = "0.4.0", path = "../remote-storage" }
 crabka-remote-storage-topic = { version = "0.4.0", path = "../remote-storage-topic" }
 crabka-object-store = { version = "0.4.0", path = "../object-store" }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
 crabka-throttle = { version = "0.4.0", path = "../throttle" }
 crabka-units = { workspace = true }
 crabka-security.workspace = true
@@ -154,7 +154,7 @@ crabka-client-producer = { version = "0.4", path = "../client-producer" }
 # Host-side raw `Client::send(DescribeGroupsRequest)` against the
 # real-Kafka Docker capture (`describe_groups_jvm.rs`).
 crabka-client-core = { version = "0.4", path = "../client-core", features = ["mock"] }
-crabka-ids = { version = "0.4.0", path = "../ids" }
+crabka-ids = { version = "0.4.1", path = "../ids" }
 crabka-records-legacy = { version = "0.4.0", path = "../records-legacy" }
 crabka-protocol = { version = "0.4", path = "../protocol", default-features = false }
 # Serialize the captured real-Kafka DescribeGroups fixture as JSON.

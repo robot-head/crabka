@@ -25,12 +25,12 @@ workspace = true
 assert2 = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 crabka-security = { workspace = true }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
+crabka-client-admin = { version = "0.4.1", path = "../client-admin" }
 crabka-gres-balancer = { version = "0.4.0", path = "../gres-balancer" }
 crabka-gres-control = { version = "0.4.0", path = "../gres-control" }
 crabka-units = { workspace = true }
-crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-metadata = { version = "0.4.1", path = "../metadata" }
 crabka-raft = { version = "0.4.0", path = "../raft" }
 derive_more = { workspace = true }
 thiserror = { workspace = true }

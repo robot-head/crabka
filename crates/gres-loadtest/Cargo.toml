@@ -21,12 +21,12 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["env"] }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
+crabka-client-admin = { version = "0.4.1", path = "../client-admin" }
 crabka-gres-control = { version = "0.4.0", path = "../gres-control" }
-crabka-security = { version = "0.4.0", path = "../security" }
+crabka-security = { version = "0.4.1", path = "../security" }
 crabka-units = { workspace = true }
 futures = { workspace = true }
 hdrhistogram = { version = "7.5", default-features = false }

@@ -35,14 +35,14 @@ path = "src/bin/schema-compat-check.rs"
 
 [dependencies]
 assert2 = { workspace = true }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
-crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
-crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
-crabka-security = { version = "0.4.0", path = "../security" }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
+crabka-client-admin = { version = "0.4.1", path = "../client-admin" }
+crabka-client-producer = { version = "0.4.1", path = "../client-producer" }
+crabka-protocol = { version = "0.4.1", path = "../protocol", default-features = false }
+crabka-security = { version = "0.4.1", path = "../security" }
 crabka-authz = { version = "0.4.0", path = "../authz" }
 crabka-logfmt = { version = "0.4.0", path = "../logfmt" }
-crabka-metadata = { version = "0.4.0", path = "../metadata" }
+crabka-metadata = { version = "0.4.1", path = "../metadata" }
 crabka-telemetry = { version = "0.4.0", path = "../telemetry" }
 crabka-units = { workspace = true }
 arc-swap = { workspace = true }

@@ -19,10 +19,10 @@ workspace = true
 
 [dependencies]
 bytes = { workspace = true }
-crabka-client-admin = { version = "0.4.0", path = "../client-admin" }
-crabka-client-core = { version = "0.4.0", path = "../client-core" }
-crabka-client-producer = { version = "0.4.0", path = "../client-producer" }
-crabka-protocol = { version = "0.4.0", path = "../protocol", default-features = false }
+crabka-client-admin = { version = "0.4.1", path = "../client-admin" }
+crabka-client-core = { version = "0.4.1", path = "../client-core" }
+crabka-client-producer = { version = "0.4.1", path = "../client-producer" }
+crabka-protocol = { version = "0.4.1", path = "../protocol", default-features = false }
 crabka-units = { workspace = true }
 refined_type = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
